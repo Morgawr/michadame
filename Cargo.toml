@@ -16,6 +16,7 @@ ffmpeg-next = "8.0.0"
 libc = "0.2"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+image = { version = "0.25", features = ["png"] }
 
 # Lock all egui-related crates to the same version to prevent conflicts.
 eframe = { version = "0.27.2", default-features = true }
