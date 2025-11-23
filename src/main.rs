@@ -7,10 +7,13 @@ use libpulse_binding::def::Retval;
 use libpulse_binding::context::{Context as PulseContext, FlagSet as PulseContextFlagSet, State as PulseContextState};
 use libpulse_binding::mainloop::standard::{IterateResult, Mainloop};
 use libpulse_binding::operation::State as OperationState;
-use std::process::{Child, Command};
+use serde::{Deserialize, Serialize};
+use std::process::Command;
 use std::rc::Rc;
-use serde::{Serialize, Deserialize};
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
 use std::sync::mpsc;
+use std::time::Instant;
+use std::thread::{self, JoinHandle};
 
 /// Holds the results of our background device scan.
 enum DeviceScanResult {
@@ -63,15 +66,26 @@ struct AppState {
     selected_pulse_source_name: Option<String>,
     selected_pulse_sink_name: Option<String>,
     pulse_loopback_module_index: Option<u32>,
-    gamescope_process: Option<Child>,
     status_message: String,
     // Video format state
     supported_formats: Vec<VideoFormat>,
     selected_format_index: usize,
     selected_resolution: (u32, u32),
     selected_framerate: u32,
+    // Embedded video player state
+    video_thread: Option<JoinHandle<()>>,
+    stop_video_thread: Option<Arc<AtomicBool>>,
+    video_texture: Option<egui::TextureHandle>,
+    // A lock-free, single-element channel for the latest video frame.
+    frame_receiver: Option<crossbeam_channel::Receiver<Arc<egui::ColorImage>>>,
     // Receiver for the background device scan
     device_scan_receiver: Option<mpsc::Receiver<DeviceScanResult>>,
+    // FPS counter state
+    last_fps_check: Instant,
+    frames_since_last_check: u32,
+    // Video FPS counter state
+    last_video_fps_check: Instant,
+    video_frames_since_last_check: u32,
 }
 impl Default for AppState {
     fn default() -> Self {
@@ -83,13 +97,20 @@ impl Default for AppState {
             selected_pulse_source_name: None,
             selected_pulse_sink_name: None,
             pulse_loopback_module_index: None,
-            gamescope_process: None,
             status_message: "Loading devices...".to_string(),
             supported_formats: Vec::new(),
             selected_format_index: 0,
             selected_resolution: (0, 0),
             selected_framerate: 0,
+            video_thread: None,
+            stop_video_thread: None,
+            video_texture: None,
+            frame_receiver: None,
             device_scan_receiver: None,
+            last_fps_check: Instant::now(),
+            frames_since_last_check: 0,
+            last_video_fps_check: Instant::now(),
+            video_frames_since_last_check: 0,
         }
     }
 }
@@ -102,6 +123,15 @@ impl eframe::App for AppState {
             ui.heading("Capture Control");
             ui.separator();
 
+            // --- Check for new video frames ---
+            // Receive the latest frame, dropping any older ones in the queue.
+            if let Some(rx) = &self.frame_receiver {
+                if let Ok(image) = rx.try_recv() {
+                    self.video_texture.as_mut().unwrap().set(image, egui::TextureOptions::LINEAR);
+                    self.video_frames_since_last_check += 1;
+                }
+            }
+
             // --- Check for device scan results ---
             if let Some(rx) = &self.device_scan_receiver {
                 if let Ok(scan_result) = rx.try_recv() {
@@ -112,6 +142,15 @@ impl eframe::App for AppState {
                             self.pulse_sources = pulse_sources;
                             self.pulse_sinks = pulse_sinks;
                             self.status_message = "Devices loaded successfully.".to_string();
+
+                            // Allocate a texture for the video frame.
+                            // We do this once here after the first successful scan.
+                            if self.video_texture.is_none() {
+                                let tex_manager = ctx.tex_manager();
+                                let tex_id = tex_manager.write().alloc(
+                                    "ffmpeg_video".to_string(), egui::ImageData::Color(egui::ColorImage::new([1, 1], egui::Color32::BLACK).into()), egui::TextureOptions::LINEAR);
+                                self.video_texture = Some(egui::TextureHandle::new(tex_manager, tex_id));
+                            }
 
                             // --- Load and apply saved configuration ---
                             if let Ok(cfg) = confy::load::<MichadameConfig>("michadame", None) {
@@ -326,26 +365,56 @@ impl eframe::App for AppState {
 
             // --- 4. Start/Stop Controls ---
             ui.horizontal(|ui| {
-                let is_running = self.gamescope_process.is_some();
-                if ui.add_enabled(!is_running && self.selected_resolution.0 > 0, egui::Button::new("▶ Start Stream")).clicked() {
-                    start_stream(self);
+                let is_running = self.video_thread.is_some();
+                if ui.add_enabled(!is_running && self.selected_resolution.0 > 0 && self.video_texture.is_some(), egui::Button::new("▶ Start Stream")).clicked() {
+                    start_stream(self, ctx);
                 }
                 if ui.add_enabled(is_running, egui::Button::new("⏹ Stop Stream")).clicked() {
                     stop_stream(self);
                 }
             });
-            
+
+            // --- Embedded Video Player ---
+            ui.separator();
+            if let Some(texture) = &self.video_texture {
+                // Show the video frame, scaling it to fit the available width.
+                let available_width = ui.available_width();
+                ui.add(egui::Image::new(texture).max_width(available_width));
+            } else {
+                // Placeholder
+                ui.allocate_space(egui::vec2(640.0, 360.0));
+            }
+
             // --- Status Bar ---
             ui.separator();
             ui.label(&self.status_message);
 
-            // Poll the process to see if it has exited
-            if let Some(process) = &mut self.gamescope_process {
-                if let Ok(Some(_)) = process.try_wait() {
-                    stop_stream(self);
-                    self.status_message = "Stream process finished.".to_string();
-                }
+            // --- FPS Counter ---
+            self.frames_since_last_check += 1;
+            let now = Instant::now();
+            let elapsed_secs = (now - self.last_fps_check).as_secs_f32();
+
+            if elapsed_secs >= 1.0 {
+                let _fps = self.frames_since_last_check as f32 / elapsed_secs;
+                self.last_fps_check = now;
+                self.frames_since_last_check = 0;
             }
+            
+            // --- Video FPS Counter ---
+            let video_elapsed_secs = (now - self.last_video_fps_check).as_secs_f32();
+            if video_elapsed_secs >= 1.0 {
+                let _video_fps = self.video_frames_since_last_check as f32 / video_elapsed_secs;
+                self.last_video_fps_check = now;
+                self.video_frames_since_last_check = 0;
+            }
+
+            // --- Update Window Title with FPS ---
+            let gui_fps = self.frames_since_last_check as f32 / (now - self.last_fps_check).as_secs_f32().max(0.001);
+            let video_fps = self.video_frames_since_last_check as f32 / video_elapsed_secs.max(0.001);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("Michadame Viewer | UI: {:.0} FPS | Video: {:.0} FPS", gui_fps, video_fps)));
+
+            // Force the UI to repaint continuously. This is necessary for smooth video playback.
+            ctx.request_repaint();
         });
     }
 }
@@ -362,13 +431,14 @@ fn main() -> Result<(), eframe::Error> {
 
     // Create a closure that will be called once to create the App state.
     let creator = |cc: &eframe::CreationContext| {
+        //let gl = cc.gl.as_ref().expect("You need to run eframe with the glow backend").clone();
         // --- Embed a local font for 100% robust character support ---
         let mut fonts = egui::FontDefinitions::default();
 
         // Load the font data from the file we added to the assets folder.
         fonts.font_data.insert("roboto_slab".to_owned(), egui::FontData::from_static(include_bytes!("../assets/RobotoSlab-Regular.ttf")).tweak(
-            egui::FontTweak { scale: 1.05, ..Default::default() }
-        ));
+            egui::FontTweak { scale: 1.05, ..Default::default() },
+        ),);
         fonts.font_data.insert("noto_sans_jp".to_owned(), egui::FontData::from_static(include_bytes!("../assets/NotoSansJP-Regular.ttf")));
         fonts.font_data.insert("noto_emoji".to_owned(), egui::FontData::from_static(include_bytes!("../assets/NotoColorEmoji-Regular.ttf")));
 
@@ -376,13 +446,11 @@ fn main() -> Result<(), eframe::Error> {
         // 1. Roboto Slab for general text.
         // 2. Noto Sans JP for Japanese characters.
         // 3. Noto Color Emoji for symbols and emoji.
-        fonts.families.entry(egui::FontFamily::Proportional).or_default().insert(0, "roboto_slab".to_owned());
-        fonts.families.entry(egui::FontFamily::Proportional).or_default().push("noto_sans_jp".to_owned());
-        fonts.families.entry(egui::FontFamily::Proportional).or_default().push("noto_emoji".to_owned());
+        fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap()
+            .extend(vec!["roboto_slab".to_owned(), "noto_sans_jp".to_owned(), "noto_emoji".to_owned()]);
 
-        fonts.families.entry(egui::FontFamily::Monospace).or_default().insert(0, "roboto_slab".to_owned());
-        fonts.families.entry(egui::FontFamily::Monospace).or_default().push("noto_sans_jp".to_owned());
-        fonts.families.entry(egui::FontFamily::Monospace).or_default().push("noto_emoji".to_owned());
+        fonts.families.get_mut(&egui::FontFamily::Monospace).unwrap()
+            .extend(vec!["roboto_slab".to_owned(), "noto_sans_jp".to_owned(), "noto_emoji".to_owned()]);
 
         cc.egui_ctx.set_fonts(fonts);
         let mut app_state = AppState::default();
@@ -391,20 +459,20 @@ fn main() -> Result<(), eframe::Error> {
         let (tx, rx) = mpsc::channel();
         app_state.device_scan_receiver = Some(rx);
 
-        let ctx_clone = cc.egui_ctx.clone();
+        let egui_ctx = cc.egui_ctx.clone();
         std::thread::spawn(move || {
-        let video_result = find_video_devices();
-        let pulse_result = find_pulse_devices();
+            let video_result = find_video_devices();
+            let pulse_result = find_pulse_devices();
 
-        let result = match (video_result, pulse_result) {
-            (Ok(video_devices), Ok((pulse_sources, pulse_sinks))) => {
-                DeviceScanResult::Success(video_devices, pulse_sources, pulse_sinks)
-            }
-            (Err(e), _) => DeviceScanResult::Failure(e.context("Failed to find video devices")),
-            (_, Err(e)) => DeviceScanResult::Failure(e.context("Failed to find PulseAudio devices")),
-        };
-        let _ = tx.send(result);
-            ctx_clone.request_repaint(); // Wake up the GUI thread
+            let result = match (video_result, pulse_result) {
+                (Ok(video_devices), Ok((pulse_sources, pulse_sinks))) => {
+                    DeviceScanResult::Success(video_devices, pulse_sources, pulse_sinks)
+                }
+                (Err(e), _) => DeviceScanResult::Failure(e.context("Failed to find video devices")),
+                (_, Err(e)) => DeviceScanResult::Failure(e.context("Failed to find PulseAudio devices")),
+            };
+            let _ = tx.send(result);
+            egui_ctx.request_repaint(); // Wake up the GUI thread
         });        
         Box::new(app_state) as Box<dyn eframe::App>
     };
@@ -438,7 +506,7 @@ fn save_config(state: &AppState) {
 }
 
 /// Action to start the stream
-fn start_stream(state: &mut AppState) {
+fn start_stream(state: &mut AppState, _ctx: &egui::Context) {
     // Load PulseAudio loopback module
     match (&state.selected_pulse_source_name, &state.selected_pulse_sink_name) {
         (Some(mic), Some(sink)) => {
@@ -459,7 +527,6 @@ fn start_stream(state: &mut AppState) {
         }
     }
 
-    // Launch gamescope + mpv
     let format = if let Some(f) = state.supported_formats.get(state.selected_format_index) {
         f
     } else {
@@ -467,30 +534,33 @@ fn start_stream(state: &mut AppState) {
         return;
     };
 
-    match launch_gamescope(&state.selected_video_device, format, state.selected_resolution, state.selected_framerate) {
-        Ok(child) => {
-            state.gamescope_process = Some(child);
-            state.status_message = "Gamescope process started.".to_string();
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    state.stop_video_thread = Some(stop_flag.clone());
+
+    let device = state.selected_video_device.clone();
+    let format = format.clone();
+    let resolution = state.selected_resolution;
+    let framerate = state.selected_framerate;
+    let (tx, rx) = crossbeam_channel::bounded(1); // Bounded channel with capacity of 1.
+    state.frame_receiver = Some(rx);
+
+    let handle = thread::spawn(move || {
+        if let Err(e) = video_thread_main(tx, stop_flag, device, format, resolution, framerate) {
+            tracing::error!("Video thread error: {}", e);
         }
-        Err(e) => {
-            state.status_message = format!("Failed to start gamescope: {}", e);
-            if let Some(index) = state.pulse_loopback_module_index.take() {
-                if let Err(e) = unload_pulse_loopback(index) {
-                     tracing::error!("Failed to unload loopback module after launch failure: {}", e);
-                }
-            }
-        }
-    }
+    });
+
+    state.video_thread = Some(handle);
+    state.status_message = "Stream started.".to_string();
 }
 
 /// Action to stop the stream
 fn stop_stream(state: &mut AppState) {
-    if let Some(mut child) = state.gamescope_process.take() {
-        if let Err(e) = child.kill() {
-            tracing::error!("Failed to kill gamescope process: {}", e);
-        }
-        let _ = child.wait();
-        state.status_message = "Stream stopped.".to_string();
+    if let Some(stop_flag) = state.stop_video_thread.take() {
+        stop_flag.store(true, Ordering::Relaxed);
+    }
+    if let Some(handle) = state.video_thread.take() {
+        let _ = handle.join();
     }
 
     if let Some(index) = state.pulse_loopback_module_index.take() {
@@ -500,13 +570,14 @@ fn stop_stream(state: &mut AppState) {
             state.status_message = "Stream stopped and PulseAudio module unloaded.".to_string();
         }
     }
+    state.frame_receiver = None;
 }
 
 // --- Helper Functions ---
 
 fn reset_usb_device() -> Result<()> {
     let device_id = format!("{}:{}", USB_VENDOR, USB_ID);
-    let status = Command::new("pkexec")
+    let status = std::process::Command::new("pkexec")
         .arg("usbreset")
         .arg(&device_id)
         .status()
@@ -762,48 +833,107 @@ fn unload_pulse_loopback(module_index: u32) -> Result<()> {
     })
 }
 
-fn launch_gamescope(device: &str, format: &VideoFormat, resolution: (u32, u32), framerate: u32) -> Result<Child> {
-    let av_url = format!("av://v4l2:{}", device);
+/// The main logic for the background video processing thread.
+fn video_thread_main(
+    frame_sender: crossbeam_channel::Sender<Arc<egui::ColorImage>>,
+    stop_flag: Arc<AtomicBool>,
+    device: String,
+    format: VideoFormat,
+    resolution: (u32, u32),
+    framerate: u32,
+) -> Result<()> {
+    use ffmpeg_next::format::Pixel;
 
-    // The FourCC code needs to be converted to a lowercase string for mpv.
-    // It's a 4-byte code, often with non-printable characters, so we handle it carefully.
+    ffmpeg_next::init().context("Failed to initialize FFmpeg")?;
+    
     let mut pixel_format_str = format.fourcc.trim_end_matches('\0').to_lowercase();
-
-    // Map common v4l2 FourCC codes to their ffmpeg equivalents.
     match pixel_format_str.as_str() {
         "yuyv" => pixel_format_str = "yuyv422".to_string(),
         "mjpg" => pixel_format_str = "mjpeg".to_string(),
-        _ => {} // Use the lowercase FourCC directly for other formats
+        _ => {}
+    }
+    
+    let mut ffmpeg_options = ffmpeg_next::Dictionary::new();
+    ffmpeg_options.set("video_size", &format!("{}x{}", resolution.0, resolution.1));
+    ffmpeg_options.set("framerate", &framerate.to_string());
+    ffmpeg_options.set("f", "v4l2");
+    // Add options to handle low-latency live stream, replicating the working mpv command.
+    ffmpeg_options.set("fflags", "nobuffer+discardcorrupt");
+    ffmpeg_options.set("probesize", "32");
+    ffmpeg_options.set("analyzeduration", "100000"); // Use a safe, small value.
+
+    // Set the input format based on the codec.
+    // For MJPEG, we let ffmpeg decode it. For others, we treat it as raw video and specify the pixel format.
+    if pixel_format_str == "mjpeg" {
+        ffmpeg_options.set("input_format", "mjpeg");
+    } else {
+        ffmpeg_options.set("input_format", "rawvideo");
+        ffmpeg_options.set("pixel_format", &pixel_format_str);
     }
 
-    let demuxer_opts = format!(
-        "video_size={}x{},framerate={},input_format=rawvideo,pixel_format={},fflags=+nobuffer,analyzeduration=100000,probesize=32",
-        resolution.0,
-        resolution.1,
-        framerate,
-        pixel_format_str
-    );
+    tracing::info!(device = %device, options = ?ffmpeg_options, "Starting FFmpeg with options");
 
+    let ictx = ffmpeg_next::format::input_with_dictionary(&device, ffmpeg_options)
+        .context("Failed to open input device with ffmpeg")?;
 
-    Command::new("gamescope")
-        .args([
-            "-h", "2160", "-w", "3840", "-H", "2160", "-W", "3840", "-r", "144", "-f", "--rt", "--",
-        ])
-        .arg("mpv")
-        .args([
-            "--hwdec=auto", "--framedrop=decoder+vo",
-            "--no-hidpi-window-scale", "--video-sync=desync",
-            "--vd-lavc-threads=1", "--vd-lavc-dr=no", "--speed=1", "--hr-seek=no",
-            "--demuxer-readahead-secs=0", "--demuxer-max-bytes=512K", "--audio-buffer=0",
-            "--cache-pause=no", "--no-correct-pts", "--no-cache", "--untimed",
-            "--no-demuxer-thread", "--container-fps-override=60", "--opengl-glfinish=yes",
-            "--opengl-swapinterval=0", "--gpu-api=opengl", "--vo=gpu-next", "--speed=1.01"
-        ])
-        .arg(format!("--demuxer-lavf-o={}", demuxer_opts))
-        .args([
-            "--demuxer-lavf-probe-info=nostreams", "--fullscreen",
-        ])
-        .arg(&av_url)
-        .spawn()
-        .context("Failed to spawn gamescope process")
+    let input = ictx.streams().best(ffmpeg_next::media::Type::Video).context("Could not find best video stream")?;
+    let video_stream_index = input.index();
+
+    // --- Hardware Acceleration Setup ---
+    let mut decoder = ffmpeg_next::codec::context::Context::from_parameters(input.parameters())
+        .and_then(|c| c.decoder().video())
+        .context("Failed to create software video decoder")?;
+
+    decoder.set_threading(ffmpeg_next::codec::threading::Config::default());
+    let (packet_tx, packet_rx) = crossbeam_channel::bounded(1);
+    let reader_stop_flag = stop_flag.clone();
+    let _reader_thread = thread::spawn(move || {
+        let mut ictx = ictx; // Take ownership of the context
+        for (stream, packet) in ictx.packets() {
+            if reader_stop_flag.load(Ordering::Relaxed) { break; }
+            if stream.index() == video_stream_index {
+                // This is a non-blocking send. If the decoder is busy, the old packet
+                // in the channel is dropped and replaced with this new one.
+                let _ = packet_tx.try_send(packet);
+            }
+        }
+        tracing::info!("Packet reader thread finished.");
+    });
+
+    // --- Active Decoding Loop ---
+    let mut scaler = None;
+    while !stop_flag.load(Ordering::Relaxed) {
+        // Use a non-blocking receive to get the latest packet from the reader thread.
+        if let Ok(packet) = packet_rx.try_recv() {
+            decoder.send_packet(&packet).context("Failed to send packet to decoder")?;
+            let mut decoded = ffmpeg_next::frame::Video::empty();
+            while decoder.receive_frame(&mut decoded).is_ok() {
+                let frame_to_process = &decoded;
+
+                let scaler = scaler.get_or_insert_with(|| {
+                    ffmpeg_next::software::scaling::context::Context::get(
+                        frame_to_process.format(), 
+                        frame_to_process.width(), 
+                        frame_to_process.height(),
+                        Pixel::RGB24, decoded.width(), decoded.height(),
+                        ffmpeg_next::software::scaling::flag::Flags::FAST_BILINEAR,
+                    ).unwrap()
+                });
+                let mut rgb_frame = ffmpeg_next::frame::Video::empty();
+                scaler.run(frame_to_process, &mut rgb_frame).context("Scaler failed")?;
+                
+                let image_data = rgb_frame.data(0);
+                let image = Arc::new(egui::ColorImage::from_rgb([rgb_frame.width() as usize, rgb_frame.height() as usize], image_data));
+
+                if let Err(e) = frame_sender.try_send(image) {
+                    tracing::warn!("Failed to send frame, receiver disconnected: {}", e);
+                    break;
+                }
+            }
+        } else {
+            thread::yield_now();
+        }
+    }
+    tracing::info!("Video thread finished.");
+    Ok(())
 }
