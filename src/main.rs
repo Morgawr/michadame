@@ -9,6 +9,7 @@ use libpulse_binding::mainloop::standard::{IterateResult, Mainloop};
 use libpulse_binding::operation::State as OperationState;
 use std::process::{Child, Command};
 use std::rc::Rc;
+use serde::{Serialize, Deserialize};
 use std::sync::mpsc;
 
 /// Holds the results of our background device scan.
@@ -18,6 +19,14 @@ enum DeviceScanResult {
 }
 const USB_VENDOR: &str = "345f";
 const USB_ID: &str = "2131";
+
+/// Defines the structure of our configuration file.
+#[derive(Default, Serialize, Deserialize, Clone)]
+struct MichadameConfig {
+    video_device: Option<String>,
+    pulse_source: Option<String>,
+    pulse_sink: Option<String>,
+}
 
 /// Represents the state of our application
 struct AppState {
@@ -69,6 +78,28 @@ impl eframe::App for AppState {
                             self.pulse_sources = pulse_sources;
                             self.pulse_sinks = pulse_sinks;
                             self.status_message = "Devices loaded successfully.".to_string();
+
+                            // --- Load and apply saved configuration ---
+                            if let Ok(cfg) = confy::load::<MichadameConfig>("michadame", None) {
+                                // Apply video device if it still exists
+                                if let Some(saved_device) = cfg.video_device {
+                                    if self.video_devices.contains(&saved_device) {
+                                        self.selected_video_device = saved_device;
+                                    }
+                                }
+                                // Apply pulse source if it still exists
+                                if let Some(saved_source) = cfg.pulse_source {
+                                    if self.pulse_sources.iter().any(|(_, name)| name == &saved_source) {
+                                        self.selected_pulse_source_name = Some(saved_source);
+                                    }
+                                }
+                                // Apply pulse sink if it still exists
+                                if let Some(saved_sink) = cfg.pulse_sink {
+                                    if self.pulse_sinks.iter().any(|(_, name)| name == &saved_sink) {
+                                        self.selected_pulse_sink_name = Some(saved_sink);
+                                    }
+                                }
+                            }
                         }
                         DeviceScanResult::Failure(e) => {
                             self.status_message = format!("Error: {}", e);
@@ -97,12 +128,16 @@ impl eframe::App for AppState {
             ui.horizontal(|ui| {
                 ui.label("Video Device:");
                 egui::ComboBox::from_id_source("video_device_selector")
-                    .selected_text(self.selected_video_device.as_str())
-                    .show_ui(ui, |ui| {
-                        for device in &self.video_devices {
-                            ui.selectable_value(&mut self.selected_video_device, device.clone(), device.as_str());
-                        }
-                    });
+                .selected_text(self.selected_video_device.as_str())
+                .show_ui(ui, |ui| {
+                    let mut changed = false;
+                    for device in &self.video_devices {
+                        changed |= ui.selectable_value(&mut self.selected_video_device, device.clone(), device.as_str()).changed();
+                    }
+                    if changed {
+                        save_config(self);
+                    }
+                });
             });
             ui.separator();
 
@@ -122,11 +157,15 @@ impl eframe::App for AppState {
 
                 egui::ComboBox::from_label("Input (Source)")
                     .selected_text(selected_source_desc)
-                    .show_ui(ui, |ui| {
-                        for (desc, name) in &self.pulse_sources {
-                            ui.selectable_value(&mut self.selected_pulse_source_name, Some(name.clone()), desc);
-                        }
-                    });
+                .show_ui(ui, |ui| {
+                    let mut changed = false;
+                    for (desc, name) in &self.pulse_sources {
+                        changed |= ui.selectable_value(&mut self.selected_pulse_source_name, Some(name.clone()), desc).changed();
+                    }
+                    if changed {
+                        save_config(self);
+                    }
+                });
 
                 let selected_sink_desc = self.pulse_sinks.iter()
                     .find(|(_, name)| Some(name) == self.selected_pulse_sink_name.as_ref())
@@ -135,11 +174,15 @@ impl eframe::App for AppState {
 
                 egui::ComboBox::from_label("Output (Sink)")
                     .selected_text(selected_sink_desc)
-                    .show_ui(ui, |ui| {
-                        for (desc, name) in &self.pulse_sinks {
-                            ui.selectable_value(&mut self.selected_pulse_sink_name, Some(name.clone()), desc);
-                        }
-                    });
+                .show_ui(ui, |ui| {
+                    let mut changed = false;
+                    for (desc, name) in &self.pulse_sinks {
+                        changed |= ui.selectable_value(&mut self.selected_pulse_sink_name, Some(name.clone()), desc).changed();
+                    }
+                    if changed {
+                        save_config(self);
+                    }
+                });
             });
             ui.separator();
 
@@ -232,6 +275,19 @@ fn main() -> Result<(), eframe::Error> {
     // If it does return, it's an error.
     eframe::run_native("Michadame Viewer", options, Box::new(creator))
 
+}
+/// Saves the current selections to the configuration file.
+fn save_config(state: &AppState) {
+    let cfg = MichadameConfig {
+        video_device: Some(state.selected_video_device.clone()),
+        pulse_source: state.selected_pulse_source_name.clone(),
+        pulse_sink: state.selected_pulse_sink_name.clone(),
+    };
+
+    if let Err(e) = confy::store("michadame", None, cfg) {
+        tracing::error!("Failed to save configuration: {}", e);
+        // We can update the status message, but it might be annoying to the user.
+    }
 }
 
 /// Action to start the stream
