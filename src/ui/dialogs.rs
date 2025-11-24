@@ -34,11 +34,10 @@ pub fn show_first_run_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut
         .unwrap_or(false)
 }
 
-pub fn show_quit_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) -> bool {
+pub fn show_quit_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
     let screen_rect = ctx.screen_rect();
     ui.painter().rect_filled(screen_rect, 0.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 128));
 
-    let mut quit_app = false;
     egui::Window::new("Quit?")
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .collapsible(false)
@@ -48,7 +47,7 @@ pub fn show_quit_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut egui
             ui.add_space(15.0);
             ui.horizontal(|ui| {
                 if ui.button("Yes, quit").clicked() {
-                    quit_app = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 if ui.button("Cancel").clicked() {
                     state.show_quit_dialog = false;
@@ -56,5 +55,4 @@ pub fn show_quit_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut egui
             });
         });
 
-    quit_app
 }

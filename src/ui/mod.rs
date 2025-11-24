@@ -18,10 +18,7 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
             if state.show_first_run_dialog {
                 repaint_requested |= dialogs::show_first_run_dialog(state, ctx, ui);
             } else if state.show_quit_dialog {
-                if dialogs::show_quit_dialog(state, ctx, ui) {
-                    // User confirmed quit
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
+                dialogs::show_quit_dialog(state, ctx, ui);
                 repaint_requested = true;
             }
 

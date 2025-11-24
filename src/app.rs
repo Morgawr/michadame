@@ -295,15 +295,19 @@ impl eframe::App for AppState {
             FullscreenAction::Idle => {}
         }
 
+        // Handle window close request (e.g., from the 'X' button)
         if ctx.input(|i| i.viewport().close_requested()) {
-            if self.video_thread.is_some() {
-                // If the stream is running, show the dialog.
-                // By not sending a `Close` command, we prevent the window from closing.
+            if self.video_thread.is_some() && !self.show_quit_dialog {
+                // If a stream is running, show the confirmation dialog
+                // and cancel the default close behavior.
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.show_quit_dialog = true;
-            } else {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
+            // If no stream is running, we don't cancel the close,
+            // so the application will exit. The `on_exit` method will be called for cleanup.
+            repaint_requested = true;
         }
+
         if ctx.input(|i| i.key_pressed(egui::Key::Q) || i.key_pressed(egui::Key::Escape)) {
             if self.video_thread.is_some() {
                 self.show_quit_dialog = true;
