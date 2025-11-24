@@ -1,14 +1,15 @@
-use crate::{app::AppState, config, devices, video};
+use crate::{app::AppState, config, devices};
 use eframe::egui;
 
-pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) {
+pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     if state.is_fullscreen {
-        return;
+        return false;
     }
-    layout_top_ui_content(ui, state);
+    layout_top_ui_content(ui, state)
 }
 
-fn layout_top_ui_content(ui: &mut egui::Ui, state: &mut AppState) {
+fn layout_top_ui_content(ui: &mut egui::Ui, state: &mut AppState) -> bool {
+    let mut changed = false;
     ui.horizontal(|ui| {
         if let Some(logo) = &state.logo_texture {
             ui.add(egui::Image::new(logo).max_height(160.0));
@@ -28,13 +29,13 @@ fn layout_top_ui_content(ui: &mut egui::Ui, state: &mut AppState) {
         egui::ComboBox::from_id_source("usb_device_selector")
             .selected_text(selected_text)
             .show_ui(ui, |ui| {
-                if ui.selectable_value(&mut state.selected_usb_device, None, "None").changed() {
-                    config::save_config(state);
-                }
+                let mut combo_changed = ui.selectable_value(&mut state.selected_usb_device, None, "None").changed();
                 for (id, name) in &state.usb_devices {
-                    if ui.selectable_value(&mut state.selected_usb_device, Some(id.clone()), format!("{} {}", id, name)).changed() {
-                        config::save_config(state);
-                    }
+                    combo_changed |= ui.selectable_value(&mut state.selected_usb_device, Some(id.clone()), format!("{} {}", id, name)).changed();
+                }
+                if combo_changed {
+                    config::save_config(state);
+                    changed = true;
                 }
             });
 
@@ -45,8 +46,9 @@ fn layout_top_ui_content(ui: &mut egui::Ui, state: &mut AppState) {
                     Err(e) => format!("Failed to reset USB: {}", e),
                 };
             }
-            if ui.checkbox(&mut state.reset_usb_on_startup, "Reset on startup").changed() {
+            if ui.checkbox(&mut state.reset_usb_on_startup, "Reset on startup").on_hover_text("Requires pkexec to be configured for usbreset without a password prompt for automatic startup reset.").changed() {
                 config::save_config(state);
+                changed = true;
             }
         }
     });
@@ -58,11 +60,11 @@ fn layout_top_ui_content(ui: &mut egui::Ui, state: &mut AppState) {
         let _combo_box = egui::ComboBox::from_id_source("video_device_selector")
             .selected_text(state.selected_video_device.as_str())
             .show_ui(ui, |ui| {
-                let mut changed = false;
+                let mut combo_changed = false;
                 for device in &state.video_devices {
-                    changed |= ui.selectable_value(&mut state.selected_video_device, device.clone(), device.as_str()).changed();
+                    combo_changed |= ui.selectable_value(&mut state.selected_video_device, device.clone(), device.as_str()).changed();
                 }
-                if changed && !state.selected_video_device.is_empty() {
+                if combo_changed && !state.selected_video_device.is_empty() {
                     config::save_config(state);
                     state.supported_formats.clear();
                     state.selected_format_index = 0;
@@ -81,6 +83,7 @@ fn layout_top_ui_content(ui: &mut egui::Ui, state: &mut AppState) {
                             state.status_message = format!("Failed to scan formats: {}", e);
                         }
                     }
+                    changed = true;
                 }
             });
     });
@@ -101,6 +104,7 @@ fn layout_top_ui_content(ui: &mut egui::Ui, state: &mut AppState) {
                                 state.selected_framerate = res.framerates.first().cloned().unwrap_or(0);
                             }
                             config::save_config(state);
+                            changed = true;
                         }
                     }
                 });
@@ -113,6 +117,7 @@ fn layout_top_ui_content(ui: &mut egui::Ui, state: &mut AppState) {
                         if ui.selectable_value(&mut state.selected_resolution, (res.width, res.height), format!("{}x{}", res.width, res.height)).changed() {
                             state.selected_framerate = res.framerates.first().cloned().unwrap_or(0);
                             config::save_config(state);
+                            changed = true;
                         }
                     }
                 });
@@ -126,6 +131,7 @@ fn layout_top_ui_content(ui: &mut egui::Ui, state: &mut AppState) {
                             for &fps in &res_info.framerates {
                                 if ui.selectable_value(&mut state.selected_framerate, fps, format!("{} fps", fps)).changed() {
                                     config::save_config(state);
+                                    changed = true;
                                 }
                             }
                         });
@@ -140,6 +146,7 @@ fn layout_top_ui_content(ui: &mut egui::Ui, state: &mut AppState) {
             ui.label("PulseAudio Configuration:");
             if ui.button("🔄 Refresh").clicked() {
                 state.status_message = "Refresh clicked. Please restart the app to re-scan devices.".to_string();
+                changed = true;
             }
         });
 
@@ -151,11 +158,14 @@ fn layout_top_ui_content(ui: &mut egui::Ui, state: &mut AppState) {
         egui::ComboBox::from_label("Input (Source)")
             .selected_text(selected_source_desc)
             .show_ui(ui, |ui| {
-                let mut changed = false;
+                let mut combo_changed = false;
                 for (desc, name) in &state.pulse_sources {
-                    changed |= ui.selectable_value(&mut state.selected_pulse_source_name, Some(name.clone()), desc).changed();
+                    combo_changed |= ui.selectable_value(&mut state.selected_pulse_source_name, Some(name.clone()), desc).changed();
                 }
-                if changed { config::save_config(state); }
+                if combo_changed {
+                    config::save_config(state);
+                    changed = true;
+                }
             });
 
         let selected_sink_desc = state.pulse_sinks.iter()
@@ -166,25 +176,33 @@ fn layout_top_ui_content(ui: &mut egui::Ui, state: &mut AppState) {
         egui::ComboBox::from_label("Output (Sink)")
             .selected_text(selected_sink_desc)
             .show_ui(ui, |ui| {
-                let mut changed = false;
+                let mut combo_changed = false;
                 for (desc, name) in &state.pulse_sinks {
-                    changed |= ui.selectable_value(&mut state.selected_pulse_sink_name, Some(name.clone()), desc).changed();
+                    combo_changed |= ui.selectable_value(&mut state.selected_pulse_sink_name, Some(name.clone()), desc).changed();
                 }
-                if changed { config::save_config(state); }
+                if combo_changed {
+                    config::save_config(state);
+                    changed = true;
+                }
             });
     });
     ui.separator();
 
     ui.horizontal(|ui| {
         let is_running = state.video_thread.is_some();
-        if ui.add_enabled(!is_running && state.selected_resolution.0 > 0, egui::Button::new("▶ Start Stream")).clicked() {
+        let start_button = ui.add_enabled(!is_running && state.selected_resolution.0 > 0, egui::Button::new("▶ Start Stream"));
+        if start_button.clicked() {
             state.start_stream(ui.ctx());
+            changed = true;
         }
-        if ui.add_enabled(is_running, egui::Button::new("⏹ Stop Stream")).clicked() {
+        let stop_button = ui.add_enabled(is_running, egui::Button::new("⏹ Stop Stream"));
+        if stop_button.clicked() {
             state.stop_stream(ui.ctx());
+            changed = true;
         }
     });
 
     ui.separator();
     ui.label(&state.status_message);
+    changed
 }

@@ -1,5 +1,6 @@
 use crate::video::VideoFormat;
 use crate::{config, devices, ui, video};
+use anyhow::Context;
 use eframe::egui;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -35,8 +36,8 @@ pub struct AppState {
     video_frames_since_last_check: u32,
     pub is_fullscreen: bool,
     pub reset_usb_on_startup: bool,
-    fullscreen_toggle_state: u8,
     pub show_first_run_dialog: bool,
+    fullscreen_toggle_state: u8,
 }
 
 impl Default for AppState {
@@ -68,8 +69,8 @@ impl Default for AppState {
             video_frames_since_last_check: 0,
             is_fullscreen: false,
             reset_usb_on_startup: false,
-            fullscreen_toggle_state: 0,
             show_first_run_dialog: false,
+            fullscreen_toggle_state: 0,
         }
     }
 }
@@ -101,24 +102,16 @@ impl AppState {
             let pulse_result = devices::audio::find_pulse_devices();
             let usb_result = devices::usb::find_usb_devices();
 
-            let result = match (video_result, pulse_result, usb_result) {
-                (Ok(video_devices), Ok((pulse_sources, pulse_sinks)), Ok(usb_devices)) => {
-                    devices::DeviceScanResult::Success(
-                        video_devices,
-                        pulse_sources,
-                        pulse_sinks,
-                        usb_devices,
-                    )
-                }
-                (Err(e), _, _) => {
-                    devices::DeviceScanResult::Failure(e.context("Failed to find video devices"))
-                }
-                (_, Err(e), _) => {
-                    devices::DeviceScanResult::Failure(e.context("Failed to find PulseAudio devices"))
-                }
-                (_, _, Err(e)) => {
-                    devices::DeviceScanResult::Failure(e.context("Failed to find USB devices"))
-                }
+            let result: devices::DeviceScanResult = (|| {
+                let video_devices = video_result.context("Failed to find video devices")?;
+                let (pulse_sources, pulse_sinks) =
+                    pulse_result.context("Failed to find PulseAudio devices")?;
+                let usb_devices = usb_result.context("Failed to find USB devices")?;
+                Ok((video_devices, pulse_sources, pulse_sinks, usb_devices))
+            })();
+
+            if let Err(e) = &result {
+                tracing::error!("Device scan failed: {:?}", e);
             };
             let _ = tx.send(result);
             egui_ctx.request_repaint();
@@ -126,25 +119,28 @@ impl AppState {
         app_state
     }
 
-    fn handle_device_scan_result(&mut self, result: devices::DeviceScanResult) {
-        match result {
-            devices::DeviceScanResult::Success(video_devices, pulse_sources, pulse_sinks, usb_devices) => {
+    fn handle_device_scan_result(&mut self, result: devices::DeviceScanResult) -> bool {
+        let scan_successful = match result {
+            Ok((video_devices, pulse_sources, pulse_sinks, usb_devices)) => {
                 self.video_devices = video_devices;
                 self.selected_video_device = self.video_devices.first().cloned().unwrap_or_default();
                 self.pulse_sources = pulse_sources;
                 self.pulse_sinks = pulse_sinks;
                 self.usb_devices = usb_devices;
-                self.status_message = "Devices loaded successfully.".to_string();
 
                 if let Ok(cfg) = confy::load::<config::MichadameConfig>("michadame", None) {
                     config::apply_config(self, &cfg);
                 }
+                self.status_message = "Devices loaded successfully.".to_string();
+                true
             }
-            devices::DeviceScanResult::Failure(e) => {
+            Err(e) => {
                 self.status_message = format!("Error: {}", e);
+                false
             }
-        }
+        };
         self.device_scan_receiver = None;
+        scan_successful
     }
 
     fn update_fps_counters(&mut self, ctx: &egui::Context) {
@@ -233,7 +229,6 @@ impl AppState {
 
             ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(required_size));
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(required_size));
-
             self.fullscreen_toggle_state = 1;
         }
     }
@@ -268,24 +263,31 @@ impl AppState {
 
 impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let mut repaint_requested = false;
+
         if self.fullscreen_toggle_state == 2 {
             self.fullscreen_toggle_state = 0;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+            repaint_requested = true;
         } else if self.fullscreen_toggle_state == 1 {
             self.fullscreen_toggle_state = 2;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+            repaint_requested = true;
         }
 
         if ctx.input(|i| i.key_pressed(egui::Key::F)) {
             self.is_fullscreen = !self.is_fullscreen;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
+            repaint_requested = true;
         }
 
         if let Some(rx) = &self.device_scan_receiver {
             if let Ok(scan_result) = rx.try_recv() {
-                self.handle_device_scan_result(scan_result);
+                repaint_requested |= self.handle_device_scan_result(scan_result);
+            } else {
+                // Still loading
+                repaint_requested = true;
             }
-            ctx.request_repaint();
         }
 
         if let Some(rx) = &self.frame_receiver {
@@ -293,11 +295,16 @@ impl eframe::App for AppState {
                 self.video_texture.as_mut().unwrap().set(image, egui::TextureOptions::LINEAR);
                 self.video_frames_since_last_check += 1;
             }
+            // Always repaint when video is playing to show new frames
+            repaint_requested = true;
         }
 
-        ui::draw_main_ui(self, ctx);
+        repaint_requested |= ui::draw_main_ui(self, ctx);
         self.update_fps_counters(ctx);
-        ctx.request_repaint();
+
+        if repaint_requested {
+            ctx.request_repaint();
+        }
     }
 }
 

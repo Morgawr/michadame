@@ -1,7 +1,7 @@
 use crate::{app::AppState, config};
 use eframe::egui;
 
-pub fn show_first_run_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
+pub fn show_first_run_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) -> bool {
     let screen_rect = ctx.screen_rect();
     ui.painter().rect_filled(screen_rect, 0.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 128));
 
@@ -24,7 +24,12 @@ pub fn show_first_run_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut
                 if ui.button("I Understand").clicked() {
                     state.show_first_run_dialog = false;
                     config::save_config(state);
+                    true
+                } else {
+                    false
                 }
-            });
-        });
+            }).inner
+        })
+        .and_then(|inner| inner.inner)
+        .unwrap_or(false)
 }

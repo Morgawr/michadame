@@ -1,11 +1,11 @@
 use anyhow::{anyhow, Context, Result};
 use libpulse_binding::callbacks::ListResult;
 use libpulse_binding::context::{Context as PulseContext, FlagSet as PulseContextFlagSet, State as PulseContextState};
-use libpulse_binding::def::Retval;
 use libpulse_binding::mainloop::standard::{IterateResult, Mainloop};
 use libpulse_binding::operation::State as OperationState;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
 fn run_pulse_op<F, T>(op_logic: F) -> Result<T>
 where
@@ -16,8 +16,10 @@ where
 
     context.connect(None, PulseContextFlagSet::empty(), None).context("Failed to connect context")?;
 
+    let start_time = std::time::Instant::now();
     loop {
-        match mainloop.iterate(false) {
+        // Use a timeout to avoid blocking forever
+        match mainloop.iterate(true) {
             IterateResult::Err(e) => return Err(anyhow!("Mainloop iterate error: {}", e)),
             IterateResult::Quit(_) => return Err(anyhow!("Mainloop quit unexpectedly")),
             _ => {}
@@ -28,6 +30,10 @@ where
                 return Err(anyhow!("Context state failed or terminated"));
             }
             _ => {}
+        }
+
+        if start_time.elapsed() > Duration::from_secs(5) {
+            return Err(anyhow!("Timeout waiting for PulseAudio context to be ready"));
         }
     }
 
@@ -78,8 +84,8 @@ pub fn find_pulse_devices() -> Result<(Vec<(String, String)>, Vec<(String, Strin
             });
 
             while *lists_completed.borrow() < 2 {
-                if mainloop.iterate(false) == IterateResult::Quit(Retval(0)) {
-                     return Err(anyhow!("Mainloop quit while getting devices"));
+                if matches!(mainloop.iterate(true), IterateResult::Quit(_)) {
+                    return Err(anyhow!("Mainloop quit while getting devices"));
                 }
             }
             drop(op_source);
@@ -105,7 +111,7 @@ pub fn load_pulse_loopback(source: &str, sink: &str) -> Result<u32> {
             });
 
             while op.get_state() == OperationState::Running {
-                if mainloop.iterate(false) == IterateResult::Quit(Retval(0)) {
+                if matches!(mainloop.iterate(true), IterateResult::Quit(_)) {
                     return Err(anyhow!("Mainloop quit while loading module"));
                 }
             }
@@ -120,7 +126,7 @@ pub fn unload_pulse_loopback(module_index: u32) -> Result<()> {
     run_pulse_op(|context, mainloop| {
         let op = context.introspect().unload_module(module_index, |_| {});
         while op.get_state() == OperationState::Running {
-            if mainloop.iterate(false) == IterateResult::Quit(Retval(0)) {
+            if matches!(mainloop.iterate(true), IterateResult::Quit(_)) {
                 return Err(anyhow!("Mainloop quit while unloading module"));
             }
         }

@@ -17,6 +17,53 @@ pub fn find_video_devices() -> Result<Vec<String>> {
     Ok(devices)
 }
 
+fn parse_format_line(line: &str) -> Option<VideoFormat> {
+    if line.starts_with('[') && line.contains(':') && line.contains('\'') {
+        let parts: Vec<&str> = line.split('\'').collect();
+        if parts.len() >= 2 {
+            let fourcc = parts[1].to_string();
+            let description = line.split(|c| c == '(' || c == ')').nth(1).unwrap_or("").to_string();
+            return Some(VideoFormat {
+                fourcc,
+                description,
+                resolutions: Vec::new(),
+            });
+        }
+    }
+    None
+}
+
+fn parse_resolution_line(line: &str) -> Option<Resolution> {
+    if line.starts_with("Size: Discrete") {
+        let res_parts: Vec<&str> = line.split_whitespace().collect();
+        if res_parts.len() >= 3 {
+            let res_str = res_parts[2];
+            let dim_parts: Vec<&str> = res_str.split('x').collect();
+            if dim_parts.len() == 2 {
+                if let (Ok(w), Ok(h)) = (dim_parts[0].parse(), dim_parts[1].parse()) {
+                    return Some(Resolution { width: w, height: h, framerates: Vec::new() });
+                }
+            }
+        }
+    }
+    None
+}
+
+fn parse_framerate_line(line: &str, resolution: &mut Resolution) {
+    if line.starts_with("Interval: Discrete") {
+        if let Some(fps_part) = line.split(|c| c == '(' || c == ')').nth(1) {
+            if let Some(fps_str) = fps_part.split_whitespace().next() {
+                if let Ok(fps_float) = fps_str.parse::<f64>() {
+                    let fps = fps_float.round() as u32;
+                    if !resolution.framerates.contains(&fps) {
+                        resolution.framerates.push(fps);
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn find_video_formats(device_path: &str) -> Result<Vec<VideoFormat>> {
     let output = Command::new("v4l2-ctl")
         .arg("--list-formats-ext")
@@ -36,60 +83,31 @@ pub fn find_video_formats(device_path: &str) -> Result<Vec<VideoFormat>> {
     let mut current_resolution: Option<Resolution> = None;
 
     for line in stdout.lines().filter(|l| !l.is_empty()) {
-        let trimmed = line.trim();
-
-        if trimmed.starts_with('[') && trimmed.contains(':') && trimmed.contains('\'') {
-            if let Some(mut format) = current_format.take() {
+        let line = line.trim();
+        if let Some(new_format) = parse_format_line(line) {
+            // Finalize the previous format before starting a new one
+            if let Some(mut fmt) = current_format.take() {
                 if let Some(res) = current_resolution.take() {
                     if !res.framerates.is_empty() {
-                        format.resolutions.push(res);
+                        fmt.resolutions.push(res);
                     }
                 }
-                if !format.resolutions.is_empty() {
-                    formats.push(format);
+                if !fmt.resolutions.is_empty() {
+                    formats.push(fmt);
                 }
             }
-
-            let parts: Vec<&str> = trimmed.split('\'').collect();
-            if parts.len() >= 2 {
-                let fourcc = parts[1].to_string();
-                let description = trimmed.split(|c| c == '(' || c == ')').nth(1).unwrap_or("").to_string();
-                
-                current_format = Some(VideoFormat {
-                    fourcc,
-                    description,
-                    resolutions: Vec::new(),
-                });
-            }
-        } else if trimmed.starts_with("Size: Discrete") {
-            if let Some(format) = &mut current_format {
+            current_format = Some(new_format);
+        } else if let Some(new_res) = parse_resolution_line(line) {
+            if let Some(fmt) = &mut current_format {
                 if let Some(res) = current_resolution.take() {
                     if !res.framerates.is_empty() {
-                        format.resolutions.push(res);
+                        fmt.resolutions.push(res);
                     }
                 }
-
-                let res_parts: Vec<&str> = trimmed.split_whitespace().collect();
-                if res_parts.len() >= 3 {
-                    let res_str = res_parts[2];
-                    let dim_parts: Vec<&str> = res_str.split('x').collect();
-                    if dim_parts.len() == 2 {
-                        if let (Ok(w), Ok(h)) = (dim_parts[0].parse(), dim_parts[1].parse()) {
-                            current_resolution = Some(Resolution { width: w, height: h, framerates: Vec::new() });
-                        }
-                    }
-                }
+                current_resolution = Some(new_res);
             }
-        } else if trimmed.starts_with("Interval: Discrete") {
-            if let Some(res) = &mut current_resolution {
-                if let Some(fps_part) = trimmed.split(|c| c == '(' || c == ')').nth(1) {
-                    if let Some(fps_str) = fps_part.split_whitespace().next() {
-                        if let Ok(fps_float) = fps_str.parse::<f64>() {
-                            res.framerates.push(fps_float.round() as u32);
-                        }
-                    }
-                }
-            }
+        } else if let Some(res) = &mut current_resolution {
+            parse_framerate_line(line, res);
         }
     }
 

@@ -7,7 +7,29 @@ use std::sync::{
     Arc,
 };
 use std::thread;
-
+fn setup_ffmpeg_options(
+    format: &VideoFormat,
+    resolution: (u32, u32),
+    framerate: u32,
+) -> (String, ffmpeg_next::Dictionary) {
+    let mut pixel_format_str = format.fourcc.trim_end_matches('\0').to_lowercase();
+    if pixel_format_str == "yuyv" {
+        pixel_format_str = "yuyv422".to_string();
+    } else if pixel_format_str == "mjpg" {
+        pixel_format_str = "mjpeg".to_string();
+    }
+    let mut ffmpeg_options = ffmpeg_next::Dictionary::new();
+    ffmpeg_options.set("video_size", &format!("{}x{}", resolution.0, resolution.1));
+    ffmpeg_options.set("framerate", &framerate.to_string());
+    ffmpeg_options.set("input_format", &pixel_format_str);
+    ffmpeg_options.set("fflags", "nobuffer+discardcorrupt");
+    ffmpeg_options.set("probesize", "32");
+    ffmpeg_options.set("analyzeduration", "100000");
+    if pixel_format_str != "mjpeg" {
+        ffmpeg_options.set("pixel_format", &pixel_format_str);
+    }
+    (pixel_format_str, ffmpeg_options)
+}
 pub fn video_thread_main(
     frame_sender: crossbeam_channel::Sender<Arc<egui::ColorImage>>,
     stop_flag: Arc<AtomicBool>,
@@ -17,31 +39,9 @@ pub fn video_thread_main(
     framerate: u32,
 ) -> Result<()> {
     ffmpeg_next::init().context("Failed to initialize FFmpeg")?;
-    
-    let mut pixel_format_str = format.fourcc.trim_end_matches('\0').to_lowercase();
-    match pixel_format_str.as_str() {
-        "yuyv" => pixel_format_str = "yuyv422".to_string(),
-        "mjpg" => pixel_format_str = "mjpeg".to_string(),
-        _ => {}
-    }
-    
-    let mut ffmpeg_options = ffmpeg_next::Dictionary::new();
-    ffmpeg_options.set("video_size", &format!("{}x{}", resolution.0, resolution.1));
-    ffmpeg_options.set("framerate", &framerate.to_string());
-    ffmpeg_options.set("f", "v4l2");
-    ffmpeg_options.set("fflags", "nobuffer+discardcorrupt");
-    ffmpeg_options.set("probesize", "32");
-    ffmpeg_options.set("analyzeduration", "100000");
-
-    if pixel_format_str == "mjpeg" {
-        ffmpeg_options.set("input_format", "mjpeg");
-    } else {
-        ffmpeg_options.set("input_format", "rawvideo");
-        ffmpeg_options.set("pixel_format", &pixel_format_str);
-    }
+    let (_pixel_format, mut ffmpeg_options) = setup_ffmpeg_options(&format, resolution, framerate);
 
     tracing::info!(device = %device, options = ?ffmpeg_options, "Starting FFmpeg with options");
-
     let ictx = ffmpeg_next::format::input_with_dictionary(&device, ffmpeg_options)
         .context("Failed to open input device with ffmpeg")?;
 
@@ -68,7 +68,7 @@ pub fn video_thread_main(
 
     let mut scaler = None;
     while !stop_flag.load(Ordering::Relaxed) {
-        if let Ok(packet) = packet_rx.try_recv() {
+        if let Ok(packet) = packet_rx.recv() {
             decoder.send_packet(&packet).context("Failed to send packet to decoder")?;
             let mut decoded = ffmpeg_next::frame::Video::empty();
             while decoder.receive_frame(&mut decoded).is_ok() {
@@ -93,8 +93,6 @@ pub fn video_thread_main(
                     break;
                 }
             }
-        } else {
-            thread::yield_now();
         }
     }
     tracing::info!("Video thread finished.");
