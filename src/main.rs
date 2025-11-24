@@ -32,6 +32,7 @@ struct MichadameConfig {
     video_resolution: Option<(u32, u32)>,
     video_framerate: Option<u32>,
     reset_usb_on_startup: Option<bool>,
+    has_shown_first_run_warning: Option<bool>,
 }
 
 /// Holds resolution and its available framerates.
@@ -96,6 +97,8 @@ struct AppState {
     reset_usb_on_startup: bool,
     // State machine for the fullscreen toggle workaround. 0: idle, 1: enter, 2: exit.
     fullscreen_toggle_state: u8,
+    // Controls the visibility of the first-run warning dialog.
+    show_first_run_dialog: bool,
 }
 impl Default for AppState {
     fn default() -> Self {
@@ -127,6 +130,7 @@ impl Default for AppState {
             is_fullscreen: false,
             reset_usb_on_startup: false,
             fullscreen_toggle_state: 0,
+            show_first_run_dialog: false,
         }
     }
 }
@@ -158,6 +162,38 @@ impl eframe::App for AppState {
         };
 
         egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
+
+            // --- First Run Warning Dialog ---
+            if self.show_first_run_dialog {
+                // Create a modal background
+                let screen_rect = ctx.screen_rect();
+                ui.painter().rect_filled(screen_rect, 0.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 128));
+
+                // Show the modal window on top
+                egui::Window::new("Heads Up!")
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .collapsible(false)
+                    .resizable(false)
+                    .show(ctx, |ui| {
+                        ui.vertical_centered(|ui| {
+                            if let Some(logo) = &self.logo_texture {
+                                ui.add(egui::Image::new(logo).max_height(160.0));
+                            }
+                        });
+                        ui.add_space(10.0);
+                        ui.label("WARNING: Some capture cards require resetting the USB device after every stream. If yours is one of them, select your USB device from the drop down and make sure to reset it before or after you are done running the capture feed. This requires root.");
+                        ui.add_space(10.0);
+                        ui.label(egui::RichText::new("Also, DO NOT FALL IN LOVE WITH THE ANIME GIRL, SHE IS NOT REAL").strong().color(egui::Color32::RED));
+                        ui.add_space(15.0);
+                        ui.vertical_centered(|ui| {
+                            if ui.button("I Understand").clicked() {
+                                self.show_first_run_dialog = false;
+                                // The config will be saved by the save_config call below.
+                                save_config(self);
+                            }
+                        });
+                    });
+            }
 
             // --- Check for new video frames ---
             // Receive the latest frame, dropping any older ones in the queue.
@@ -248,6 +284,11 @@ impl eframe::App for AppState {
                                         };
                                         tracing::info!("USB device reset on startup as requested.");
                                     }
+                                }
+
+                                // Check if the first-run warning needs to be shown.
+                                if !cfg.has_shown_first_run_warning.unwrap_or(false) {
+                                    self.show_first_run_dialog = true;
                                 }
                             }
                         }
@@ -638,6 +679,7 @@ fn save_config(state: &AppState) {
         },
         video_framerate: if state.selected_framerate > 0 { Some(state.selected_framerate) } else { None },
         reset_usb_on_startup: Some(state.reset_usb_on_startup),
+        has_shown_first_run_warning: Some(!state.show_first_run_dialog),
     };
 
     if let Err(e) = confy::store("michadame", None, cfg) {
