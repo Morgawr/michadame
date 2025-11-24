@@ -37,14 +37,8 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
 }
 
 fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> bool {
-    let image_widget = if state.is_fullscreen {
-        egui::Image::new(state.video_texture.as_ref().unwrap()).fit_to_exact_size(ui.available_size())
-    } else if state.selected_resolution.0 > 0 {
-        let video_size = egui::vec2(state.selected_resolution.0 as f32, state.selected_resolution.1 as f32);
-        egui::Image::new(state.video_texture.as_ref().unwrap()).fit_to_exact_size(video_size)
-    } else {
-        egui::Image::new(state.video_texture.as_ref().unwrap()).max_width(ui.available_width())
-    };
+    let image_widget = egui::Image::new(state.video_texture.as_ref().unwrap())
+        .fit_to_exact_size(ui.available_size());
 
     let response = ui.add(image_widget.sense(egui::Sense::click()));
     if response.double_clicked() {

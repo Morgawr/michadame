@@ -11,7 +11,7 @@ fn setup_ffmpeg_options(
     format: &VideoFormat,
     resolution: (u32, u32),
     framerate: u32,
-) -> (String, ffmpeg_next::Dictionary) {
+) -> (String, ffmpeg_next::Dictionary<'_>) {
     let mut pixel_format_str = format.fourcc.trim_end_matches('\0').to_lowercase();
     if pixel_format_str == "yuyv" {
         pixel_format_str = "yuyv422".to_string();
@@ -39,7 +39,7 @@ pub fn video_thread_main(
     framerate: u32,
 ) -> Result<()> {
     ffmpeg_next::init().context("Failed to initialize FFmpeg")?;
-    let (_pixel_format, mut ffmpeg_options) = setup_ffmpeg_options(&format, resolution, framerate);
+    let (_pixel_format, ffmpeg_options) = setup_ffmpeg_options(&format, resolution, framerate);
 
     tracing::info!(device = %device, options = ?ffmpeg_options, "Starting FFmpeg with options");
     let ictx = ffmpeg_next::format::input_with_dictionary(&device, ffmpeg_options)
