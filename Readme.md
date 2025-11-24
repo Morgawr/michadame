@@ -1,6 +1,6 @@
 # MICHADAME - 見ちゃダメ
 
-<img width="895" height="835" alt="logo" src="https://github.com/user-attachments/assets/91ccc30e-7429-4c05-82fd-0809cc55d2e7" />
+<img width="447" height="417" alt="logo" src="https://github.com/user-attachments/assets/91ccc30e-7429-4c05-82fd-0809cc55d2e7" />
 
 ## THIS SOFTWARE IS SLOP SLOP SLOP IT IS AI SLOP SLOP SLOPPITY SLOPPY SLOP SLOP
 
