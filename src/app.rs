@@ -37,6 +37,7 @@ pub struct AppState {
     pub is_fullscreen: bool,
     pub reset_usb_on_startup: bool,
     pub show_first_run_dialog: bool,
+    pub show_quit_dialog: bool,
     fullscreen_toggle_state: u8,
 }
 
@@ -70,6 +71,7 @@ impl Default for AppState {
             is_fullscreen: false,
             reset_usb_on_startup: false,
             show_first_run_dialog: false,
+            show_quit_dialog: false,
             fullscreen_toggle_state: 0,
         }
     }
@@ -266,6 +268,10 @@ impl AppState {
 }
 
 impl eframe::App for AppState {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.stop_stream_resources();
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut repaint_requested = false;
 
@@ -276,6 +282,24 @@ impl eframe::App for AppState {
         } else if self.fullscreen_toggle_state == 1 {
             self.fullscreen_toggle_state = 2;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+            repaint_requested = true;
+        }
+
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if self.video_thread.is_some() {
+                // If the stream is running, show the dialog.
+                // By not sending a `Close` command, we prevent the window from closing.
+                self.show_quit_dialog = true;
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Q) || i.key_pressed(egui::Key::Escape)) {
+            if self.video_thread.is_some() {
+                self.show_quit_dialog = true;
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
             repaint_requested = true;
         }
 
@@ -311,11 +335,5 @@ impl eframe::App for AppState {
         if repaint_requested {
             ctx.request_repaint();
         }
-    }
-}
-
-impl Drop for AppState {
-    fn drop(&mut self) {
-        self.stop_stream_resources();
     }
 }
