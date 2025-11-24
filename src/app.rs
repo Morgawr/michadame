@@ -234,6 +234,10 @@ impl AppState {
     }
 
     pub fn stop_stream(&mut self, ctx: &egui::Context) {
+        if self.is_fullscreen {
+            self.is_fullscreen = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
         self.stop_stream_resources();
         ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize([500.0, 200.0].into()));
     }
@@ -275,10 +279,12 @@ impl eframe::App for AppState {
             repaint_requested = true;
         }
 
-        if ctx.input(|i| i.key_pressed(egui::Key::F)) {
-            self.is_fullscreen = !self.is_fullscreen;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
-            repaint_requested = true;
+        if self.video_thread.is_some() {
+            if ctx.input(|i| i.key_pressed(egui::Key::F)) {
+                self.is_fullscreen = !self.is_fullscreen;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
+                repaint_requested = true;
+            }
         }
 
         if let Some(rx) = &self.device_scan_receiver {

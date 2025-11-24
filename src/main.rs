@@ -25,6 +25,7 @@ fn main() -> Result<(), eframe::Error> {
                 width: icon_width,
                 height: icon_height,
             }),
+        persist_window: true,
         ..Default::default()
     };
 
