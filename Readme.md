@@ -8,11 +8,11 @@
 
 THIS SOFTWARE IS AI SLOPCORE
 
-I HAVE HARNESSED THE POWERS OF FIRE AND LIGHTING TO SUMMON FORTH THE DEVIL IN THE MACHINE.
+I HAVE HARNESSED THE POWERS OF FIRE AND LIGHTNING TO SUMMON FORTH THE DEVIL IN THE MACHINE.
 
 I MADE A DEAL, I BURNED THE FORESTS AND POISONED THE SEAS, ALL SO I COULD CONJURE THIS SOFTWARE FROM THE ASTRAL PLANE.
 
-DO NOT HANDLE THIS SOFTWARE CAREFULLY, FOR IT HAS NO LICENSE NOR FEELINGS. 
+DO NOT HANDLE THIS SOFTWARE CAREFULLY, FOR IT HAS NO LICENSE NOR FEELINGS.
 
 GOD RESTED ON THE SEVENTH DAY, WHILE THE DEVIL WORKED HIS CHARM. AND THROUGH HIS ARTIFICE HE WAS CHAINED TO THE WILL OF THE MACHINES.
 
@@ -25,10 +25,10 @@ GOD RESTED ON THE SEVENTH DAY, WHILE THE DEVIL WORKED HIS CHARM. AND THROUGH HIS
 > modern times, walk light through the traps of
 > the age. As you journey on through these
 > modern times, walk heavy through the barriers
-> made. 
+> made.
 > Metachthonia.
 
---- 
+---
 
 [preview.webm](https://github.com/user-attachments/assets/57bb8507-0fae-4efb-9844-61b67b0f94bb)
 
@@ -52,4 +52,4 @@ If the audio gets stuck when closing the software, run:
 pactl unload-module module-loopback
 ```
 
-and it should fix it. 
+and it should fix it.
