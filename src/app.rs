@@ -9,6 +9,13 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+#[derive(PartialEq, Eq, Copy, Clone)]
+enum FullscreenAction {
+    Idle,
+    Enter,
+    Exit,
+}
+
 pub struct AppState {
     pub video_devices: Vec<String>,
     pub usb_devices: Vec<(String, String)>,
@@ -38,7 +45,7 @@ pub struct AppState {
     pub reset_usb_on_startup: bool,
     pub show_first_run_dialog: bool,
     pub show_quit_dialog: bool,
-    fullscreen_toggle_state: u8,
+    fullscreen_action: FullscreenAction,
 }
 
 impl Default for AppState {
@@ -72,7 +79,7 @@ impl Default for AppState {
             reset_usb_on_startup: false,
             show_first_run_dialog: false,
             show_quit_dialog: false,
-            fullscreen_toggle_state: 0,
+            fullscreen_action: FullscreenAction::Idle,
         }
     }
 }
@@ -161,8 +168,8 @@ impl AppState {
             self.video_frames_since_last_check = 0;
         }
 
-        let gui_fps = self.frames_since_last_check as f32 / elapsed_secs.max(0.001);
-        let video_fps = self.video_frames_since_last_check as f32 / video_elapsed_secs.max(0.001);
+        let gui_fps = if elapsed_secs > 0.0 { self.frames_since_last_check as f32 / elapsed_secs } else { 0.0 };
+        let video_fps = if video_elapsed_secs > 0.0 { self.video_frames_since_last_check as f32 / video_elapsed_secs } else { 0.0 };
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
             "Michadame Viewer | UI: {:.0} FPS | Video: {:.0} FPS",
             gui_fps, video_fps
@@ -226,12 +233,11 @@ impl AppState {
         self.status_message = "Stream started.".to_string();
 
         if !self.is_fullscreen {
-            let top_ui_height = 500.0;
+            let top_ui_height = 400.0; // Approximate height of the top UI panel.
             let required_size = egui::vec2(resolution.0 as f32, resolution.1 as f32 + top_ui_height);
-
             ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(required_size));
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(required_size));
-            self.fullscreen_toggle_state = 1;
+            self.fullscreen_action = FullscreenAction::Enter;
         }
     }
 
@@ -275,14 +281,18 @@ impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut repaint_requested = false;
 
-        if self.fullscreen_toggle_state == 2 {
-            self.fullscreen_toggle_state = 0;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-            repaint_requested = true;
-        } else if self.fullscreen_toggle_state == 1 {
-            self.fullscreen_toggle_state = 2;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
-            repaint_requested = true;
+        match self.fullscreen_action {
+            FullscreenAction::Enter => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+                self.fullscreen_action = FullscreenAction::Exit;
+                repaint_requested = true;
+            }
+            FullscreenAction::Exit => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                self.fullscreen_action = FullscreenAction::Idle;
+                repaint_requested = true;
+            }
+            FullscreenAction::Idle => {}
         }
 
         if ctx.input(|i| i.viewport().close_requested()) {
