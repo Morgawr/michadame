@@ -28,9 +28,7 @@ GOD RESTED ON THE SEVENTH DAY, WHILE THE DEVIL WORKED ITT CHARM. AND THROUGH HIS
 
 --- 
 
-<p align="center">
-  <video src="preview.webm" width="800" autoplay loop muted playsinline></video>
-</p>
+[preview.webm](https://github.com/user-attachments/assets/57bb8507-0fae-4efb-9844-61b67b0f94bb)
 
 ---
 
