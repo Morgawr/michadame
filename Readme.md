@@ -40,6 +40,8 @@ cargo build --release
 
 and find the resulting binary in `target/release/michadame`. Put it somewhere where you can execute it.
 
+NOTE: If you compile and run the software in debug mode, it will run like shit with low framerate. You have been warned.
+
 It will probably not work well the first time on your PC. You can try to figure out how to fix it or ask the AI to do it for you according to your needs. I just run it on my own PC because I needed it.
 
 If the audio gets stuck when closing the software, run:
