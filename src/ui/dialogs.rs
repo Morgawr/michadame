@@ -43,7 +43,7 @@ pub fn show_quit_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut egui
         .collapsible(false)
         .resizable(false)
         .show(ctx, |ui| {
-            ui.label("The video stream is running. Are you sure you want to quit?");
+            ui.label("A video stream is running in a separate window. Are you sure you want to quit the application?");
             ui.add_space(15.0);
             ui.horizontal(|ui| {
                 if ui.button("Yes, quit").clicked() {

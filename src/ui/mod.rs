@@ -27,24 +27,13 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
 
             repaint_requested |= controls::layout_top_ui(ui, state);
 
-            if state.video_thread.is_some() {
-                if !state.is_fullscreen {
-                    ui.separator();
-                }
-                repaint_requested |= draw_video_player(state, ui, ctx);
-            } else {
-                if !state.is_fullscreen {
-                    ui.allocate_space(egui::vec2(640.0, 360.0));
-                }
-            }
             repaint_requested
         })
         .inner
 }
 
-fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> bool {
-    let available_rect = ui.available_rect_before_wrap();
-    let response = ui.allocate_rect(available_rect, egui::Sense::click_and_drag());
+pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) {
+    let response = ui.allocate_response(ui.available_size(), egui::Sense::click());
 
     let filter = CrtFilter::from_u8(state.crt_filter.load(std::sync::atomic::Ordering::Relaxed));
 
@@ -79,9 +68,7 @@ fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Contex
         ui.put(response.rect, image_widget);
     }
     if response.double_clicked() {
-        state.is_fullscreen = !state.is_fullscreen;
-        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(state.is_fullscreen));
-        return true;
+        let is_fullscreen = !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(is_fullscreen));
     }
-    false
 }

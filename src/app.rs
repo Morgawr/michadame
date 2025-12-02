@@ -45,6 +45,7 @@ pub struct AppState {
     pub reset_usb_on_startup: bool,
     pub show_first_run_dialog: bool,
     pub show_quit_dialog: bool,
+    pub video_window_open: bool,
     fullscreen_action: FullscreenAction,
     pub crt_filter: Arc<AtomicU8>,
     pub crt_renderer: Option<Arc<Mutex<video::gpu_filter::CrtFilterRenderer>>>,
@@ -93,6 +94,7 @@ impl Default for AppState {
             reset_usb_on_startup: false,
             show_first_run_dialog: false,
             show_quit_dialog: false,
+            video_window_open: false,
             fullscreen_action: FullscreenAction::Idle,
             crt_filter: Arc::new(AtomicU8::new(CrtFilter::Scanlines as u8)),
             crt_renderer: None,
@@ -266,14 +268,7 @@ impl AppState {
         });
         self.video_thread = Some(handle);
         self.status_message = "Stream started.".to_string();
-
-        if !self.is_fullscreen {
-            let top_ui_height = 400.0; // Approximate height of the top UI panel.
-            let required_size = egui::vec2(resolution.0 as f32, resolution.1 as f32 + top_ui_height);
-            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(required_size));
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(required_size));
-            self.fullscreen_action = FullscreenAction::Enter;
-        }
+        self.video_window_open = true;
     }
 
     pub fn stop_stream(&mut self, ctx: &egui::Context) {
@@ -282,6 +277,7 @@ impl AppState {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         }
         self.stop_stream_resources();
+        self.video_window_open = false;
         ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize([500.0, 200.0].into()));
     }
 
@@ -305,6 +301,7 @@ impl AppState {
 
         self.video_texture = None;
         self.frame_receiver = None;
+        self.video_window_open = false;
     }
 }
 
@@ -320,6 +317,50 @@ impl eframe::App for AppState {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut repaint_requested = false;
+
+        // --- Video Window ---
+        if self.video_window_open {
+            let video_ctx = ctx.clone();
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("video_window"),
+                egui::ViewportBuilder::default()
+                    .with_title("Michadame Video") // Set a default title
+                    .with_inner_size([self.selected_resolution.0 as f32, self.selected_resolution.1 as f32])
+                    .with_inner_size([self.selected_resolution.0 as f32, self.selected_resolution.1 as f32]),
+                |ctx, class| {
+                    assert!(
+                        class == egui::ViewportClass::Immediate,
+                        "This egui backend doesn't support multiple viewports"
+                    );
+
+                    egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| {
+                        ui::draw_video_player(self, ui, ctx);
+                    });
+
+                    // Handle keyboard shortcuts only for this window
+                    if ctx.input(|i| i.key_pressed(egui::Key::F)) {
+                        let is_fullscreen = !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(is_fullscreen));
+                    }
+                    if ctx.input(|i| i.key_pressed(egui::Key::C)) {
+                        let current_filter = CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed));
+                        let next_filter = current_filter.next();
+                        self.crt_filter.store(next_filter as u8, Ordering::Relaxed);
+                        self.status_message = format!("CRT filter set to: {}", next_filter.to_string());
+                    }
+                    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        // Allow Esc to exit fullscreen on the video window
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                    }
+
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        // This is how we close the window.
+                        self.stop_stream(&video_ctx);
+                    }
+                },
+            );
+        }
+
 
         match self.fullscreen_action {
             FullscreenAction::Enter => {
@@ -337,39 +378,12 @@ impl eframe::App for AppState {
 
         // Handle window close request (e.g., from the 'X' button)
         if ctx.input(|i| i.viewport().close_requested()) {
-            if self.video_thread.is_some() && !self.show_quit_dialog {
-                // If a stream is running, show the confirmation dialog
-                // and cancel the default close behavior.
+            if self.video_window_open && !self.show_quit_dialog {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.show_quit_dialog = true;
-            }
-            // If no stream is running, we don't cancel the close,
-            // so the application will exit. The `on_exit` method will be called for cleanup.
-            repaint_requested = true;
-        }
-
-        if ctx.input(|i| i.key_pressed(egui::Key::Q) || i.key_pressed(egui::Key::Escape)) {
-            if self.video_thread.is_some() {
-                self.show_quit_dialog = true;
             } else {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             repaint_requested = true;
-        }
-
-        if self.video_thread.is_some() {
-            if ctx.input(|i| i.key_pressed(egui::Key::F)) {
-                self.is_fullscreen = !self.is_fullscreen;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
-                repaint_requested = true;
-            }
-            if ctx.input(|i| i.key_pressed(egui::Key::C)) {
-                let current_filter = CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed));
-                let next_filter = current_filter.next();
-                self.crt_filter.store(next_filter as u8, Ordering::Relaxed);
-                self.status_message = format!("CRT filter set to: {}", next_filter.to_string());
-                repaint_requested = true;
-            }
         }
 
         if let Some(rx) = &self.device_scan_receiver {

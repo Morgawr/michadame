@@ -200,9 +200,6 @@ fn layout_top_ui_content(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             state.stop_stream(ui.ctx());
             changed = true;
         }
-        if is_running {
-            ui.label("(Press 'F' for fullscreen, 'C' to cycle CRT filter)");
-        }
     });
 
     let current_filter = CrtFilter::from_u8(state.crt_filter.load(std::sync::atomic::Ordering::Relaxed));
