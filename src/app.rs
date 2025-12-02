@@ -46,6 +46,7 @@ pub struct AppState {
     pub show_first_run_dialog: bool,
     pub show_quit_dialog: bool,
     fullscreen_action: FullscreenAction,
+    pub crt_filter_enabled: Arc<AtomicBool>,
 }
 
 impl Default for AppState {
@@ -80,6 +81,7 @@ impl Default for AppState {
             show_first_run_dialog: false,
             show_quit_dialog: false,
             fullscreen_action: FullscreenAction::Idle,
+            crt_filter_enabled: Arc::new(AtomicBool::new(true)),
         }
     }
 }
@@ -221,14 +223,16 @@ impl AppState {
         let resolution = self.selected_resolution;
         let framerate = self.selected_framerate;
         let (tx, rx) = crossbeam_channel::bounded(1);
+        let crt_filter_enabled = self.crt_filter_enabled.clone();
         self.frame_receiver = Some(rx);
 
         let handle = thread::spawn(move || {
-            if let Err(e) = video::decoder::video_thread_main(tx, stop_flag, device, format, resolution, framerate) {
+            if let Err(e) = video::decoder::video_thread_main(
+                tx, stop_flag, device, format, resolution, framerate, crt_filter_enabled,
+            ) {
                 tracing::error!("Video thread error: {}", e);
             }
         });
-
         self.video_thread = Some(handle);
         self.status_message = "Stream started.".to_string();
 
@@ -321,6 +325,15 @@ impl eframe::App for AppState {
             if ctx.input(|i| i.key_pressed(egui::Key::F)) {
                 self.is_fullscreen = !self.is_fullscreen;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
+                repaint_requested = true;
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::C)) {
+                let is_enabled = !self.crt_filter_enabled.load(Ordering::Relaxed);
+                self.crt_filter_enabled.store(is_enabled, Ordering::Relaxed);
+                self.status_message = format!(
+                    "CRT filter {}",
+                    if is_enabled { "enabled" } else { "disabled" }
+                );
                 repaint_requested = true;
             }
         }

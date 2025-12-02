@@ -1,3 +1,4 @@
+use crate::devices::filters;
 use crate::video::types::VideoFormat;
 use anyhow::{Context, Result};
 use eframe::egui;
@@ -37,6 +38,7 @@ pub fn video_thread_main(
     format: VideoFormat,
     resolution: (u32, u32),
     framerate: u32,
+    crt_filter_enabled: Arc<AtomicBool>,
 ) -> Result<()> {
     ffmpeg_next::init().context("Failed to initialize FFmpeg")?;
     let (_pixel_format, ffmpeg_options) = setup_ffmpeg_options(&format, resolution, framerate);
@@ -86,8 +88,14 @@ pub fn video_thread_main(
                 let mut rgb_frame = ffmpeg_next::frame::Video::empty();
                 scaler.run(frame_to_process, &mut rgb_frame).context("Scaler failed")?;
                 
-                let image_data = rgb_frame.data(0);
-                let image = Arc::new(egui::ColorImage::from_rgb([rgb_frame.width() as usize, rgb_frame.height() as usize], image_data));
+                let width = rgb_frame.width();
+                let height = rgb_frame.height();
+                let image_data = rgb_frame.data_mut(0);
+                if crt_filter_enabled.load(Ordering::Relaxed) {
+                    filters::apply_scanlines(image_data, width, height);
+                }
+
+                let image = Arc::new(egui::ColorImage::from_rgb([width as usize, height as usize], rgb_frame.data(0)));
 
                 if frame_sender.try_send(image).is_err() {
                     break;

@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod filters;
 pub mod usb;
 pub mod video;
 use anyhow::Result;

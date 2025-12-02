@@ -200,7 +200,9 @@ fn layout_top_ui_content(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             state.stop_stream(ui.ctx());
             changed = true;
         }
-        ui.label("(Press 'F' for fullscreen)");
+        if is_running {
+            ui.label("(Press 'F' for fullscreen, 'C' for CRT filter)");
+        }
     });
 
     ui.separator();
