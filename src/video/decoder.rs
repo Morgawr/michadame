@@ -1,10 +1,10 @@
-use crate::devices::filters;
+use crate::devices::{filter_type::CrtFilter, filters};
 use crate::video::types::VideoFormat;
 use anyhow::{Context, Result};
 use eframe::egui;
 use ffmpeg_next::format::Pixel;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
     Arc,
 };
 use std::thread;
@@ -38,7 +38,7 @@ pub fn video_thread_main(
     format: VideoFormat,
     resolution: (u32, u32),
     framerate: u32,
-    crt_filter_enabled: Arc<AtomicBool>,
+    crt_filter: Arc<AtomicU8>,
 ) -> Result<()> {
     ffmpeg_next::init().context("Failed to initialize FFmpeg")?;
     let (_pixel_format, ffmpeg_options) = setup_ffmpeg_options(&format, resolution, framerate);
@@ -91,8 +91,9 @@ pub fn video_thread_main(
                 let width = rgb_frame.width();
                 let height = rgb_frame.height();
                 let image_data = rgb_frame.data_mut(0);
-                if crt_filter_enabled.load(Ordering::Relaxed) {
-                    filters::apply_scanlines(image_data, width, height);
+                let filter_type = CrtFilter::from_u8(crt_filter.load(Ordering::Relaxed));
+                if filter_type != CrtFilter::Off {
+                    filters::apply_filter(filter_type, image_data, width, height);
                 }
 
                 let image = Arc::new(egui::ColorImage::from_rgb([width as usize, height as usize], rgb_frame.data(0)));

@@ -1,4 +1,4 @@
-use crate::{app::AppState, config, devices};
+use crate::{app::AppState, config, devices, devices::filter_type::CrtFilter};
 use eframe::egui;
 
 pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
@@ -201,9 +201,24 @@ fn layout_top_ui_content(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             changed = true;
         }
         if is_running {
-            ui.label("(Press 'F' for fullscreen, 'C' for CRT filter)");
+            ui.label("(Press 'F' for fullscreen, 'C' to cycle CRT filter)");
         }
     });
+
+    let current_filter = CrtFilter::from_u8(state.crt_filter.load(std::sync::atomic::Ordering::Relaxed));
+    if current_filter == CrtFilter::Lottes {
+        ui.group(|ui| {
+            ui.label("Lottes Filter Settings");
+            ui.horizontal(|ui| {
+                ui.label("Gamma:");
+                if ui.add(egui::Slider::new(&mut state.crt_gamma, 1.0..=4.0).text("Brightness")).changed() {
+                    config::save_config(state);
+                    changed = true;
+                }
+            });
+        });
+    }
+
 
     ui.separator();
     ui.label(&state.status_message);

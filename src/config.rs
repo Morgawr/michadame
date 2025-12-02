@@ -12,8 +12,9 @@ pub struct MichadameConfig {
     pub video_resolution: Option<(u32, u32)>,
     pub video_framerate: Option<u32>,
     pub reset_usb_on_startup: Option<bool>,
-    pub has_shown_first_run_warning: Option<bool>,
-    pub crt_filter_enabled: Option<bool>,
+    pub has_shown_first_run_warning: Option<bool>, // Add this line
+    pub crt_filter: Option<u8>,
+    pub crt_gamma: Option<f32>,
 }
 
 pub fn save_config(state: &AppState) {
@@ -33,7 +34,8 @@ pub fn save_config(state: &AppState) {
         },
         video_framerate: if state.selected_framerate > 0 { Some(state.selected_framerate) } else { None },
         reset_usb_on_startup: Some(state.reset_usb_on_startup),
-        crt_filter_enabled: Some(state.crt_filter_enabled.load(Ordering::Relaxed)),
+        crt_filter: Some(state.crt_filter.load(Ordering::Relaxed)),
+        crt_gamma: Some(state.crt_gamma),
         has_shown_first_run_warning: Some(!state.show_first_run_dialog),
     };
 
@@ -79,7 +81,10 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     if !cfg.has_shown_first_run_warning.unwrap_or(false) {
         state.show_first_run_dialog = true;
     }
-    if let Some(enabled) = cfg.crt_filter_enabled {
-        state.crt_filter_enabled.store(enabled, Ordering::Relaxed);
+    if let Some(filter) = cfg.crt_filter {
+        state.crt_filter.store(filter, Ordering::Relaxed);
+    }
+    if let Some(gamma) = cfg.crt_gamma {
+        state.crt_gamma = gamma;
     }
 }

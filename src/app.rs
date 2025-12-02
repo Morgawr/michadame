@@ -1,9 +1,9 @@
 use crate::video::VideoFormat;
-use crate::{config, devices, ui, video};
+use crate::{config, devices, ui, video, devices::filter_type::CrtFilter};
 use anyhow::Context;
 use eframe::egui;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
     Arc, mpsc,
 };
 use std::thread::{self, JoinHandle};
@@ -46,7 +46,9 @@ pub struct AppState {
     pub show_first_run_dialog: bool,
     pub show_quit_dialog: bool,
     fullscreen_action: FullscreenAction,
-    pub crt_filter_enabled: Arc<AtomicBool>,
+    pub crt_filter: Arc<AtomicU8>,
+    pub crt_renderer: Option<Arc<video::gpu_filter::CrtFilterRenderer>>, // Kept for on_exit, but not used for rendering
+    pub crt_gamma: f32,
 }
 
 impl Default for AppState {
@@ -81,7 +83,9 @@ impl Default for AppState {
             show_first_run_dialog: false,
             show_quit_dialog: false,
             fullscreen_action: FullscreenAction::Idle,
-            crt_filter_enabled: Arc::new(AtomicBool::new(true)),
+            crt_filter: Arc::new(AtomicU8::new(CrtFilter::Scanlines as u8)),
+            crt_renderer: None, // This will be set in main.rs
+            crt_gamma: 2.4,
         }
     }
 }
@@ -101,6 +105,11 @@ impl AppState {
         let logo_texture = cc
             .egui_ctx
             .load_texture("logo", logo_color_image, Default::default());
+
+        if let Some(gl) = cc.gl.as_ref() {
+            app_state.crt_renderer = Some(Arc::new(video::gpu_filter::CrtFilterRenderer::new(gl)));
+        }
+
         app_state.logo_texture = Some(logo_texture);
 
         // Asynchronous Device Scanning
@@ -223,13 +232,13 @@ impl AppState {
         let resolution = self.selected_resolution;
         let framerate = self.selected_framerate;
         let (tx, rx) = crossbeam_channel::bounded(1);
-        let crt_filter_enabled = self.crt_filter_enabled.clone();
+        let crt_filter = self.crt_filter.clone();
         self.frame_receiver = Some(rx);
 
         let handle = thread::spawn(move || {
-            if let Err(e) = video::decoder::video_thread_main(
-                tx, stop_flag, device, format, resolution, framerate, crt_filter_enabled,
-            ) {
+            if let Err(e) =
+                video::decoder::video_thread_main(tx, stop_flag, device, format, resolution, framerate, crt_filter)
+            {
                 tracing::error!("Video thread error: {}", e);
             }
         });
@@ -279,6 +288,11 @@ impl AppState {
 
 impl eframe::App for AppState {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(gl) = _gl {
+            if let Some(renderer) = self.crt_renderer.as_ref() {
+                renderer.destroy(gl);
+            }
+        }
         self.stop_stream_resources();
     }
 
@@ -328,12 +342,10 @@ impl eframe::App for AppState {
                 repaint_requested = true;
             }
             if ctx.input(|i| i.key_pressed(egui::Key::C)) {
-                let is_enabled = !self.crt_filter_enabled.load(Ordering::Relaxed);
-                self.crt_filter_enabled.store(is_enabled, Ordering::Relaxed);
-                self.status_message = format!(
-                    "CRT filter {}",
-                    if is_enabled { "enabled" } else { "disabled" }
-                );
+                let current_filter = CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed));
+                let next_filter = current_filter.next();
+                self.crt_filter.store(next_filter as u8, Ordering::Relaxed);
+                self.status_message = format!("CRT filter set to: {}", next_filter.to_string());
                 repaint_requested = true;
             }
         }

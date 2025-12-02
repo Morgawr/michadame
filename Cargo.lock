@@ -2362,10 +2362,12 @@ name = "michadame"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "confy",
  "crossbeam-channel",
  "eframe",
  "egui",
+ "egui_glow",
  "ffmpeg-next",
  "glob",
  "image 0.25.9",

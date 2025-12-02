@@ -1,5 +1,7 @@
 use crate::app::AppState;
 use eframe::egui;
+use eframe::egui_glow;
+use crate::devices::filter_type::CrtFilter;
 
 pub mod controls;
 pub mod dialogs;
@@ -40,10 +42,29 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
 }
 
 fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) -> bool {
-    let image_widget = egui::Image::new(state.video_texture.as_ref().unwrap())
-        .fit_to_exact_size(ui.available_size());
+    let available_rect = ui.available_rect_before_wrap();
+    let response = ui.allocate_rect(available_rect, egui::Sense::click_and_drag());
 
-    let response = ui.add(image_widget.sense(egui::Sense::click()));
+    let filter = CrtFilter::from_u8(state.crt_filter.load(std::sync::atomic::Ordering::Relaxed));
+
+    if filter == CrtFilter::Lottes && state.crt_renderer.is_some() {
+        let renderer = state.crt_renderer.as_ref().unwrap().clone();
+        let video_texture_id = state.video_texture.as_ref().unwrap().id();
+        let resolution = state.selected_resolution;
+        let gamma = state.crt_gamma;
+
+        let callback = egui::PaintCallback {
+            rect: response.rect,
+            callback: std::sync::Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
+                renderer.paint(painter, video_texture_id, resolution, gamma);
+            })),
+        };
+        ui.painter().add(callback);
+    } else {
+        let image_widget = egui::Image::new(state.video_texture.as_ref().unwrap())
+            .fit_to_exact_size(response.rect.size());
+        ui.put(response.rect, image_widget);
+    }
     if response.double_clicked() {
         state.is_fullscreen = !state.is_fullscreen;
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(state.is_fullscreen));
