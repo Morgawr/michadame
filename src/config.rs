@@ -14,7 +14,18 @@ pub struct MichadameConfig {
     pub reset_usb_on_startup: Option<bool>,
     pub has_shown_first_run_warning: Option<bool>, // Add this line
     pub crt_filter: Option<u8>,
-    pub crt_gamma: Option<f32>,
+
+    // Lottes params
+    pub crt_hard_scan: Option<f32>,
+    pub crt_warp_x: Option<f32>,
+    pub crt_warp_y: Option<f32>,
+    pub crt_shadow_mask: Option<f32>,
+    pub crt_brightboost: Option<f32>,
+    pub crt_hard_bloom_pix: Option<f32>,
+    pub crt_hard_bloom_scan: Option<f32>,
+    pub crt_bloom_amount: Option<f32>,
+    pub crt_shape: Option<f32>,
+    pub crt_hard_pix: Option<f32>,
 }
 
 pub fn save_config(state: &AppState) {
@@ -34,9 +45,19 @@ pub fn save_config(state: &AppState) {
         },
         video_framerate: if state.selected_framerate > 0 { Some(state.selected_framerate) } else { None },
         reset_usb_on_startup: Some(state.reset_usb_on_startup),
-        crt_filter: Some(state.crt_filter.load(Ordering::Relaxed)),
-        crt_gamma: Some(state.crt_gamma),
         has_shown_first_run_warning: Some(!state.show_first_run_dialog),
+        crt_filter: Some(state.crt_filter.load(Ordering::Relaxed)),
+
+        crt_hard_scan: Some(state.crt_hard_scan),
+        crt_warp_x: Some(state.crt_warp_x),
+        crt_warp_y: Some(state.crt_warp_y),
+        crt_shadow_mask: Some(state.crt_shadow_mask),
+        crt_brightboost: Some(state.crt_brightboost),
+        crt_hard_bloom_pix: Some(state.crt_hard_bloom_pix),
+        crt_hard_bloom_scan: Some(state.crt_hard_bloom_scan),
+        crt_bloom_amount: Some(state.crt_bloom_amount),
+        crt_shape: Some(state.crt_shape),
+        crt_hard_pix: Some(state.crt_hard_pix),
     };
 
     if let Err(e) = confy::store("michadame", None, cfg) {
@@ -84,7 +105,34 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     if let Some(filter) = cfg.crt_filter {
         state.crt_filter.store(filter, Ordering::Relaxed);
     }
-    if let Some(gamma) = cfg.crt_gamma {
-        state.crt_gamma = gamma;
+    if let Some(val) = cfg.crt_hard_scan {
+        state.crt_hard_scan = val;
+    }
+    if let Some(val) = cfg.crt_hard_pix {
+        state.crt_hard_pix = val;
+    }
+    if let Some(val) = cfg.crt_brightboost {
+        state.crt_brightboost = val;
+    }
+    if let Some(val) = cfg.crt_warp_x {
+        state.crt_warp_x = val;
+    }
+    if let Some(val) = cfg.crt_warp_y {
+        state.crt_warp_y = val;
+    }
+    if let Some(val) = cfg.crt_shadow_mask {
+        state.crt_shadow_mask = val;
+    }
+    if let Some(val) = cfg.crt_hard_bloom_pix {
+        state.crt_hard_bloom_pix = val;
+    }
+    if let Some(val) = cfg.crt_hard_bloom_scan {
+        state.crt_hard_bloom_scan = val;
+    }
+    if let Some(val) = cfg.crt_bloom_amount {
+        state.crt_bloom_amount = val;
+    }
+    if let Some(val) = cfg.crt_shape {
+        state.crt_shape = val;
     }
 }

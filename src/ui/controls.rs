@@ -209,9 +209,64 @@ fn layout_top_ui_content(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     if current_filter == CrtFilter::Lottes {
         ui.group(|ui| {
             ui.label("Lottes Filter Settings");
-            ui.horizontal(|ui| {
-                ui.label("Gamma:");
-                if ui.add(egui::Slider::new(&mut state.crt_gamma, 1.0..=4.0).text("Brightness")).changed() {
+            ui.collapsing("Geometry", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Warp X:");
+                    if ui.add(egui::Slider::new(&mut state.crt_warp_x, 0.0..=0.125)).changed() { config::save_config(state); changed = true; }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Warp Y:");
+                    if ui.add(egui::Slider::new(&mut state.crt_warp_y, 0.0..=0.125)).changed() { config::save_config(state); changed = true; }
+                });
+            });
+            ui.collapsing("Scanlines & Pixels", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Scanline Hardness:");
+                    if ui.add(egui::Slider::new(&mut state.crt_hard_scan, -20.0..=0.0)).changed() { config::save_config(state); changed = true; }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Pixel Hardness:");
+                    if ui.add(egui::Slider::new(&mut state.crt_hard_pix, -8.0..=0.0)).changed() { config::save_config(state); changed = true; }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Filter Shape:");
+                    if ui.add(egui::Slider::new(&mut state.crt_shape, 0.0..=10.0)).changed() { config::save_config(state); changed = true; }
+                });
+            });
+            ui.collapsing("Bloom", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Bloom Amount:");
+                    if ui.add(egui::Slider::new(&mut state.crt_bloom_amount, 0.0..=1.0)).changed() { config::save_config(state); changed = true; }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Bloom X Softness:");
+                    if ui.add(egui::Slider::new(&mut state.crt_hard_bloom_pix, -4.0..=-0.5)).changed() { config::save_config(state); changed = true; }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Bloom Y Softness:");
+                    if ui.add(egui::Slider::new(&mut state.crt_hard_bloom_scan, -4.0..=-1.0)).changed() { config::save_config(state); changed = true; }
+                });
+            });
+            ui.collapsing("Mask & Color", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Shadow Mask Type:");
+                    if ui.add(egui::Slider::new(&mut state.crt_shadow_mask, 0.0..=4.0).step_by(1.0)).changed() { config::save_config(state); changed = true; }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Brightness:");
+                    if ui.add(egui::Slider::new(&mut state.crt_brightboost, 0.0..=2.0)).changed() { config::save_config(state); changed = true; }
+                });
+                if ui.button("Reset to Defaults").clicked() {
+                    let defaults = crate::video::gpu_filter::ShaderParams::default();
+                    state.crt_hard_scan = defaults.hard_scan;
+                    state.crt_warp_x = defaults.warp_x;
+                    state.crt_warp_y = defaults.warp_y; state.crt_shadow_mask = defaults.shadow_mask;
+                    state.crt_brightboost = defaults.brightboost;
+                    state.crt_hard_bloom_pix = defaults.hard_bloom_pix;
+                    state.crt_hard_bloom_scan = defaults.hard_bloom_scan;
+                    state.crt_bloom_amount = defaults.bloom_amount;
+                    state.crt_shape = defaults.shape;
+                    state.crt_hard_pix = defaults.hard_pix;
                     config::save_config(state);
                     changed = true;
                 }

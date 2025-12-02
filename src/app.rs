@@ -2,7 +2,7 @@ use crate::video::VideoFormat;
 use crate::{config, devices, ui, video, devices::filter_type::CrtFilter};
 use anyhow::Context;
 use eframe::egui;
-use std::sync::{
+use std::sync::{Mutex,
     atomic::{AtomicBool, AtomicU8, Ordering},
     Arc, mpsc,
 };
@@ -47,8 +47,19 @@ pub struct AppState {
     pub show_quit_dialog: bool,
     fullscreen_action: FullscreenAction,
     pub crt_filter: Arc<AtomicU8>,
-    pub crt_renderer: Option<Arc<video::gpu_filter::CrtFilterRenderer>>, // Kept for on_exit, but not used for rendering
-    pub crt_gamma: f32,
+    pub crt_renderer: Option<Arc<Mutex<video::gpu_filter::CrtFilterRenderer>>>,
+
+    // Lottes Filter Params
+    pub crt_hard_scan: f32,
+    pub crt_warp_x: f32,
+    pub crt_warp_y: f32,
+    pub crt_shadow_mask: f32,
+    pub crt_brightboost: f32,
+    pub crt_hard_bloom_pix: f32,
+    pub crt_hard_bloom_scan: f32,
+    pub crt_bloom_amount: f32,
+    pub crt_shape: f32,
+    pub crt_hard_pix: f32,
 }
 
 impl Default for AppState {
@@ -84,8 +95,19 @@ impl Default for AppState {
             show_quit_dialog: false,
             fullscreen_action: FullscreenAction::Idle,
             crt_filter: Arc::new(AtomicU8::new(CrtFilter::Scanlines as u8)),
-            crt_renderer: None, // This will be set in main.rs
-            crt_gamma: 2.4,
+            crt_renderer: None,
+
+            // Lottes Filter Params
+            crt_hard_scan: -8.0,
+            crt_warp_x: 0.031,
+            crt_warp_y: 0.041,
+            crt_shadow_mask: 3.0,
+            crt_brightboost: 1.0,
+            crt_hard_bloom_pix: -1.5,
+            crt_hard_bloom_scan: -2.0,
+            crt_bloom_amount: 0.15,
+            crt_shape: 2.0,
+            crt_hard_pix: -3.0,
         }
     }
 }
@@ -107,7 +129,7 @@ impl AppState {
             .load_texture("logo", logo_color_image, Default::default());
 
         if let Some(gl) = cc.gl.as_ref() {
-            app_state.crt_renderer = Some(Arc::new(video::gpu_filter::CrtFilterRenderer::new(gl)));
+            app_state.crt_renderer = Some(Arc::new(Mutex::new(video::gpu_filter::CrtFilterRenderer::new(gl))));
         }
 
         app_state.logo_texture = Some(logo_texture);
@@ -290,7 +312,7 @@ impl eframe::App for AppState {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if let Some(gl) = _gl {
             if let Some(renderer) = self.crt_renderer.as_ref() {
-                renderer.destroy(gl);
+                renderer.lock().unwrap().destroy(gl);
             }
         }
         self.stop_stream_resources();

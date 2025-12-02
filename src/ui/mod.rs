@@ -2,6 +2,7 @@ use crate::app::AppState;
 use eframe::egui;
 use eframe::egui_glow;
 use crate::devices::filter_type::CrtFilter;
+use crate::video;
 
 pub mod controls;
 pub mod dialogs;
@@ -51,12 +52,24 @@ fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Contex
         let renderer = state.crt_renderer.as_ref().unwrap().clone();
         let video_texture_id = state.video_texture.as_ref().unwrap().id();
         let resolution = state.selected_resolution;
-        let gamma = state.crt_gamma;
+        let params = video::gpu_filter::ShaderParams {
+            hard_scan: state.crt_hard_scan,
+            warp_x: state.crt_warp_x,
+            warp_y: state.crt_warp_y,
+            shadow_mask: state.crt_shadow_mask,
+            brightboost: state.crt_brightboost,
+            hard_bloom_pix: state.crt_hard_bloom_pix,
+            hard_bloom_scan: state.crt_hard_bloom_scan,
+            bloom_amount: state.crt_bloom_amount,
+            shape: state.crt_shape,
+            hard_pix: state.crt_hard_pix,
+        };
 
         let callback = egui::PaintCallback {
             rect: response.rect,
             callback: std::sync::Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
-                renderer.paint(painter, video_texture_id, resolution, gamma);
+                let output_size = (response.rect.width(), response.rect.height());
+                renderer.lock().unwrap().paint(painter, video_texture_id, resolution, output_size, &params);
             })),
         };
         ui.painter().add(callback);
