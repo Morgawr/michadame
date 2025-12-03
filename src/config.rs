@@ -14,6 +14,7 @@ pub struct MichadameConfig {
     pub reset_usb_on_startup: Option<bool>,
     pub has_shown_first_run_warning: Option<bool>, // Add this line
     pub crt_filter: Option<u8>,
+    pub pixelate_filter_enabled: Option<bool>,
 
     // Lottes params
     pub crt_hard_scan: Option<f32>,
@@ -47,6 +48,7 @@ pub fn save_config(state: &AppState) {
         reset_usb_on_startup: Some(state.reset_usb_on_startup),
         has_shown_first_run_warning: Some(!state.show_first_run_dialog),
         crt_filter: Some(state.crt_filter.load(Ordering::Relaxed)),
+        pixelate_filter_enabled: Some(state.pixelate_filter_enabled),
 
         crt_hard_scan: Some(state.crt_hard_scan),
         crt_warp_x: Some(state.crt_warp_x),
@@ -104,6 +106,9 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     }
     if let Some(filter) = cfg.crt_filter {
         state.crt_filter.store(filter, Ordering::Relaxed);
+    }
+    if let Some(val) = cfg.pixelate_filter_enabled {
+        state.pixelate_filter_enabled = val;
     }
     if let Some(val) = cfg.crt_hard_scan {
         state.crt_hard_scan = val;

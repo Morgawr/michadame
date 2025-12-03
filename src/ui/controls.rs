@@ -78,6 +78,10 @@ fn layout_top_ui_content(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                 state.selected_resolution = (res.width, res.height);
                                 state.selected_framerate = res.framerates.first().cloned().unwrap_or(0);
                             }
+                            // After loading formats, try to apply the saved config for them.
+                            if let Ok(cfg) = confy::load::<config::MichadameConfig>("michadame", None) {
+                                crate::video::types::apply_saved_format_config(state, &cfg);
+                            }
                         }
                         Err(e) => {
                             state.status_message = format!("Failed to scan formats: {}", e);

@@ -345,12 +345,14 @@ impl eframe::App for AppState {
                         let current_filter = CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed));
                         let next_filter = current_filter.next();
                         self.crt_filter.store(next_filter as u8, Ordering::Relaxed);
+                        config::save_config(self);
                         self.status_message = format!("CRT filter set to: {}", next_filter.to_string());
                     }
                     if ctx.input(|i| i.key_pressed(egui::Key::G)) {
                         self.pixelate_filter_enabled = !self.pixelate_filter_enabled;
                         let status = if self.pixelate_filter_enabled { "enabled" } else { "disabled" };
                         self.status_message = format!("480p Pixelate filter {}.", status);
+                        config::save_config(self);
                     }
                     if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                         // Allow Esc to exit fullscreen on the video window
