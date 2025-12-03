@@ -34,36 +34,32 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
 
 pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) {
     let response = ui.allocate_response(ui.available_size(), egui::Sense::click());
-
     let filter = CrtFilter::from_u8(state.crt_filter.load(std::sync::atomic::Ordering::Relaxed));
+    let video_texture_id = state.video_texture.as_ref().unwrap().id();
 
-    if filter == CrtFilter::Lottes && state.crt_renderer.is_some() {
-        let renderer = state.crt_renderer.as_ref().unwrap().clone();
-        let video_texture_id = state.video_texture.as_ref().unwrap().id();
-        let resolution = state.selected_resolution;
-        let params = video::gpu_filter::ShaderParams {
-            hard_scan: state.crt_hard_scan,
-            warp_x: state.crt_warp_x,
-            warp_y: state.crt_warp_y,
-            shadow_mask: state.crt_shadow_mask,
-            brightboost: state.crt_brightboost,
-            hard_bloom_pix: state.crt_hard_bloom_pix,
-            hard_bloom_scan: state.crt_hard_bloom_scan,
-            bloom_amount: state.crt_bloom_amount,
-            shape: state.crt_shape,
-            hard_pix: state.crt_hard_pix,
-        };
+    // All GPU filtering is handled within a single paint callback to ensure correct state.
+    if state.pixelate_filter_enabled || filter == CrtFilter::Lottes {
+        if let Some(renderer_arc) = &state.crt_renderer {
+            let renderer_clone = renderer_arc.clone();
+            let params = video::gpu_filter::ShaderParams::from_state(state);
+            let resolution = state.selected_resolution;
+            let pixelate = state.pixelate_filter_enabled;
+            let run_lottes = filter == CrtFilter::Lottes;
+            let rect = response.rect;
 
-        let callback = egui::PaintCallback {
-            rect: response.rect,
-            callback: std::sync::Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
-                let output_size = (response.rect.width(), response.rect.height());
-                renderer.lock().unwrap().paint(painter, video_texture_id, resolution, output_size, &params);
-            })),
-        };
-        ui.painter().add(callback);
+            let callback = egui::PaintCallback {
+                rect: response.rect,
+                callback: std::sync::Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
+                    let mut renderer = renderer_clone.lock().unwrap();
+                    let output_size = (rect.width(), rect.height());
+                    renderer.paint(painter, video_texture_id, resolution, output_size, &params, pixelate, run_lottes);
+                })),
+            };
+            ui.painter().add(callback);
+        }
     } else {
-        let image_widget = egui::Image::new(state.video_texture.as_ref().unwrap())
+        // Default rendering for CPU Scanlines or Off when no GPU filters are active.
+        let image_widget = egui::Image::new(egui::load::SizedTexture::new(video_texture_id, response.rect.size()))
             .fit_to_exact_size(response.rect.size());
         ui.put(response.rect, image_widget);
     }

@@ -203,6 +203,13 @@ fn layout_top_ui_content(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     });
 
     let current_filter = CrtFilter::from_u8(state.crt_filter.load(std::sync::atomic::Ordering::Relaxed));
+
+    ui.horizontal(|ui| {
+        if ui.checkbox(&mut state.pixelate_filter_enabled, "Enable 480p Pixelate Filter (GPU)").on_hover_text("This is a GPU-based pre-filter that runs before other effects.").changed() {
+            config::save_config(state);
+            changed = true;
+        }
+    });
     if current_filter == CrtFilter::Lottes {
         ui.group(|ui| {
             ui.label("Lottes Filter Settings");

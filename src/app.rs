@@ -2,9 +2,9 @@ use crate::video::VideoFormat;
 use crate::{config, devices, ui, video, devices::filter_type::CrtFilter};
 use anyhow::Context;
 use eframe::egui;
-use std::sync::{Mutex,
+use std::sync::{Mutex, 
     atomic::{AtomicBool, AtomicU8, Ordering},
-    Arc, mpsc,
+    Arc,
 };
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
@@ -28,7 +28,7 @@ pub struct AppState {
     pub stop_video_thread: Option<Arc<AtomicBool>>,
     pub video_texture: Option<egui::TextureHandle>,
     pub frame_receiver: Option<crossbeam_channel::Receiver<Arc<egui::ColorImage>>>,
-    device_scan_receiver: Option<mpsc::Receiver<devices::DeviceScanResult>>,
+    device_scan_receiver: Option<crossbeam_channel::Receiver<devices::DeviceScanResult>>,
     pub logo_texture: Option<egui::TextureHandle>,
     last_fps_check: Instant,
     frames_since_last_check: u32,
@@ -40,6 +40,7 @@ pub struct AppState {
     pub show_quit_dialog: bool,
     pub show_stop_stream_dialog: bool,
     pub video_window_open: bool,
+    pub pixelate_filter_enabled: bool,
     pub crt_filter: Arc<AtomicU8>,
     pub crt_renderer: Option<Arc<Mutex<video::gpu_filter::CrtFilterRenderer>>>,
 
@@ -89,6 +90,7 @@ impl Default for AppState {
             show_quit_dialog: false,
             show_stop_stream_dialog: false,
             video_window_open: false,
+            pixelate_filter_enabled: false,
             crt_filter: Arc::new(AtomicU8::new(CrtFilter::Scanlines as u8)),
             crt_renderer: None,
 
@@ -130,7 +132,7 @@ impl AppState {
         app_state.logo_texture = Some(logo_texture);
 
         // Asynchronous Device Scanning
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = crossbeam_channel::unbounded();
         app_state.device_scan_receiver = Some(rx);
 
         let egui_ctx = cc.egui_ctx.clone();
@@ -310,7 +312,7 @@ impl eframe::App for AppState {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut repaint_requested = false;
-
+        
         // --- Video Window ---
         if self.video_window_open {
             let video_ctx = ctx.clone();
@@ -344,6 +346,11 @@ impl eframe::App for AppState {
                         let next_filter = current_filter.next();
                         self.crt_filter.store(next_filter as u8, Ordering::Relaxed);
                         self.status_message = format!("CRT filter set to: {}", next_filter.to_string());
+                    }
+                    if ctx.input(|i| i.key_pressed(egui::Key::G)) {
+                        self.pixelate_filter_enabled = !self.pixelate_filter_enabled;
+                        let status = if self.pixelate_filter_enabled { "enabled" } else { "disabled" };
+                        self.status_message = format!("480p Pixelate filter {}.", status);
                     }
                     if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                         // Allow Esc to exit fullscreen on the video window

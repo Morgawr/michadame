@@ -3,12 +3,12 @@ use crate::devices::filter_type::CrtFilter;
 pub fn apply_filter(filter: CrtFilter, frame_data: &mut [u8], width: u32, height: u32) {
     match filter {
         CrtFilter::Off => {}
-        CrtFilter::Scanlines => apply_scanlines(frame_data, width, height),
+        CrtFilter::Scanlines => apply_scanlines_cpu(frame_data, width, height),
         CrtFilter::Lottes => {} // Lottes is now a GPU-only filter
     }
 }
 
-fn apply_scanlines(frame_data: &mut [u8], width: u32, _height: u32) {
+fn apply_scanlines_cpu(frame_data: &mut [u8], width: u32, _height: u32) {
     let width = width as usize;
     for y in (0..frame_data.len() / (width * 3)).step_by(2) {
         for x in 0..width {

@@ -13,6 +13,45 @@ const VS_SRC: &str = r#"#version 330 core
     }
 "#;
 
+// Pixelation shader to simulate 480p
+const FS_PIXELATE: &str = r#"#version 330 core
+    in vec2 v_tc;
+    out vec4 out_color;
+
+    uniform sampler2D video_texture;
+    uniform vec2 target_resolution; // e.g., 854.0, 480.0 for 16:9 480p
+
+    void main() {
+        // Flip the Y-coordinate to correct for framebuffer inversion.
+        vec2 flipped_tc = vec2(v_tc.x, 1.0 - v_tc.y);
+
+        // Calculate the size of a 'pixel' in the low-resolution target.
+        vec2 pixel_size = 1.0 / target_resolution;
+
+        // Find the coordinate of the center of the low-res 'pixel' block.
+        vec2 pixelated_uv = (floor(flipped_tc / pixel_size) + 0.5) * pixel_size;
+
+        out_color = texture(video_texture, pixelated_uv);
+    }"#;
+
+// Simple passthrough shader for drawing a texture to the screen
+const FS_PASSTHROUGH: &str = r#"#version 330 core
+    in vec2 v_tc;
+    out vec4 out_color;
+    uniform sampler2D video_texture;
+    
+    // Convert from linear to sRGB color space
+    float ToSrgb1(float c) {
+        return (c < 0.0031308 ? c * 12.92 : 1.055 * pow(c, 0.41666) - 0.055);
+    }
+    vec3 ToSrgb(vec3 c) {
+        return vec3(ToSrgb1(c.r), ToSrgb1(c.g), ToSrgb1(c.b));
+    }
+
+    void main() {
+        vec3 linear_color = texture(video_texture, v_tc).rgb;
+        out_color = vec4(ToSrgb(linear_color), 1.0);
+    }"#;
 // Lottes Pass 0: Horizontal blur for bloom
 const FS_PASS0: &str = r#"#version 330 core
     in vec2 v_tc;
@@ -219,16 +258,24 @@ const FS_FINAL: &str = r#"#version 330 core
 "#;
 
 pub struct CrtFilterRenderer {
+    passthrough_prog: glow::Program,
+    pixelate_prog: glow::Program,
     pass0_prog: glow::Program,
     pass1_prog: glow::Program,
     pass2_prog: glow::Program,
     pass3_prog: glow::Program,
     final_prog: glow::Program,
 
-    fbos: [glow::Framebuffer; 4],
-    pass_textures: [glow::Texture; 4],
+    fbos: [glow::Framebuffer; 5],
+    pass_textures: [glow::Texture; 5],
     vertex_array: glow::VertexArray,
 
+    // Passthrough uniforms
+    p_passthrough_video_texture_loc: glow::UniformLocation,
+
+    // Pixelate uniforms
+    p_pixelate_video_texture_loc: glow::UniformLocation,
+    p_pixelate_target_res_loc: glow::UniformLocation,
     // Pass 0 uniforms
     p0_hard_bloom_pix_loc: glow::UniformLocation,
     p0_video_texture_loc: glow::UniformLocation,
@@ -263,11 +310,25 @@ pub struct CrtFilterRenderer {
 impl CrtFilterRenderer {
     pub fn new(gl: &glow::Context) -> Self {
         unsafe {
+            let passthrough_prog = compile_program(gl, VS_SRC, FS_PASSTHROUGH);
+            let pixelate_prog = compile_program(gl, VS_SRC, FS_PIXELATE);
             let pass0_prog = compile_program(gl, VS_SRC, FS_PASS0);
             let pass1_prog = compile_program(gl, VS_SRC, FS_PASS1);
             let pass2_prog = compile_program(gl, VS_SRC, FS_PASS2);
             let pass3_prog = compile_program(gl, VS_SRC, FS_PASS3);
             let final_prog = compile_program(gl, VS_SRC, FS_FINAL);
+
+            // Passthrough
+            let p_passthrough_video_texture_loc =
+                gl.get_uniform_location(passthrough_prog, "video_texture")
+                    .unwrap();
+
+            // Pixelate
+            let p_pixelate_video_texture_loc =
+                gl.get_uniform_location(pixelate_prog, "video_texture").unwrap();
+            let p_pixelate_target_res_loc =
+                gl.get_uniform_location(pixelate_prog, "target_resolution")
+                    .unwrap();
 
             // Pass 0
             let p0_hard_bloom_pix_loc = gl.get_uniform_location(pass0_prog, "hardBloomPix").unwrap();
@@ -302,8 +363,10 @@ impl CrtFilterRenderer {
                 gl.create_framebuffer().unwrap(),
                 gl.create_framebuffer().unwrap(),
                 gl.create_framebuffer().unwrap(),
+                gl.create_framebuffer().unwrap(),
             ];
             let pass_textures = [
+                gl.create_texture().unwrap(),
                 gl.create_texture().unwrap(),
                 gl.create_texture().unwrap(),
                 gl.create_texture().unwrap(),
@@ -338,8 +401,11 @@ impl CrtFilterRenderer {
             gl.bind_vertex_array(None);
 
             Self {
-                pass0_prog, pass1_prog, pass2_prog, pass3_prog, final_prog,
+                passthrough_prog, pixelate_prog, pass0_prog, pass1_prog, pass2_prog, pass3_prog, final_prog,
                 fbos, pass_textures, vertex_array,
+                p_passthrough_video_texture_loc,
+                p_pixelate_video_texture_loc,
+                p_pixelate_target_res_loc,
                 p0_hard_bloom_pix_loc, p0_video_texture_loc,
                 p1_hard_bloom_scan_loc, p1_pass0_texture_loc,
                 p2_hard_pix_loc, p2_video_texture_loc,
@@ -352,7 +418,7 @@ impl CrtFilterRenderer {
         }
     }
 
-    pub fn paint(&mut self, painter: &egui_glow::Painter, video_texture_id: egui::TextureId, resolution: (u32, u32), output_size: (f32, f32), params: &ShaderParams) {
+    pub fn paint(&mut self, painter: &egui_glow::Painter, video_texture_id: egui::TextureId, resolution: (u32, u32), output_size: (f32, f32), params: &ShaderParams, run_pixelate: bool, run_lottes: bool) {
         let gl = painter.gl();
         let video_texture = painter.texture(video_texture_id).unwrap();
 
@@ -368,65 +434,93 @@ impl CrtFilterRenderer {
             gl.bind_vertex_array(Some(self.vertex_array));
             gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
 
-            // --- PASS 0 (Horizontal Bloom) ---
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[0]));
-            gl.use_program(Some(self.pass0_prog));
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(video_texture));
-            gl.uniform_1_i32(Some(&self.p0_video_texture_loc), 0);
-            gl.uniform_1_f32(Some(&self.p0_hard_bloom_pix_loc), params.hard_bloom_pix);
-            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            let mut lottes_input_texture = video_texture;
 
-            // --- PASS 1 (Vertical Bloom) ---
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[1]));
-            gl.use_program(Some(self.pass1_prog));
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[0]));
-            gl.uniform_1_i32(Some(&self.p1_pass0_texture_loc), 0);
-            gl.uniform_1_f32(Some(&self.p1_hard_bloom_scan_loc), params.hard_bloom_scan);
-            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            if run_pixelate {
+                // --- PIXELATE PASS ---
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[4]));
+                gl.use_program(Some(self.pixelate_prog));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(video_texture));
+                gl.uniform_1_i32(Some(&self.p_pixelate_video_texture_loc), 0);
+                // Target 480p 16:9
+                gl.uniform_2_f32(Some(&self.p_pixelate_target_res_loc), 854.0, 480.0);
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                lottes_input_texture = self.pass_textures[4];
+            }
 
-            // --- PASS 2 (Horizontal Scanlines) ---
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[2]));
-            gl.use_program(Some(self.pass2_prog));
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(video_texture));
-            gl.uniform_1_i32(Some(&self.p2_video_texture_loc), 0);
-            gl.uniform_1_f32(Some(&self.p2_hard_pix_loc), params.hard_pix);
-            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            if run_lottes {
+                // --- PASS 0 (Horizontal Bloom) ---
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[0]));
+                gl.use_program(Some(self.pass0_prog));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(lottes_input_texture));
+                gl.uniform_1_i32(Some(&self.p0_video_texture_loc), 0);
+                gl.uniform_1_f32(Some(&self.p0_hard_bloom_pix_loc), params.hard_bloom_pix);
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-            // --- PASS 3 (Vertical Scanlines) ---
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[3]));
-            gl.use_program(Some(self.pass3_prog));
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[2]));
-            gl.uniform_1_i32(Some(&self.p3_pass2_texture_loc), 0);
-            gl.uniform_1_f32(Some(&self.p3_hard_scan_loc), params.hard_scan);
-            gl.uniform_1_f32(Some(&self.p3_shape_loc), params.shape);
-            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                // --- PASS 1 (Vertical Bloom) ---
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[1]));
+                gl.use_program(Some(self.pass1_prog));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[0]));
+                gl.uniform_1_i32(Some(&self.p1_pass0_texture_loc), 0);
+                gl.uniform_1_f32(Some(&self.p1_hard_bloom_scan_loc), params.hard_bloom_scan);
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-            // --- FINAL PASS ---
-            gl.bind_framebuffer(glow::FRAMEBUFFER, None); // Render to screen
-            gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
-            gl.use_program(Some(self.final_prog));
-            
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[1])); // bloom
-            gl.uniform_1_i32(Some(&self.final_pass1_texture_loc), 0);
+                // --- PASS 2 (Horizontal Scanlines) ---
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[2]));
+                gl.use_program(Some(self.pass2_prog));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(lottes_input_texture));
+                gl.uniform_1_i32(Some(&self.p2_video_texture_loc), 0);
+                gl.uniform_1_f32(Some(&self.p2_hard_pix_loc), params.hard_pix);
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-            gl.active_texture(glow::TEXTURE1);
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[3])); // scanlines
-            gl.uniform_1_i32(Some(&self.final_pass3_texture_loc), 1);
+                // --- PASS 3 (Vertical Scanlines) ---
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[3]));
+                gl.use_program(Some(self.pass3_prog));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[2]));
+                gl.uniform_1_i32(Some(&self.p3_pass2_texture_loc), 0);
+                gl.uniform_1_f32(Some(&self.p3_hard_scan_loc), params.hard_scan);
+                gl.uniform_1_f32(Some(&self.p3_shape_loc), params.shape);
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-            gl.uniform_2_f32(Some(&self.final_video_res_loc), resolution.0 as f32, resolution.1 as f32);
-            gl.uniform_2_f32(Some(&self.final_output_res_loc), output_size.0, output_size.1);
-            gl.uniform_1_f32(Some(&self.final_warp_x_loc), params.warp_x);
-            gl.uniform_1_f32(Some(&self.final_warp_y_loc), params.warp_y);
-            gl.uniform_1_f32(Some(&self.final_shadow_mask_loc), params.shadow_mask);
-            gl.uniform_1_f32(Some(&self.final_brightboost_loc), params.brightboost);
-            gl.uniform_1_f32(Some(&self.final_bloom_amount_loc), params.bloom_amount);
+                // --- FINAL PASS ---
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None); // Render to screen
+                gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+                gl.use_program(Some(self.final_prog));
+                
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[1])); // bloom
+                gl.uniform_1_i32(Some(&self.final_pass1_texture_loc), 0);
 
-            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                gl.active_texture(glow::TEXTURE1);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[3])); // scanlines
+                gl.uniform_1_i32(Some(&self.final_pass3_texture_loc), 1);
+
+                gl.uniform_2_f32(Some(&self.final_video_res_loc), resolution.0 as f32, resolution.1 as f32);
+                gl.uniform_2_f32(Some(&self.final_output_res_loc), output_size.0, output_size.1);
+                gl.uniform_1_f32(Some(&self.final_warp_x_loc), params.warp_x);
+                gl.uniform_1_f32(Some(&self.final_warp_y_loc), params.warp_y);
+                gl.uniform_1_f32(Some(&self.final_shadow_mask_loc), params.shadow_mask);
+                gl.uniform_1_f32(Some(&self.final_brightboost_loc), params.brightboost);
+                gl.uniform_1_f32(Some(&self.final_bloom_amount_loc), params.bloom_amount);
+
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            } else if run_pixelate {
+                // If only pixelation is enabled, we need to draw its result to the screen.
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None); // Render to screen
+                gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+                gl.use_program(Some(self.passthrough_prog));
+
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(lottes_input_texture));
+                gl.uniform_1_i32(Some(&self.p_passthrough_video_texture_loc), 0);
+
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            }
 
             gl.bind_vertex_array(None);
 
@@ -442,6 +536,8 @@ impl CrtFilterRenderer {
 
     pub fn destroy(&self, gl: &glow::Context) {
         unsafe {
+            gl.delete_program(self.passthrough_prog);
+            gl.delete_program(self.pixelate_prog);
             gl.delete_program(self.pass0_prog);
             gl.delete_program(self.pass1_prog);
             gl.delete_program(self.pass2_prog);
@@ -463,7 +559,7 @@ impl CrtFilterRenderer {
 
     fn setup_framebuffers(&mut self, gl: &glow::Context, width: u32, height: u32) {
         unsafe {
-            for i in 0..4 {
+            for i in 0..self.pass_textures.len() {
                 gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[i]));
                 gl.tex_image_2d(
                     glow::TEXTURE_2D,
@@ -528,6 +624,23 @@ unsafe fn compile_program(gl: &glow::Context, vs_src: &str, fs_src: &str) -> glo
     }
 
     program
+}
+
+impl ShaderParams {
+    pub fn from_state(state: &crate::app::AppState) -> Self {
+        Self {
+            hard_scan: state.crt_hard_scan,
+            warp_x: state.crt_warp_x,
+            warp_y: state.crt_warp_y,
+            shadow_mask: state.crt_shadow_mask,
+            brightboost: state.crt_brightboost,
+            hard_bloom_pix: state.crt_hard_bloom_pix,
+            hard_bloom_scan: state.crt_hard_bloom_scan,
+            bloom_amount: state.crt_bloom_amount,
+            shape: state.crt_shape,
+            hard_pix: state.crt_hard_pix,
+        }
+    }
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
