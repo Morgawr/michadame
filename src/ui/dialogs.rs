@@ -56,3 +56,25 @@ pub fn show_quit_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut egui
         });
 
 }
+
+pub fn show_stop_stream_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui, video_ctx: &egui::Context) {
+    let screen_rect = ctx.screen_rect();
+    ui.painter().rect_filled(screen_rect, 0.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 128));
+
+    egui::Window::new("Stop Stream?")
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .collapsible(false)
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.label("Are you sure you want to stop the video stream?");
+            ui.add_space(15.0);
+            ui.horizontal(|ui| {
+                if ui.button("Yes, stop stream").clicked() {
+                    state.stop_stream(video_ctx);
+                }
+                if ui.button("Cancel").clicked() {
+                    state.show_stop_stream_dialog = false;
+                }
+            });
+        });
+}

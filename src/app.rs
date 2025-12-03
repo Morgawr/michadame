@@ -9,13 +9,6 @@ use std::sync::{Mutex,
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
-#[derive(PartialEq, Eq, Copy, Clone)]
-enum FullscreenAction {
-    Idle,
-    Enter,
-    Exit,
-}
-
 pub struct AppState {
     pub video_devices: Vec<String>,
     pub usb_devices: Vec<(String, String)>,
@@ -45,8 +38,8 @@ pub struct AppState {
     pub reset_usb_on_startup: bool,
     pub show_first_run_dialog: bool,
     pub show_quit_dialog: bool,
+    pub show_stop_stream_dialog: bool,
     pub video_window_open: bool,
-    fullscreen_action: FullscreenAction,
     pub crt_filter: Arc<AtomicU8>,
     pub crt_renderer: Option<Arc<Mutex<video::gpu_filter::CrtFilterRenderer>>>,
 
@@ -94,8 +87,8 @@ impl Default for AppState {
             reset_usb_on_startup: false,
             show_first_run_dialog: false,
             show_quit_dialog: false,
+            show_stop_stream_dialog: false,
             video_window_open: false,
-            fullscreen_action: FullscreenAction::Idle,
             crt_filter: Arc::new(AtomicU8::new(CrtFilter::Scanlines as u8)),
             crt_renderer: None,
 
@@ -335,6 +328,10 @@ impl eframe::App for AppState {
 
                     egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| {
                         ui::draw_video_player(self, ui, ctx);
+
+                        if self.show_stop_stream_dialog {
+                            ui::dialogs::show_stop_stream_dialog(self, ctx, ui, &video_ctx);
+                        }
                     });
 
                     // Handle keyboard shortcuts only for this window
@@ -352,6 +349,11 @@ impl eframe::App for AppState {
                         // Allow Esc to exit fullscreen on the video window
                         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
                     }
+                    if ctx.input(|i| i.key_pressed(egui::Key::Q)) {
+                        if self.video_window_open && !self.show_stop_stream_dialog {
+                            self.show_stop_stream_dialog = true;
+                        }
+                    }
 
                     if ctx.input(|i| i.viewport().close_requested()) {
                         // This is how we close the window.
@@ -359,21 +361,6 @@ impl eframe::App for AppState {
                     }
                 },
             );
-        }
-
-
-        match self.fullscreen_action {
-            FullscreenAction::Enter => {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
-                self.fullscreen_action = FullscreenAction::Exit;
-                repaint_requested = true;
-            }
-            FullscreenAction::Exit => {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-                self.fullscreen_action = FullscreenAction::Idle;
-                repaint_requested = true;
-            }
-            FullscreenAction::Idle => {}
         }
 
         // Handle window close request (e.g., from the 'X' button)
