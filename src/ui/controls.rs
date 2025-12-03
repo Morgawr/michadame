@@ -226,11 +226,11 @@ fn layout_top_ui_content(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             ui.collapsing("Scanlines & Pixels", |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Scanline Hardness:");
-                    if ui.add(egui::Slider::new(&mut state.crt_hard_scan, -20.0..=0.0)).changed() { config::save_config(state); changed = true; }
+                    if ui.add(egui::Slider::new(&mut state.crt_hard_scan, -20.0..=-1.0)).changed() { config::save_config(state); changed = true; }
                 });
                 ui.horizontal(|ui| {
                     ui.label("Pixel Hardness:");
-                    if ui.add(egui::Slider::new(&mut state.crt_hard_pix, -8.0..=0.0)).changed() { config::save_config(state); changed = true; }
+                    if ui.add(egui::Slider::new(&mut state.crt_hard_pix, -20.0..=0.0)).changed() { config::save_config(state); changed = true; }
                 });
                 ui.horizontal(|ui| {
                     ui.label("Filter Shape:");

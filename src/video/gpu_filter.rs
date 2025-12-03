@@ -68,7 +68,7 @@ const FS_PASS0: &str = r#"#version 330 core
         vec2 dx = vec2(1.0 / tex_size.x, 0.0);
         vec3 col = vec3(0.0);
         float total = 0.0;
-        for (float i = -4.0; i <= 4.0; i += 1.0) {
+        for (float i = -3.0; i <= 3.0; i += 1.0) {
             float weight = Gaus(i, hardBloomPix);
             col += texture(video_texture, v_tc + i * dx).rgb * weight;
             total += weight;
