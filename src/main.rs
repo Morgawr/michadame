@@ -18,8 +18,8 @@ fn main() -> Result<(), eframe::Error> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([640.0, 500.0]) // Start with a window tall enough for the logo and UI.
-            .with_min_inner_size([500.0, 200.0])
+            .with_inner_size([640.0, 480.0]) // Default starting size for the video window
+            .with_min_inner_size([320.0, 240.0])
             .with_icon(egui::IconData {
                 rgba: icon.into_raw(),
                 width: icon_width,

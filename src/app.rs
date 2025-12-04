@@ -40,6 +40,7 @@ pub struct AppState {
     pub show_quit_dialog: bool,
     pub show_stop_stream_dialog: bool,
     pub video_window_open: bool,
+    pub control_window_open: bool,
     pub pixelate_filter_enabled: bool,
     pub crt_filter: Arc<AtomicU8>,
     pub crt_renderer: Option<Arc<Mutex<video::gpu_filter::CrtFilterRenderer>>>,
@@ -55,6 +56,7 @@ pub struct AppState {
     pub crt_bloom_amount: f32,
     pub crt_shape: f32,
     pub crt_hard_pix: f32,
+    fullscreen_toggle_frame_count: Option<u8>,
 }
 
 impl Default for AppState {
@@ -90,6 +92,7 @@ impl Default for AppState {
             show_quit_dialog: false,
             show_stop_stream_dialog: false,
             video_window_open: false,
+            control_window_open: true,
             pixelate_filter_enabled: false,
             crt_filter: Arc::new(AtomicU8::new(CrtFilter::Scanlines as u8)),
             crt_renderer: None,
@@ -105,6 +108,7 @@ impl Default for AppState {
             crt_bloom_amount: 0.15,
             crt_shape: 2.0,
             crt_hard_pix: -3.0,
+            fullscreen_toggle_frame_count: None,
         }
     }
 }
@@ -124,6 +128,18 @@ impl AppState {
         let logo_texture = cc
             .egui_ctx
             .load_texture("logo", logo_color_image, Default::default());
+
+        // Pre-allocate the video texture to prevent panics.
+        let video_texture = {
+            let tex_manager = cc.egui_ctx.tex_manager();
+            let tex_id = tex_manager.write().alloc(
+                "video_stream".to_string(),
+                egui::ImageData::Color(egui::ColorImage::new([1, 1], egui::Color32::BLACK).into()),
+                egui::TextureOptions::LINEAR,
+            );
+            egui::TextureHandle::new(tex_manager, tex_id)
+        };
+        app_state.video_texture = Some(video_texture);
 
         if let Some(gl) = cc.gl.as_ref() {
             app_state.crt_renderer = Some(Arc::new(Mutex::new(video::gpu_filter::CrtFilterRenderer::new(gl))));
@@ -155,6 +171,12 @@ impl AppState {
             let _ = tx.send(result);
             egui_ctx.request_repaint();
         });
+
+        // Request focus for the control window on startup
+        cc.egui_ctx.send_viewport_cmd_to(
+            egui::ViewportId::from_hash_of("control_window"),
+            egui::ViewportCommand::Focus
+        );
         app_state
     }
 
@@ -233,22 +255,20 @@ impl AppState {
             return;
         };
 
-        if self.video_texture.is_none() {
-            let tex_manager = ctx.tex_manager();
-            let tex_id = tex_manager.write().alloc(
-                "ffmpeg_video".to_string(),
-                egui::ImageData::Color(egui::ColorImage::new([1, 1], egui::Color32::BLACK).into()),
-                egui::TextureOptions::LINEAR,
-            );
-            self.video_texture = Some(egui::TextureHandle::new(tex_manager, tex_id));
-        }
+        let resolution = self.selected_resolution;
+
+        // Resize the main window to match the video stream resolution
+        // The command needs to be sent to the main viewport.
+        let new_size = egui::vec2(resolution.0 as f32, resolution.1 as f32);
+        ctx.send_viewport_cmd_to(
+            egui::ViewportId::ROOT, egui::ViewportCommand::InnerSize(new_size)
+        );
+        ctx.request_repaint(); // Force a repaint to ensure the new texture is drawn
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         self.stop_video_thread = Some(stop_flag.clone());
-
         let device = self.selected_video_device.clone();
         let format = format.clone();
-        let resolution = self.selected_resolution;
         let framerate = self.selected_framerate;
         let (tx, rx) = crossbeam_channel::bounded(1);
         let crt_filter = self.crt_filter.clone();
@@ -264,6 +284,10 @@ impl AppState {
         self.video_thread = Some(handle);
         self.status_message = "Stream started.".to_string();
         self.video_window_open = true;
+        self.control_window_open = false;
+
+        // Start the fullscreen toggle sequence to fix resizing issues.
+        self.fullscreen_toggle_frame_count = Some(0);
     }
 
     pub fn stop_stream(&mut self, ctx: &egui::Context) {
@@ -272,8 +296,12 @@ impl AppState {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         }
         self.stop_stream_resources();
-        self.video_window_open = false;
-        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize([500.0, 200.0].into()));
+        // Reset the texture to a black screen instead of removing it
+        if let Some(texture) = &mut self.video_texture {
+            texture.set(egui::ImageData::Color(egui::ColorImage::new([1, 1], egui::Color32::BLACK).into()), egui::TextureOptions::LINEAR);
+        }
+        self.video_window_open = false; // This now means "stream is not active"
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
     fn stop_stream_resources(&mut self) {
@@ -294,7 +322,6 @@ impl AppState {
             self.status_message = "Stream stopped.".to_string();
         }
 
-        self.video_texture = None;
         self.frame_receiver = None;
         self.video_window_open = false;
     }
@@ -312,64 +339,93 @@ impl eframe::App for AppState {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut repaint_requested = false;
-        
-        // --- Video Window ---
-        if self.video_window_open {
-            let video_ctx = ctx.clone();
+
+        // --- Control Window (Secondary) ---
+        if self.control_window_open {
             ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of("video_window"),
+                egui::ViewportId::from_hash_of("control_window"),
                 egui::ViewportBuilder::default()
-                    .with_title("Michadame Video") // Set a default title
-                    .with_inner_size([self.selected_resolution.0 as f32, self.selected_resolution.1 as f32])
-                    .with_inner_size([self.selected_resolution.0 as f32, self.selected_resolution.1 as f32]),
+                    .with_title("Michadame Controls")
+                    .with_inner_size([640.0, 500.0]),
                 |ctx, class| {
                     assert!(
                         class == egui::ViewportClass::Immediate,
                         "This egui backend doesn't support multiple viewports"
                     );
 
-                    egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| {
-                        ui::draw_video_player(self, ui, ctx);
-
-                        if self.show_stop_stream_dialog {
-                            ui::dialogs::show_stop_stream_dialog(self, ctx, ui, &video_ctx);
-                        }
-                    });
-
-                    // Handle keyboard shortcuts only for this window
-                    if ctx.input(|i| i.key_pressed(egui::Key::F)) {
-                        let is_fullscreen = !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(is_fullscreen));
-                    }
-                    if ctx.input(|i| i.key_pressed(egui::Key::C)) {
-                        let current_filter = CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed));
-                        let next_filter = current_filter.next();
-                        self.crt_filter.store(next_filter as u8, Ordering::Relaxed);
-                        config::save_config(self);
-                        self.status_message = format!("CRT filter set to: {}", next_filter.to_string());
-                    }
-                    if ctx.input(|i| i.key_pressed(egui::Key::G)) {
-                        self.pixelate_filter_enabled = !self.pixelate_filter_enabled;
-                        let status = if self.pixelate_filter_enabled { "enabled" } else { "disabled" };
-                        self.status_message = format!("480p Pixelate filter {}.", status);
-                        config::save_config(self);
-                    }
-                    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        // Allow Esc to exit fullscreen on the video window
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-                    }
-                    if ctx.input(|i| i.key_pressed(egui::Key::Q)) {
-                        if self.video_window_open && !self.show_stop_stream_dialog {
-                            self.show_stop_stream_dialog = true;
-                        }
-                    }
+                    repaint_requested |= ui::draw_main_ui(self, ctx);
 
                     if ctx.input(|i| i.viewport().close_requested()) {
-                        // This is how we close the window.
-                        self.stop_stream(&video_ctx);
+                        self.control_window_open = false;
                     }
                 },
             );
+        }
+
+        // --- Video Window (Primary) ---
+        egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| {
+            ui::draw_video_player(self, ui, ctx);
+
+            if self.show_stop_stream_dialog {
+                ui::dialogs::show_stop_stream_dialog(self, ctx, ui, ctx);
+            }
+
+            if self.show_quit_dialog {
+                ui::dialogs::show_quit_dialog(self, ctx, ui);
+            }
+        });
+
+        // Handle the fullscreen toggle sequence to fix window sizing on stream start.
+        if let Some(count) = self.fullscreen_toggle_frame_count {
+            match count {
+                0 => {
+                    // Frame 1 (after start): Wait one frame for stream to initialize.
+                    self.fullscreen_toggle_frame_count = Some(1);
+                }
+                1 => {
+                    // Frame 2: Go fullscreen.
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+                    self.fullscreen_toggle_frame_count = Some(2);
+                }
+                2 => {
+                    // Frame 3: Go back to windowed and end the sequence.
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                    self.fullscreen_toggle_frame_count = None;
+                }
+                _ => self.fullscreen_toggle_frame_count = None, // Should not happen.
+            }
+            repaint_requested = true;
+        }
+
+        // Handle keyboard shortcuts for the main video window
+        if ctx.input(|i| i.key_pressed(egui::Key::F)) {
+            let is_fullscreen = !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(is_fullscreen));
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::C)) {
+            let current_filter = CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed));
+            let next_filter = current_filter.next();
+            self.crt_filter.store(next_filter as u8, Ordering::Relaxed);
+            config::save_config(self);
+            self.status_message = format!("CRT filter set to: {}", next_filter.to_string());
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::G)) {
+            self.pixelate_filter_enabled = !self.pixelate_filter_enabled;
+            let status = if self.pixelate_filter_enabled { "enabled" } else { "disabled" };
+            self.status_message = format!("480p Pixelate filter {}.", status);
+            config::save_config(self);
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            // Allow Esc to exit fullscreen on the video window
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Q)) {
+            if self.video_window_open && !self.show_stop_stream_dialog {
+                self.show_stop_stream_dialog = true;
+            }
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::M)) {
+            self.control_window_open = !self.control_window_open;
         }
 
         // Handle window close request (e.g., from the 'X' button)
@@ -377,8 +433,7 @@ impl eframe::App for AppState {
             if self.video_window_open && !self.show_quit_dialog {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.show_quit_dialog = true;
-            } else {
-            }
+            } // If no stream, or dialog is already open, allow the default close behavior.
             repaint_requested = true;
         }
 
@@ -400,7 +455,6 @@ impl eframe::App for AppState {
             repaint_requested = true;
         }
 
-        repaint_requested |= ui::draw_main_ui(self, ctx);
         self.update_fps_counters(ctx);
 
         if repaint_requested {

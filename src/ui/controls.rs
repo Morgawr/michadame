@@ -2,13 +2,6 @@ use crate::{app::AppState, config, devices, devices::filter_type::CrtFilter};
 use eframe::egui;
 
 pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
-    if state.is_fullscreen {
-        return false;
-    }
-    layout_top_ui_content(ui, state)
-}
-
-fn layout_top_ui_content(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
         if let Some(logo) = &state.logo_texture {

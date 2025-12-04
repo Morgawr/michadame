@@ -43,7 +43,7 @@ pub fn show_quit_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut egui
         .collapsible(false)
         .resizable(false)
         .show(ctx, |ui| {
-            ui.label("A video stream is running in a separate window. Are you sure you want to quit the application?");
+            ui.label("A video stream is active. Are you sure you want to quit the application?");
             ui.add_space(15.0);
             ui.horizontal(|ui| {
                 if ui.button("Yes, quit").clicked() {
@@ -57,7 +57,7 @@ pub fn show_quit_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut egui
 
 }
 
-pub fn show_stop_stream_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui, video_ctx: &egui::Context) {
+pub fn show_stop_stream_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui, main_ctx: &egui::Context) {
     let screen_rect = ctx.screen_rect();
     ui.painter().rect_filled(screen_rect, 0.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 128));
 
@@ -70,7 +70,7 @@ pub fn show_stop_stream_dialog(state: &mut AppState, ctx: &egui::Context, ui: &m
             ui.add_space(15.0);
             ui.horizontal(|ui| {
                 if ui.button("Yes, stop stream").clicked() {
-                    state.stop_stream(video_ctx);
+                    state.stop_stream(main_ctx);
                 }
                 if ui.button("Cancel").clicked() {
                     state.show_stop_stream_dialog = false;
