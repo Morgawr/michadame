@@ -58,11 +58,13 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 ui.painter().add(callback);
             }
         } else {
-            // Default rendering for CPU Scanlines or Off when no GPU filters are active.
-            // Using Image::new with the texture's native size preserves aspect ratio,
-            // and centering it handles the one-frame lag during resize gracefully.
-            let image_widget = egui::Image::new(video_texture).sense(egui::Sense::click());
-            ui.centered_and_justified(|ui| ui.add(image_widget));
+            // Fallback to a simple passthrough shader if no other GPU filters are active.
+            let renderer_clone = state.crt_renderer.as_ref().unwrap().clone();
+            let rect = response.rect;
+            let callback = egui::PaintCallback { rect, callback: std::sync::Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
+                renderer_clone.lock().unwrap().draw_passthrough(painter.gl(), painter.texture(video_texture_id).unwrap(), (rect.width(), rect.height()));
+            }))};
+            ui.painter().add(callback);
         }
         if response.double_clicked() {
             let is_fullscreen = !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));

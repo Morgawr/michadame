@@ -526,6 +526,24 @@ impl CrtFilterRenderer {
         }
     }
 
+    pub fn draw_passthrough(&self, gl: &glow::Context, video_texture: glow::Texture, output_size: (f32, f32)) {
+        unsafe {
+            let old_vbo = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
+            gl.bind_vertex_array(Some(self.vertex_array));
+
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None); // Render to screen
+            gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+            gl.use_program(Some(self.passthrough_prog));
+
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(video_texture));
+
+            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+            gl.bind_vertex_array(Some(glow::VertexArray::from(glow::NativeVertexArray(NonZero::new(old_vbo as u32).unwrap()))));
+        }
+    }
+
     pub fn destroy(&self, gl: &glow::Context) {
         unsafe {
             gl.delete_program(self.passthrough_prog);
