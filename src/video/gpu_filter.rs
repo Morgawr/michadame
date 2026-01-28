@@ -39,6 +39,8 @@ const FS_PASSTHROUGH: &str = r#"#version 330 core
     in vec2 v_tc;
     out vec4 out_color;
     uniform sampler2D video_texture;
+    uniform vec2 videoResolution;
+    uniform vec2 outputResolution;
     
     // Convert from linear to sRGB color space
     float ToSrgb1(float c) {
@@ -49,8 +51,24 @@ const FS_PASSTHROUGH: &str = r#"#version 330 core
     }
 
     void main() {
-        vec3 linear_color = texture(video_texture, v_tc).rgb;
-        out_color = vec4(ToSrgb(linear_color), 1.0);
+        float video_aspect = videoResolution.x / videoResolution.y;
+        float output_aspect = outputResolution.x / outputResolution.y;
+
+        vec2 scale = vec2(1.0, 1.0);
+        if (video_aspect > output_aspect) {
+            scale.y = output_aspect / video_aspect;
+        } else {
+            scale.x = video_aspect / output_aspect;
+        }
+
+        vec2 centered_tc = (v_tc - 0.5) / scale + 0.5;
+
+        if (centered_tc.x < 0.0 || centered_tc.x > 1.0 || centered_tc.y < 0.0 || centered_tc.y > 1.0) {
+            out_color = vec4(0.0, 0.0, 0.0, 1.0);
+        } else {
+            vec3 linear_color = texture(video_texture, centered_tc).rgb;
+            out_color = vec4(ToSrgb(linear_color), 1.0);
+        }
     }"#;
 // Lottes Pass 0: Horizontal blur for bloom
 const FS_PASS0: &str = r#"#version 330 core
@@ -272,6 +290,8 @@ pub struct CrtFilterRenderer {
     vbo: glow::Buffer,
 
     // Passthrough uniforms
+    p_passthrough_video_res_loc: glow::UniformLocation,
+    p_passthrough_output_res_loc: glow::UniformLocation,
 
     // Pixelate uniforms
     p_pixelate_target_res_loc: glow::UniformLocation,
@@ -310,6 +330,10 @@ impl CrtFilterRenderer {
             let pass2_prog = compile_program(gl, VS_SRC, FS_PASS2);
             let pass3_prog = compile_program(gl, VS_SRC, FS_PASS3);
             let final_prog = compile_program(gl, VS_SRC, FS_FINAL);
+
+            // Passthrough
+            let p_passthrough_video_res_loc = gl.get_uniform_location(passthrough_prog, "videoResolution").unwrap();
+            let p_passthrough_output_res_loc = gl.get_uniform_location(passthrough_prog, "outputResolution").unwrap();
 
             // Pixelate
             let p_pixelate_target_res_loc =
@@ -407,6 +431,7 @@ impl CrtFilterRenderer {
             Self {
                 passthrough_prog, pixelate_prog, pass0_prog, pass1_prog, pass2_prog, pass3_prog, final_prog,
                 fbos, pass_textures, vertex_array, vbo,
+                p_passthrough_video_res_loc, p_passthrough_output_res_loc,
                 p_pixelate_target_res_loc,
                 p0_hard_bloom_pix_loc,
                 p1_hard_bloom_scan_loc,
@@ -511,6 +536,9 @@ impl CrtFilterRenderer {
                 gl.active_texture(glow::TEXTURE0);
                 gl.bind_texture(glow::TEXTURE_2D, Some(lottes_input_texture));
 
+                gl.uniform_2_f32(Some(&self.p_passthrough_video_res_loc), resolution.0 as f32, resolution.1 as f32);
+                gl.uniform_2_f32(Some(&self.p_passthrough_output_res_loc), output_size.0, output_size.1);
+
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
 
@@ -526,7 +554,7 @@ impl CrtFilterRenderer {
         }
     }
 
-    pub fn draw_passthrough(&self, gl: &glow::Context, video_texture: glow::Texture, output_size: (f32, f32)) {
+    pub fn draw_passthrough(&self, gl: &glow::Context, video_texture: glow::Texture, resolution: (u32, u32), output_size: (f32, f32)) {
         unsafe {
             let old_vbo = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
             gl.bind_vertex_array(Some(self.vertex_array));
@@ -537,6 +565,9 @@ impl CrtFilterRenderer {
 
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(video_texture));
+
+            gl.uniform_2_f32(Some(&self.p_passthrough_video_res_loc), resolution.0 as f32, resolution.1 as f32);
+            gl.uniform_2_f32(Some(&self.p_passthrough_output_res_loc), output_size.0, output_size.1);
 
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 

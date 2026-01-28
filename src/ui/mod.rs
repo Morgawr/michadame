@@ -62,7 +62,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             let renderer_clone = state.crt_renderer.as_ref().unwrap().clone();
             let rect = response.rect;
             let callback = egui::PaintCallback { rect, callback: std::sync::Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
-                renderer_clone.lock().unwrap().draw_passthrough(painter.gl(), painter.texture(video_texture_id).unwrap(), (rect.width(), rect.height()));
+                renderer_clone.lock().unwrap().draw_passthrough(painter.gl(), painter.texture(video_texture_id).unwrap(), (texture_size.x as u32, texture_size.y as u32), (rect.width(), rect.height()));
             }))};
             ui.painter().add(callback);
         }
