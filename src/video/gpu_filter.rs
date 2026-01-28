@@ -232,8 +232,8 @@ const FS_FINAL: &str = r#"#version 330 core
         } else {
             scale.x = video_aspect / output_aspect;
         }
-        vec2 centered_tc = (v_tc - 0.5) / scale + 0.5;
-        vec2 warped_pos = (Warp(centered_tc * scale) - (0.5 - 0.5 * scale)) / scale;
+        vec2 warped_tc = Warp(v_tc);
+        vec2 warped_pos = (warped_tc - 0.5) / scale + 0.5;
 
         if (warped_pos.x < 0.0 || warped_pos.x > 1.0 || warped_pos.y < 0.0 || warped_pos.y > 1.0) {
             out_color = vec4(0.0, 0.0, 0.0, 1.0);
