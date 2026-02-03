@@ -4,10 +4,41 @@ use eframe::egui_glow;
 use crate::devices::filter_type::CrtFilter;
 use crate::video;
 
+use std::thread;
+use tungstenite::{connect, Message};
+use url::Url;
+
 pub mod controls;
 pub mod dialogs;
 
+fn send_ws_command(command: serde_json::Value) {
+    thread::spawn(move || {
+        println!("Connecting to WebSocket at ws://127.0.0.1:9002 ...");
+        match connect(Url::parse("ws://127.0.0.1:9002").unwrap()) {
+            Ok((mut socket, _)) => {
+                println!("Connected to WebSocket.");
+                let msg = command.to_string();
+                if let Err(e) = socket.send(Message::Text(msg)) {
+                    println!("WebSocket write error: {}", e);
+                    return;
+                }
+                match socket.read() {
+                    Ok(msg) => println!("WebSocket received: {}", msg),
+                    Err(e) => println!("WebSocket read error: {}", e),
+                }
+                let _ = socket.close(None);
+            }
+            Err(e) => println!("Failed to connect to WebSocket: {}", e),
+        }
+    });
+}
+
 pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
+    if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+        println!("Spacebar pressed, sending command...");
+        send_ws_command(serde_json::json!({"command": "manual_ocr"}));
+    }
+
     let panel_frame = if state.is_fullscreen {
         egui::Frame::none()
     } else {
@@ -30,6 +61,11 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
 }
 
 pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) {
+    if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+        println!("Spacebar pressed, sending command...");
+        send_ws_command(serde_json::json!({"command": "manual_ocr"}));
+    }
+
     if state.video_window_open {
         let response = ui.allocate_response(ui.available_size(), egui::Sense::click());
         let video_texture = state.video_texture.as_ref().unwrap();

@@ -23,3 +23,6 @@ image = { version = "0.25", features = ["png"] }
 eframe = { version = "0.27.2", default-features = true }
 egui = "0.27.2"
 egui_glow = "0.27.2"
+tungstenite = "0.21"
+serde_json = "1.0"
+url = "2.5"
