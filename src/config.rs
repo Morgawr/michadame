@@ -29,6 +29,7 @@ pub struct MichadameConfig {
     pub crt_hard_pix: Option<f32>,
     pub use_magenta_background: Option<bool>,
     pub horizontal_stretch: Option<f32>,
+    pub median_filter_enabled: Option<bool>,
 }
 
 pub fn save_config(state: &AppState) {
@@ -64,6 +65,7 @@ pub fn save_config(state: &AppState) {
         crt_hard_pix: Some(state.crt_hard_pix),
         use_magenta_background: Some(state.use_magenta_background),
         horizontal_stretch: Some(state.horizontal_stretch),
+        median_filter_enabled: Some(state.median_filter_enabled),
     };
 
     if let Err(e) = confy::store("michadame", None, cfg) {
@@ -149,5 +151,8 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     }
     if let Some(val) = cfg.horizontal_stretch {
         state.horizontal_stretch = val;
+    }
+    if let Some(val) = cfg.median_filter_enabled {
+        state.median_filter_enabled = val;
     }
 }

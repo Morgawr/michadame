@@ -213,6 +213,13 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     });
 
     ui.horizontal(|ui| {
+        if ui.checkbox(&mut state.median_filter_enabled, "Enable Horizontal 3x1 Median Filter").on_hover_text("A GPU-based pre-filter that reduces horizontal noise by taking the median of 3 horizontal pixels.").changed() {
+            config::save_config(state);
+            changed = true;
+        }
+    });
+
+    ui.horizontal(|ui| {
         ui.label("Horizontal Stretch:");
         if ui.add(egui::Slider::new(&mut state.horizontal_stretch, 0.5..=1.5).step_by(0.001)).changed() {
             config::save_config(state);

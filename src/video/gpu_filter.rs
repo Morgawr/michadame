@@ -13,6 +13,27 @@ const VS_SRC: &str = r#"#version 330 core
     }
 "#;
 
+// 3x1 Horizontal Median Filter
+const FS_MEDIAN_3X1: &str = r#"#version 330 core
+    in vec2 v_tc;
+    out vec4 out_color;
+    uniform sampler2D video_texture;
+
+    vec3 median(vec3 a, vec3 b, vec3 c) {
+        return max(min(a, b), min(max(a, b), c));
+    }
+
+    void main() {
+        vec2 tex_size = vec2(textureSize(video_texture, 0));
+        vec2 dx = vec2(1.0 / tex_size.x, 0.0);
+        
+        vec3 col_m = texture(video_texture, v_tc - dx).rgb;
+        vec3 col_c = texture(video_texture, v_tc).rgb;
+        vec3 col_p = texture(video_texture, v_tc + dx).rgb;
+        
+        out_color = vec4(median(col_m, col_c, col_p), 1.0);
+    }"#;
+
 // Pixelation shader to simulate 480p
 const FS_PIXELATE: &str = r#"#version 330 core
     in vec2 v_tc;
@@ -22,14 +43,11 @@ const FS_PIXELATE: &str = r#"#version 330 core
     uniform vec2 target_resolution; // e.g., 854.0, 480.0 for 16:9 480p
 
     void main() {
-        // Flip the Y-coordinate to correct for framebuffer inversion.
-        vec2 flipped_tc = vec2(v_tc.x, 1.0 - v_tc.y);
-
         // Calculate the size of a 'pixel' in the low-resolution target.
         vec2 pixel_size = 1.0 / target_resolution;
 
         // Find the coordinate of the center of the low-res 'pixel' block.
-        vec2 pixelated_uv = (floor(flipped_tc / pixel_size) + 0.5) * pixel_size;
+        vec2 pixelated_uv = (floor(v_tc / pixel_size) + 0.5) * pixel_size;
 
         out_color = texture(video_texture, pixelated_uv);
     }"#;
@@ -53,6 +71,7 @@ const FS_PASSTHROUGH: &str = r#"#version 330 core
     }
 
     void main() {
+        vec2 corrected_tc = vec2(v_tc.x, 1.0 - v_tc.y);
         float video_aspect = (videoResolution.x * horizontal_stretch) / videoResolution.y;
         float output_aspect = outputResolution.x / outputResolution.y;
 
@@ -63,7 +82,7 @@ const FS_PASSTHROUGH: &str = r#"#version 330 core
             scale.x = video_aspect / output_aspect;
         }
 
-        vec2 centered_tc = (v_tc - 0.5) / scale + 0.5;
+        vec2 centered_tc = (corrected_tc - 0.5) / scale + 0.5;
 
         if (centered_tc.x < 0.0 || centered_tc.x > 1.0 || centered_tc.y < 0.0 || centered_tc.y > 1.0) {
             out_color = vec4(background_color, 1.0);
@@ -243,6 +262,9 @@ const FS_FINAL: &str = r#"#version 330 core
     }
 
     void main() {
+        // Correct for source inversion only in the final pass.
+        vec2 corrected_tc = vec2(v_tc.x, 1.0 - v_tc.y);
+
         // Calculate aspect ratios
         float video_aspect = (videoResolution.x * horizontal_stretch) / videoResolution.y;
         float output_aspect = outputResolution.x / outputResolution.y;
@@ -257,7 +279,7 @@ const FS_FINAL: &str = r#"#version 330 core
 
         // First check if we are in the letterbox/pillarbox bars.
         // These should be colored with the background color.
-        vec2 centered_pos = (v_tc - 0.5) / scale + 0.5;
+        vec2 centered_pos = (corrected_tc - 0.5) / scale + 0.5;
         if (centered_pos.x < 0.0 || centered_pos.x > 1.0 || centered_pos.y < 0.0 || centered_pos.y > 1.0) {
             out_color = vec4(background_color, 1.0);
             return;
@@ -265,7 +287,7 @@ const FS_FINAL: &str = r#"#version 330 core
 
         // Now apply warp for the CRT curvature.
         // If the warped position is outside the video area, it should be BLACK (behind the tube).
-        vec2 warped_tc = Warp(v_tc);
+        vec2 warped_tc = Warp(corrected_tc);
         vec2 warped_pos = (warped_tc - 0.5) / scale + 0.5;
 
         if (warped_pos.x < 0.0 || warped_pos.x > 1.0 || warped_pos.y < 0.0 || warped_pos.y > 1.0) {
@@ -297,10 +319,11 @@ pub struct CrtFilterRenderer {
     pass1_prog: glow::Program,
     pass2_prog: glow::Program,
     pass3_prog: glow::Program,
+    median_prog: glow::Program,
     final_prog: glow::Program,
 
-    fbos: [glow::Framebuffer; 5],
-    pass_textures: [glow::Texture; 5],
+    fbos: [glow::Framebuffer; 6],
+    pass_textures: [glow::Texture; 6],
     vertex_array: glow::VertexArray,
     vbo: glow::Buffer,
 
@@ -348,6 +371,7 @@ impl CrtFilterRenderer {
             let pass1_prog = compile_program(gl, VS_SRC, FS_PASS1);
             let pass2_prog = compile_program(gl, VS_SRC, FS_PASS2);
             let pass3_prog = compile_program(gl, VS_SRC, FS_PASS3);
+            let median_prog = compile_program(gl, VS_SRC, FS_MEDIAN_3X1);
             let final_prog = compile_program(gl, VS_SRC, FS_FINAL);
 
             // Passthrough
@@ -371,6 +395,11 @@ impl CrtFilterRenderer {
             // Pass 3
             let p3_hard_scan_loc = gl.get_uniform_location(pass3_prog, "hardScan").unwrap();
             let p3_shape_loc = gl.get_uniform_location(pass3_prog, "shape").unwrap();
+
+            // Median Filter
+            gl.use_program(Some(median_prog));
+            gl.uniform_1_i32(Some(&gl.get_uniform_location(median_prog, "video_texture").unwrap()), 0);
+            gl.use_program(None);
 
             // Final Pass
             let final_video_res_loc = gl.get_uniform_location(final_prog, "videoResolution").unwrap();
@@ -415,8 +444,10 @@ impl CrtFilterRenderer {
                 gl.create_framebuffer().unwrap(),
                 gl.create_framebuffer().unwrap(),
                 gl.create_framebuffer().unwrap(),
+                gl.create_framebuffer().unwrap(),
             ];
             let pass_textures = [
+                gl.create_texture().unwrap(),
                 gl.create_texture().unwrap(),
                 gl.create_texture().unwrap(),
                 gl.create_texture().unwrap(),
@@ -430,10 +461,10 @@ impl CrtFilterRenderer {
             // We need a vertex buffer to draw a simple quad.
             let vertices: [f32; 16] = [
                 // pos    // tex
-                -1.0, -1.0, 0.0, 1.0, // bottom-left
-                 1.0, -1.0, 1.0, 1.0, // bottom-right
-                -1.0,  1.0, 0.0, 0.0, // top-left
-                 1.0,  1.0, 1.0, 0.0, // top-right
+                -1.0, -1.0, 0.0, 0.0, // bottom-left
+                 1.0, -1.0, 1.0, 0.0, // bottom-right
+                -1.0,  1.0, 0.0, 1.0, // top-left
+                 1.0,  1.0, 1.0, 1.0, // top-right
             ];
             let vbo = gl.create_buffer().unwrap();
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
@@ -463,6 +494,7 @@ impl CrtFilterRenderer {
                 final_shadow_mask_loc, final_brightboost_loc, final_bloom_amount_loc,
                 final_background_color_loc, passthrough_background_color_loc,
                 final_horizontal_stretch_loc, passthrough_horizontal_stretch_loc,
+                median_prog,
                 last_size: (0, 0),
             }
         }
@@ -486,16 +518,28 @@ impl CrtFilterRenderer {
 
             let mut lottes_input_texture = video_texture;
 
+            if params.median_filter_enabled {
+                // --- MEDIAN FILTER PASS ---
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[5]));
+                gl.use_program(Some(self.median_prog));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(video_texture));
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                lottes_input_texture = self.pass_textures[5];
+            }
+            
+            let mut final_input_texture = lottes_input_texture;
+
             if run_pixelate {
                 // --- PIXELATE PASS ---
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[4]));
                 gl.use_program(Some(self.pixelate_prog));
                 gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(video_texture));
+                gl.bind_texture(glow::TEXTURE_2D, Some(lottes_input_texture));
                 // Target 480p 16:9
                 gl.uniform_2_f32(Some(&self.p_pixelate_target_res_loc), 854.0, 480.0);
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                lottes_input_texture = self.pass_textures[4];
+                final_input_texture = self.pass_textures[4];
             }
 
             if run_lottes {
@@ -503,7 +547,7 @@ impl CrtFilterRenderer {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[0]));
                 gl.use_program(Some(self.pass0_prog));
                 gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(lottes_input_texture));
+                gl.bind_texture(glow::TEXTURE_2D, Some(final_input_texture));
                 gl.uniform_1_f32(Some(&self.p0_hard_bloom_pix_loc), params.hard_bloom_pix);
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
@@ -519,7 +563,7 @@ impl CrtFilterRenderer {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[2]));
                 gl.use_program(Some(self.pass2_prog));
                 gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(lottes_input_texture));
+                gl.bind_texture(glow::TEXTURE_2D, Some(final_input_texture));
                 gl.uniform_1_f32(Some(&self.p2_hard_pix_loc), params.hard_pix);
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
@@ -561,7 +605,7 @@ impl CrtFilterRenderer {
                 gl.use_program(Some(self.passthrough_prog));
 
                 gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(lottes_input_texture));
+                gl.bind_texture(glow::TEXTURE_2D, Some(final_input_texture));
 
                 gl.uniform_2_f32(Some(&self.p_passthrough_video_res_loc), resolution.0 as f32, resolution.1 as f32);
                 gl.uniform_2_f32(Some(&self.p_passthrough_output_res_loc), output_size.0, output_size.1);
@@ -571,7 +615,7 @@ impl CrtFilterRenderer {
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             } else {
                 // Fallback: draw directly to screen using passthrough
-                self.draw_passthrough(gl, video_texture, resolution, output_size, params.background_color, params.horizontal_stretch);
+                self.draw_passthrough(gl, lottes_input_texture, resolution, output_size, params.background_color, params.horizontal_stretch, false);
             }
 
             gl.bind_vertex_array(None);
@@ -586,17 +630,34 @@ impl CrtFilterRenderer {
         }
     }
 
-    pub fn draw_passthrough(&self, gl: &glow::Context, video_texture: glow::Texture, resolution: (u32, u32), output_size: (f32, f32), background_color: [f32; 3], horizontal_stretch: f32) {
+    pub fn draw_passthrough(&mut self, gl: &glow::Context, video_texture: glow::Texture, resolution: (u32, u32), output_size: (f32, f32), background_color: [f32; 3], horizontal_stretch: f32, median_filter_enabled: bool) {
+        if self.last_size != resolution {
+            self.setup_framebuffers(gl, resolution.0, resolution.1);
+            self.last_size = resolution;
+        }
         unsafe {
             let old_vbo = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
             gl.bind_vertex_array(Some(self.vertex_array));
+
+            let mut final_input_texture = video_texture;
+
+            if median_filter_enabled {
+                // --- MEDIAN FILTER PASS ---
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[5]));
+                gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
+                gl.use_program(Some(self.median_prog));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(video_texture));
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                final_input_texture = self.pass_textures[5];
+            }
 
             gl.bind_framebuffer(glow::FRAMEBUFFER, None); // Render to screen
             gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
             gl.use_program(Some(self.passthrough_prog));
 
             gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(video_texture));
+            gl.bind_texture(glow::TEXTURE_2D, Some(final_input_texture));
 
             gl.uniform_2_f32(Some(&self.p_passthrough_video_res_loc), resolution.0 as f32, resolution.1 as f32);
             gl.uniform_2_f32(Some(&self.p_passthrough_output_res_loc), output_size.0, output_size.1);
@@ -714,6 +775,7 @@ impl ShaderParams {
             hard_pix: state.crt_hard_pix,
             background_color: if state.use_magenta_background { [1.0, 0.0, 1.0] } else { [0.0, 0.0, 0.0] },
             horizontal_stretch: state.horizontal_stretch,
+            median_filter_enabled: state.median_filter_enabled,
         }
     }
 }
@@ -732,6 +794,7 @@ pub struct ShaderParams {
     pub hard_pix: f32,
     pub background_color: [f32; 3],
     pub horizontal_stretch: f32,
+    pub median_filter_enabled: bool,
 }
 
 impl Default for ShaderParams {
@@ -749,6 +812,7 @@ impl Default for ShaderParams {
             hard_pix: -3.0,
             background_color: [0.0, 0.0, 0.0],
             horizontal_stretch: 1.0,
+            median_filter_enabled: false,
         }
     }
 }
