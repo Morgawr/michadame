@@ -99,7 +99,7 @@ impl Default for AppState {
             video_window_open: false,
             control_window_open: true,
             pixelate_filter_enabled: false,
-            crt_filter: Arc::new(AtomicU8::new(CrtFilter::Scanlines as u8)),
+            crt_filter: Arc::new(AtomicU8::new(CrtFilter::Off as u8)),
             crt_renderer: None,
 
             // Lottes Filter Params
