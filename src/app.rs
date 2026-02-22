@@ -27,7 +27,8 @@ pub struct AppState {
     pub video_thread: Option<JoinHandle<()>>,
     pub stop_video_thread: Option<Arc<AtomicBool>>,
     pub video_texture: Option<egui::TextureHandle>,
-    pub frame_receiver: Option<crossbeam_channel::Receiver<Arc<egui::ColorImage>>>,
+    pub latest_frame: Option<Arc<video::types::RawFrame>>,
+    pub frame_receiver: Option<crossbeam_channel::Receiver<Arc<video::types::RawFrame>>>,
     device_scan_receiver: Option<crossbeam_channel::Receiver<devices::DeviceScanResult>>,
     pub logo_texture: Option<egui::TextureHandle>,
     last_fps_check: Instant,
@@ -117,6 +118,7 @@ impl Default for AppState {
             horizontal_stretch: 1.0,
             median_filter_enabled: false,
             vibrance: 1.0,
+            latest_frame: None,
         }
     }
 }
@@ -279,12 +281,11 @@ impl AppState {
         let format = format.clone();
         let framerate = self.selected_framerate;
         let (tx, rx) = crossbeam_channel::bounded(1);
-        let crt_filter = self.crt_filter.clone();
         self.frame_receiver = Some(rx);
 
         let handle = thread::spawn(move || {
             if let Err(e) =
-                video::decoder::video_thread_main(tx, stop_flag, device, format, resolution, framerate, crt_filter)
+                video::decoder::video_thread_main(tx, stop_flag, device, format, resolution, framerate)
             {
                 tracing::error!("Video thread error: {}", e);
             }
@@ -455,8 +456,8 @@ impl eframe::App for AppState {
         }
 
         if let Some(rx) = &self.frame_receiver {
-            if let Ok(image) = rx.try_recv() {
-                self.video_texture.as_mut().unwrap().set(image, egui::TextureOptions::LINEAR);
+            if let Ok(frame) = rx.try_recv() {
+                self.latest_frame = Some(frame);
                 self.video_frames_since_last_check += 1;
             }
             // Always repaint when video is playing to show new frames

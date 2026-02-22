@@ -1,10 +1,8 @@
-use crate::devices::{filter_type::CrtFilter, filters};
-use crate::video::types::VideoFormat;
+use crate::video::types::{VideoFormat, RawFrame};
 use anyhow::{Context, Result};
-use eframe::egui;
 use ffmpeg_next::format::Pixel;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU8, Ordering},
+    atomic::{AtomicBool, Ordering},
     Arc,
 };
 use std::thread;
@@ -29,16 +27,16 @@ fn setup_ffmpeg_options(
     if pixel_format_str != "mjpeg" {
         ffmpeg_options.set("pixel_format", &pixel_format_str);
     }
+    ffmpeg_options.set("color_range", "pc");
     (pixel_format_str, ffmpeg_options)
 }
 pub fn video_thread_main(
-    frame_sender: crossbeam_channel::Sender<Arc<egui::ColorImage>>,
+    frame_sender: crossbeam_channel::Sender<Arc<RawFrame>>,
     stop_flag: Arc<AtomicBool>,
     device: String,
     format: VideoFormat,
     resolution: (u32, u32),
     framerate: u32,
-    crt_filter: Arc<AtomicU8>,
 ) -> Result<()> {
     ffmpeg_next::init().context("Failed to initialize FFmpeg")?;
     let (_pixel_format, ffmpeg_options) = setup_ffmpeg_options(&format, resolution, framerate);
@@ -68,37 +66,61 @@ pub fn video_thread_main(
         tracing::info!("Packet reader thread finished.");
     });
 
-    let mut scaler = None;
     while !stop_flag.load(Ordering::Relaxed) {
         if let Ok(packet) = packet_rx.recv() {
             decoder.send_packet(&packet).context("Failed to send packet to decoder")?;
             let mut decoded = ffmpeg_next::frame::Video::empty();
             while decoder.receive_frame(&mut decoded).is_ok() {
-                let frame_to_process = &decoded;
-
-                let scaler = scaler.get_or_insert_with(|| {
-                    ffmpeg_next::software::scaling::context::Context::get(
-                        frame_to_process.format(), 
-                        frame_to_process.width(), 
-                        frame_to_process.height(),
-                        Pixel::RGB24, decoded.width(), decoded.height(),
-                        ffmpeg_next::software::scaling::flag::Flags::FAST_BILINEAR,
-                    ).unwrap()
-                });
-                let mut rgb_frame = ffmpeg_next::frame::Video::empty();
-                scaler.run(frame_to_process, &mut rgb_frame).context("Scaler failed")?;
+                // Just pass the raw frame data
+                let width = decoded.width();
+                let height = decoded.height();
+                let format = decoded.format();
                 
-                let width = rgb_frame.width();
-                let height = rgb_frame.height();
-                let image_data = rgb_frame.data_mut(0);
-                let filter_type = CrtFilter::from_u8(crt_filter.load(Ordering::Relaxed));
-                if filter_type != CrtFilter::Off {
-                    filters::apply_filter(filter_type, image_data, width, height);
+                // For direct texture upload, we'll send the raw data bytes.
+                // Tightly pack the data planes to avoid stride/padding issues on the GPU
+                let mut data = Vec::new();
+                
+                if format == Pixel::YUV422P || format == Pixel::YUV420P || format == Pixel::YUVJ422P || format == Pixel::YUVJ420P {
+                    for i in 0..3 {
+                        let plane_width = if i == 0 { width } else { width / 2 };
+                        let plane_height = if i == 0 { height } else {
+                            if format == Pixel::YUV420P || format == Pixel::YUVJ420P { height / 2 } else { height }
+                        };
+                        
+                        let stride = decoded.stride(i);
+                        let plane_data = decoded.data(i);
+                        for row in 0..plane_height {
+                            let start = (row as usize) * stride;
+                            let end = start + (plane_width as usize);
+                            if end <= plane_data.len() {
+                                data.extend_from_slice(&plane_data[start..end]);
+                            }
+                        }
+                    }
+                } else if format == Pixel::YUYV422 {
+                    let stride = decoded.stride(0);
+                    let plane_data = decoded.data(0);
+                    let row_bytes = (width * 2) as usize;
+                    for row in 0..height {
+                        let start = (row as usize) * stride;
+                        let end = start + row_bytes;
+                        if end <= plane_data.len() {
+                            data.extend_from_slice(&plane_data[start..end]);
+                        }
+                    }
+                } else {
+                    // Fallback for other formats - might still have stride issues but at least it sends something
+                    data.extend_from_slice(decoded.data(0));
                 }
 
-                let image = Arc::new(egui::ColorImage::from_rgb([width as usize, height as usize], rgb_frame.data(0)));
+                let raw_frame = Arc::new(RawFrame {
+                    width,
+                    height,
+                    data,
+                    format,
+                });
 
-                if frame_sender.try_send(image).is_err() {
+                if frame_sender.try_send(raw_frame).is_err() {
                     break;
                 }
             }

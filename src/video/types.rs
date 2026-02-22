@@ -1,5 +1,12 @@
 use crate::{app::AppState, config::MichadameConfig};
 
+pub struct RawFrame {
+    pub width: u32,
+    pub height: u32,
+    pub data: Vec<u8>,
+    pub format: ffmpeg_next::format::Pixel,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Resolution {
     pub width: u32,

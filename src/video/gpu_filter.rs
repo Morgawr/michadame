@@ -1,7 +1,8 @@
 use eframe::glow::{self, HasContext};
-use eframe::{egui, egui_glow};
 
 use std::num::NonZero;
+use crate::video::types::RawFrame;
+use ffmpeg_next::format::Pixel;
 
 const VS_SRC: &str = r#"#version 330 core
     layout(location = 0) in vec2 a_pos;
@@ -10,6 +11,77 @@ const VS_SRC: &str = r#"#version 330 core
     void main() {
         gl_Position = vec4(a_pos, 0.0, 1.0);
         v_tc = a_tc;
+    }
+"#;
+
+const FS_YUV_PLANAR: &str = r#"#version 330 core
+    in vec2 v_tc;
+    out vec4 out_color;
+    uniform sampler2D y_tex;
+    uniform sampler2D u_tex;
+    uniform sampler2D v_tex;
+
+    float ToLinear1(float c) {
+        return (c <= 0.04045) ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
+    }
+    vec3 ToLinear(vec3 c) {
+        return vec3(ToLinear1(c.r), ToLinear1(c.g), ToLinear1(c.b));
+    }
+
+    void main() {
+        float y = texture(y_tex, v_tc).r;
+        float u = texture(u_tex, v_tc).r - 0.5;
+        float v = texture(v_tex, v_tc).r - 0.5;
+
+        // BT.709 Full Range (PC Range) conversion
+        // R = Y + 1.5748 * V
+        // G = Y - 0.1873 * U - 0.4681 * V
+        // B = Y + 1.8556 * U
+        float r = y + 1.5748 * v;
+        float g = y - 0.1873 * u - 0.4681 * v;
+        float b = y + 1.8556 * u;
+
+        // Convert to linear space for the filtering pipeline
+        out_color = vec4(ToLinear(clamp(vec3(r, g, b), 0.0, 1.0)), 1.0);
+    }
+"#;
+
+const FS_YUYV_PACKED: &str = r#"#version 330 core
+    in vec2 v_tc;
+    out vec4 out_color;
+    uniform sampler2D raw_tex;
+
+    float ToLinear1(float c) {
+        return (c <= 0.04045) ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
+    }
+    vec3 ToLinear(vec3 c) {
+        return vec3(ToLinear1(c.r), ToLinear1(c.g), ToLinear1(c.b));
+    }
+
+    void main() {
+        // YUYV is packed: [Y0, U0, Y1, V0]
+        // We sample the texture as if it were RGBA (each pixel has 4 channels)
+        // Texture width is width / 2
+        vec4 yuyv_vec = texture(raw_tex, v_tc);
+        
+        // Determine if we want the first or second Y based on X coordinate
+        float x_pixel = v_tc.x * textureSize(raw_tex, 0).x * 2.0;
+        float y_val;
+        if (fract(x_pixel) < 0.5) {
+            y_val = yuyv_vec.r; // Y0
+        } else {
+            y_val = yuyv_vec.b; // Y1
+        }
+        
+        float u = yuyv_vec.g - 0.5;
+        float v = yuyv_vec.a - 0.5;
+
+        // BT.709 Full Range (PC Range) conversion
+        float r = y_val + 1.5748 * v;
+        float g = y_val - 0.1873 * u - 0.4681 * v;
+        float b = y_val + 1.8556 * u;
+
+        out_color = vec4(ToLinear(clamp(vec3(r, g, b), 0.0, 1.0)), 1.0);
     }
 "#;
 
@@ -86,10 +158,10 @@ const FS_PASSTHROUGH: &str = r#"#version 330 core
         vec2 centered_tc = (corrected_tc - 0.5) / scale + 0.5;
 
         if (centered_tc.x < 0.0 || centered_tc.x > 1.0 || centered_tc.y < 0.0 || centered_tc.y > 1.0) {
-            out_color = vec4(background_color, 1.0);
+            out_color = vec4(ToSrgb(background_color), 1.0);
         } else {
             vec3 linear_color = texture(video_texture, centered_tc).rgb;
-            // Apply vibrance (saturation boost)
+            // Apply vibrance (saturation boost in linear space)
             float luminance = dot(linear_color, vec3(0.299, 0.587, 0.114));
             linear_color = mix(vec3(luminance), linear_color, vibrance);
             out_color = vec4(ToSrgb(linear_color), 1.0);
@@ -300,9 +372,8 @@ const FS_FINAL: &str = r#"#version 330 core
             return;
         }
 
-        // The original shader's Tri() function is equivalent to our pass3_texture lookup
+        // Current inputs (scanline, bloom) are in linear space.
         vec3 scanline_color = texture(pass3_texture, warped_pos).rgb; 
-        // The original shader's Bloom() function is equivalent to our pass1_texture lookup
         vec3 bloom_color = texture(pass1_texture, warped_pos).rgb;
 
         vec3 final_color = scanline_color + bloom_color * bloomAmount;
@@ -313,8 +384,8 @@ const FS_FINAL: &str = r#"#version 330 core
 
         final_color *= brightboost;
 
-        // Apply vibrance (saturation boost)
-        float luminance = dot(final_color, vec3(0.299, 0.587, 0.114));
+        // Apply vibrance (saturation boost in linear space)
+        float luminance = dot(final_color, vec3(0.2126, 0.7152, 0.0722));
         final_color = mix(vec3(luminance), final_color, vibrance);
 
         out_color = vec4(ToSrgb(final_color), 1.0);
@@ -330,9 +401,12 @@ pub struct CrtFilterRenderer {
     pass3_prog: glow::Program,
     median_prog: glow::Program,
     final_prog: glow::Program,
+    yuv_planar_prog: glow::Program,
+    yuyv_packed_prog: glow::Program,
 
-    fbos: [glow::Framebuffer; 6],
-    pass_textures: [glow::Texture; 6],
+    fbos: [glow::Framebuffer; 7], // 0-5 for passes, 6 for YUV conversion result
+    pass_textures: [glow::Texture; 7], // 0-5 for passes, 6 for the YUV source texture
+    yuv_planes: [glow::Texture; 3], // textures for Y, U, V planes
     vertex_array: glow::VertexArray,
     vbo: glow::Buffer,
 
@@ -384,6 +458,8 @@ impl CrtFilterRenderer {
             let pass3_prog = compile_program(gl, VS_SRC, FS_PASS3);
             let median_prog = compile_program(gl, VS_SRC, FS_MEDIAN_3X1);
             let final_prog = compile_program(gl, VS_SRC, FS_FINAL);
+            let yuv_planar_prog = compile_program(gl, VS_SRC, FS_YUV_PLANAR);
+            let yuyv_packed_prog = compile_program(gl, VS_SRC, FS_YUYV_PACKED);
 
             // Passthrough
             let p_passthrough_video_res_loc = gl.get_uniform_location(passthrough_prog, "videoResolution").unwrap();
@@ -449,9 +525,21 @@ impl CrtFilterRenderer {
             gl.use_program(Some(final_prog));
             gl.uniform_1_i32(Some(&gl.get_uniform_location(final_prog, "pass1_texture").unwrap()), 0);
             gl.uniform_1_i32(Some(&gl.get_uniform_location(final_prog, "pass3_texture").unwrap()), 1);
+
+            // YUV Planar
+            gl.use_program(Some(yuv_planar_prog));
+            gl.uniform_1_i32(Some(&gl.get_uniform_location(yuv_planar_prog, "y_tex").unwrap()), 0);
+            gl.uniform_1_i32(Some(&gl.get_uniform_location(yuv_planar_prog, "u_tex").unwrap()), 1);
+            gl.uniform_1_i32(Some(&gl.get_uniform_location(yuv_planar_prog, "v_tex").unwrap()), 2);
+
+            // YUYV Packed
+            gl.use_program(Some(yuyv_packed_prog));
+            gl.uniform_1_i32(Some(&gl.get_uniform_location(yuyv_packed_prog, "raw_tex").unwrap()), 0);
+
             gl.use_program(None);
 
             let fbos = [
+                gl.create_framebuffer().unwrap(),
                 gl.create_framebuffer().unwrap(),
                 gl.create_framebuffer().unwrap(),
                 gl.create_framebuffer().unwrap(),
@@ -463,6 +551,12 @@ impl CrtFilterRenderer {
                 gl.create_texture().unwrap(),
                 gl.create_texture().unwrap(),
                 gl.create_texture().unwrap(),
+                gl.create_texture().unwrap(),
+                gl.create_texture().unwrap(),
+                gl.create_texture().unwrap(),
+                gl.create_texture().unwrap(),
+            ];
+            let yuv_planes = [
                 gl.create_texture().unwrap(),
                 gl.create_texture().unwrap(),
                 gl.create_texture().unwrap(),
@@ -497,7 +591,8 @@ impl CrtFilterRenderer {
 
             Self {
                 passthrough_prog, pixelate_prog, pass0_prog, pass1_prog, pass2_prog, pass3_prog, final_prog,
-                fbos, pass_textures, vertex_array, vbo,
+                yuv_planar_prog, yuyv_packed_prog,
+                fbos, pass_textures, yuv_planes, vertex_array, vbo,
                 p_passthrough_video_res_loc, p_passthrough_output_res_loc,
                 p_pixelate_target_res_loc,
                 p0_hard_bloom_pix_loc,
@@ -514,9 +609,8 @@ impl CrtFilterRenderer {
         }
     }
 
-    pub fn paint(&mut self, painter: &egui_glow::Painter, video_texture_id: egui::TextureId, resolution: (u32, u32), output_size: (f32, f32), params: &ShaderParams, run_pixelate: bool, run_lottes: bool) {
-        let gl = painter.gl();
-        let video_texture = painter.texture(video_texture_id).unwrap();
+    pub fn paint(&mut self, gl: &glow::Context, raw_frame: Option<&RawFrame>, fallback_texture: Option<glow::Texture>, resolution: (u32, u32), output_size: (f32, f32), params: &ShaderParams, run_pixelate: bool, run_lottes: bool) {
+        let mut video_texture = fallback_texture;
 
         if self.last_size != resolution {
             self.setup_framebuffers(gl, resolution.0, resolution.1);
@@ -530,14 +624,61 @@ impl CrtFilterRenderer {
             gl.bind_vertex_array(Some(self.vertex_array));
             gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
 
-            let mut lottes_input_texture = video_texture;
+            if let Some(frame) = raw_frame {
+                // --- YUV CONVERSION PASS ---
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[6]));
+                gl.viewport(0, 0, frame.width as i32, frame.height as i32);
+                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+                gl.clear(glow::COLOR_BUFFER_BIT);
+                
+                if frame.format == Pixel::YUV422P || frame.format == Pixel::YUV420P || frame.format == Pixel::YUVJ422P || frame.format == Pixel::YUVJ420P {
+                    gl.use_program(Some(self.yuv_planar_prog));
+                    let (y_end, u_end) = if frame.format == Pixel::YUV422P || frame.format == Pixel::YUVJ422P {
+                        ((frame.width * frame.height) as usize, (frame.width * frame.height * 3 / 2) as usize)
+                    } else {
+                        ((frame.width * frame.height) as usize, (frame.width * frame.height * 5 / 4) as usize)
+                    };
+                    
+                    let y_data = &frame.data[0..y_end];
+                    let u_data = &frame.data[y_end..u_end];
+                    let v_data = &frame.data[u_end..];
+                    
+                    let chroma_width = frame.width / 2;
+                    let chroma_height = if frame.format == Pixel::YUV422P || frame.format == Pixel::YUVJ422P { frame.height } else { frame.height / 2 };
+
+                    gl.active_texture(glow::TEXTURE0);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[0]));
+                    gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R8 as i32, frame.width as i32, frame.height as i32, 0, glow::RED, glow::UNSIGNED_BYTE, Some(y_data));
+                    
+                    gl.active_texture(glow::TEXTURE1);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[1]));
+                    gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R8 as i32, chroma_width as i32, chroma_height as i32, 0, glow::RED, glow::UNSIGNED_BYTE, Some(u_data));
+                    
+                    gl.active_texture(glow::TEXTURE2);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[2]));
+                    gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R8 as i32, chroma_width as i32, chroma_height as i32, 0, glow::RED, glow::UNSIGNED_BYTE, Some(v_data));
+                } else if frame.format == Pixel::YUYV422 {
+                    gl.use_program(Some(self.yuyv_packed_prog));
+                    gl.active_texture(glow::TEXTURE0);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[0]));
+                    // YUYV is 2 bytes per pixel, we treat it as RGBA with width / 2
+                    gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, (frame.width / 2) as i32, frame.height as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, Some(&frame.data));
+                }
+                
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                video_texture = Some(self.pass_textures[6]);
+                gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
+            }
+
+            let input_texture = video_texture.expect("No video texture available");
+            let mut lottes_input_texture = input_texture;
 
             if params.median_filter_enabled {
                 // --- MEDIAN FILTER PASS ---
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[5]));
                 gl.use_program(Some(self.median_prog));
                 gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(video_texture));
+                gl.bind_texture(glow::TEXTURE_2D, video_texture);
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 lottes_input_texture = self.pass_textures[5];
             }
@@ -631,7 +772,7 @@ impl CrtFilterRenderer {
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             } else {
                 // Fallback: draw directly to screen using passthrough
-                self.draw_passthrough(gl, lottes_input_texture, resolution, output_size, params.background_color, params.horizontal_stretch, false, params.vibrance);
+                self.draw_passthrough(gl, None, Some(lottes_input_texture), resolution, output_size, params.background_color, params.horizontal_stretch, params.median_filter_enabled, params.vibrance);
             }
 
             gl.bind_vertex_array(None);
@@ -646,16 +787,66 @@ impl CrtFilterRenderer {
         }
     }
 
-    pub fn draw_passthrough(&mut self, gl: &glow::Context, video_texture: glow::Texture, resolution: (u32, u32), output_size: (f32, f32), background_color: [f32; 3], horizontal_stretch: f32, median_filter_enabled: bool, vibrance: f32) {
+    pub fn draw_passthrough(&mut self, gl: &glow::Context, raw_frame: Option<&RawFrame>, fallback_texture: Option<glow::Texture>, resolution: (u32, u32), output_size: (f32, f32), background_color: [f32; 3], horizontal_stretch: f32, median_filter_enabled: bool, vibrance: f32) {
+        let mut video_texture = fallback_texture;
+
         if self.last_size != resolution {
             self.setup_framebuffers(gl, resolution.0, resolution.1);
             self.last_size = resolution;
         }
+
         unsafe {
             let old_vbo = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
             gl.bind_vertex_array(Some(self.vertex_array));
 
-            let mut final_input_texture = video_texture;
+            if let Some(frame) = raw_frame {
+                // --- YUV CONVERSION PASS ---
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[6]));
+                gl.viewport(0, 0, frame.width as i32, frame.height as i32);
+                
+                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+                gl.clear(glow::COLOR_BUFFER_BIT);
+                
+                if frame.format == Pixel::YUV422P || frame.format == Pixel::YUV420P || frame.format == Pixel::YUVJ422P || frame.format == Pixel::YUVJ420P {
+                    gl.use_program(Some(self.yuv_planar_prog));
+                    let (y_end, u_end) = if frame.format == Pixel::YUV422P || frame.format == Pixel::YUVJ422P {
+                        ((frame.width * frame.height) as usize, (frame.width * frame.height * 3 / 2) as usize)
+                    } else {
+                        ((frame.width * frame.height) as usize, (frame.width * frame.height * 5 / 4) as usize)
+                    };
+                    
+                    let y_data = &frame.data[0..y_end];
+                    let u_data = &frame.data[y_end..u_end];
+                    let v_data = &frame.data[u_end..];
+                    
+                    let chroma_width = frame.width / 2;
+                    let chroma_height = if frame.format == Pixel::YUV422P || frame.format == Pixel::YUVJ422P { frame.height } else { frame.height / 2 };
+
+                    gl.active_texture(glow::TEXTURE0);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[0]));
+                    gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R8 as i32, frame.width as i32, frame.height as i32, 0, glow::RED, glow::UNSIGNED_BYTE, Some(y_data));
+                    
+                    gl.active_texture(glow::TEXTURE1);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[1]));
+                    gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R8 as i32, chroma_width as i32, chroma_height as i32, 0, glow::RED, glow::UNSIGNED_BYTE, Some(u_data));
+                    
+                    gl.active_texture(glow::TEXTURE2);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[2]));
+                    gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R8 as i32, chroma_width as i32, chroma_height as i32, 0, glow::RED, glow::UNSIGNED_BYTE, Some(v_data));
+                } else if frame.format == Pixel::YUYV422 {
+                    gl.use_program(Some(self.yuyv_packed_prog));
+                    gl.active_texture(glow::TEXTURE0);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[0]));
+                    gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, (frame.width / 2) as i32, frame.height as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, Some(&frame.data));
+                }
+                
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                video_texture = Some(self.pass_textures[6]);
+                gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
+            }
+
+            let input_texture = video_texture.expect("No video texture available");
+            let mut final_input_texture = input_texture;
 
             if median_filter_enabled {
                 // --- MEDIAN FILTER PASS ---
@@ -663,7 +854,7 @@ impl CrtFilterRenderer {
                 gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
                 gl.use_program(Some(self.median_prog));
                 gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(video_texture));
+                gl.bind_texture(glow::TEXTURE_2D, Some(input_texture));
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 final_input_texture = self.pass_textures[5];
             }
@@ -696,13 +887,17 @@ impl CrtFilterRenderer {
             gl.delete_program(self.pass1_prog);
             gl.delete_program(self.pass2_prog);
             gl.delete_program(self.pass3_prog);
-            gl.delete_program(self.final_prog);
+            gl.delete_program(self.yuv_planar_prog);
+            gl.delete_program(self.yuyv_packed_prog);
             gl.delete_vertex_array(self.vertex_array);
             gl.delete_buffer(self.vbo);
             for fbo in self.fbos {
                 gl.delete_framebuffer(fbo);
             }
             for texture in self.pass_textures {
+                gl.delete_texture(texture);
+            }
+            for texture in self.yuv_planes {
                 gl.delete_texture(texture);
             }
         }
@@ -737,6 +932,15 @@ impl CrtFilterRenderer {
                     0,
                 );
             }
+
+            for texture in self.yuv_planes {
+                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+            }
+
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
