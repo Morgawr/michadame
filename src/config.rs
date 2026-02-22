@@ -147,4 +147,7 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     if let Some(val) = cfg.use_magenta_background {
         state.use_magenta_background = val;
     }
+    if let Some(val) = cfg.horizontal_stretch {
+        state.horizontal_stretch = val;
+    }
 }
