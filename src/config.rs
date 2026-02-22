@@ -28,6 +28,7 @@ pub struct MichadameConfig {
     pub crt_shape: Option<f32>,
     pub crt_hard_pix: Option<f32>,
     pub use_magenta_background: Option<bool>,
+    pub horizontal_stretch: Option<f32>,
 }
 
 pub fn save_config(state: &AppState) {
@@ -62,6 +63,7 @@ pub fn save_config(state: &AppState) {
         crt_shape: Some(state.crt_shape),
         crt_hard_pix: Some(state.crt_hard_pix),
         use_magenta_background: Some(state.use_magenta_background),
+        horizontal_stretch: Some(state.horizontal_stretch),
     };
 
     if let Err(e) = confy::store("michadame", None, cfg) {

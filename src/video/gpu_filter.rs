@@ -42,6 +42,7 @@ const FS_PASSTHROUGH: &str = r#"#version 330 core
     uniform vec2 videoResolution;
     uniform vec2 outputResolution;
     uniform vec3 background_color;
+    uniform float horizontal_stretch;
     
     // Convert from linear to sRGB color space
     float ToSrgb1(float c) {
@@ -52,7 +53,7 @@ const FS_PASSTHROUGH: &str = r#"#version 330 core
     }
 
     void main() {
-        float video_aspect = videoResolution.x / videoResolution.y;
+        float video_aspect = (videoResolution.x * horizontal_stretch) / videoResolution.y;
         float output_aspect = outputResolution.x / outputResolution.y;
 
         vec2 scale = vec2(1.0, 1.0);
@@ -189,6 +190,7 @@ const FS_FINAL: &str = r#"#version 330 core
     uniform float brightboost;
     uniform float bloomAmount;
     uniform vec3 background_color;
+    uniform float horizontal_stretch;
 
     float ToSrgb1(float c) {
         return (c < 0.0031308 ? c * 12.92 : 1.055 * pow(c, 0.41666) - 0.055);
@@ -242,7 +244,7 @@ const FS_FINAL: &str = r#"#version 330 core
 
     void main() {
         // Calculate aspect ratios
-        float video_aspect = videoResolution.x / videoResolution.y;
+        float video_aspect = (videoResolution.x * horizontal_stretch) / videoResolution.y;
         float output_aspect = outputResolution.x / outputResolution.y;
 
         // Determine scale and offset to letterbox/pillarbox the video
@@ -331,6 +333,8 @@ pub struct CrtFilterRenderer {
     final_bloom_amount_loc: glow::UniformLocation,
     final_background_color_loc: glow::UniformLocation,
     passthrough_background_color_loc: glow::UniformLocation,
+    final_horizontal_stretch_loc: glow::UniformLocation,
+    passthrough_horizontal_stretch_loc: glow::UniformLocation,
 
     last_size: (u32, u32),
 }
@@ -378,6 +382,8 @@ impl CrtFilterRenderer {
             let final_bloom_amount_loc = gl.get_uniform_location(final_prog, "bloomAmount").unwrap();
             let final_background_color_loc = gl.get_uniform_location(final_prog, "background_color").unwrap();
             let passthrough_background_color_loc = gl.get_uniform_location(passthrough_prog, "background_color").unwrap();
+            let final_horizontal_stretch_loc = gl.get_uniform_location(final_prog, "horizontal_stretch").unwrap();
+            let passthrough_horizontal_stretch_loc = gl.get_uniform_location(passthrough_prog, "horizontal_stretch").unwrap();
 
             // Set sampler uniforms once, as they don't change.
             gl.use_program(Some(passthrough_prog));
@@ -456,6 +462,7 @@ impl CrtFilterRenderer {
                 final_video_res_loc, final_output_res_loc, final_warp_x_loc, final_warp_y_loc,
                 final_shadow_mask_loc, final_brightboost_loc, final_bloom_amount_loc,
                 final_background_color_loc, passthrough_background_color_loc,
+                final_horizontal_stretch_loc, passthrough_horizontal_stretch_loc,
                 last_size: (0, 0),
             }
         }
@@ -544,6 +551,7 @@ impl CrtFilterRenderer {
                 gl.uniform_1_f32(Some(&self.final_brightboost_loc), params.brightboost);
                 gl.uniform_1_f32(Some(&self.final_bloom_amount_loc), params.bloom_amount);
                 gl.uniform_3_f32(Some(&self.final_background_color_loc), params.background_color[0], params.background_color[1], params.background_color[2]);
+                gl.uniform_1_f32(Some(&self.final_horizontal_stretch_loc), params.horizontal_stretch);
 
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             } else if run_pixelate {
@@ -558,8 +566,12 @@ impl CrtFilterRenderer {
                 gl.uniform_2_f32(Some(&self.p_passthrough_video_res_loc), resolution.0 as f32, resolution.1 as f32);
                 gl.uniform_2_f32(Some(&self.p_passthrough_output_res_loc), output_size.0, output_size.1);
                 gl.uniform_3_f32(Some(&self.passthrough_background_color_loc), params.background_color[0], params.background_color[1], params.background_color[2]);
+                gl.uniform_1_f32(Some(&self.passthrough_horizontal_stretch_loc), params.horizontal_stretch);
 
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            } else {
+                // Fallback: draw directly to screen using passthrough
+                self.draw_passthrough(gl, video_texture, resolution, output_size, params.background_color, params.horizontal_stretch);
             }
 
             gl.bind_vertex_array(None);
@@ -574,7 +586,7 @@ impl CrtFilterRenderer {
         }
     }
 
-    pub fn draw_passthrough(&self, gl: &glow::Context, video_texture: glow::Texture, resolution: (u32, u32), output_size: (f32, f32), background_color: [f32; 3]) {
+    pub fn draw_passthrough(&self, gl: &glow::Context, video_texture: glow::Texture, resolution: (u32, u32), output_size: (f32, f32), background_color: [f32; 3], horizontal_stretch: f32) {
         unsafe {
             let old_vbo = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
             gl.bind_vertex_array(Some(self.vertex_array));
@@ -590,6 +602,7 @@ impl CrtFilterRenderer {
             gl.uniform_2_f32(Some(&self.p_passthrough_output_res_loc), output_size.0, output_size.1);
             
             gl.uniform_3_f32(Some(&self.passthrough_background_color_loc), background_color[0], background_color[1], background_color[2]);
+            gl.uniform_1_f32(Some(&self.passthrough_horizontal_stretch_loc), horizontal_stretch);
 
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
@@ -700,6 +713,7 @@ impl ShaderParams {
             shape: state.crt_shape,
             hard_pix: state.crt_hard_pix,
             background_color: if state.use_magenta_background { [1.0, 0.0, 1.0] } else { [0.0, 0.0, 0.0] },
+            horizontal_stretch: state.horizontal_stretch,
         }
     }
 }
@@ -717,6 +731,7 @@ pub struct ShaderParams {
     pub shape: f32,
     pub hard_pix: f32,
     pub background_color: [f32; 3],
+    pub horizontal_stretch: f32,
 }
 
 impl Default for ShaderParams {
@@ -733,6 +748,7 @@ impl Default for ShaderParams {
             shape: 2.0,
             hard_pix: -3.0,
             background_color: [0.0, 0.0, 0.0],
+            horizontal_stretch: 1.0,
         }
     }
 }

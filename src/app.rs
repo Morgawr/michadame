@@ -58,6 +58,7 @@ pub struct AppState {
     pub crt_hard_pix: f32,
     pub fullscreen_toggle_frame_count: Option<u8>,
     pub use_magenta_background: bool,
+    pub horizontal_stretch: f32,
 }
 
 impl Default for AppState {
@@ -111,6 +112,7 @@ impl Default for AppState {
             crt_hard_pix: -3.0,
             fullscreen_toggle_frame_count: None,
             use_magenta_background: false,
+            horizontal_stretch: 1.0,
         }
     }
 }

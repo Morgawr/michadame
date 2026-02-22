@@ -211,6 +211,15 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             changed = true;
         }
     });
+
+    ui.horizontal(|ui| {
+        ui.label("Horizontal Stretch:");
+        if ui.add(egui::Slider::new(&mut state.horizontal_stretch, 0.5..=1.5).step_by(0.001)).changed() {
+            config::save_config(state);
+            changed = true;
+        }
+    });
+
     if current_filter == CrtFilter::Lottes {
         ui.group(|ui| {
             ui.label("Lottes Filter Settings");
