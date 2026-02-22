@@ -65,9 +65,10 @@ const FS_YUYV_PACKED: &str = r#"#version 330 core
         vec4 yuyv_vec = texture(raw_tex, v_tc);
         
         // Determine if we want the first or second Y based on X coordinate
-        float x_pixel = v_tc.x * textureSize(raw_tex, 0).x * 2.0;
+        // We multiply by 2 because each texture pixel contains 2 source pixels
+        float x_idx = v_tc.x * textureSize(raw_tex, 0).x * 2.0;
         float y_val;
-        if (fract(x_pixel) < 0.5) {
+        if (int(floor(x_idx)) % 2 == 0) {
             y_val = yuyv_vec.r; // Y0
         } else {
             y_val = yuyv_vec.b; // Y1

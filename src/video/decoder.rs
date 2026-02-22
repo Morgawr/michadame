@@ -1,6 +1,5 @@
 use crate::video::types::{VideoFormat, RawFrame};
 use anyhow::{Context, Result};
-use ffmpeg_next::format::Pixel;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -24,9 +23,7 @@ fn setup_ffmpeg_options(
     ffmpeg_options.set("fflags", "nobuffer+discardcorrupt");
     ffmpeg_options.set("probesize", "32");
     ffmpeg_options.set("analyzeduration", "100000");
-    if pixel_format_str != "mjpeg" {
-        ffmpeg_options.set("pixel_format", &pixel_format_str);
-    }
+    ffmpeg_options.set("pixel_format", &pixel_format_str);
     ffmpeg_options.set("color_range", "pc");
     (pixel_format_str, ffmpeg_options)
 }
@@ -66,51 +63,32 @@ pub fn video_thread_main(
         tracing::info!("Packet reader thread finished.");
     });
 
+    let mut scaler = ffmpeg_next::software::scaling::context::Context::get(
+        decoder.format(),
+        decoder.width(),
+        decoder.height(),
+        decoder.format(),
+        decoder.width(),
+        decoder.height(),
+        ffmpeg_next::software::scaling::flag::Flags::BILINEAR,
+    ).context("Failed to create software scaler for normalization")?;
+
     while !stop_flag.load(Ordering::Relaxed) {
         if let Ok(packet) = packet_rx.recv() {
             decoder.send_packet(&packet).context("Failed to send packet to decoder")?;
             let mut decoded = ffmpeg_next::frame::Video::empty();
             while decoder.receive_frame(&mut decoded).is_ok() {
-                // Just pass the raw frame data
                 let width = decoded.width();
                 let height = decoded.height();
                 let format = decoded.format();
                 
-                // For direct texture upload, we'll send the raw data bytes.
-                // Tightly pack the data planes to avoid stride/padding issues on the GPU
+                // Use the scaler to normalize the frame (removes strides and ensures consistent plane layout)
+                let mut normalized = ffmpeg_next::frame::Video::empty();
+                scaler.run(&decoded, &mut normalized).context("Failed to normalize video frame")?;
+
                 let mut data = Vec::new();
-                
-                if format == Pixel::YUV422P || format == Pixel::YUV420P || format == Pixel::YUVJ422P || format == Pixel::YUVJ420P {
-                    for i in 0..3 {
-                        let plane_width = if i == 0 { width } else { width / 2 };
-                        let plane_height = if i == 0 { height } else {
-                            if format == Pixel::YUV420P || format == Pixel::YUVJ420P { height / 2 } else { height }
-                        };
-                        
-                        let stride = decoded.stride(i);
-                        let plane_data = decoded.data(i);
-                        for row in 0..plane_height {
-                            let start = (row as usize) * stride;
-                            let end = start + (plane_width as usize);
-                            if end <= plane_data.len() {
-                                data.extend_from_slice(&plane_data[start..end]);
-                            }
-                        }
-                    }
-                } else if format == Pixel::YUYV422 {
-                    let stride = decoded.stride(0);
-                    let plane_data = decoded.data(0);
-                    let row_bytes = (width * 2) as usize;
-                    for row in 0..height {
-                        let start = (row as usize) * stride;
-                        let end = start + row_bytes;
-                        if end <= plane_data.len() {
-                            data.extend_from_slice(&plane_data[start..end]);
-                        }
-                    }
-                } else {
-                    // Fallback for other formats - might still have stride issues but at least it sends something
-                    data.extend_from_slice(decoded.data(0));
+                for i in 0..normalized.planes() {
+                    data.extend_from_slice(normalized.data(i));
                 }
 
                 let raw_frame = Arc::new(RawFrame {
