@@ -227,6 +227,14 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         }
     });
 
+    ui.horizontal(|ui| {
+        ui.label("Video Vibrance:");
+        if ui.add(egui::Slider::new(&mut state.vibrance, 0.0..=2.0).step_by(0.01)).changed() {
+            config::save_config(state);
+            changed = true;
+        }
+    });
+
     if current_filter == CrtFilter::Lottes {
         ui.group(|ui| {
             ui.label("Lottes Filter Settings");

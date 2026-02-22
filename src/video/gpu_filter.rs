@@ -61,6 +61,7 @@ const FS_PASSTHROUGH: &str = r#"#version 330 core
     uniform vec2 outputResolution;
     uniform vec3 background_color;
     uniform float horizontal_stretch;
+    uniform float vibrance;
     
     // Convert from linear to sRGB color space
     float ToSrgb1(float c) {
@@ -88,6 +89,9 @@ const FS_PASSTHROUGH: &str = r#"#version 330 core
             out_color = vec4(background_color, 1.0);
         } else {
             vec3 linear_color = texture(video_texture, centered_tc).rgb;
+            // Apply vibrance (saturation boost)
+            float luminance = dot(linear_color, vec3(0.299, 0.587, 0.114));
+            linear_color = mix(vec3(luminance), linear_color, vibrance);
             out_color = vec4(ToSrgb(linear_color), 1.0);
         }
     }"#;
@@ -210,6 +214,7 @@ const FS_FINAL: &str = r#"#version 330 core
     uniform float bloomAmount;
     uniform vec3 background_color;
     uniform float horizontal_stretch;
+    uniform float vibrance;
 
     float ToSrgb1(float c) {
         return (c < 0.0031308 ? c * 12.92 : 1.055 * pow(c, 0.41666) - 0.055);
@@ -308,6 +313,10 @@ const FS_FINAL: &str = r#"#version 330 core
 
         final_color *= brightboost;
 
+        // Apply vibrance (saturation boost)
+        float luminance = dot(final_color, vec3(0.299, 0.587, 0.114));
+        final_color = mix(vec3(luminance), final_color, vibrance);
+
         out_color = vec4(ToSrgb(final_color), 1.0);
     }
 "#;
@@ -358,6 +367,8 @@ pub struct CrtFilterRenderer {
     passthrough_background_color_loc: glow::UniformLocation,
     final_horizontal_stretch_loc: glow::UniformLocation,
     passthrough_horizontal_stretch_loc: glow::UniformLocation,
+    final_vibrance_loc: glow::UniformLocation,
+    passthrough_vibrance_loc: glow::UniformLocation,
 
     last_size: (u32, u32),
 }
@@ -413,6 +424,8 @@ impl CrtFilterRenderer {
             let passthrough_background_color_loc = gl.get_uniform_location(passthrough_prog, "background_color").unwrap();
             let final_horizontal_stretch_loc = gl.get_uniform_location(final_prog, "horizontal_stretch").unwrap();
             let passthrough_horizontal_stretch_loc = gl.get_uniform_location(passthrough_prog, "horizontal_stretch").unwrap();
+            let final_vibrance_loc = gl.get_uniform_location(final_prog, "vibrance").unwrap();
+            let passthrough_vibrance_loc = gl.get_uniform_location(passthrough_prog, "vibrance").unwrap();
 
             // Set sampler uniforms once, as they don't change.
             gl.use_program(Some(passthrough_prog));
@@ -494,6 +507,7 @@ impl CrtFilterRenderer {
                 final_shadow_mask_loc, final_brightboost_loc, final_bloom_amount_loc,
                 final_background_color_loc, passthrough_background_color_loc,
                 final_horizontal_stretch_loc, passthrough_horizontal_stretch_loc,
+                final_vibrance_loc, passthrough_vibrance_loc,
                 median_prog,
                 last_size: (0, 0),
             }
@@ -596,6 +610,7 @@ impl CrtFilterRenderer {
                 gl.uniform_1_f32(Some(&self.final_bloom_amount_loc), params.bloom_amount);
                 gl.uniform_3_f32(Some(&self.final_background_color_loc), params.background_color[0], params.background_color[1], params.background_color[2]);
                 gl.uniform_1_f32(Some(&self.final_horizontal_stretch_loc), params.horizontal_stretch);
+                gl.uniform_1_f32(Some(&self.final_vibrance_loc), params.vibrance);
 
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             } else if run_pixelate {
@@ -611,11 +626,12 @@ impl CrtFilterRenderer {
                 gl.uniform_2_f32(Some(&self.p_passthrough_output_res_loc), output_size.0, output_size.1);
                 gl.uniform_3_f32(Some(&self.passthrough_background_color_loc), params.background_color[0], params.background_color[1], params.background_color[2]);
                 gl.uniform_1_f32(Some(&self.passthrough_horizontal_stretch_loc), params.horizontal_stretch);
+                gl.uniform_1_f32(Some(&self.passthrough_vibrance_loc), params.vibrance);
 
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             } else {
                 // Fallback: draw directly to screen using passthrough
-                self.draw_passthrough(gl, lottes_input_texture, resolution, output_size, params.background_color, params.horizontal_stretch, false);
+                self.draw_passthrough(gl, lottes_input_texture, resolution, output_size, params.background_color, params.horizontal_stretch, false, params.vibrance);
             }
 
             gl.bind_vertex_array(None);
@@ -630,7 +646,7 @@ impl CrtFilterRenderer {
         }
     }
 
-    pub fn draw_passthrough(&mut self, gl: &glow::Context, video_texture: glow::Texture, resolution: (u32, u32), output_size: (f32, f32), background_color: [f32; 3], horizontal_stretch: f32, median_filter_enabled: bool) {
+    pub fn draw_passthrough(&mut self, gl: &glow::Context, video_texture: glow::Texture, resolution: (u32, u32), output_size: (f32, f32), background_color: [f32; 3], horizontal_stretch: f32, median_filter_enabled: bool, vibrance: f32) {
         if self.last_size != resolution {
             self.setup_framebuffers(gl, resolution.0, resolution.1);
             self.last_size = resolution;
@@ -664,6 +680,7 @@ impl CrtFilterRenderer {
             
             gl.uniform_3_f32(Some(&self.passthrough_background_color_loc), background_color[0], background_color[1], background_color[2]);
             gl.uniform_1_f32(Some(&self.passthrough_horizontal_stretch_loc), horizontal_stretch);
+            gl.uniform_1_f32(Some(&self.passthrough_vibrance_loc), vibrance);
 
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
@@ -776,6 +793,7 @@ impl ShaderParams {
             background_color: if state.use_magenta_background { [1.0, 0.0, 1.0] } else { [0.0, 0.0, 0.0] },
             horizontal_stretch: state.horizontal_stretch,
             median_filter_enabled: state.median_filter_enabled,
+            vibrance: state.vibrance,
         }
     }
 }
@@ -795,6 +813,7 @@ pub struct ShaderParams {
     pub background_color: [f32; 3],
     pub horizontal_stretch: f32,
     pub median_filter_enabled: bool,
+    pub vibrance: f32,
 }
 
 impl Default for ShaderParams {
@@ -813,6 +832,7 @@ impl Default for ShaderParams {
             background_color: [0.0, 0.0, 0.0],
             horizontal_stretch: 1.0,
             median_filter_enabled: false,
+            vibrance: 1.0,
         }
     }
 }

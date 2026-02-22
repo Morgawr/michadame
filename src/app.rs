@@ -60,6 +60,7 @@ pub struct AppState {
     pub use_magenta_background: bool,
     pub horizontal_stretch: f32,
     pub median_filter_enabled: bool,
+    pub vibrance: f32,
 }
 
 impl Default for AppState {
@@ -115,6 +116,7 @@ impl Default for AppState {
             use_magenta_background: false,
             horizontal_stretch: 1.0,
             median_filter_enabled: false,
+            vibrance: 1.0,
         }
     }
 }
