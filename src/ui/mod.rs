@@ -97,8 +97,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             // Fallback to a simple passthrough shader if no other GPU filters are active.
             let renderer_clone = state.crt_renderer.as_ref().unwrap().clone();
             let rect = response.rect;
+            let background_color = if state.use_magenta_background { [1.0, 0.0, 1.0] } else { [0.0, 0.0, 0.0] };
             let callback = egui::PaintCallback { rect, callback: std::sync::Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
-                renderer_clone.lock().unwrap().draw_passthrough(painter.gl(), painter.texture(video_texture_id).unwrap(), (texture_size.x as u32, texture_size.y as u32), (rect.width(), rect.height()));
+                renderer_clone.lock().unwrap().draw_passthrough(painter.gl(), painter.texture(video_texture_id).unwrap(), (texture_size.x as u32, texture_size.y as u32), (rect.width(), rect.height()), background_color);
             }))};
             ui.painter().add(callback);
         }

@@ -206,6 +206,10 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             config::save_config(state);
             changed = true;
         }
+        if ui.checkbox(&mut state.use_magenta_background, "Magenta Background").on_hover_text("Toggles background color between magenta and black for letterboxing/pillarboxing.").changed() {
+            config::save_config(state);
+            changed = true;
+        }
     });
     if current_filter == CrtFilter::Lottes {
         ui.group(|ui| {

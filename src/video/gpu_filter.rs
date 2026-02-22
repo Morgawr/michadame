@@ -41,6 +41,7 @@ const FS_PASSTHROUGH: &str = r#"#version 330 core
     uniform sampler2D video_texture;
     uniform vec2 videoResolution;
     uniform vec2 outputResolution;
+    uniform vec3 background_color;
     
     // Convert from linear to sRGB color space
     float ToSrgb1(float c) {
@@ -64,7 +65,7 @@ const FS_PASSTHROUGH: &str = r#"#version 330 core
         vec2 centered_tc = (v_tc - 0.5) / scale + 0.5;
 
         if (centered_tc.x < 0.0 || centered_tc.x > 1.0 || centered_tc.y < 0.0 || centered_tc.y > 1.0) {
-            out_color = vec4(0.0, 0.0, 0.0, 1.0);
+            out_color = vec4(background_color, 1.0);
         } else {
             vec3 linear_color = texture(video_texture, centered_tc).rgb;
             out_color = vec4(ToSrgb(linear_color), 1.0);
@@ -187,6 +188,7 @@ const FS_FINAL: &str = r#"#version 330 core
     uniform float shadowMask; // 0-4
     uniform float brightboost;
     uniform float bloomAmount;
+    uniform vec3 background_color;
 
     float ToSrgb1(float c) {
         return (c < 0.0031308 ? c * 12.92 : 1.055 * pow(c, 0.41666) - 0.055);
@@ -250,6 +252,17 @@ const FS_FINAL: &str = r#"#version 330 core
         } else {
             scale.x = video_aspect / output_aspect;
         }
+
+        // First check if we are in the letterbox/pillarbox bars.
+        // These should be colored with the background color.
+        vec2 centered_pos = (v_tc - 0.5) / scale + 0.5;
+        if (centered_pos.x < 0.0 || centered_pos.x > 1.0 || centered_pos.y < 0.0 || centered_pos.y > 1.0) {
+            out_color = vec4(background_color, 1.0);
+            return;
+        }
+
+        // Now apply warp for the CRT curvature.
+        // If the warped position is outside the video area, it should be BLACK (behind the tube).
         vec2 warped_tc = Warp(v_tc);
         vec2 warped_pos = (warped_tc - 0.5) / scale + 0.5;
 
@@ -316,6 +329,8 @@ pub struct CrtFilterRenderer {
     final_shadow_mask_loc: glow::UniformLocation,
     final_brightboost_loc: glow::UniformLocation,
     final_bloom_amount_loc: glow::UniformLocation,
+    final_background_color_loc: glow::UniformLocation,
+    passthrough_background_color_loc: glow::UniformLocation,
 
     last_size: (u32, u32),
 }
@@ -361,6 +376,8 @@ impl CrtFilterRenderer {
             let final_shadow_mask_loc = gl.get_uniform_location(final_prog, "shadowMask").unwrap();
             let final_brightboost_loc = gl.get_uniform_location(final_prog, "brightboost").unwrap();
             let final_bloom_amount_loc = gl.get_uniform_location(final_prog, "bloomAmount").unwrap();
+            let final_background_color_loc = gl.get_uniform_location(final_prog, "background_color").unwrap();
+            let passthrough_background_color_loc = gl.get_uniform_location(passthrough_prog, "background_color").unwrap();
 
             // Set sampler uniforms once, as they don't change.
             gl.use_program(Some(passthrough_prog));
@@ -438,6 +455,7 @@ impl CrtFilterRenderer {
                 p2_hard_pix_loc, p3_hard_scan_loc, p3_shape_loc,
                 final_video_res_loc, final_output_res_loc, final_warp_x_loc, final_warp_y_loc,
                 final_shadow_mask_loc, final_brightboost_loc, final_bloom_amount_loc,
+                final_background_color_loc, passthrough_background_color_loc,
                 last_size: (0, 0),
             }
         }
@@ -525,6 +543,7 @@ impl CrtFilterRenderer {
                 gl.uniform_1_f32(Some(&self.final_shadow_mask_loc), params.shadow_mask);
                 gl.uniform_1_f32(Some(&self.final_brightboost_loc), params.brightboost);
                 gl.uniform_1_f32(Some(&self.final_bloom_amount_loc), params.bloom_amount);
+                gl.uniform_3_f32(Some(&self.final_background_color_loc), params.background_color[0], params.background_color[1], params.background_color[2]);
 
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             } else if run_pixelate {
@@ -538,6 +557,7 @@ impl CrtFilterRenderer {
 
                 gl.uniform_2_f32(Some(&self.p_passthrough_video_res_loc), resolution.0 as f32, resolution.1 as f32);
                 gl.uniform_2_f32(Some(&self.p_passthrough_output_res_loc), output_size.0, output_size.1);
+                gl.uniform_3_f32(Some(&self.passthrough_background_color_loc), params.background_color[0], params.background_color[1], params.background_color[2]);
 
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
@@ -554,7 +574,7 @@ impl CrtFilterRenderer {
         }
     }
 
-    pub fn draw_passthrough(&self, gl: &glow::Context, video_texture: glow::Texture, resolution: (u32, u32), output_size: (f32, f32)) {
+    pub fn draw_passthrough(&self, gl: &glow::Context, video_texture: glow::Texture, resolution: (u32, u32), output_size: (f32, f32), background_color: [f32; 3]) {
         unsafe {
             let old_vbo = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
             gl.bind_vertex_array(Some(self.vertex_array));
@@ -568,6 +588,8 @@ impl CrtFilterRenderer {
 
             gl.uniform_2_f32(Some(&self.p_passthrough_video_res_loc), resolution.0 as f32, resolution.1 as f32);
             gl.uniform_2_f32(Some(&self.p_passthrough_output_res_loc), output_size.0, output_size.1);
+            
+            gl.uniform_3_f32(Some(&self.passthrough_background_color_loc), background_color[0], background_color[1], background_color[2]);
 
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
@@ -677,6 +699,7 @@ impl ShaderParams {
             bloom_amount: state.crt_bloom_amount,
             shape: state.crt_shape,
             hard_pix: state.crt_hard_pix,
+            background_color: if state.use_magenta_background { [1.0, 0.0, 1.0] } else { [0.0, 0.0, 0.0] },
         }
     }
 }
@@ -693,6 +716,7 @@ pub struct ShaderParams {
     pub bloom_amount: f32,
     pub shape: f32,
     pub hard_pix: f32,
+    pub background_color: [f32; 3],
 }
 
 impl Default for ShaderParams {
@@ -708,6 +732,7 @@ impl Default for ShaderParams {
             bloom_amount: 0.15,
             shape: 2.0,
             hard_pix: -3.0,
+            background_color: [0.0, 0.0, 0.0],
         }
     }
 }
