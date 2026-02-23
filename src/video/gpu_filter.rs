@@ -86,6 +86,7 @@ pub struct CrtFilterRenderer {
     passthrough_vibrance_loc: glow::UniformLocation,
 
     last_size: (u32, u32),
+    last_scaler_filter: Option<u8>,
 }
 
 impl CrtFilterRenderer {
@@ -379,6 +380,7 @@ impl CrtFilterRenderer {
                 passthrough_vibrance_loc,
                 median_prog,
                 last_size: (0, 0),
+                last_scaler_filter: None,
             }
         }
     }
@@ -396,9 +398,10 @@ impl CrtFilterRenderer {
     ) {
         let mut video_texture = fallback_texture;
 
-        if self.last_size != resolution {
-            self.setup_framebuffers(gl, resolution.0, resolution.1);
+        if self.last_size != resolution || self.last_scaler_filter != Some(params.scaler_filter) {
+            self.setup_framebuffers(gl, resolution.0, resolution.1, params.scaler_filter);
             self.last_size = resolution;
+            self.last_scaler_filter = Some(params.scaler_filter);
         }
 
         unsafe {
@@ -654,6 +657,7 @@ impl CrtFilterRenderer {
                     params.horizontal_stretch,
                     params.median_filter_enabled,
                     params.vibrance,
+                    params.scaler_filter,
                 );
             }
 
@@ -682,12 +686,14 @@ impl CrtFilterRenderer {
         horizontal_stretch: f32,
         median_filter_enabled: bool,
         vibrance: f32,
+        scaler_filter: u8,
     ) {
         let mut video_texture = fallback_texture;
 
-        if self.last_size != resolution {
-            self.setup_framebuffers(gl, resolution.0, resolution.1);
+        if self.last_size != resolution || self.last_scaler_filter != Some(scaler_filter) {
+            self.setup_framebuffers(gl, resolution.0, resolution.1, scaler_filter);
             self.last_size = resolution;
+            self.last_scaler_filter = Some(scaler_filter);
         }
 
         unsafe {
@@ -872,7 +878,13 @@ impl CrtFilterRenderer {
         }
     }
 
-    fn setup_framebuffers(&mut self, gl: &glow::Context, width: u32, height: u32) {
+    fn setup_framebuffers(&mut self, gl: &glow::Context, width: u32, height: u32, scaler_filter: u8) {
+        let filter_mode = if scaler_filter == crate::video::types::ScalerFilter::Point as u8 {
+            glow::NEAREST as i32
+        } else {
+            glow::LINEAR as i32
+        };
+
         unsafe {
             for i in 0..self.pass_textures.len() {
                 gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[i]));
@@ -890,12 +902,12 @@ impl CrtFilterRenderer {
                 gl.tex_parameter_i32(
                     glow::TEXTURE_2D,
                     glow::TEXTURE_MIN_FILTER,
-                    glow::LINEAR as i32,
+                    filter_mode,
                 );
                 gl.tex_parameter_i32(
                     glow::TEXTURE_2D,
                     glow::TEXTURE_MAG_FILTER,
-                    glow::LINEAR as i32,
+                    filter_mode,
                 );
                 gl.tex_parameter_i32(
                     glow::TEXTURE_2D,
@@ -923,12 +935,12 @@ impl CrtFilterRenderer {
                 gl.tex_parameter_i32(
                     glow::TEXTURE_2D,
                     glow::TEXTURE_MIN_FILTER,
-                    glow::LINEAR as i32,
+                    filter_mode,
                 );
                 gl.tex_parameter_i32(
                     glow::TEXTURE_2D,
                     glow::TEXTURE_MAG_FILTER,
-                    glow::LINEAR as i32,
+                    filter_mode,
                 );
                 gl.tex_parameter_i32(
                     glow::TEXTURE_2D,
@@ -1005,6 +1017,7 @@ impl ShaderParams {
             horizontal_stretch: state.video.horizontal_stretch,
             median_filter_enabled: state.video.median_filter_enabled,
             vibrance: state.video.vibrance,
+            scaler_filter: state.scaler_filter.load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 }
@@ -1025,6 +1038,7 @@ pub struct ShaderParams {
     pub horizontal_stretch: f32,
     pub median_filter_enabled: bool,
     pub vibrance: f32,
+    pub scaler_filter: u8,
 }
 
 impl Default for ShaderParams {
@@ -1044,6 +1058,7 @@ impl Default for ShaderParams {
             horizontal_stretch: 1.0,
             median_filter_enabled: false,
             vibrance: 1.0,
+            scaler_filter: crate::video::types::ScalerFilter::FastBilinear as u8,
         }
     }
 }
