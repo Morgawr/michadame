@@ -8,46 +8,59 @@ Here is how the native hardware capture looks next to the Flycast emulator, both
 
 ### Eve Zero
 
-| Emulator (Flycast) | Native Capture | Capture with CRT Filter |
-| :---: | :---: | :---: |
-| ![Eve Zero Emulator](examples/evezero_emu.png) | ![Eve Zero Native Capture](examples/evezero_base.png) | ![Eve Zero CRT Filter](examples/evezero_crt.png) |
+| Source | Screenshot |
+| :--- | :--- |
+| Emulator (Flycast) | ![Eve Zero Emulator](examples/evezero_emu.png) |
+| Native Capture | ![Eve Zero Native Capture](examples/evezero_base.png) |
+| Capture with CRT Filter | ![Eve Zero CRT Filter](examples/evezero_crt.png) |
 
 ### Grandia 2
 
-| Emulator (Flycast) | Native Capture | Capture with CRT Filter |
-| :---: | :---: | :---: |
-| ![Grandia 2 Emulator](examples/grandia2_emu.png) | ![Grandia 2 Native Capture](examples/grandia2_base.png) | ![Grandia 2 CRT Filter](examples/grandia2_crt.png) |
+| Source | Screenshot |
+| :--- | :--- |
+| Emulator (Flycast) | ![Grandia 2 Emulator](examples/grandia2_emu.png) |
+| Native Capture | ![Grandia 2 Native Capture](examples/grandia2_base.png) |
+| Capture with CRT Filter | ![Grandia 2 CRT Filter](examples/grandia2_crt.png) |
 
 ### Sakura Taisen
 
-| Emulator (Flycast) | Native Capture | Capture with CRT Filter |
-| :---: | :---: | :---: |
-| ![Sakura Taisen Emulator](examples/sakurataisen_emu.png) | ![Sakura Taisen Native Capture](examples/sakurataisen_base.png) | ![Sakura Taisen CRT Filter](examples/sakurataisen_crt.png) |
+| Source | Screenshot |
+| :--- | :--- |
+| Emulator (Flycast) | ![Sakura Taisen Emulator](examples/sakurataisen_emu.png) |
+| Native Capture | ![Sakura Taisen Native Capture](examples/sakurataisen_base.png) |
+| Capture with CRT Filter | ![Sakura Taisen CRT Filter](examples/sakurataisen_crt.png) |
 
 ### Maboroshi Tsukiyo
 
-| Emulator (Flycast) | Native Capture | Capture with CRT Filter |
-| :---: | :---: | :---: |
-| ![Maboroshi Tsukiyo Emulator](examples/maboroshi_emu.png) | ![Maboroshi Tsukiyo Native Capture](examples/maboroshi_base.png) | ![Maboroshi Tsukiyo CRT Filter](examples/maboroshi_crt.png) |
+| Source | Screenshot |
+| :--- | :--- |
+| Emulator (Flycast) | ![Maboroshi Tsukiyo Emulator](examples/maboroshi_emu.png) |
+| Native Capture | ![Maboroshi Tsukiyo Native Capture](examples/maboroshi_base.png) |
+| Capture with CRT Filter | ![Maboroshi Tsukiyo CRT Filter](examples/maboroshi_crt.png) |
 
 ### Yume no Tsubasa
 
-| Emulator (Flycast) | Native Capture | Capture with CRT Filter |
-| :---: | :---: | :---: |
-| ![Yume no Tsubasa Emulator](examples/tsubasa_emu.png) | ![Yume no Tsubasa Native Capture](examples/tsubasa_base.png) | ![Yume no Tsubasa CRT Filter](examples/tsubasa_crt.png) |
+| Source | Screenshot |
+| :--- | :--- |
+| Emulator (Flycast) | ![Yume no Tsubasa Emulator](examples/tsubasa_emu.png) |
+| Native Capture | ![Yume no Tsubasa Native Capture](examples/tsubasa_base.png) |
+| Capture with CRT Filter | ![Yume no Tsubasa CRT Filter](examples/tsubasa_crt.png) |
 
 ### Black Matrix
 
-| Emulator (Flycast) | Native Capture | Capture with CRT Filter |
-| :---: | :---: | :---: |
-| ![Black Matrix Emulator](examples/blackmatrix_emu.png) | ![Black Matrix Native Capture](examples/blackmatrix_base.png) | ![Black Matrix CRT Filter](examples/blackmatrix_crt.png) |
+| Source | Screenshot |
+| :--- | :--- |
+| Emulator (Flycast) | ![Black Matrix Emulator](examples/blackmatrix_emu.png) |
+| Native Capture | ![Black Matrix Native Capture](examples/blackmatrix_base.png) |
+| Capture with CRT Filter | ![Black Matrix CRT Filter](examples/blackmatrix_crt.png) |
 
 ### Exodus Guilty
 
-| Emulator (Flycast) | Native Capture | Capture with CRT Filter |
-| :---: | :---: | :---: |
-| ![Exodus Guilty Emulator](examples/exodus_emu.png) | ![Exodus Guilty Native Capture](examples/exodus_base.png) | ![Exodus Guilty CRT Filter](examples/exodus_crt.png) |
-
+| Source | Screenshot |
+| :--- | :--- |
+| Emulator (Flycast) | ![Exodus Guilty Emulator](examples/exodus_emu.png) |
+| Native Capture | ![Exodus Guilty Native Capture](examples/exodus_base.png) |
+| Capture with CRT Filter | ![Exodus Guilty CRT Filter](examples/exodus_crt.png) |
 
 ## Nintendo Switch vs PC
 
@@ -55,7 +68,9 @@ This section shows Octopath Traveler 2 running on a Switch compared to the nativ
 
 ### Octopath Traveler 2
 
-| Switch Capture | PC Native 4K |
-| :---: | :---: |
-| ![Octopath Intro Switch](examples/octopath_intro.png) | ![Octopath Intro PC](examples/octopath_intro_pc.png) |
-| ![Octopath Menu Switch](examples/octopath_menu.png) | ![Octopath Menu PC](examples/octopath_menu_pc.png) |
+| Source | Screenshot |
+| :--- | :--- |
+| Switch Capture (Intro) | ![Octopath Intro Switch](examples/octopath_intro.png) |
+| PC Native 4K (Intro) | ![Octopath Intro PC](examples/octopath_intro_pc.png) |
+| Switch Capture (Menu) | ![Octopath Menu Switch](examples/octopath_menu.png) |
+| PC Native 4K (Menu) | ![Octopath Menu PC](examples/octopath_menu_pc.png) |
