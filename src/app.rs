@@ -1,10 +1,11 @@
 use crate::video::VideoFormat;
-use crate::{config, devices, ui, video, devices::filter_type::CrtFilter};
+use crate::{config, devices, devices::filter_type::CrtFilter, ui, video};
 use anyhow::Context;
 use eframe::egui;
-use std::sync::{Mutex, 
+use std::collections::HashMap;
+use std::sync::{
     atomic::{AtomicBool, AtomicU8, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
@@ -62,6 +63,11 @@ pub struct AppState {
     pub horizontal_stretch: f32,
     pub median_filter_enabled: bool,
     pub vibrance: f32,
+
+    // Profiles
+    pub profiles: HashMap<String, config::Profile>,
+    pub active_profile: String,
+    pub new_profile_name: String,
 }
 
 impl Default for AppState {
@@ -119,6 +125,13 @@ impl Default for AppState {
             median_filter_enabled: false,
             vibrance: 1.0,
             latest_frame: None,
+            profiles: {
+                let mut p = HashMap::new();
+                p.insert("Default".to_string(), config::Profile::default());
+                p
+            },
+            active_profile: "Default".to_string(),
+            new_profile_name: String::new(),
         }
     }
 }
@@ -128,8 +141,8 @@ impl AppState {
         let mut app_state = AppState::default();
 
         // Load UI Logo Texture
-        let logo_image =
-            image::load_from_memory(include_bytes!("../assets/logo.png")).expect("Failed to load logo");
+        let logo_image = image::load_from_memory(include_bytes!("../assets/logo.png"))
+            .expect("Failed to load logo");
         let logo_size = [logo_image.width() as _, logo_image.height() as _];
         let logo_rgba = logo_image.to_rgba8();
         let logo_pixels = logo_rgba.as_flat_samples();
@@ -152,7 +165,9 @@ impl AppState {
         app_state.video_texture = Some(video_texture);
 
         if let Some(gl) = cc.gl.as_ref() {
-            app_state.crt_renderer = Some(Arc::new(Mutex::new(video::gpu_filter::CrtFilterRenderer::new(gl))));
+            app_state.crt_renderer = Some(Arc::new(Mutex::new(
+                video::gpu_filter::CrtFilterRenderer::new(gl),
+            )));
         }
 
         app_state.logo_texture = Some(logo_texture);
@@ -185,7 +200,7 @@ impl AppState {
         // Request focus for the control window on startup
         cc.egui_ctx.send_viewport_cmd_to(
             egui::ViewportId::from_hash_of("control_window"),
-            egui::ViewportCommand::Focus
+            egui::ViewportCommand::Focus,
         );
         app_state
     }
@@ -194,7 +209,8 @@ impl AppState {
         let scan_successful = match result {
             Ok((video_devices, pulse_sources, pulse_sinks, usb_devices)) => {
                 self.video_devices = video_devices;
-                self.selected_video_device = self.video_devices.first().cloned().unwrap_or_default();
+                self.selected_video_device =
+                    self.video_devices.first().cloned().unwrap_or_default();
                 self.pulse_sources = pulse_sources;
                 self.pulse_sinks = pulse_sinks;
                 self.usb_devices = usb_devices;
@@ -230,8 +246,16 @@ impl AppState {
             self.video_frames_since_last_check = 0;
         }
 
-        let gui_fps = if elapsed_secs > 0.0 { self.frames_since_last_check as f32 / elapsed_secs } else { 0.0 };
-        let video_fps = if video_elapsed_secs > 0.0 { self.video_frames_since_last_check as f32 / video_elapsed_secs } else { 0.0 };
+        let gui_fps = if elapsed_secs > 0.0 {
+            self.frames_since_last_check as f32 / elapsed_secs
+        } else {
+            0.0
+        };
+        let video_fps = if video_elapsed_secs > 0.0 {
+            self.video_frames_since_last_check as f32 / video_elapsed_secs
+        } else {
+            0.0
+        };
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
             "Michadame Viewer | UI: {:.0} FPS | Video: {:.0} FPS",
             gui_fps, video_fps
@@ -239,19 +263,20 @@ impl AppState {
     }
 
     pub fn start_stream(&mut self, ctx: &egui::Context) {
-        match (&self.selected_pulse_source_name, &self.selected_pulse_sink_name) {
-            (Some(mic), Some(sink)) => {
-                match devices::audio::load_pulse_loopback(mic, sink) {
-                    Ok(index) => {
-                        self.pulse_loopback_module_index = Some(index);
-                        self.status_message = "PulseAudio loopback loaded.".to_string();
-                    }
-                    Err(e) => {
-                        self.status_message = format!("Failed to load loopback: {}", e);
-                        return;
-                    }
+        match (
+            &self.selected_pulse_source_name,
+            &self.selected_pulse_sink_name,
+        ) {
+            (Some(mic), Some(sink)) => match devices::audio::load_pulse_loopback(mic, sink) {
+                Ok(index) => {
+                    self.pulse_loopback_module_index = Some(index);
+                    self.status_message = "PulseAudio loopback loaded.".to_string();
                 }
-            }
+                Err(e) => {
+                    self.status_message = format!("Failed to load loopback: {}", e);
+                    return;
+                }
+            },
             _ => {
                 self.status_message = "Cannot start: Missing PulseAudio devices.".to_string();
                 return;
@@ -271,7 +296,8 @@ impl AppState {
         // The command needs to be sent to the main viewport.
         let new_size = egui::vec2(resolution.0 as f32, resolution.1 as f32);
         ctx.send_viewport_cmd_to(
-            egui::ViewportId::ROOT, egui::ViewportCommand::InnerSize(new_size)
+            egui::ViewportId::ROOT,
+            egui::ViewportCommand::InnerSize(new_size),
         );
         ctx.request_repaint(); // Force a repaint to ensure the new texture is drawn
 
@@ -284,9 +310,9 @@ impl AppState {
         self.frame_receiver = Some(rx);
 
         let handle = thread::spawn(move || {
-            if let Err(e) =
-                video::decoder::video_thread_main(tx, stop_flag, device, format, resolution, framerate)
-            {
+            if let Err(e) = video::decoder::video_thread_main(
+                tx, stop_flag, device, format, resolution, framerate,
+            ) {
                 tracing::error!("Video thread error: {}", e);
             }
         });
@@ -307,7 +333,10 @@ impl AppState {
         self.stop_stream_resources();
         // Reset the texture to a black screen instead of removing it
         if let Some(texture) = &mut self.video_texture {
-            texture.set(egui::ImageData::Color(egui::ColorImage::new([1, 1], egui::Color32::BLACK).into()), egui::TextureOptions::LINEAR);
+            texture.set(
+                egui::ImageData::Color(egui::ColorImage::new([1, 1], egui::Color32::BLACK).into()),
+                egui::TextureOptions::LINEAR,
+            );
         }
         self.video_window_open = false; // This now means "stream is not active"
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -323,7 +352,10 @@ impl AppState {
 
         if let Some(index) = self.pulse_loopback_module_index.take() {
             if let Err(e) = devices::audio::unload_pulse_loopback(index) {
-                self.status_message = format!("Stream stopped, but failed to unload PulseAudio module: {}", e);
+                self.status_message = format!(
+                    "Stream stopped, but failed to unload PulseAudio module: {}",
+                    e
+                );
             } else {
                 self.status_message = "Stream stopped and PulseAudio module unloaded.".to_string();
             }
@@ -372,17 +404,19 @@ impl eframe::App for AppState {
         }
 
         // --- Video Window (Primary) ---
-        egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| {
-            ui::draw_video_player(self, ui, ctx);
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none())
+            .show(ctx, |ui| {
+                ui::draw_video_player(self, ui, ctx);
 
-            if self.show_stop_stream_dialog {
-                ui::dialogs::show_stop_stream_dialog(self, ctx, ui, ctx);
-            }
+                if self.show_stop_stream_dialog {
+                    ui::dialogs::show_stop_stream_dialog(self, ctx, ui, ctx);
+                }
 
-            if self.show_quit_dialog {
-                ui::dialogs::show_quit_dialog(self, ctx, ui);
-            }
-        });
+                if self.show_quit_dialog {
+                    ui::dialogs::show_quit_dialog(self, ctx, ui);
+                }
+            });
 
         // Handle the fullscreen toggle sequence to fix window sizing on stream start.
         if let Some(count) = self.fullscreen_toggle_frame_count {
@@ -420,7 +454,11 @@ impl eframe::App for AppState {
         }
         if ctx.input(|i| i.key_pressed(egui::Key::G)) {
             self.pixelate_filter_enabled = !self.pixelate_filter_enabled;
-            let status = if self.pixelate_filter_enabled { "enabled" } else { "disabled" };
+            let status = if self.pixelate_filter_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            };
             self.status_message = format!("480p Pixelate filter {}.", status);
             config::save_config(self);
         }

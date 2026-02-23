@@ -11,7 +11,10 @@ pub fn reset_usb_device(device_id: &str) -> Result<()> {
     if status.success() {
         Ok(())
     } else {
-        let msg = format!("'pkexec usbreset' failed with status: {}. Check if 'usbreset' is in your PATH.", status);
+        let msg = format!(
+            "'pkexec usbreset' failed with status: {}. Check if 'usbreset' is in your PATH.",
+            status
+        );
         tracing::error!("{}", msg);
         Err(anyhow!(msg))
     }
@@ -28,7 +31,8 @@ pub fn find_usb_devices() -> Result<Vec<(String, String)>> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let devices = stdout.lines()
+    let devices = stdout
+        .lines()
         .filter_map(|line| {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() > 6 && parts[4] == "ID" {

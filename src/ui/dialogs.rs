@@ -3,7 +3,11 @@ use eframe::egui;
 
 pub fn show_first_run_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) -> bool {
     let screen_rect = ctx.screen_rect();
-    ui.painter().rect_filled(screen_rect, 0.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 128));
+    ui.painter().rect_filled(
+        screen_rect,
+        0.0,
+        egui::Color32::from_rgba_unmultiplied(0, 0, 0, 128),
+    );
 
     egui::Window::new("Heads Up!")
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -36,7 +40,11 @@ pub fn show_first_run_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut
 
 pub fn show_quit_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
     let screen_rect = ctx.screen_rect();
-    ui.painter().rect_filled(screen_rect, 0.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 128));
+    ui.painter().rect_filled(
+        screen_rect,
+        0.0,
+        egui::Color32::from_rgba_unmultiplied(0, 0, 0, 128),
+    );
 
     egui::Window::new("Quit?")
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -54,12 +62,20 @@ pub fn show_quit_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut egui
                 }
             });
         });
-
 }
 
-pub fn show_stop_stream_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui, main_ctx: &egui::Context) {
+pub fn show_stop_stream_dialog(
+    state: &mut AppState,
+    ctx: &egui::Context,
+    ui: &mut egui::Ui,
+    main_ctx: &egui::Context,
+) {
     let screen_rect = ctx.screen_rect();
-    ui.painter().rect_filled(screen_rect, 0.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 128));
+    ui.painter().rect_filled(
+        screen_rect,
+        0.0,
+        egui::Color32::from_rgba_unmultiplied(0, 0, 0, 128),
+    );
 
     egui::Window::new("Stop Stream?")
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])

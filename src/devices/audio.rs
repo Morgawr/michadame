@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use libpulse_binding::callbacks::ListResult;
-use libpulse_binding::context::{Context as PulseContext, FlagSet as PulseContextFlagSet, State as PulseContextState};
+use libpulse_binding::context::{
+    Context as PulseContext, FlagSet as PulseContextFlagSet, State as PulseContextState,
+};
 use libpulse_binding::mainloop::standard::{IterateResult, Mainloop};
 use libpulse_binding::operation::State as OperationState;
 use std::cell::RefCell;
@@ -12,9 +14,12 @@ where
     F: FnOnce(&mut PulseContext, &mut Mainloop) -> Result<T>,
 {
     let mut mainloop = Mainloop::new().context("Failed to create mainloop")?;
-    let mut context = PulseContext::new(&mainloop, "pa-client").context("Failed to create context")?;
+    let mut context =
+        PulseContext::new(&mainloop, "pa-client").context("Failed to create context")?;
 
-    context.connect(None, PulseContextFlagSet::empty(), None).context("Failed to connect context")?;
+    context
+        .connect(None, PulseContextFlagSet::empty(), None)
+        .context("Failed to connect context")?;
 
     let start_time = std::time::Instant::now();
     loop {
@@ -33,7 +38,9 @@ where
         }
 
         if start_time.elapsed() > Duration::from_secs(5) {
-            return Err(anyhow!("Timeout waiting for PulseAudio context to be ready"));
+            return Err(anyhow!(
+                "Timeout waiting for PulseAudio context to be ready"
+            ));
         }
     }
 

@@ -1,4 +1,4 @@
-use crate::video::types::{VideoFormat, RawFrame};
+use crate::video::types::{RawFrame, VideoFormat};
 use anyhow::{Context, Result};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -42,7 +42,10 @@ pub fn video_thread_main(
     let ictx = ffmpeg_next::format::input_with_dictionary(&device, ffmpeg_options)
         .context("Failed to open input device with ffmpeg")?;
 
-    let input = ictx.streams().best(ffmpeg_next::media::Type::Video).context("Could not find best video stream")?;
+    let input = ictx
+        .streams()
+        .best(ffmpeg_next::media::Type::Video)
+        .context("Could not find best video stream")?;
     let video_stream_index = input.index();
 
     let mut decoder = ffmpeg_next::codec::context::Context::from_parameters(input.parameters())
@@ -55,7 +58,9 @@ pub fn video_thread_main(
     let _reader_thread = thread::spawn(move || {
         let mut ictx = ictx;
         for (stream, packet) in ictx.packets() {
-            if reader_stop_flag.load(Ordering::Relaxed) { break; }
+            if reader_stop_flag.load(Ordering::Relaxed) {
+                break;
+            }
             if stream.index() == video_stream_index {
                 let _ = packet_tx.try_send(packet);
             }
@@ -71,20 +76,25 @@ pub fn video_thread_main(
         decoder.width(),
         decoder.height(),
         ffmpeg_next::software::scaling::flag::Flags::BILINEAR,
-    ).context("Failed to create software scaler for normalization")?;
+    )
+    .context("Failed to create software scaler for normalization")?;
 
     while !stop_flag.load(Ordering::Relaxed) {
         if let Ok(packet) = packet_rx.recv() {
-            decoder.send_packet(&packet).context("Failed to send packet to decoder")?;
+            decoder
+                .send_packet(&packet)
+                .context("Failed to send packet to decoder")?;
             let mut decoded = ffmpeg_next::frame::Video::empty();
             while decoder.receive_frame(&mut decoded).is_ok() {
                 let width = decoded.width();
                 let height = decoded.height();
                 let format = decoded.format();
-                
+
                 // Use the scaler to normalize the frame (removes strides and ensures consistent plane layout)
                 let mut normalized = ffmpeg_next::frame::Video::empty();
-                scaler.run(&decoded, &mut normalized).context("Failed to normalize video frame")?;
+                scaler
+                    .run(&decoded, &mut normalized)
+                    .context("Failed to normalize video frame")?;
 
                 let mut data = Vec::new();
                 for i in 0..normalized.planes() {

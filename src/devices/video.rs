@@ -22,7 +22,11 @@ fn parse_format_line(line: &str) -> Option<VideoFormat> {
         let parts: Vec<&str> = line.split('\'').collect();
         if parts.len() >= 2 {
             let fourcc = parts[1].to_string();
-            let description = line.split(|c| c == '(' || c == ')').nth(1).unwrap_or("").to_string();
+            let description = line
+                .split(|c| c == '(' || c == ')')
+                .nth(1)
+                .unwrap_or("")
+                .to_string();
             return Some(VideoFormat {
                 fourcc,
                 description,
@@ -41,7 +45,11 @@ fn parse_resolution_line(line: &str) -> Option<Resolution> {
             let dim_parts: Vec<&str> = res_str.split('x').collect();
             if dim_parts.len() == 2 {
                 if let (Ok(w), Ok(h)) = (dim_parts[0].parse(), dim_parts[1].parse()) {
-                    return Some(Resolution { width: w, height: h, framerates: Vec::new() });
+                    return Some(Resolution {
+                        width: w,
+                        height: h,
+                        framerates: Vec::new(),
+                    });
                 }
             }
         }

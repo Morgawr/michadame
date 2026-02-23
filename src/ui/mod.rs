@@ -1,8 +1,8 @@
 use crate::app::AppState;
-use eframe::egui;
-use eframe::egui_glow;
 use crate::devices::filter_type::CrtFilter;
 use crate::video;
+use eframe::egui;
+use eframe::egui_glow;
 
 use std::thread;
 use tungstenite::{connect, Message};
@@ -71,7 +71,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         let video_texture = state.video_texture.as_ref().unwrap();
         let texture_size = video_texture.size_vec2();
 
-        let filter = CrtFilter::from_u8(state.crt_filter.load(std::sync::atomic::Ordering::Relaxed));
+        let filter =
+            CrtFilter::from_u8(state.crt_filter.load(std::sync::atomic::Ordering::Relaxed));
 
         // All GPU filtering is handled within a single paint callback to ensure correct state.
         if state.pixelate_filter_enabled || filter == CrtFilter::Lottes {
@@ -83,18 +84,32 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 let rect = response.rect;
                 let latest_frame = state.latest_frame.clone();
                 let video_texture = state.video_texture.as_ref().map(|t| t.id());
-    
+
                 let callback = egui::PaintCallback {
                     rect: response.rect,
-                    callback: std::sync::Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
-                        let mut renderer = renderer_clone.lock().unwrap();
-                        let output_size = (rect.width(), rect.height()); 
-                        let fallback_tex = video_texture.and_then(|id| painter.texture(id));
-                        
-                        let res = latest_frame.as_ref().map(|f| (f.width, f.height)).unwrap_or((texture_size.x as u32, texture_size.y as u32));
-                        
-                        renderer.paint(painter.gl(), latest_frame.as_deref(), fallback_tex, res, output_size, &params, pixelate, run_lottes)
-                    })),
+                    callback: std::sync::Arc::new(egui_glow::CallbackFn::new(
+                        move |_info, painter| {
+                            let mut renderer = renderer_clone.lock().unwrap();
+                            let output_size = (rect.width(), rect.height());
+                            let fallback_tex = video_texture.and_then(|id| painter.texture(id));
+
+                            let res = latest_frame
+                                .as_ref()
+                                .map(|f| (f.width, f.height))
+                                .unwrap_or((texture_size.x as u32, texture_size.y as u32));
+
+                            renderer.paint(
+                                painter.gl(),
+                                latest_frame.as_deref(),
+                                fallback_tex,
+                                res,
+                                output_size,
+                                &params,
+                                pixelate,
+                                run_lottes,
+                            )
+                        },
+                    )),
                 };
                 ui.painter().add(callback);
             }
@@ -102,18 +117,38 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             // Fallback to a simple passthrough shader if no other GPU filters are active.
             let renderer_clone = state.crt_renderer.as_ref().unwrap().clone();
             let rect = response.rect;
-            let background_color = if state.use_magenta_background { [1.0, 0.0, 1.0] } else { [0.0, 0.0, 0.0] };
+            let background_color = if state.use_magenta_background {
+                [1.0, 0.0, 1.0]
+            } else {
+                [0.0, 0.0, 0.0]
+            };
             let horizontal_stretch = state.horizontal_stretch;
             let median_filter_enabled = state.median_filter_enabled;
             let vibrance = state.vibrance;
             let latest_frame = state.latest_frame.clone();
             let video_texture = state.video_texture.as_ref().map(|t| t.id());
 
-            let callback = egui::PaintCallback { rect, callback: std::sync::Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
-                let fallback_tex = video_texture.and_then(|id| painter.texture(id));
-                let res = latest_frame.as_ref().map(|f| (f.width, f.height)).unwrap_or((texture_size.x as u32, texture_size.y as u32));
-                renderer_clone.lock().unwrap().draw_passthrough(painter.gl(), latest_frame.as_deref(), fallback_tex, res, (rect.width(), rect.height()), background_color, horizontal_stretch, median_filter_enabled, vibrance);
-            }))};
+            let callback = egui::PaintCallback {
+                rect,
+                callback: std::sync::Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
+                    let fallback_tex = video_texture.and_then(|id| painter.texture(id));
+                    let res = latest_frame
+                        .as_ref()
+                        .map(|f| (f.width, f.height))
+                        .unwrap_or((texture_size.x as u32, texture_size.y as u32));
+                    renderer_clone.lock().unwrap().draw_passthrough(
+                        painter.gl(),
+                        latest_frame.as_deref(),
+                        fallback_tex,
+                        res,
+                        (rect.width(), rect.height()),
+                        background_color,
+                        horizontal_stretch,
+                        median_filter_enabled,
+                        vibrance,
+                    );
+                })),
+            };
             ui.painter().add(callback);
         }
         if response.double_clicked() {

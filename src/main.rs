@@ -34,17 +34,43 @@ fn main() -> Result<(), eframe::Error> {
         // --- Embed a local font for 100% robust character support ---
         let mut fonts = egui::FontDefinitions::default();
 
-        fonts.font_data.insert("roboto_slab".to_owned(), egui::FontData::from_static(include_bytes!("../assets/RobotoSlab-Regular.ttf")).tweak(
-            egui::FontTweak { scale: 1.05, ..Default::default() },
-        ),);
-        fonts.font_data.insert("noto_sans_jp".to_owned(), egui::FontData::from_static(include_bytes!("../assets/NotoSansJP-Regular.ttf")));
-        fonts.font_data.insert("noto_emoji".to_owned(), egui::FontData::from_static(include_bytes!("../assets/NotoColorEmoji-Regular.ttf")));
+        fonts.font_data.insert(
+            "roboto_slab".to_owned(),
+            egui::FontData::from_static(include_bytes!("../assets/RobotoSlab-Regular.ttf")).tweak(
+                egui::FontTweak {
+                    scale: 1.05,
+                    ..Default::default()
+                },
+            ),
+        );
+        fonts.font_data.insert(
+            "noto_sans_jp".to_owned(),
+            egui::FontData::from_static(include_bytes!("../assets/NotoSansJP-Regular.ttf")),
+        );
+        fonts.font_data.insert(
+            "noto_emoji".to_owned(),
+            egui::FontData::from_static(include_bytes!("../assets/NotoColorEmoji-Regular.ttf")),
+        );
 
-        fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap()
-            .extend(vec!["roboto_slab".to_owned(), "noto_sans_jp".to_owned(), "noto_emoji".to_owned()]);
+        fonts
+            .families
+            .get_mut(&egui::FontFamily::Proportional)
+            .unwrap()
+            .extend(vec![
+                "roboto_slab".to_owned(),
+                "noto_sans_jp".to_owned(),
+                "noto_emoji".to_owned(),
+            ]);
 
-        fonts.families.get_mut(&egui::FontFamily::Monospace).unwrap()
-            .extend(vec!["roboto_slab".to_owned(), "noto_sans_jp".to_owned(), "noto_emoji".to_owned()]);
+        fonts
+            .families
+            .get_mut(&egui::FontFamily::Monospace)
+            .unwrap()
+            .extend(vec![
+                "roboto_slab".to_owned(),
+                "noto_sans_jp".to_owned(),
+                "noto_emoji".to_owned(),
+            ]);
 
         cc.egui_ctx.set_fonts(fonts);
         Box::new(app::AppState::new(cc)) as Box<dyn eframe::App>
