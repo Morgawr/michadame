@@ -2,6 +2,7 @@
     in vec2 v_tc;
     out vec4 out_color;
     uniform sampler2D raw_tex;
+    uniform int input_range; // 0 for Full, 1 for Limited
 
     float ToLinear1(float c) {
         return (c <= 0.04045) ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
@@ -26,8 +27,18 @@
             y_val = yuyv_vec.b; // Y1
         }
         
-        float u = yuyv_vec.g - 0.5;
-        float v = yuyv_vec.a - 0.5;
+        float u = yuyv_vec.g;
+        float v = yuyv_vec.a;
+
+        if (input_range == 1) {
+            // Limited Range (MPEG) to Full Range (JPEG) expansion
+            y_val = (y_val - 16.0/255.0) * (255.0/219.0);
+            u = (u - 16.0/255.0) * (255.0/224.0);
+            v = (v - 16.0/255.0) * (255.0/224.0);
+        }
+
+        u = u - 0.5;
+        v = v - 0.5;
 
         // BT.709 Full Range (PC Range) conversion
         float r = y_val + 1.5748 * v;

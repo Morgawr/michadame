@@ -5,6 +5,7 @@ pub struct RawFrame {
     pub height: u32,
     pub data: Vec<u8>,
     pub format: ffmpeg_next::format::Pixel,
+    pub color_range: ColorRange,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -107,6 +108,26 @@ impl ScalerFilter {
             ScalerFilter::Bicubic => ffmpeg_next::software::scaling::flag::Flags::BICUBIC,
             ScalerFilter::Point => ffmpeg_next::software::scaling::flag::Flags::POINT,
             ScalerFilter::Lanczos => ffmpeg_next::software::scaling::flag::Flags::LANCZOS,
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorRange {
+    Full = 0,
+    Limited = 1,
+}
+
+impl ColorRange {
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            1 => ColorRange::Limited,
+            _ => ColorRange::Full,
+        }
+    }
+    pub fn to_string(&self) -> String {
+        match self {
+            ColorRange::Full => "Full (PC)".to_string(),
+            ColorRange::Limited => "Limited (TV)".to_string(),
         }
     }
 }

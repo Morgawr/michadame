@@ -44,6 +44,8 @@ pub struct CrtFilterRenderer {
     final_prog: glow::Program,
     yuv_planar_prog: glow::Program,
     yuyv_packed_prog: glow::Program,
+    yuv_range_loc: glow::UniformLocation,
+    yuyv_range_loc: glow::UniformLocation,
 
     fbos: [glow::Framebuffer; 7], // 0-5 for passes, 6 for YUV conversion result
     pass_textures: [glow::Texture; 7], // 0-5 for passes, 6 for the YUV source texture
@@ -268,6 +270,10 @@ impl CrtFilterRenderer {
                 ),
                 0,
             );
+            let yuyv_range_loc = gl.get_uniform_location(yuyv_packed_prog, "input_range").unwrap();
+
+            gl.use_program(Some(yuv_planar_prog));
+            let yuv_range_loc = gl.get_uniform_location(yuv_planar_prog, "input_range").unwrap();
 
             gl.use_program(None);
 
@@ -352,6 +358,8 @@ impl CrtFilterRenderer {
                 final_prog,
                 yuv_planar_prog,
                 yuyv_packed_prog,
+                yuv_range_loc,
+                yuyv_range_loc,
                 fbos,
                 pass_textures,
                 yuv_planes,
@@ -490,6 +498,7 @@ impl CrtFilterRenderer {
                         glow::UNSIGNED_BYTE,
                         Some(v_data),
                     );
+                    gl.uniform_1_i32(Some(&self.yuv_range_loc), frame.color_range as i32);
                 } else if frame.format == Pixel::YUYV422 {
                     gl.use_program(Some(self.yuyv_packed_prog));
                     gl.active_texture(glow::TEXTURE0);
@@ -506,6 +515,7 @@ impl CrtFilterRenderer {
                         glow::UNSIGNED_BYTE,
                         Some(&frame.data),
                     );
+                    gl.uniform_1_i32(Some(&self.yuyv_range_loc), frame.color_range as i32);
                 }
 
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
@@ -780,6 +790,7 @@ impl CrtFilterRenderer {
                         glow::UNSIGNED_BYTE,
                         Some(v_data),
                     );
+                    gl.uniform_1_i32(Some(&self.yuv_range_loc), frame.color_range as i32);
                 } else if frame.format == Pixel::YUYV422 {
                     gl.use_program(Some(self.yuyv_packed_prog));
                     gl.active_texture(glow::TEXTURE0);
@@ -795,6 +806,7 @@ impl CrtFilterRenderer {
                         glow::UNSIGNED_BYTE,
                         Some(&frame.data),
                     );
+                    gl.uniform_1_i32(Some(&self.yuyv_range_loc), frame.color_range as i32);
                 }
 
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);

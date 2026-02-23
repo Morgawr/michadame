@@ -34,10 +34,19 @@ pub fn video_thread_main(
     resolution: (u32, u32),
     framerate: u32,
     scaler_filter: Arc<AtomicU8>,
+    color_range: Arc<AtomicU8>,
 ) -> Result<()> {
     ffmpeg_next::init().context("Failed to initialize FFmpeg")?;
-    let (_pixel_format, ffmpeg_options) = setup_ffmpeg_options(&format, resolution, framerate);
-
+    let (_pixel_format, mut ffmpeg_options) = setup_ffmpeg_options(&format, resolution, framerate);
+    
+    // Initial color range setup
+    let initial_range = color_range.load(Ordering::Relaxed);
+    if initial_range == 1 {
+        ffmpeg_options.set("color_range", "tv");
+    } else {
+        ffmpeg_options.set("color_range", "pc");
+    }
+    
     tracing::info!(device = %device, options = ?ffmpeg_options, "Starting FFmpeg with options");
     let ictx = ffmpeg_next::format::input_with_dictionary(&device, ffmpeg_options)
         .context("Failed to open input device with ffmpeg")?;
@@ -107,6 +116,9 @@ pub fn video_thread_main(
 
                 // Use the scaler to normalize the frame (removes strides and ensures consistent plane layout)
                 let mut normalized = ffmpeg_next::frame::Video::empty();
+                
+                let range_val = color_range.load(Ordering::Relaxed);
+
                 scaler
                     .run(&decoded, &mut normalized)
                     .context("Failed to normalize video frame")?;
@@ -121,6 +133,7 @@ pub fn video_thread_main(
                     height,
                     data,
                     format,
+                    color_range: crate::video::types::ColorRange::from_u8(range_val),
                 });
 
                 match frame_sender.try_send(raw_frame) {

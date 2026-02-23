@@ -10,6 +10,7 @@ pub struct Profile {
     pub video_format_fourcc: Option<String>,
     pub crt_filter: Option<u8>,
     pub scaler_filter: Option<u8>,
+    pub color_range: Option<u8>,
     pub pixelate_filter_enabled: Option<bool>,
 
     // Lottes params
@@ -48,6 +49,7 @@ struct LegacyConfig {
     video_format_fourcc: Option<String>,
     crt_filter: Option<u8>,
     scaler_filter: Option<u8>,
+    color_range: Option<u8>,
     pixelate_filter_enabled: Option<bool>,
     crt_hard_scan: Option<f32>,
     crt_warp_x: Option<f32>,
@@ -94,6 +96,7 @@ impl From<LegacyConfig> for MichadameConfig {
                 video_format_fourcc: legacy.video_format_fourcc,
                 crt_filter: legacy.crt_filter,
                 scaler_filter: legacy.scaler_filter,
+                color_range: legacy.color_range,
                 pixelate_filter_enabled: legacy.pixelate_filter_enabled,
                 crt_hard_scan: legacy.crt_hard_scan,
                 crt_warp_x: legacy.crt_warp_x,
@@ -154,6 +157,7 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
             .map(|f| f.fourcc.clone()),
         crt_filter: Some(state.crt_filter.load(Ordering::Relaxed)),
         scaler_filter: Some(state.scaler_filter.load(Ordering::Relaxed)),
+        color_range: Some(state.color_range.load(Ordering::Relaxed)),
         pixelate_filter_enabled: Some(state.video.pixelate_filter_enabled),
 
         crt_hard_scan: Some(state.crt.hard_scan),
@@ -263,6 +267,9 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) {
     }
     if let Some(s) = profile.scaler_filter {
         state.scaler_filter.store(s, Ordering::Relaxed);
+    }
+    if let Some(c) = profile.color_range {
+        state.color_range.store(c, Ordering::Relaxed);
     }
     if let Some(val) = profile.pixelate_filter_enabled {
         state.video.pixelate_filter_enabled = val;

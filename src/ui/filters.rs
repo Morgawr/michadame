@@ -55,6 +55,22 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     }
                 }
             });
+        
+        ui.label("Range:");
+        let current_range = state.color_range.load(std::sync::atomic::Ordering::Relaxed);
+        let range_text = crate::video::types::ColorRange::from_u8(current_range).to_string();
+        egui::ComboBox::from_id_source("range_selector")
+            .selected_text(range_text)
+            .show_ui(ui, |ui| {
+                if ui.selectable_value(&mut current_range.clone(), 0, "Full (PC)").clicked() {
+                    state.color_range.store(0, std::sync::atomic::Ordering::Relaxed);
+                    changed = true;
+                }
+                if ui.selectable_value(&mut current_range.clone(), 1, "Limited (TV)").clicked() {
+                    state.color_range.store(1, std::sync::atomic::Ordering::Relaxed);
+                    changed = true;
+                }
+            });
 
         if ui
             .checkbox(&mut state.video.pixelate_filter_enabled, "Pixelate")

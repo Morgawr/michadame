@@ -77,6 +77,7 @@ pub struct AppState {
 
     pub crt_filter: Arc<AtomicU8>,
     pub scaler_filter: Arc<AtomicU8>,
+    pub color_range: Arc<AtomicU8>,
     pub crt_renderer: Option<Arc<Mutex<video::gpu_filter::CrtFilterRenderer>>>,
     pub fullscreen_toggle_frame_count: Option<u8>,
 
@@ -143,6 +144,7 @@ impl Default for AppState {
             video_frames_since_last_check: 0,
             crt_filter: Arc::new(AtomicU8::new(CrtFilter::Off as u8)),
             scaler_filter: Arc::new(AtomicU8::new(video::types::ScalerFilter::Bicubic as u8)),
+            color_range: Arc::new(AtomicU8::new(video::types::ColorRange::Full as u8)),
             crt_renderer: None,
             fullscreen_toggle_frame_count: None,
             latest_frame: None,
@@ -261,6 +263,7 @@ impl AppState {
         self.frame_receiver = Some(rx);
 
         let scaler_filter = self.scaler_filter.clone();
+        let color_range = self.color_range.clone();
 
         let handle = thread::spawn(move || {
             if let Err(e) = video::decoder::video_thread_main(
@@ -270,6 +273,7 @@ impl AppState {
                 resolution,
                 framerate,
                 scaler_filter,
+                color_range,
             ) {
                 tracing::error!("Video thread error: {}", e);
             }
