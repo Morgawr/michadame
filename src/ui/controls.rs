@@ -14,18 +14,6 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     });
     ui.separator();
 
-    changed |= profiles::draw_profile_management(ui, state);
-    changed |= devices::draw_device_selectors(ui, state);
-    changed |= filters::draw_filters(ui, state);
-
-    if changed {
-        // config::save_config(state); is handled explicitly by the Save button now
-        // except when drawing specific triggers like resetting defaults. We'll do it
-        // there explicitly if needed.
-    }
-
-    ui.separator();
-
     ui.horizontal(|ui| {
         if state.ui.video_window_open {
             if ui.button("🛑 Stop Stream").clicked() {
@@ -47,6 +35,12 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             }
         }
     });
+
+    ui.separator();
+
+    changed |= profiles::draw_profile_management(ui, state);
+    changed |= devices::draw_device_selectors(ui, state);
+    changed |= filters::draw_filters(ui, state);
 
     changed
 }

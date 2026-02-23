@@ -75,7 +75,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
         if ui
             .add(
-                egui::Slider::new(&mut state.video.vibrance, 0.0..=1.0)
+                egui::Slider::new(&mut state.video.vibrance, 0.0..=3.0)
                     .text("Vibrance (Saturation)")
                     .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
             )
@@ -222,7 +222,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 state.crt.bloom_amount = 0.15;
                 state.crt.shape = 2.0;
 
-                state.video.vibrance = 0.0;
+                state.video.vibrance = 1.0;
                 state.video.use_magenta_background = false;
                 state.video.horizontal_stretch = 1.0;
                 state.video.pixelate_filter_enabled = false;
