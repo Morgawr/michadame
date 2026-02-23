@@ -29,6 +29,8 @@ pub fn draw_profile_management(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                 if let Some(profile) = profile_to_apply {
                     config::apply_profile_to_state(state, &profile);
                 }
+                config::save_config(state);
+                state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: format!("Switched to profile: {}", state.active_profile).into() });
                 changed = true;
             }
 
@@ -38,7 +40,7 @@ pub fn draw_profile_management(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                     .profiles
                     .insert(state.active_profile.clone(), current_profile_data);
                 config::save_config(state);
-                state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: format!("Saved configuration to profile: {}", state.active_profile).into() });
+                state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: format!("Saved configuration to profile: {}", state.active_profile).into() });
                 changed = true;
             }
 
@@ -63,7 +65,7 @@ pub fn draw_profile_management(ui: &mut egui::Ui, state: &mut AppState) -> bool 
 
                 config::save_config(state); // Save immediately on profile creation
                 changed = true;
-                state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: format!("Created and switched to profile: {}", state.active_profile).into() });
+                state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: format!("Created and switched to profile: {}", state.active_profile).into() });
             }
 
             if ui
@@ -86,7 +88,7 @@ pub fn draw_profile_management(ui: &mut egui::Ui, state: &mut AppState) -> bool 
 
                 config::save_config(state); // Save immediately on profile deletion
                 changed = true;
-                state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: format!("Deleted profile. Switched to: {}", state.active_profile).into() });
+                state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: format!("Deleted profile. Switched to: {}", state.active_profile).into() });
             }
         });
     });

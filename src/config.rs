@@ -210,6 +210,39 @@ pub fn save_config(state: &AppState) {
     }
 }
 
+pub fn save_global_hardware_config(state: &AppState) {
+    let mut cfg = match confy::load::<MichadameConfig>("michadame", None) {
+        Ok(c) => c,
+        Err(_) => MichadameConfig::default(),
+    };
+
+    // Update global settings
+    cfg.video_device = Some(state.hardware.selected_video_device.clone());
+    cfg.usb_device = state.hardware.selected_usb_device.clone();
+    cfg.video_resolution = if state.hardware.selected_resolution.0 > 0 {
+        Some(state.hardware.selected_resolution)
+    } else {
+        None
+    };
+    cfg.video_framerate = if state.hardware.selected_framerate > 0 {
+        Some(state.hardware.selected_framerate)
+    } else {
+        None
+    };
+    cfg.reset_usb_on_startup = Some(state.ui.reset_usb_on_startup);
+    cfg.has_shown_first_run_warning = Some(!state.ui.show_first_run_dialog);
+
+    cfg.active_profile = state.active_profile.clone();
+    
+    // We intentionally DO NOT update the `active_profile` data inline here. 
+    // This allows Michadame to save hardware settings independently without touching UI filters.
+    cfg.profiles = state.profiles.clone();
+
+    if let Err(e) = confy::store("michadame", None, cfg) {
+        tracing::error!("Failed to save global hardware configuration: {}", e);
+    }
+}
+
 pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) {
     if let Some(saved_source) = &profile.pulse_source {
         if state
@@ -299,7 +332,7 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     state.ui.reset_usb_on_startup = cfg.reset_usb_on_startup.unwrap_or(false);
     if state.ui.reset_usb_on_startup {
         if let Some(device_to_reset) = &state.hardware.selected_usb_device {
-            state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: (match crate::devices::usb::reset_usb_device(device_to_reset) {
+            state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: (match crate::devices::usb::reset_usb_device(device_to_reset) {
                 Ok(_) => "Auto-reset USB device successfully.".to_string(),
                 Err(e) => format!("Failed to auto-reset USB: {}", e),
             }).into() });

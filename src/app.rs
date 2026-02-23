@@ -171,11 +171,11 @@ impl AppState {
                 if let Ok(cfg) = confy::load::<config::MichadameConfig>("michadame", None) {
                     config::apply_config(self, &cfg);
                 }
-                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: "Devices loaded successfully.".to_string().into() });
+                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Devices loaded successfully.".to_string().into() });
                 true
             }
             Err(e) => {
-                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: format!("Error: {}", e).into() });
+                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: format!("Error: {}", e).into() });
                 false
             }
         };
@@ -223,15 +223,15 @@ impl AppState {
             (Some(mic), Some(sink)) => match devices::audio::load_pulse_loopback(mic, sink) {
                 Ok(index) => {
                     self.hardware.pulse_loopback_module_index = Some(index);
-                    self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: "PulseAudio loopback loaded.".to_string().into() });
+                    self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "PulseAudio loopback loaded.".to_string().into() });
                 }
                 Err(e) => {
-                    self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: format!("Failed to load loopback: {}", e).into() });
+                    self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: format!("Failed to load loopback: {}", e).into() });
                     return;
                 }
             },
             _ => {
-                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: "Cannot start: Missing PulseAudio devices.".to_string().into() });
+                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Cannot start: Missing PulseAudio devices.".to_string().into() });
                 return;
             }
         }
@@ -239,7 +239,7 @@ impl AppState {
         let format = if let Some(f) = self.hardware.supported_formats.get(self.hardware.selected_format_index) {
             f
         } else {
-            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: "Cannot start: No video format selected.".to_string().into() });
+            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Cannot start: No video format selected.".to_string().into() });
             return;
         };
 
@@ -275,7 +275,7 @@ impl AppState {
             }
         });
         self.video_thread = Some(handle);
-        self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: "Stream started.".to_string().into() });
+        self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Stream started.".to_string().into() });
         self.ui.video_window_open = true;
         self.ui.control_window_open = false;
 
@@ -309,15 +309,15 @@ impl AppState {
 
         if let Some(index) = self.hardware.pulse_loopback_module_index.take() {
             if let Err(e) = devices::audio::unload_pulse_loopback(index) {
-                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: format!(
+                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: format!(
                     "Stream stopped, but failed to unload PulseAudio module: {}",
                     e
                 ).into() });
             } else {
-                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: "Stream stopped and PulseAudio module unloaded.".to_string().into() });
+                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Stream stopped and PulseAudio module unloaded.".to_string().into() });
             }
         } else {
-            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: "Stream stopped.".to_string().into() });
+            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Stream stopped.".to_string().into() });
         }
 
         self.frame_receiver = None;
@@ -407,7 +407,7 @@ impl eframe::App for AppState {
             let next_filter = current_filter.next();
             self.crt_filter.store(next_filter as u8, Ordering::Relaxed);
             config::save_config(self);
-            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: format!("CRT filter set to: {}", next_filter.to_string()).into() });
+            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: format!("CRT filter set to: {}", next_filter.to_string()).into() });
         }
         if ctx.input(|i| i.key_pressed(egui::Key::G)) {
             self.video.pixelate_filter_enabled = !self.video.pixelate_filter_enabled;
@@ -416,7 +416,7 @@ impl eframe::App for AppState {
             } else {
                 "disabled"
             };
-            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: format!("480p Pixelate filter {}.", status).into() });
+            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: format!("480p Pixelate filter {}.", status).into() });
             config::save_config(self);
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -460,6 +460,7 @@ impl eframe::App for AppState {
         }
 
         self.update_fps_counters(ctx);
+        self.toasts.show(ctx);
 
         if repaint_requested {
             ctx.request_repaint();
