@@ -9,7 +9,16 @@ use tungstenite::{connect, Message};
 use url::Url;
 
 pub mod controls;
+pub mod devices;
 pub mod dialogs;
+pub mod filters;
+pub mod profiles;
+
+pub fn setup_style(ctx: &eframe::egui::Context) {
+    let mut style = (*ctx.style()).clone();
+    style.visuals.window_rounding = eframe::egui::Rounding::ZERO;
+    ctx.set_style(style);
+}
 
 fn send_ws_command(command: serde_json::Value) {
     thread::spawn(move || {

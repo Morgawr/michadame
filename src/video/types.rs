@@ -71,3 +71,42 @@ pub fn apply_saved_format_config(state: &mut AppState, cfg: &MichadameConfig) {
         }
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScalerFilter {
+    FastBilinear = 0,
+    Bilinear = 1,
+    Bicubic = 2,
+    Point = 3,
+    Lanczos = 4,
+}
+
+impl ScalerFilter {
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            1 => ScalerFilter::Bilinear,
+            2 => ScalerFilter::Bicubic,
+            3 => ScalerFilter::Point,
+            4 => ScalerFilter::Lanczos,
+            _ => ScalerFilter::FastBilinear,
+        }
+    }
+    pub fn to_string(&self) -> String {
+        match self {
+            ScalerFilter::FastBilinear => "Fast Bilinear".to_string(),
+            ScalerFilter::Bilinear => "Bilinear".to_string(),
+            ScalerFilter::Bicubic => "Bicubic".to_string(),
+            ScalerFilter::Point => "Point (Nearest)".to_string(),
+            ScalerFilter::Lanczos => "Lanczos".to_string(),
+        }
+    }
+    pub fn to_ffmpeg_flag(&self) -> ffmpeg_next::software::scaling::flag::Flags {
+        match self {
+            ScalerFilter::FastBilinear => ffmpeg_next::software::scaling::flag::Flags::FAST_BILINEAR,
+            ScalerFilter::Bilinear => ffmpeg_next::software::scaling::flag::Flags::BILINEAR,
+            ScalerFilter::Bicubic => ffmpeg_next::software::scaling::flag::Flags::BICUBIC,
+            ScalerFilter::Point => ffmpeg_next::software::scaling::flag::Flags::POINT,
+            ScalerFilter::Lanczos => ffmpeg_next::software::scaling::flag::Flags::LANCZOS,
+        }
+    }
+}

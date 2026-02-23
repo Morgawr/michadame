@@ -1,7 +1,7 @@
 use crate::video::types::{RawFrame, VideoFormat};
 use anyhow::{Context, Result};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
     Arc,
 };
 use std::thread;
@@ -34,6 +34,7 @@ pub fn video_thread_main(
     format: VideoFormat,
     resolution: (u32, u32),
     framerate: u32,
+    scaler_filter: Arc<AtomicU8>,
 ) -> Result<()> {
     ffmpeg_next::init().context("Failed to initialize FFmpeg")?;
     let (_pixel_format, ffmpeg_options) = setup_ffmpeg_options(&format, resolution, framerate);
@@ -65,9 +66,10 @@ pub fn video_thread_main(
                 let _ = packet_tx.try_send(packet);
             }
         }
-        tracing::info!("Packet reader thread finished.");
+        tracing::debug!("Packet reader thread finished.");
     });
 
+    let mut current_scaler_val = scaler_filter.load(Ordering::Relaxed);
     let mut scaler = ffmpeg_next::software::scaling::context::Context::get(
         decoder.format(),
         decoder.width(),
@@ -75,11 +77,26 @@ pub fn video_thread_main(
         decoder.format(),
         decoder.width(),
         decoder.height(),
-        ffmpeg_next::software::scaling::flag::Flags::BILINEAR,
+        crate::video::types::ScalerFilter::from_u8(current_scaler_val).to_ffmpeg_flag(),
     )
     .context("Failed to create software scaler for normalization")?;
 
     while !stop_flag.load(Ordering::Relaxed) {
+        let new_scaler_val = scaler_filter.load(Ordering::Relaxed);
+        if new_scaler_val != current_scaler_val {
+            current_scaler_val = new_scaler_val;
+            scaler = ffmpeg_next::software::scaling::context::Context::get(
+                decoder.format(),
+                decoder.width(),
+                decoder.height(),
+                decoder.format(),
+                decoder.width(),
+                decoder.height(),
+                crate::video::types::ScalerFilter::from_u8(current_scaler_val).to_ffmpeg_flag(),
+            )
+            .context("Failed to re-create software scaler")?;
+        }
+
         if let Ok(packet) = packet_rx.recv() {
             decoder
                 .send_packet(&packet)
@@ -114,6 +131,6 @@ pub fn video_thread_main(
             }
         }
     }
-    tracing::info!("Video thread finished.");
+    tracing::debug!("Video thread finished.");
     Ok(())
 }

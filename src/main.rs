@@ -1,9 +1,11 @@
 mod app;
 mod config;
 mod devices;
+mod state;
 mod ui;
 mod video;
 
+use anyhow::Result;
 use eframe::egui;
 
 fn main() -> Result<(), eframe::Error> {
@@ -73,7 +75,7 @@ fn main() -> Result<(), eframe::Error> {
             ]);
 
         cc.egui_ctx.set_fonts(fonts);
-        Box::new(app::AppState::new(cc)) as Box<dyn eframe::App>
+        Box::new(state::init_app_state(cc)) as Box<dyn eframe::App>
     };
 
     eframe::run_native("Michadame Viewer", options, Box::new(creator))

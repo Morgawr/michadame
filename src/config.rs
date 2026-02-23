@@ -9,6 +9,7 @@ pub struct Profile {
     pub pulse_sink: Option<String>,
     pub video_format_fourcc: Option<String>,
     pub crt_filter: Option<u8>,
+    pub scaler_filter: Option<u8>,
     pub pixelate_filter_enabled: Option<bool>,
 
     // Lottes params
@@ -47,6 +48,7 @@ pub struct MichadameConfig {
     pub pulse_sink: Option<String>,
     pub video_format_fourcc: Option<String>,
     pub crt_filter: Option<u8>,
+    pub scaler_filter: Option<u8>,
     pub pixelate_filter_enabled: Option<bool>,
     pub crt_hard_scan: Option<f32>,
     pub crt_warp_x: Option<f32>,
@@ -81,6 +83,7 @@ impl Default for MichadameConfig {
             pulse_sink: None,
             video_format_fourcc: None,
             crt_filter: None,
+            scaler_filter: None,
             pixelate_filter_enabled: None,
             crt_hard_scan: None,
             crt_warp_x: None,
@@ -109,6 +112,7 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
             .get(state.selected_format_index)
             .map(|f| f.fourcc.clone()),
         crt_filter: Some(state.crt_filter.load(Ordering::Relaxed)),
+        scaler_filter: Some(state.scaler_filter.load(Ordering::Relaxed)),
         pixelate_filter_enabled: Some(state.pixelate_filter_enabled),
 
         crt_hard_scan: Some(state.crt_hard_scan),
@@ -183,6 +187,9 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) {
     if let Some(filter) = profile.crt_filter {
         state.crt_filter.store(filter, Ordering::Relaxed);
     }
+    if let Some(s) = profile.scaler_filter {
+        state.scaler_filter.store(s, Ordering::Relaxed);
+    }
     if let Some(val) = profile.pixelate_filter_enabled {
         state.pixelate_filter_enabled = val;
     }
@@ -238,6 +245,7 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
         default_profile.pulse_sink = cfg.pulse_sink.clone();
         default_profile.video_format_fourcc = cfg.video_format_fourcc.clone();
         default_profile.crt_filter = cfg.crt_filter;
+        default_profile.scaler_filter = cfg.scaler_filter;
         default_profile.pixelate_filter_enabled = cfg.pixelate_filter_enabled;
         default_profile.crt_hard_scan = cfg.crt_hard_scan;
         default_profile.crt_warp_x = cfg.crt_warp_x;
@@ -289,6 +297,8 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     if !cfg.has_shown_first_run_warning.unwrap_or(false) {
         state.show_first_run_dialog = true;
     }
+
+    state.active_profile = cfg.active_profile.clone();
 
     // Apply active profile
     let profile_to_apply = state.profiles.get(&state.active_profile).cloned();

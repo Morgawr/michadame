@@ -1,6 +1,5 @@
 use crate::video::VideoFormat;
 use crate::{config, devices, devices::filter_type::CrtFilter, ui, video};
-use anyhow::Context;
 use eframe::egui;
 use std::collections::HashMap;
 use std::sync::{
@@ -30,7 +29,7 @@ pub struct AppState {
     pub video_texture: Option<egui::TextureHandle>,
     pub latest_frame: Option<Arc<video::types::RawFrame>>,
     pub frame_receiver: Option<crossbeam_channel::Receiver<Arc<video::types::RawFrame>>>,
-    device_scan_receiver: Option<crossbeam_channel::Receiver<devices::DeviceScanResult>>,
+    pub device_scan_receiver: Option<crossbeam_channel::Receiver<devices::DeviceScanResult>>,
     pub logo_texture: Option<egui::TextureHandle>,
     last_fps_check: Instant,
     frames_since_last_check: u32,
@@ -45,6 +44,7 @@ pub struct AppState {
     pub control_window_open: bool,
     pub pixelate_filter_enabled: bool,
     pub crt_filter: Arc<AtomicU8>,
+    pub scaler_filter: Arc<AtomicU8>,
     pub crt_renderer: Option<Arc<Mutex<video::gpu_filter::CrtFilterRenderer>>>,
 
     // Lottes Filter Params
@@ -106,6 +106,7 @@ impl Default for AppState {
             control_window_open: true,
             pixelate_filter_enabled: false,
             crt_filter: Arc::new(AtomicU8::new(CrtFilter::Off as u8)),
+            scaler_filter: Arc::new(AtomicU8::new(video::types::ScalerFilter::Bicubic as u8)),
             crt_renderer: None,
 
             // Lottes Filter Params
@@ -137,74 +138,6 @@ impl Default for AppState {
 }
 
 impl AppState {
-    pub fn new(cc: &eframe::CreationContext) -> Self {
-        let mut app_state = AppState::default();
-
-        // Load UI Logo Texture
-        let logo_image = image::load_from_memory(include_bytes!("../assets/logo.png"))
-            .expect("Failed to load logo");
-        let logo_size = [logo_image.width() as _, logo_image.height() as _];
-        let logo_rgba = logo_image.to_rgba8();
-        let logo_pixels = logo_rgba.as_flat_samples();
-        let logo_color_image =
-            egui::ColorImage::from_rgba_unmultiplied(logo_size, logo_pixels.as_slice());
-        let logo_texture = cc
-            .egui_ctx
-            .load_texture("logo", logo_color_image, Default::default());
-
-        // Pre-allocate the video texture to prevent panics.
-        let video_texture = {
-            let tex_manager = cc.egui_ctx.tex_manager();
-            let tex_id = tex_manager.write().alloc(
-                "video_stream".to_string(),
-                egui::ImageData::Color(egui::ColorImage::new([1, 1], egui::Color32::BLACK).into()),
-                egui::TextureOptions::LINEAR,
-            );
-            egui::TextureHandle::new(tex_manager, tex_id)
-        };
-        app_state.video_texture = Some(video_texture);
-
-        if let Some(gl) = cc.gl.as_ref() {
-            app_state.crt_renderer = Some(Arc::new(Mutex::new(
-                video::gpu_filter::CrtFilterRenderer::new(gl),
-            )));
-        }
-
-        app_state.logo_texture = Some(logo_texture);
-
-        // Asynchronous Device Scanning
-        let (tx, rx) = crossbeam_channel::unbounded();
-        app_state.device_scan_receiver = Some(rx);
-
-        let egui_ctx = cc.egui_ctx.clone();
-        std::thread::spawn(move || {
-            let video_result = devices::video::find_video_devices();
-            let pulse_result = devices::audio::find_pulse_devices();
-            let usb_result = devices::usb::find_usb_devices();
-
-            let result: devices::DeviceScanResult = (|| {
-                let video_devices = video_result.context("Failed to find video devices")?;
-                let (pulse_sources, pulse_sinks) =
-                    pulse_result.context("Failed to find PulseAudio devices")?;
-                let usb_devices = usb_result.context("Failed to find USB devices")?;
-                Ok((video_devices, pulse_sources, pulse_sinks, usb_devices))
-            })();
-
-            if let Err(e) = &result {
-                tracing::error!("Device scan failed: {:?}", e);
-            };
-            let _ = tx.send(result);
-            egui_ctx.request_repaint();
-        });
-
-        // Request focus for the control window on startup
-        cc.egui_ctx.send_viewport_cmd_to(
-            egui::ViewportId::from_hash_of("control_window"),
-            egui::ViewportCommand::Focus,
-        );
-        app_state
-    }
-
     fn handle_device_scan_result(&mut self, result: devices::DeviceScanResult) -> bool {
         let scan_successful = match result {
             Ok((video_devices, pulse_sources, pulse_sinks, usb_devices)) => {
@@ -309,9 +242,17 @@ impl AppState {
         let (tx, rx) = crossbeam_channel::bounded(1);
         self.frame_receiver = Some(rx);
 
+        let scaler_filter = self.scaler_filter.clone();
+
         let handle = thread::spawn(move || {
             if let Err(e) = video::decoder::video_thread_main(
-                tx, stop_flag, device, format, resolution, framerate,
+                tx,
+                stop_flag,
+                device,
+                format,
+                resolution,
+                framerate,
+                scaler_filter,
             ) {
                 tracing::error!("Video thread error: {}", e);
             }
