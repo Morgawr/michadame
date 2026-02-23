@@ -28,15 +28,15 @@ pub fn init_app_state(cc: &eframe::CreationContext) -> AppState {
     let (tx, _rx) = crossbeam_channel::unbounded();
     let (video_devices, pulse_sources, pulse_sinks, usb_devices) =
         crate::devices::scan_devices(None, None, tx);
-    state.video_devices = video_devices;
-    state.usb_devices = usb_devices;
-    state.pulse_sources = pulse_sources;
-    state.pulse_sinks = pulse_sinks;
+    state.hardware.video_devices = video_devices;
+    state.hardware.usb_devices = usb_devices;
+    state.hardware.pulse_sources = pulse_sources;
+    state.hardware.pulse_sinks = pulse_sinks;
 
-    if !state.selected_video_device.is_empty() {
-        match crate::devices::video::find_video_formats(&state.selected_video_device) {
+    if !state.hardware.selected_video_device.is_empty() {
+        match crate::devices::video::find_video_formats(&state.hardware.selected_video_device) {
             Ok(formats) => {
-                state.supported_formats = formats;
+                state.hardware.supported_formats = formats;
                 crate::video::types::apply_saved_format_config(&mut state, &loaded_cfg);
             }
             Err(e) => {

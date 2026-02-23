@@ -57,13 +57,13 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             });
 
         if ui
-            .checkbox(&mut state.pixelate_filter_enabled, "Pixelate")
+            .checkbox(&mut state.video.pixelate_filter_enabled, "Pixelate")
             .changed()
         {
             changed = true;
         }
         if ui
-            .checkbox(&mut state.median_filter_enabled, "Median Filter 3x1")
+            .checkbox(&mut state.video.median_filter_enabled, "Median Filter 3x1")
             .changed()
         {
             changed = true;
@@ -75,7 +75,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
         if ui
             .add(
-                egui::Slider::new(&mut state.vibrance, 0.0..=1.0)
+                egui::Slider::new(&mut state.video.vibrance, 0.0..=1.0)
                     .text("Vibrance (Saturation)")
                     .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
             )
@@ -86,7 +86,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
         ui.horizontal(|ui| {
             if ui
-                .checkbox(&mut state.use_magenta_background, "Magenta Background")
+                .checkbox(&mut state.video.use_magenta_background, "Magenta Background")
                 .on_hover_text(
                     "Uses a magenta background around the video stream instead of black.",
                 )
@@ -96,7 +96,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             }
             if ui
                 .add(
-                    egui::Slider::new(&mut state.horizontal_stretch, 1.0..=1.5)
+                    egui::Slider::new(&mut state.video.horizontal_stretch, 1.0..=1.5)
                         .text("Horizontal Stretch")
                         .step_by(0.001)
                         .custom_formatter(|n, _| format!("{:.1}%", n * 100.0)),
@@ -115,30 +115,30 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         ui.group(|ui| {
             ui.label("Lottes CRT Parameters:");
 
-            let mut scan = state.crt_hard_scan as f32;
-            let mut pix = state.crt_hard_pix as f32;
-            let mut bright = state.crt_brightboost as f32;
-            let mut warp_x = state.crt_warp_x as f32;
-            let mut warp_y = state.crt_warp_y as f32;
-            let mut mask = state.crt_shadow_mask as f32;
-            let mut bloom_pix = state.crt_hard_bloom_pix as f32;
-            let mut bloom_scan = state.crt_hard_bloom_scan as f32;
-            let mut bloom_amount = state.crt_bloom_amount as f32;
-            let mut shape = state.crt_shape as f32;
+            let mut scan = state.crt.hard_scan as f32;
+            let mut pix = state.crt.hard_pix as f32;
+            let mut bright = state.crt.brightboost as f32;
+            let mut warp_x = state.crt.warp_x as f32;
+            let mut warp_y = state.crt.warp_y as f32;
+            let mut mask = state.crt.shadow_mask as f32;
+            let mut bloom_pix = state.crt.hard_bloom_pix as f32;
+            let mut bloom_scan = state.crt.hard_bloom_scan as f32;
+            let mut bloom_amount = state.crt.bloom_amount as f32;
+            let mut shape = state.crt.shape as f32;
 
             ui.horizontal(|ui| {
                 if ui
                     .add(egui::Slider::new(&mut scan, -20.0..=0.0).text("HardScan"))
                     .changed()
                 {
-                    state.crt_hard_scan = scan;
+                    state.crt.hard_scan = scan;
                     changed = true;
                 }
                 if ui
                     .add(egui::Slider::new(&mut pix, -20.0..=0.0).text("HardPix"))
                     .changed()
                 {
-                    state.crt_hard_pix = pix;
+                    state.crt.hard_pix = pix;
                     changed = true;
                 }
             });
@@ -147,14 +147,14 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     .add(egui::Slider::new(&mut bright, 0.5..=2.0).text("Brightboost"))
                     .changed()
                 {
-                    state.crt_brightboost = bright;
+                    state.crt.brightboost = bright;
                     changed = true;
                 }
                 if ui
                     .add(egui::Slider::new(&mut bloom_amount, 0.0..=1.0).text("Bloom Amount"))
                     .changed()
                 {
-                    state.crt_bloom_amount = bloom_amount;
+                    state.crt.bloom_amount = bloom_amount;
                     changed = true;
                 }
             });
@@ -163,14 +163,14 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     .add(egui::Slider::new(&mut warp_x, 0.0..=0.125).text("WarpX"))
                     .changed()
                 {
-                    state.crt_warp_x = warp_x;
+                    state.crt.warp_x = warp_x;
                     changed = true;
                 }
                 if ui
                     .add(egui::Slider::new(&mut warp_y, 0.0..=0.125).text("WarpY"))
                     .changed()
                 {
-                    state.crt_warp_y = warp_y;
+                    state.crt.warp_y = warp_y;
                     changed = true;
                 }
             });
@@ -180,7 +180,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     .on_hover_text("0=None, 1=Compressed TV, 2=Aperture, 3=VGA, 4=VGA (lighter)")
                     .changed()
                 {
-                    state.crt_shadow_mask = mask.round(); // Assuming integer values desired for enum
+                    state.crt.shadow_mask = mask.round(); // Assuming integer values desired for enum
                     changed = true;
                 }
             });
@@ -190,7 +190,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     .on_hover_text("0=Linear, 1=Gaussian, 2=Sinc, etc.")
                     .changed()
                 {
-                    state.crt_shape = shape.round();
+                    state.crt.shape = shape.round();
                     changed = true;
                 }
             });
@@ -199,34 +199,34 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     .add(egui::Slider::new(&mut bloom_pix, -2.0..=2.0).text("BloomPix"))
                     .changed()
                 {
-                    state.crt_hard_bloom_pix = bloom_pix;
+                    state.crt.hard_bloom_pix = bloom_pix;
                     changed = true;
                 }
                 if ui
                     .add(egui::Slider::new(&mut bloom_scan, -2.0..=2.0).text("BloomScan"))
                     .changed()
                 {
-                    state.crt_hard_bloom_scan = bloom_scan;
+                    state.crt.hard_bloom_scan = bloom_scan;
                     changed = true;
                 }
             });
             if ui.button("Reset Defaults").clicked() {
-                state.crt_hard_scan = -8.0;
-                state.crt_hard_pix = -3.0;
-                state.crt_brightboost = 1.0;
-                state.crt_warp_x = 0.031;
-                state.crt_warp_y = 0.041;
-                state.crt_shadow_mask = 1.0;
-                state.crt_hard_bloom_pix = -1.5;
-                state.crt_hard_bloom_scan = -2.0;
-                state.crt_bloom_amount = 0.15;
-                state.crt_shape = 2.0;
+                state.crt.hard_scan = -8.0;
+                state.crt.hard_pix = -3.0;
+                state.crt.brightboost = 1.0;
+                state.crt.warp_x = 0.031;
+                state.crt.warp_y = 0.041;
+                state.crt.shadow_mask = 1.0;
+                state.crt.hard_bloom_pix = -1.5;
+                state.crt.hard_bloom_scan = -2.0;
+                state.crt.bloom_amount = 0.15;
+                state.crt.shape = 2.0;
 
-                state.vibrance = 0.0;
-                state.use_magenta_background = false;
-                state.horizontal_stretch = 1.0;
-                state.pixelate_filter_enabled = false;
-                state.median_filter_enabled = false;
+                state.video.vibrance = 0.0;
+                state.video.use_magenta_background = false;
+                state.video.horizontal_stretch = 1.0;
+                state.video.pixelate_filter_enabled = false;
+                state.video.median_filter_enabled = false;
                 changed = true;
             }
         });

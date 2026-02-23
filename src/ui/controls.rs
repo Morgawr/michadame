@@ -27,20 +27,20 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     ui.separator();
 
     ui.horizontal(|ui| {
-        if state.video_window_open {
+        if state.ui.video_window_open {
             if ui.button("🛑 Stop Stream").clicked() {
                 state.stop_stream(ui.ctx());
-                state.status_message = "Stream stopped.".to_string();
+                state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: "Stream stopped.".to_string().into() });
             }
         } else {
             let can_stream =
-                !state.selected_video_device.is_empty() && state.selected_resolution.0 > 0;
+                !state.hardware.selected_video_device.is_empty() && state.hardware.selected_resolution.0 > 0;
             if ui
                 .add_enabled(can_stream, egui::Button::new("▶ Start Stream"))
                 .clicked()
             {
                 state.start_stream(ui.ctx());
-                state.status_message = "Stream starting...".to_string();
+                state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: "Stream starting...".to_string().into() });
             }
             if !can_stream {
                 ui.label("Select Video Format/Resolution first.");

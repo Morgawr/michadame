@@ -4,394 +4,34 @@ use crate::video::types::RawFrame;
 use ffmpeg_next::format::Pixel;
 use std::num::NonZero;
 
-const VS_SRC: &str = r#"#version 330 core
-    layout(location = 0) in vec2 a_pos;
-    layout(location = 1) in vec2 a_tc;
-    out vec2 v_tc;
-    void main() {
-        gl_Position = vec4(a_pos, 0.0, 1.0);
-        v_tc = a_tc;
-    }
-"#;
+const VS_SRC: &str = include_str!("shaders/vs_src.glsl");
 
-const FS_YUV_PLANAR: &str = r#"#version 330 core
-    in vec2 v_tc;
-    out vec4 out_color;
-    uniform sampler2D y_tex;
-    uniform sampler2D u_tex;
-    uniform sampler2D v_tex;
+const FS_YUV_PLANAR: &str = include_str!("shaders/fs_yuv_planar.glsl");
 
-    float ToLinear1(float c) {
-        return (c <= 0.04045) ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
-    }
-    vec3 ToLinear(vec3 c) {
-        return vec3(ToLinear1(c.r), ToLinear1(c.g), ToLinear1(c.b));
-    }
-
-    void main() {
-        float y = texture(y_tex, v_tc).r;
-        float u = texture(u_tex, v_tc).r - 0.5;
-        float v = texture(v_tex, v_tc).r - 0.5;
-
-        // BT.709 Full Range (PC Range) conversion
-        // R = Y + 1.5748 * V
-        // G = Y - 0.1873 * U - 0.4681 * V
-        // B = Y + 1.8556 * U
-        float r = y + 1.5748 * v;
-        float g = y - 0.1873 * u - 0.4681 * v;
-        float b = y + 1.8556 * u;
-
-        // Convert to linear space for the filtering pipeline
-        out_color = vec4(ToLinear(clamp(vec3(r, g, b), 0.0, 1.0)), 1.0);
-    }
-"#;
-
-const FS_YUYV_PACKED: &str = r#"#version 330 core
-    in vec2 v_tc;
-    out vec4 out_color;
-    uniform sampler2D raw_tex;
-
-    float ToLinear1(float c) {
-        return (c <= 0.04045) ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
-    }
-    vec3 ToLinear(vec3 c) {
-        return vec3(ToLinear1(c.r), ToLinear1(c.g), ToLinear1(c.b));
-    }
-
-    void main() {
-        // YUYV is packed: [Y0, U0, Y1, V0]
-        // We sample the texture as if it were RGBA (each pixel has 4 channels)
-        // Texture width is width / 2
-        vec4 yuyv_vec = texture(raw_tex, v_tc);
-        
-        // Determine if we want the first or second Y based on X coordinate
-        // We multiply by 2 because each texture pixel contains 2 source pixels
-        float x_idx = v_tc.x * textureSize(raw_tex, 0).x * 2.0;
-        float y_val;
-        if (int(floor(x_idx)) % 2 == 0) {
-            y_val = yuyv_vec.r; // Y0
-        } else {
-            y_val = yuyv_vec.b; // Y1
-        }
-        
-        float u = yuyv_vec.g - 0.5;
-        float v = yuyv_vec.a - 0.5;
-
-        // BT.709 Full Range (PC Range) conversion
-        float r = y_val + 1.5748 * v;
-        float g = y_val - 0.1873 * u - 0.4681 * v;
-        float b = y_val + 1.8556 * u;
-
-        out_color = vec4(ToLinear(clamp(vec3(r, g, b), 0.0, 1.0)), 1.0);
-    }
-"#;
+const FS_YUYV_PACKED: &str = include_str!("shaders/fs_yuyv_packed.glsl");
 
 // 3x1 Horizontal Median Filter
-const FS_MEDIAN_3X1: &str = r#"#version 330 core
-    in vec2 v_tc;
-    out vec4 out_color;
-    uniform sampler2D video_texture;
-
-    vec3 median(vec3 a, vec3 b, vec3 c) {
-        return max(min(a, b), min(max(a, b), c));
-    }
-
-    void main() {
-        vec2 tex_size = vec2(textureSize(video_texture, 0));
-        vec2 dx = vec2(1.0 / tex_size.x, 0.0);
-        
-        vec3 col_m = texture(video_texture, v_tc - dx).rgb;
-        vec3 col_c = texture(video_texture, v_tc).rgb;
-        vec3 col_p = texture(video_texture, v_tc + dx).rgb;
-        
-        out_color = vec4(median(col_m, col_c, col_p), 1.0);
-    }"#;
+const FS_MEDIAN_3X1: &str = include_str!("shaders/fs_median_3x1.glsl");
 
 // Pixelation shader to simulate 480p
-const FS_PIXELATE: &str = r#"#version 330 core
-    in vec2 v_tc;
-    out vec4 out_color;
-
-    uniform sampler2D video_texture;
-    uniform vec2 target_resolution; // e.g., 854.0, 480.0 for 16:9 480p
-
-    void main() {
-        // Calculate the size of a 'pixel' in the low-resolution target.
-        vec2 pixel_size = 1.0 / target_resolution;
-
-        // Find the coordinate of the center of the low-res 'pixel' block.
-        vec2 pixelated_uv = (floor(v_tc / pixel_size) + 0.5) * pixel_size;
-
-        out_color = texture(video_texture, pixelated_uv);
-    }"#;
+const FS_PIXELATE: &str = include_str!("shaders/fs_pixelate.glsl");
 
 // Simple passthrough shader for drawing a texture to the screen
-const FS_PASSTHROUGH: &str = r#"#version 330 core
-    in vec2 v_tc;
-    out vec4 out_color;
-    uniform sampler2D video_texture;
-    uniform vec2 videoResolution;
-    uniform vec2 outputResolution;
-    uniform vec3 background_color;
-    uniform float horizontal_stretch;
-    uniform float vibrance;
-    
-    // Convert from linear to sRGB color space
-    float ToSrgb1(float c) {
-        return (c < 0.0031308 ? c * 12.92 : 1.055 * pow(c, 0.41666) - 0.055);
-    }
-    vec3 ToSrgb(vec3 c) {
-        return vec3(ToSrgb1(c.r), ToSrgb1(c.g), ToSrgb1(c.b));
-    }
-
-    void main() {
-        vec2 corrected_tc = vec2(v_tc.x, 1.0 - v_tc.y);
-        float video_aspect = (videoResolution.x * horizontal_stretch) / videoResolution.y;
-        float output_aspect = outputResolution.x / outputResolution.y;
-
-        vec2 scale = vec2(1.0, 1.0);
-        if (video_aspect > output_aspect) {
-            scale.y = output_aspect / video_aspect;
-        } else {
-            scale.x = video_aspect / output_aspect;
-        }
-
-        vec2 centered_tc = (corrected_tc - 0.5) / scale + 0.5;
-
-        if (centered_tc.x < 0.0 || centered_tc.x > 1.0 || centered_tc.y < 0.0 || centered_tc.y > 1.0) {
-            out_color = vec4(ToSrgb(background_color), 1.0);
-        } else {
-            vec3 linear_color = texture(video_texture, centered_tc).rgb;
-            // Apply vibrance (saturation boost in linear space)
-            float luminance = dot(linear_color, vec3(0.299, 0.587, 0.114));
-            linear_color = mix(vec3(luminance), linear_color, vibrance);
-            out_color = vec4(ToSrgb(linear_color), 1.0);
-        }
-    }"#;
+const FS_PASSTHROUGH: &str = include_str!("shaders/fs_passthrough.glsl");
 // Lottes Pass 0: Horizontal blur for bloom
-const FS_PASS0: &str = r#"#version 330 core
-    in vec2 v_tc;
-    out vec4 out_color;
-    uniform sampler2D video_texture;
-    uniform float hardBloomPix;
-
-    float Gaus(float pos, float scale) {
-        return exp2(scale * pos * pos);
-    }
-
-    void main() {
-        vec2 tex_size = vec2(textureSize(video_texture, 0));
-        vec2 dx = vec2(1.0 / tex_size.x, 0.0);
-        vec3 col = vec3(0.0);
-        float total = 0.0;
-        for (int i = -3; i <= 3; i += 1) {
-            float weight = Gaus(i, hardBloomPix);
-            col += texture(video_texture, v_tc + i * dx).rgb * weight;
-            total += weight;
-        }
-        out_color = vec4(col / total, 1.0);
-    }
-"#;
+const FS_PASS0: &str = include_str!("shaders/fs_pass0.glsl");
 
 // Lottes Pass 1: Vertical blur for bloom
-const FS_PASS1: &str = r#"#version 330 core
-    in vec2 v_tc;
-    out vec4 out_color;
-    uniform sampler2D pass0_texture;
-    uniform float hardBloomScan;
-
-    float Gaus(float pos, float scale) {
-        return exp2(scale * pos * pos);
-    }
-
-    void main() {
-        vec2 tex_size = vec2(textureSize(pass0_texture, 0));
-        vec2 dy = vec2(0.0, 1.0 / tex_size.y);
-        vec3 col = vec3(0.0);
-        float total = 0.0;
-        for (int i = -2; i <= 2; i += 1) {
-            float weight = Gaus(i, hardBloomScan);
-            col += texture(pass0_texture, v_tc + i * dy).rgb * weight;
-            total += weight;
-        }
-        out_color = vec4(col / total, 1.0);
-    }
-"#;
+const FS_PASS1: &str = include_str!("shaders/fs_pass1.glsl");
 
 // Lottes Pass 2: Horizontal blur for scanlines
-const FS_PASS2: &str = r#"#version 330 core
-    in vec2 v_tc;
-    out vec4 out_color;
-    uniform sampler2D video_texture;
-    uniform float hardPix;
-
-    float Gaus(float pos, float scale) {
-        return exp2(scale * pos * pos);
-    }
-
-    void main() {
-        vec2 tex_size = vec2(textureSize(video_texture, 0));
-        vec2 dx = vec2(1.0 / tex_size.x, 0.0);
-        vec3 col = vec3(0.0);
-        float total = 0.0;
-        for (int i = -2; i <= 2; i += 1) {
-            float weight = Gaus(i, hardPix);
-            col += texture(video_texture, v_tc + i * dx).rgb * weight;
-            total += weight;
-        }
-        out_color = vec4(col / total, 1.0);
-    }
-"#;
+const FS_PASS2: &str = include_str!("shaders/fs_pass2.glsl");
 
 // Lottes Pass 3: Vertical blur for scanlines
-const FS_PASS3: &str = r#"#version 330 core
-    in vec2 v_tc;
-    out vec4 out_color;
-    uniform sampler2D pass2_texture;
-    uniform float hardScan;
-    uniform float shape;
-
-    float Gaus(float pos, float scale) {
-        return exp2(scale * pow(abs(pos), shape));
-    }
-
-    void main() {
-        vec2 tex_size = vec2(textureSize(pass2_texture, 0));
-        vec2 dy = vec2(0.0, 1.0 / tex_size.y);
-        vec3 col = vec3(0.0);
-        float total = 0.0;
-        for (int i = -2; i <= 2; i += 1) {
-            float weight = Gaus(i, hardScan);
-            col += texture(pass2_texture, v_tc + i * dy).rgb * weight;
-            total += weight;
-        }
-        out_color = vec4(col / total, 1.0);
-    }
-"#;
+const FS_PASS3: &str = include_str!("shaders/fs_pass3.glsl");
 
 // Lottes Final Pass: Combines textures and applies warp, mask, and color correction
-const FS_FINAL: &str = r#"#version 330 core
-    in vec2 v_tc;
-    out vec4 out_color;
-
-    uniform sampler2D pass1_texture; // bloom
-    uniform sampler2D pass3_texture; // scanlines
-
-    uniform vec2 videoResolution;
-    uniform vec2 outputResolution;
-
-    uniform float warpX;
-    uniform float warpY;
-    uniform float shadowMask; // 0-4
-    uniform float brightboost;
-    uniform float bloomAmount;
-    uniform vec3 background_color;
-    uniform float horizontal_stretch;
-    uniform float vibrance;
-
-    float ToSrgb1(float c) {
-        return (c < 0.0031308 ? c * 12.92 : 1.055 * pow(c, 0.41666) - 0.055);
-    }
-
-    vec3 ToSrgb(vec3 c) {
-        return vec3(ToSrgb1(c.r), ToSrgb1(c.g), ToSrgb1(c.b));
-    }
-
-    vec2 Warp(vec2 pos) {
-        pos = pos * 2.0 - 1.0;
-        pos *= vec2(1.0 + (pos.y * pos.y) * warpX, 1.0 + (pos.x * pos.x) * warpY);
-        return pos * 0.5 + 0.5;
-    }
-
-    vec3 Mask(vec2 pos) {
-        float maskDark = 0.5;
-        vec3 mask = vec3(0.5, 0.5, 0.5); // maskDark
-        float maskLight = 1.5;
-        if (shadowMask == 1.0) { // Compressed TV
-            float line = maskLight;
-            float odd = 0.0;
-            if (fract(pos.x / 6.0) < 0.5) odd = 1.0;
-            if (fract((pos.y + odd) / 2.0) < 0.5) line = maskDark;
-            pos.x = fract(pos.x / 3.0);
-            if (pos.x < 0.333) mask.r = maskLight;
-            else if (pos.x < 0.666) mask.g = maskLight;
-            else mask.b = maskLight;
-            mask *= line;
-        } else if (shadowMask == 2.0) { // Aperture-grille
-            pos.x = fract(pos.x / 3.0);
-            if (pos.x < 0.333) mask.r = maskLight;
-            else if (pos.x < 0.666) mask.g = maskLight;
-            else mask.b = maskLight;
-        } else if (shadowMask == 3.0) { // Stretched VGA
-            pos.x += pos.y * 3.0;
-            pos.x = fract(pos.x / 6.0);
-            if (pos.x < 0.333) mask.r = maskLight;
-            else if (pos.x < 0.666) mask.g = maskLight;
-            else mask.b = maskLight;
-        } else if (shadowMask == 4.0) { // VGA
-            pos.xy = floor(pos.xy * vec2(1.0, 0.5));
-            pos.x += pos.y * 3.0;
-            pos.x = fract(pos.x / 6.0);
-            if (pos.x < 0.333) mask.r = maskLight;
-            else if (pos.x < 0.666) mask.g = maskLight;
-            else mask.b = maskLight;
-        }
-        return mask;
-    }
-
-    void main() {
-        // Correct for source inversion only in the final pass.
-        vec2 corrected_tc = vec2(v_tc.x, 1.0 - v_tc.y);
-
-        // Calculate aspect ratios
-        float video_aspect = (videoResolution.x * horizontal_stretch) / videoResolution.y;
-        float output_aspect = outputResolution.x / outputResolution.y;
-
-        // Determine scale and offset to letterbox/pillarbox the video
-        vec2 scale = vec2(1.0, 1.0);
-        if (video_aspect > output_aspect) {
-            scale.y = output_aspect / video_aspect;
-        } else {
-            scale.x = video_aspect / output_aspect;
-        }
-
-        // First check if we are in the letterbox/pillarbox bars.
-        // These should be colored with the background color.
-        vec2 centered_pos = (corrected_tc - 0.5) / scale + 0.5;
-        if (centered_pos.x < 0.0 || centered_pos.x > 1.0 || centered_pos.y < 0.0 || centered_pos.y > 1.0) {
-            out_color = vec4(background_color, 1.0);
-            return;
-        }
-
-        // Now apply warp for the CRT curvature.
-        // If the warped position is outside the video area, it should be BLACK (behind the tube).
-        vec2 warped_tc = Warp(corrected_tc);
-        vec2 warped_pos = (warped_tc - 0.5) / scale + 0.5;
-
-        if (warped_pos.x < 0.0 || warped_pos.x > 1.0 || warped_pos.y < 0.0 || warped_pos.y > 1.0) {
-            out_color = vec4(0.0, 0.0, 0.0, 1.0);
-            return;
-        }
-
-        // Current inputs (scanline, bloom) are in linear space.
-        vec3 scanline_color = texture(pass3_texture, warped_pos).rgb; 
-        vec3 bloom_color = texture(pass1_texture, warped_pos).rgb;
-
-        vec3 final_color = scanline_color + bloom_color * bloomAmount;
-
-        if (shadowMask > 0.0) {
-            final_color *= Mask(floor(v_tc * outputResolution) + 0.5);
-        }
-
-        final_color *= brightboost;
-
-        // Apply vibrance (saturation boost in linear space)
-        float luminance = dot(final_color, vec3(0.2126, 0.7152, 0.0722));
-        final_color = mix(vec3(luminance), final_color, vibrance);
-
-        out_color = vec4(ToSrgb(final_color), 1.0);
-    }
-"#;
+const FS_FINAL: &str = include_str!("shaders/fs_final.glsl");
 
 pub struct CrtFilterRenderer {
     passthrough_prog: glow::Program,
@@ -1347,24 +987,24 @@ unsafe fn compile_program(gl: &glow::Context, vs_src: &str, fs_src: &str) -> glo
 impl ShaderParams {
     pub fn from_state(state: &crate::app::AppState) -> Self {
         Self {
-            hard_scan: state.crt_hard_scan,
-            warp_x: state.crt_warp_x,
-            warp_y: state.crt_warp_y,
-            shadow_mask: state.crt_shadow_mask,
-            brightboost: state.crt_brightboost,
-            hard_bloom_pix: state.crt_hard_bloom_pix,
-            hard_bloom_scan: state.crt_hard_bloom_scan,
-            bloom_amount: state.crt_bloom_amount,
-            shape: state.crt_shape,
-            hard_pix: state.crt_hard_pix,
-            background_color: if state.use_magenta_background {
+            hard_scan: state.crt.hard_scan,
+            warp_x: state.crt.warp_x,
+            warp_y: state.crt.warp_y,
+            shadow_mask: state.crt.shadow_mask,
+            brightboost: state.crt.brightboost,
+            hard_bloom_pix: state.crt.hard_bloom_pix,
+            hard_bloom_scan: state.crt.hard_bloom_scan,
+            bloom_amount: state.crt.bloom_amount,
+            shape: state.crt.shape,
+            hard_pix: state.crt.hard_pix,
+            background_color: if state.video.use_magenta_background {
                 [1.0, 0.0, 1.0]
             } else {
                 [0.0, 0.0, 0.0]
             },
-            horizontal_stretch: state.horizontal_stretch,
-            median_filter_enabled: state.median_filter_enabled,
-            vibrance: state.vibrance,
+            horizontal_stretch: state.video.horizontal_stretch,
+            median_filter_enabled: state.video.median_filter_enabled,
+            vibrance: state.video.vibrance,
         }
     }
 }

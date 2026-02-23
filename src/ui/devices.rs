@@ -8,11 +8,11 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     ui.horizontal(|ui| {
         ui.label("USB Device to Reset:");
         let selected_text = state
-            .selected_usb_device
+            .hardware.selected_usb_device
             .as_ref()
             .and_then(|selected_id| {
                 state
-                    .usb_devices
+                    .hardware.usb_devices
                     .iter()
                     .find(|(id, _)| id == selected_id)
                     .map(|(id, name)| format!("{} {}", id, name))
@@ -22,12 +22,12 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             .selected_text(selected_text)
             .show_ui(ui, |ui| {
                 let mut combo_changed = ui
-                    .selectable_value(&mut state.selected_usb_device, None, "None")
+                    .selectable_value(&mut state.hardware.selected_usb_device, None, "None")
                     .changed();
-                for (id, name) in &state.usb_devices {
+                for (id, name) in &state.hardware.usb_devices {
                     combo_changed |= ui
                         .selectable_value(
-                            &mut state.selected_usb_device,
+                            &mut state.hardware.selected_usb_device,
                             Some(id.clone()),
                             format!("{} {}", id, name),
                         )
@@ -38,15 +38,15 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 }
             });
 
-        if let Some(selected_device) = &state.selected_usb_device {
+        if let Some(selected_device) = &state.hardware.selected_usb_device {
             if ui.button("Reset USB Device").clicked() {
-                state.status_message = match devices::usb::reset_usb_device(selected_device) {
+                state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: (match devices::usb::reset_usb_device(selected_device) {
                     Ok(_) => "USB device reset successfully.".to_string(),
                     Err(e) => format!("Failed to reset USB: {}", e),
-                };
+                }).into() });
             }
             if ui
-                .checkbox(&mut state.reset_usb_on_startup, "Reset on startup")
+                .checkbox(&mut state.ui.reset_usb_on_startup, "Reset on startup")
                 .on_hover_text("Requires pkexec to be configured for usbreset without a password prompt for automatic startup reset.")
                 .changed()
             {
@@ -61,38 +61,38 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     ui.horizontal(|ui| {
         ui.label("Video Device:");
         let _combo_box = egui::ComboBox::from_id_source("video_device_selector")
-            .selected_text(state.selected_video_device.as_str())
+            .selected_text(state.hardware.selected_video_device.as_str())
             .show_ui(ui, |ui| {
                 let mut combo_changed = false;
-                for device in &state.video_devices {
+                for device in &state.hardware.video_devices {
                     combo_changed |= ui
                         .selectable_value(
-                            &mut state.selected_video_device,
+                            &mut state.hardware.selected_video_device,
                             device.clone(),
                             device.as_str(),
                         )
                         .changed();
                 }
-                if combo_changed && !state.selected_video_device.is_empty() {
-                    state.supported_formats.clear();
-                    state.selected_format_index = 0;
-                    state.selected_resolution = (0, 0);
+                if combo_changed && !state.hardware.selected_video_device.is_empty() {
+                    state.hardware.supported_formats.clear();
+                    state.hardware.selected_format_index = 0;
+                    state.hardware.selected_resolution = (0, 0);
 
-                    match devices::video::find_video_formats(&state.selected_video_device) {
+                    match devices::video::find_video_formats(&state.hardware.selected_video_device) {
                         Ok(formats) => {
-                            state.status_message = format!(
+                            state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: format!(
                                 "Found {} formats for {}.",
                                 formats.len(),
-                                state.selected_video_device
-                            );
-                            state.supported_formats = formats;
+                                state.hardware.selected_video_device
+                            ).into() });
+                            state.hardware.supported_formats = formats;
                             if let Some(res) = state
-                                .supported_formats
+                                .hardware.supported_formats
                                 .first()
                                 .and_then(|f| f.resolutions.first())
                             {
-                                state.selected_resolution = (res.width, res.height);
-                                state.selected_framerate =
+                                state.hardware.selected_resolution = (res.width, res.height);
+                                state.hardware.selected_framerate =
                                     res.framerates.first().cloned().unwrap_or(0);
                             }
                             // Apply config logic for newly-loaded layouts
@@ -103,7 +103,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             }
                         }
                         Err(e) => {
-                            state.status_message = format!("Failed to scan formats: {}", e);
+                            state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: format!("Failed to scan formats: {}", e).into() });
                         }
                     }
                     changed = true;
@@ -112,12 +112,12 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     });
 
     // --- Video Format / Resolution ---
-    if !state.supported_formats.is_empty() {
+    if !state.hardware.supported_formats.is_empty() {
         ui.horizontal(|ui| {
-            let selected_format_description = state.supported_formats[state.selected_format_index]
+            let selected_format_description = state.hardware.supported_formats[state.hardware.selected_format_index]
                 .description
                 .clone();
-            let resolutions = state.supported_formats[state.selected_format_index]
+            let resolutions = state.hardware.supported_formats[state.hardware.selected_format_index]
                 .resolutions
                 .clone();
 
@@ -125,18 +125,18 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             egui::ComboBox::from_id_source("format_selector")
                 .selected_text(selected_format_description)
                 .show_ui(ui, |ui| {
-                    for (i, format) in state.supported_formats.iter().enumerate() {
+                    for (i, format) in state.hardware.supported_formats.iter().enumerate() {
                         if ui
                             .selectable_value(
-                                &mut state.selected_format_index,
+                                &mut state.hardware.selected_format_index,
                                 i,
                                 &format.description,
                             )
                             .changed()
                         {
-                            if let Some(res) = state.supported_formats[i].resolutions.first() {
-                                state.selected_resolution = (res.width, res.height);
-                                state.selected_framerate =
+                            if let Some(res) = state.hardware.supported_formats[i].resolutions.first() {
+                                state.hardware.selected_resolution = (res.width, res.height);
+                                state.hardware.selected_framerate =
                                     res.framerates.first().cloned().unwrap_or(0);
                             }
                             changed = true;
@@ -148,36 +148,36 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             egui::ComboBox::from_id_source("resolution_selector")
                 .selected_text(format!(
                     "{}x{}",
-                    state.selected_resolution.0, state.selected_resolution.1
+                    state.hardware.selected_resolution.0, state.hardware.selected_resolution.1
                 ))
                 .show_ui(ui, |ui| {
                     for res in &resolutions {
                         if ui
                             .selectable_value(
-                                &mut state.selected_resolution,
+                                &mut state.hardware.selected_resolution,
                                 (res.width, res.height),
                                 format!("{}x{}", res.width, res.height),
                             )
                             .changed()
                         {
-                            state.selected_framerate = res.framerates.first().cloned().unwrap_or(0);
+                            state.hardware.selected_framerate = res.framerates.first().cloned().unwrap_or(0);
                             changed = true;
                         }
                     }
                 });
 
             if let Some(res_info) = resolutions.iter().find(|r| {
-                r.width == state.selected_resolution.0 && r.height == state.selected_resolution.1
+                r.width == state.hardware.selected_resolution.0 && r.height == state.hardware.selected_resolution.1
             }) {
                 if !res_info.framerates.is_empty() {
                     ui.label("Framerate:");
                     egui::ComboBox::from_id_source("framerate_selector")
-                        .selected_text(format!("{} fps", state.selected_framerate))
+                        .selected_text(format!("{} fps", state.hardware.selected_framerate))
                         .show_ui(ui, |ui| {
                             for &fps in &res_info.framerates {
                                 if ui
                                     .selectable_value(
-                                        &mut state.selected_framerate,
+                                        &mut state.hardware.selected_framerate,
                                         fps,
                                         format!("{} fps", fps),
                                     )
@@ -199,16 +199,15 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         ui.horizontal(|ui| {
             ui.label("PulseAudio Configuration:");
             if ui.button("🔄 Refresh").clicked() {
-                state.status_message =
-                    "Refresh clicked. Please restart the app to re-scan devices.".to_string();
+                state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: "Refresh clicked. Please restart the app to re-scan devices.".to_string().into() });
                 changed = true;
             }
         });
 
         let selected_source_desc = state
-            .pulse_sources
+            .hardware.pulse_sources
             .iter()
-            .find(|(_, name)| Some(name) == state.selected_pulse_source_name.as_ref())
+            .find(|(_, name)| Some(name) == state.hardware.selected_pulse_source_name.as_ref())
             .map(|(desc, _)| desc.as_str())
             .unwrap_or("Select an Input");
 
@@ -216,10 +215,10 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             .selected_text(selected_source_desc)
             .show_ui(ui, |ui| {
                 let mut combo_changed = false;
-                for (desc, name) in &state.pulse_sources {
+                for (desc, name) in &state.hardware.pulse_sources {
                     combo_changed |= ui
                         .selectable_value(
-                            &mut state.selected_pulse_source_name,
+                            &mut state.hardware.selected_pulse_source_name,
                             Some(name.clone()),
                             desc,
                         )
@@ -231,9 +230,9 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             });
 
         let selected_sink_desc = state
-            .pulse_sinks
+            .hardware.pulse_sinks
             .iter()
-            .find(|(_, name)| Some(name) == state.selected_pulse_sink_name.as_ref())
+            .find(|(_, name)| Some(name) == state.hardware.selected_pulse_sink_name.as_ref())
             .map(|(desc, _)| desc.as_str())
             .unwrap_or("Select an Output");
 
@@ -241,10 +240,10 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             .selected_text(selected_sink_desc)
             .show_ui(ui, |ui| {
                 let mut combo_changed = false;
-                for (desc, name) in &state.pulse_sinks {
+                for (desc, name) in &state.hardware.pulse_sinks {
                     combo_changed |= ui
                         .selectable_value(
-                            &mut state.selected_pulse_sink_name,
+                            &mut state.hardware.selected_pulse_sink_name,
                             Some(name.clone()),
                             desc,
                         )

@@ -26,7 +26,7 @@ pub fn show_first_run_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut
             ui.add_space(15.0);
             ui.vertical_centered(|ui| {
                 if ui.button("I Understand").clicked() {
-                    state.show_first_run_dialog = false;
+                    state.ui.show_first_run_dialog = false;
                     config::save_config(state);
                     true
                 } else {
@@ -58,7 +58,7 @@ pub fn show_quit_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut egui
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 if ui.button("Cancel").clicked() {
-                    state.show_quit_dialog = false;
+                    state.ui.show_quit_dialog = false;
                 }
             });
         });
@@ -89,7 +89,7 @@ pub fn show_stop_stream_dialog(
                     state.stop_stream(main_ctx);
                 }
                 if ui.button("Cancel").clicked() {
-                    state.show_stop_stream_dialog = false;
+                    state.ui.show_stop_stream_dialog = false;
                 }
             });
         });

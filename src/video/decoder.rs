@@ -1,7 +1,7 @@
 use crate::video::types::{RawFrame, VideoFormat};
 use anyhow::{Context, Result};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU8, Ordering},
+    atomic::{AtomicU8, Ordering},
     Arc,
 };
 use std::thread;
@@ -29,7 +29,6 @@ fn setup_ffmpeg_options(
 }
 pub fn video_thread_main(
     frame_sender: crossbeam_channel::Sender<Arc<RawFrame>>,
-    stop_flag: Arc<AtomicBool>,
     device: String,
     format: VideoFormat,
     resolution: (u32, u32),
@@ -55,15 +54,14 @@ pub fn video_thread_main(
 
     decoder.set_threading(ffmpeg_next::codec::threading::Config::default());
     let (packet_tx, packet_rx) = crossbeam_channel::bounded(1);
-    let reader_stop_flag = stop_flag.clone();
     let _reader_thread = thread::spawn(move || {
         let mut ictx = ictx;
         for (stream, packet) in ictx.packets() {
-            if reader_stop_flag.load(Ordering::Relaxed) {
-                break;
-            }
             if stream.index() == video_stream_index {
-                let _ = packet_tx.try_send(packet);
+                match packet_tx.try_send(packet) {
+                    Err(crossbeam_channel::TrySendError::Disconnected(_)) => break,
+                    _ => {} // Ignore Full or Ok
+                }
             }
         }
         tracing::debug!("Packet reader thread finished.");
@@ -81,7 +79,7 @@ pub fn video_thread_main(
     )
     .context("Failed to create software scaler for normalization")?;
 
-    while !stop_flag.load(Ordering::Relaxed) {
+    loop {
         let new_scaler_val = scaler_filter.load(Ordering::Relaxed);
         if new_scaler_val != current_scaler_val {
             current_scaler_val = new_scaler_val;
@@ -125,10 +123,14 @@ pub fn video_thread_main(
                     format,
                 });
 
-                if frame_sender.try_send(raw_frame).is_err() {
-                    break;
+                match frame_sender.try_send(raw_frame) {
+                    Err(crossbeam_channel::TrySendError::Disconnected(_)) => return Ok(()),
+                    _ => {} // Ignore Full or Ok
                 }
             }
+        } else {
+            // packet_rx disconnected
+            break;
         }
     }
     tracing::debug!("Video thread finished.");

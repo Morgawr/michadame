@@ -3,13 +3,14 @@ use crate::{config, devices, devices::filter_type::CrtFilter, ui, video};
 use eframe::egui;
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU8, Ordering},
+    atomic::{AtomicU8, Ordering},
     Arc, Mutex,
 };
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
-pub struct AppState {
+
+pub struct HardwareState {
     pub video_devices: Vec<String>,
     pub usb_devices: Vec<(String, String)>,
     pub selected_usb_device: Option<String>,
@@ -19,22 +20,13 @@ pub struct AppState {
     pub selected_pulse_source_name: Option<String>,
     pub selected_pulse_sink_name: Option<String>,
     pub pulse_loopback_module_index: Option<u32>,
-    pub status_message: String,
     pub supported_formats: Vec<VideoFormat>,
     pub selected_format_index: usize,
     pub selected_resolution: (u32, u32),
     pub selected_framerate: u32,
-    pub video_thread: Option<JoinHandle<()>>,
-    pub stop_video_thread: Option<Arc<AtomicBool>>,
-    pub video_texture: Option<egui::TextureHandle>,
-    pub latest_frame: Option<Arc<video::types::RawFrame>>,
-    pub frame_receiver: Option<crossbeam_channel::Receiver<Arc<video::types::RawFrame>>>,
-    pub device_scan_receiver: Option<crossbeam_channel::Receiver<devices::DeviceScanResult>>,
-    pub logo_texture: Option<egui::TextureHandle>,
-    last_fps_check: Instant,
-    frames_since_last_check: u32,
-    last_video_fps_check: Instant,
-    video_frames_since_last_check: u32,
+}
+
+pub struct UiState {
     pub is_fullscreen: bool,
     pub reset_usb_on_startup: bool,
     pub show_first_run_dialog: bool,
@@ -42,29 +34,52 @@ pub struct AppState {
     pub show_stop_stream_dialog: bool,
     pub video_window_open: bool,
     pub control_window_open: bool,
-    pub pixelate_filter_enabled: bool,
-    pub crt_filter: Arc<AtomicU8>,
-    pub scaler_filter: Arc<AtomicU8>,
-    pub crt_renderer: Option<Arc<Mutex<video::gpu_filter::CrtFilterRenderer>>>,
+}
 
-    // Lottes Filter Params
-    pub crt_hard_scan: f32,
-    pub crt_warp_x: f32,
-    pub crt_warp_y: f32,
-    pub crt_shadow_mask: f32,
-    pub crt_brightboost: f32,
-    pub crt_hard_bloom_pix: f32,
-    pub crt_hard_bloom_scan: f32,
-    pub crt_bloom_amount: f32,
-    pub crt_shape: f32,
-    pub crt_hard_pix: f32,
-    pub fullscreen_toggle_frame_count: Option<u8>,
+pub struct CrtSettings {
+    pub hard_scan: f32,
+    pub warp_x: f32,
+    pub warp_y: f32,
+    pub shadow_mask: f32,
+    pub brightboost: f32,
+    pub hard_bloom_pix: f32,
+    pub hard_bloom_scan: f32,
+    pub bloom_amount: f32,
+    pub shape: f32,
+    pub hard_pix: f32,
+}
+
+pub struct VideoSettings {
+    pub pixelate_filter_enabled: bool,
     pub use_magenta_background: bool,
     pub horizontal_stretch: f32,
     pub median_filter_enabled: bool,
     pub vibrance: f32,
+}
 
-    // Profiles
+pub struct AppState {
+    pub hardware: HardwareState,
+    pub ui: UiState,
+    pub crt: CrtSettings,
+    pub video: VideoSettings,
+    pub toasts: egui_toast::Toasts,
+
+    pub video_thread: Option<JoinHandle<()>>,
+    pub video_texture: Option<egui::TextureHandle>,
+    pub latest_frame: Option<Arc<video::types::RawFrame>>,
+    pub frame_receiver: Option<crossbeam_channel::Receiver<Arc<video::types::RawFrame>>>,
+    pub device_scan_receiver: Option<crossbeam_channel::Receiver<devices::DeviceScanResult>>,
+    pub logo_texture: Option<egui::TextureHandle>,
+    pub last_fps_check: Instant,
+    pub frames_since_last_check: u32,
+    pub last_video_fps_check: Instant,
+    pub video_frames_since_last_check: u32,
+
+    pub crt_filter: Arc<AtomicU8>,
+    pub scaler_filter: Arc<AtomicU8>,
+    pub crt_renderer: Option<Arc<Mutex<video::gpu_filter::CrtFilterRenderer>>>,
+    pub fullscreen_toggle_frame_count: Option<u8>,
+
     pub profiles: HashMap<String, config::Profile>,
     pub active_profile: String,
     pub new_profile_name: String,
@@ -73,22 +88,51 @@ pub struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            video_devices: Vec::new(),
-            usb_devices: Vec::new(),
-            selected_usb_device: None,
-            selected_video_device: String::new(),
-            pulse_sources: Vec::new(),
-            pulse_sinks: Vec::new(),
-            selected_pulse_source_name: None,
-            selected_pulse_sink_name: None,
-            pulse_loopback_module_index: None,
-            status_message: "Loading devices...".to_string(),
-            supported_formats: Vec::new(),
-            selected_format_index: 0,
-            selected_resolution: (0, 0),
-            selected_framerate: 0,
+            hardware: HardwareState {
+                video_devices: Vec::new(),
+                usb_devices: Vec::new(),
+                selected_usb_device: None,
+                selected_video_device: String::new(),
+                pulse_sources: Vec::new(),
+                pulse_sinks: Vec::new(),
+                selected_pulse_source_name: None,
+                selected_pulse_sink_name: None,
+                pulse_loopback_module_index: None,
+                supported_formats: Vec::new(),
+                selected_format_index: 0,
+                selected_resolution: (0, 0),
+                selected_framerate: 0,
+            },
+            ui: UiState {
+                is_fullscreen: false,
+                reset_usb_on_startup: false,
+                show_first_run_dialog: false,
+                show_quit_dialog: false,
+                show_stop_stream_dialog: false,
+                video_window_open: false,
+                control_window_open: true,
+            },
+            crt: CrtSettings {
+                hard_scan: -8.0,
+                warp_x: 0.031,
+                warp_y: 0.041,
+                shadow_mask: 3.0,
+                brightboost: 1.0,
+                hard_bloom_pix: -1.5,
+                hard_bloom_scan: -2.0,
+                bloom_amount: 0.15,
+                shape: 2.0,
+                hard_pix: -3.0,
+            },
+            video: VideoSettings {
+                pixelate_filter_enabled: false,
+                use_magenta_background: false,
+                horizontal_stretch: 1.0,
+                median_filter_enabled: false,
+                vibrance: 1.0,
+            },
+            toasts: egui_toast::Toasts::new().anchor(egui::Align2::RIGHT_BOTTOM, (-10.0, -10.0)).direction(egui::Direction::BottomUp),
             video_thread: None,
-            stop_video_thread: None,
             video_texture: None,
             frame_receiver: None,
             device_scan_receiver: None,
@@ -97,34 +141,10 @@ impl Default for AppState {
             frames_since_last_check: 0,
             last_video_fps_check: Instant::now(),
             video_frames_since_last_check: 0,
-            is_fullscreen: false,
-            reset_usb_on_startup: false,
-            show_first_run_dialog: false,
-            show_quit_dialog: false,
-            show_stop_stream_dialog: false,
-            video_window_open: false,
-            control_window_open: true,
-            pixelate_filter_enabled: false,
             crt_filter: Arc::new(AtomicU8::new(CrtFilter::Off as u8)),
             scaler_filter: Arc::new(AtomicU8::new(video::types::ScalerFilter::Bicubic as u8)),
             crt_renderer: None,
-
-            // Lottes Filter Params
-            crt_hard_scan: -8.0,
-            crt_warp_x: 0.031,
-            crt_warp_y: 0.041,
-            crt_shadow_mask: 3.0,
-            crt_brightboost: 1.0,
-            crt_hard_bloom_pix: -1.5,
-            crt_hard_bloom_scan: -2.0,
-            crt_bloom_amount: 0.15,
-            crt_shape: 2.0,
-            crt_hard_pix: -3.0,
             fullscreen_toggle_frame_count: None,
-            use_magenta_background: false,
-            horizontal_stretch: 1.0,
-            median_filter_enabled: false,
-            vibrance: 1.0,
             latest_frame: None,
             profiles: {
                 let mut p = HashMap::new();
@@ -141,21 +161,21 @@ impl AppState {
     fn handle_device_scan_result(&mut self, result: devices::DeviceScanResult) -> bool {
         let scan_successful = match result {
             Ok((video_devices, pulse_sources, pulse_sinks, usb_devices)) => {
-                self.video_devices = video_devices;
-                self.selected_video_device =
-                    self.video_devices.first().cloned().unwrap_or_default();
-                self.pulse_sources = pulse_sources;
-                self.pulse_sinks = pulse_sinks;
-                self.usb_devices = usb_devices;
+                self.hardware.video_devices = video_devices;
+                self.hardware.selected_video_device =
+                    self.hardware.video_devices.first().cloned().unwrap_or_default();
+                self.hardware.pulse_sources = pulse_sources;
+                self.hardware.pulse_sinks = pulse_sinks;
+                self.hardware.usb_devices = usb_devices;
 
                 if let Ok(cfg) = confy::load::<config::MichadameConfig>("michadame", None) {
                     config::apply_config(self, &cfg);
                 }
-                self.status_message = "Devices loaded successfully.".to_string();
+                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: "Devices loaded successfully.".to_string().into() });
                 true
             }
             Err(e) => {
-                self.status_message = format!("Error: {}", e);
+                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: format!("Error: {}", e).into() });
                 false
             }
         };
@@ -197,33 +217,33 @@ impl AppState {
 
     pub fn start_stream(&mut self, ctx: &egui::Context) {
         match (
-            &self.selected_pulse_source_name,
-            &self.selected_pulse_sink_name,
+            &self.hardware.selected_pulse_source_name,
+            &self.hardware.selected_pulse_sink_name,
         ) {
             (Some(mic), Some(sink)) => match devices::audio::load_pulse_loopback(mic, sink) {
                 Ok(index) => {
-                    self.pulse_loopback_module_index = Some(index);
-                    self.status_message = "PulseAudio loopback loaded.".to_string();
+                    self.hardware.pulse_loopback_module_index = Some(index);
+                    self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: "PulseAudio loopback loaded.".to_string().into() });
                 }
                 Err(e) => {
-                    self.status_message = format!("Failed to load loopback: {}", e);
+                    self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: format!("Failed to load loopback: {}", e).into() });
                     return;
                 }
             },
             _ => {
-                self.status_message = "Cannot start: Missing PulseAudio devices.".to_string();
+                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: "Cannot start: Missing PulseAudio devices.".to_string().into() });
                 return;
             }
         }
 
-        let format = if let Some(f) = self.supported_formats.get(self.selected_format_index) {
+        let format = if let Some(f) = self.hardware.supported_formats.get(self.hardware.selected_format_index) {
             f
         } else {
-            self.status_message = "Cannot start: No video format selected.".to_string();
+            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: "Cannot start: No video format selected.".to_string().into() });
             return;
         };
 
-        let resolution = self.selected_resolution;
+        let resolution = self.hardware.selected_resolution;
 
         // Resize the main window to match the video stream resolution
         // The command needs to be sent to the main viewport.
@@ -234,11 +254,9 @@ impl AppState {
         );
         ctx.request_repaint(); // Force a repaint to ensure the new texture is drawn
 
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        self.stop_video_thread = Some(stop_flag.clone());
-        let device = self.selected_video_device.clone();
+        let device = self.hardware.selected_video_device.clone();
         let format = format.clone();
-        let framerate = self.selected_framerate;
+        let framerate = self.hardware.selected_framerate;
         let (tx, rx) = crossbeam_channel::bounded(1);
         self.frame_receiver = Some(rx);
 
@@ -247,7 +265,6 @@ impl AppState {
         let handle = thread::spawn(move || {
             if let Err(e) = video::decoder::video_thread_main(
                 tx,
-                stop_flag,
                 device,
                 format,
                 resolution,
@@ -258,17 +275,17 @@ impl AppState {
             }
         });
         self.video_thread = Some(handle);
-        self.status_message = "Stream started.".to_string();
-        self.video_window_open = true;
-        self.control_window_open = false;
+        self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: "Stream started.".to_string().into() });
+        self.ui.video_window_open = true;
+        self.ui.control_window_open = false;
 
         // Start the fullscreen toggle sequence to fix resizing issues.
         self.fullscreen_toggle_frame_count = Some(0);
     }
 
     pub fn stop_stream(&mut self, ctx: &egui::Context) {
-        if self.is_fullscreen {
-            self.is_fullscreen = false;
+        if self.ui.is_fullscreen {
+            self.ui.is_fullscreen = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         }
         self.stop_stream_resources();
@@ -279,33 +296,32 @@ impl AppState {
                 egui::TextureOptions::LINEAR,
             );
         }
-        self.video_window_open = false; // This now means "stream is not active"
+        self.ui.video_window_open = false; // This now means "stream is not active"
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
     fn stop_stream_resources(&mut self) {
-        if let Some(stop_flag) = self.stop_video_thread.take() {
-            stop_flag.store(true, Ordering::Relaxed);
-        }
+        self.frame_receiver = None; // Drop receiver to signal threads to exit
+
         if let Some(handle) = self.video_thread.take() {
             let _ = handle.join();
         }
 
-        if let Some(index) = self.pulse_loopback_module_index.take() {
+        if let Some(index) = self.hardware.pulse_loopback_module_index.take() {
             if let Err(e) = devices::audio::unload_pulse_loopback(index) {
-                self.status_message = format!(
+                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: format!(
                     "Stream stopped, but failed to unload PulseAudio module: {}",
                     e
-                );
+                ).into() });
             } else {
-                self.status_message = "Stream stopped and PulseAudio module unloaded.".to_string();
+                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: "Stream stopped and PulseAudio module unloaded.".to_string().into() });
             }
         } else {
-            self.status_message = "Stream stopped.".to_string();
+            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: "Stream stopped.".to_string().into() });
         }
 
         self.frame_receiver = None;
-        self.video_window_open = false;
+        self.ui.video_window_open = false;
     }
 }
 
@@ -323,7 +339,7 @@ impl eframe::App for AppState {
         let mut repaint_requested = false;
 
         // --- Control Window (Secondary) ---
-        if self.control_window_open {
+        if self.ui.control_window_open {
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("control_window"),
                 egui::ViewportBuilder::default()
@@ -338,7 +354,7 @@ impl eframe::App for AppState {
                     repaint_requested |= ui::draw_main_ui(self, ctx);
 
                     if ctx.input(|i| i.viewport().close_requested()) {
-                        self.control_window_open = false;
+                        self.ui.control_window_open = false;
                     }
                 },
             );
@@ -350,11 +366,11 @@ impl eframe::App for AppState {
             .show(ctx, |ui| {
                 ui::draw_video_player(self, ui, ctx);
 
-                if self.show_stop_stream_dialog {
+                if self.ui.show_stop_stream_dialog {
                     ui::dialogs::show_stop_stream_dialog(self, ctx, ui, ctx);
                 }
 
-                if self.show_quit_dialog {
+                if self.ui.show_quit_dialog {
                     ui::dialogs::show_quit_dialog(self, ctx, ui);
                 }
             });
@@ -391,16 +407,16 @@ impl eframe::App for AppState {
             let next_filter = current_filter.next();
             self.crt_filter.store(next_filter as u8, Ordering::Relaxed);
             config::save_config(self);
-            self.status_message = format!("CRT filter set to: {}", next_filter.to_string());
+            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: format!("CRT filter set to: {}", next_filter.to_string()).into() });
         }
         if ctx.input(|i| i.key_pressed(egui::Key::G)) {
-            self.pixelate_filter_enabled = !self.pixelate_filter_enabled;
-            let status = if self.pixelate_filter_enabled {
+            self.video.pixelate_filter_enabled = !self.video.pixelate_filter_enabled;
+            let status = if self.video.pixelate_filter_enabled {
                 "enabled"
             } else {
                 "disabled"
             };
-            self.status_message = format!("480p Pixelate filter {}.", status);
+            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: format!("480p Pixelate filter {}.", status).into() });
             config::save_config(self);
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -408,19 +424,19 @@ impl eframe::App for AppState {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Q)) {
-            if self.video_window_open && !self.show_stop_stream_dialog {
-                self.show_stop_stream_dialog = true;
+            if self.ui.video_window_open && !self.ui.show_stop_stream_dialog {
+                self.ui.show_stop_stream_dialog = true;
             }
         }
         if ctx.input(|i| i.key_pressed(egui::Key::M)) {
-            self.control_window_open = !self.control_window_open;
+            self.ui.control_window_open = !self.ui.control_window_open;
         }
 
         // Handle window close request (e.g., from the 'X' button)
         if ctx.input(|i| i.viewport().close_requested()) {
-            if self.video_window_open && !self.show_quit_dialog {
+            if self.ui.video_window_open && !self.ui.show_quit_dialog {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                self.show_quit_dialog = true;
+                self.ui.show_quit_dialog = true;
             } // If no stream, or dialog is already open, allow the default close behavior.
             repaint_requested = true;
         }

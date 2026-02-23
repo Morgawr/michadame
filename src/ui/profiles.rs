@@ -38,8 +38,7 @@ pub fn draw_profile_management(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                     .profiles
                     .insert(state.active_profile.clone(), current_profile_data);
                 config::save_config(state);
-                state.status_message =
-                    format!("Saved configuration to profile: {}", state.active_profile);
+                state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: format!("Saved configuration to profile: {}", state.active_profile).into() });
                 changed = true;
             }
 
@@ -64,8 +63,7 @@ pub fn draw_profile_management(ui: &mut egui::Ui, state: &mut AppState) -> bool 
 
                 config::save_config(state); // Save immediately on profile creation
                 changed = true;
-                state.status_message =
-                    format!("Created and switched to profile: {}", state.active_profile);
+                state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: format!("Created and switched to profile: {}", state.active_profile).into() });
             }
 
             if ui
@@ -88,8 +86,7 @@ pub fn draw_profile_management(ui: &mut egui::Ui, state: &mut AppState) -> bool 
 
                 config::save_config(state); // Save immediately on profile deletion
                 changed = true;
-                state.status_message =
-                    format!("Deleted profile. Switched to: {}", state.active_profile);
+                state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default(), text: format!("Deleted profile. Switched to: {}", state.active_profile).into() });
             }
         });
     });

@@ -48,7 +48,7 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
         send_ws_command(serde_json::json!({"command": "manual_ocr"}));
     }
 
-    let panel_frame = if state.is_fullscreen {
+    let panel_frame = if state.ui.is_fullscreen {
         egui::Frame::none()
     } else {
         egui::Frame::central_panel(&ctx.style())
@@ -58,7 +58,7 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
         .frame(panel_frame)
         .show(ctx, |ui| {
             let mut repaint_requested = false;
-            if state.show_first_run_dialog {
+            if state.ui.show_first_run_dialog {
                 repaint_requested |= dialogs::show_first_run_dialog(state, ctx, ui);
             }
 
@@ -75,7 +75,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         send_ws_command(serde_json::json!({"command": "manual_ocr"}));
     }
 
-    if state.video_window_open {
+    if state.ui.video_window_open {
         let response = ui.allocate_response(ui.available_size(), egui::Sense::click());
         let video_texture = state.video_texture.as_ref().unwrap();
         let texture_size = video_texture.size_vec2();
@@ -84,11 +84,11 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             CrtFilter::from_u8(state.crt_filter.load(std::sync::atomic::Ordering::Relaxed));
 
         // All GPU filtering is handled within a single paint callback to ensure correct state.
-        if state.pixelate_filter_enabled || filter == CrtFilter::Lottes {
+        if state.video.pixelate_filter_enabled || filter == CrtFilter::Lottes {
             if let Some(renderer_arc) = &state.crt_renderer {
                 let renderer_clone = renderer_arc.clone();
                 let params = video::gpu_filter::ShaderParams::from_state(state);
-                let pixelate = state.pixelate_filter_enabled;
+                let pixelate = state.video.pixelate_filter_enabled;
                 let run_lottes = filter == CrtFilter::Lottes;
                 let rect = response.rect;
                 let latest_frame = state.latest_frame.clone();
@@ -126,14 +126,14 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             // Fallback to a simple passthrough shader if no other GPU filters are active.
             let renderer_clone = state.crt_renderer.as_ref().unwrap().clone();
             let rect = response.rect;
-            let background_color = if state.use_magenta_background {
+            let background_color = if state.video.use_magenta_background {
                 [1.0, 0.0, 1.0]
             } else {
                 [0.0, 0.0, 0.0]
             };
-            let horizontal_stretch = state.horizontal_stretch;
-            let median_filter_enabled = state.median_filter_enabled;
-            let vibrance = state.vibrance;
+            let horizontal_stretch = state.video.horizontal_stretch;
+            let median_filter_enabled = state.video.median_filter_enabled;
+            let vibrance = state.video.vibrance;
             let latest_frame = state.latest_frame.clone();
             let video_texture = state.video_texture.as_ref().map(|t| t.id());
 
