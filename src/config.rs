@@ -28,6 +28,8 @@ pub struct Profile {
     pub horizontal_stretch: Option<f32>,
     pub median_filter_enabled: Option<bool>,
     pub vibrance: Option<f32>,
+    pub overscan_x: Option<f32>,
+    pub overscan_y: Option<f32>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -65,6 +67,8 @@ struct LegacyConfig {
     horizontal_stretch: Option<f32>,
     median_filter_enabled: Option<bool>,
     vibrance: Option<f32>,
+    overscan_x: Option<f32>,
+    overscan_y: Option<f32>,
 }
 
 fn default_active_profile() -> String {
@@ -112,6 +116,8 @@ impl From<LegacyConfig> for MichadameConfig {
                 horizontal_stretch: legacy.horizontal_stretch,
                 median_filter_enabled: legacy.median_filter_enabled,
                 vibrance: legacy.vibrance,
+                overscan_x: legacy.overscan_x,
+                overscan_y: legacy.overscan_y,
             };
             profiles.insert("Default".to_string(), legacy_profile);
             active_profile = "Default".to_string();
@@ -174,6 +180,8 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         horizontal_stretch: Some(state.video.horizontal_stretch),
         median_filter_enabled: Some(state.video.median_filter_enabled),
         vibrance: Some(state.video.vibrance),
+        overscan_x: Some(state.video.overscan_x),
+        overscan_y: Some(state.video.overscan_y),
     }
 }
 
@@ -315,6 +323,12 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) {
     }
     if let Some(val) = profile.vibrance {
         state.video.vibrance = val;
+    }
+    if let Some(val) = profile.overscan_x {
+        state.video.overscan_x = val;
+    }
+    if let Some(val) = profile.overscan_y {
+        state.video.overscan_y = val;
     }
 }
 

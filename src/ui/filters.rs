@@ -122,6 +122,31 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 changed = true;
             }
         });
+
+        ui.horizontal(|ui| {
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.video.overscan_x, -0.2..=0.2)
+                        .text("Overscan X")
+                        .step_by(0.001)
+                        .custom_formatter(|n, _| format!("{:.1}%", n * 100.0)),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.video.overscan_y, -0.2..=0.2)
+                        .text("Overscan Y")
+                        .step_by(0.001)
+                        .custom_formatter(|n, _| format!("{:.1}%", n * 100.0)),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+        });
     });
 
     let current_filter =
@@ -243,6 +268,8 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 state.video.horizontal_stretch = 1.0;
                 state.video.pixelate_filter_enabled = false;
                 state.video.median_filter_enabled = false;
+                state.video.overscan_x = 0.0;
+                state.video.overscan_y = 0.0;
                 changed = true;
             }
         });

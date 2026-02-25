@@ -46,6 +46,8 @@ pub struct CrtFilterRenderer {
     yuyv_packed_prog: glow::Program,
     yuv_range_loc: glow::UniformLocation,
     yuyv_range_loc: glow::UniformLocation,
+    yuv_overscan_loc: glow::UniformLocation,
+    yuyv_overscan_loc: glow::UniformLocation,
 
     fbos: [glow::Framebuffer; 7], // 0-5 for passes, 6 for YUV conversion result
     pass_textures: [glow::Texture; 7], // 0-5 for passes, 6 for the YUV source texture
@@ -271,9 +273,11 @@ impl CrtFilterRenderer {
                 0,
             );
             let yuyv_range_loc = gl.get_uniform_location(yuyv_packed_prog, "input_range").unwrap();
+            let yuyv_overscan_loc = gl.get_uniform_location(yuyv_packed_prog, "overscan_offset").unwrap();
 
             gl.use_program(Some(yuv_planar_prog));
             let yuv_range_loc = gl.get_uniform_location(yuv_planar_prog, "input_range").unwrap();
+            let yuv_overscan_loc = gl.get_uniform_location(yuv_planar_prog, "overscan_offset").unwrap();
 
             gl.use_program(None);
 
@@ -360,6 +364,8 @@ impl CrtFilterRenderer {
                 yuyv_packed_prog,
                 yuv_range_loc,
                 yuyv_range_loc,
+                yuv_overscan_loc,
+                yuyv_overscan_loc,
                 fbos,
                 pass_textures,
                 yuv_planes,
@@ -499,6 +505,7 @@ impl CrtFilterRenderer {
                         Some(v_data),
                     );
                     gl.uniform_1_i32(Some(&self.yuv_range_loc), frame.color_range as i32);
+                    gl.uniform_2_f32(Some(&self.yuv_overscan_loc), params.overscan_x, params.overscan_y);
                 } else if frame.format == Pixel::YUYV422 {
                     gl.use_program(Some(self.yuyv_packed_prog));
                     gl.active_texture(glow::TEXTURE0);
@@ -516,6 +523,7 @@ impl CrtFilterRenderer {
                         Some(&frame.data),
                     );
                     gl.uniform_1_i32(Some(&self.yuyv_range_loc), frame.color_range as i32);
+                    gl.uniform_2_f32(Some(&self.yuyv_overscan_loc), params.overscan_x, params.overscan_y);
                 }
 
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
@@ -668,6 +676,8 @@ impl CrtFilterRenderer {
                     params.median_filter_enabled,
                     params.vibrance,
                     params.scaler_filter,
+                    params.overscan_x,
+                    params.overscan_y,
                 );
             }
 
@@ -697,6 +707,8 @@ impl CrtFilterRenderer {
         median_filter_enabled: bool,
         vibrance: f32,
         scaler_filter: u8,
+        overscan_x: f32,
+        overscan_y: f32,
     ) {
         let mut video_texture = fallback_texture;
 
@@ -791,6 +803,7 @@ impl CrtFilterRenderer {
                         Some(v_data),
                     );
                     gl.uniform_1_i32(Some(&self.yuv_range_loc), frame.color_range as i32);
+                    gl.uniform_2_f32(Some(&self.yuv_overscan_loc), overscan_x, overscan_y);
                 } else if frame.format == Pixel::YUYV422 {
                     gl.use_program(Some(self.yuyv_packed_prog));
                     gl.active_texture(glow::TEXTURE0);
@@ -807,6 +820,7 @@ impl CrtFilterRenderer {
                         Some(&frame.data),
                     );
                     gl.uniform_1_i32(Some(&self.yuyv_range_loc), frame.color_range as i32);
+                    gl.uniform_2_f32(Some(&self.yuyv_overscan_loc), overscan_x, overscan_y);
                 }
 
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
@@ -1030,6 +1044,8 @@ impl ShaderParams {
             median_filter_enabled: state.video.median_filter_enabled,
             vibrance: state.video.vibrance,
             scaler_filter: state.scaler_filter.load(std::sync::atomic::Ordering::Relaxed),
+            overscan_x: state.video.overscan_x,
+            overscan_y: state.video.overscan_y,
         }
     }
 }
@@ -1051,6 +1067,8 @@ pub struct ShaderParams {
     pub median_filter_enabled: bool,
     pub vibrance: f32,
     pub scaler_filter: u8,
+    pub overscan_x: f32,
+    pub overscan_y: f32,
 }
 
 impl Default for ShaderParams {
@@ -1071,6 +1089,8 @@ impl Default for ShaderParams {
             median_filter_enabled: false,
             vibrance: 1.0,
             scaler_filter: crate::video::types::ScalerFilter::FastBilinear as u8,
+            overscan_x: 0.0,
+            overscan_y: 0.0,
         }
     }
 }

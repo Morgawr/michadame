@@ -4,6 +4,7 @@
     uniform sampler2D y_tex;
     uniform sampler2D u_tex;
     uniform sampler2D v_tex;
+    uniform vec2 overscan_offset;
     uniform int input_range; // 0 for Full, 1 for Limited
 
     float ToLinear1(float c) {
@@ -14,9 +15,16 @@
     }
 
     void main() {
-        float y = texture(y_tex, v_tc).r;
-        float u = texture(u_tex, v_tc).r;
-        float v = texture(v_tex, v_tc).r;
+        vec2 shifted_tc = v_tc - overscan_offset;
+        
+        if (shifted_tc.x < 0.0 || shifted_tc.x > 1.0 || shifted_tc.y < 0.0 || shifted_tc.y > 1.0) {
+            out_color = vec4(0.0, 0.0, 0.0, 1.0);
+            return;
+        }
+
+        float y = texture(y_tex, shifted_tc).r;
+        float u = texture(u_tex, shifted_tc).r;
+        float v = texture(v_tex, shifted_tc).r;
 
         if (input_range == 1) {
             // Limited Range (MPEG) to Full Range (JPEG) expansion

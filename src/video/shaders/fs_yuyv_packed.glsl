@@ -2,6 +2,7 @@
     in vec2 v_tc;
     out vec4 out_color;
     uniform sampler2D raw_tex;
+    uniform vec2 overscan_offset;
     uniform int input_range; // 0 for Full, 1 for Limited
 
     float ToLinear1(float c) {
@@ -12,14 +13,21 @@
     }
 
     void main() {
+        vec2 shifted_tc = v_tc - overscan_offset;
+
+        if (shifted_tc.x < 0.0 || shifted_tc.x > 1.0 || shifted_tc.y < 0.0 || shifted_tc.y > 1.0) {
+            out_color = vec4(0.0, 0.0, 0.0, 1.0);
+            return;
+        }
+
         // YUYV is packed: [Y0, U0, Y1, V0]
         // We sample the texture as if it were RGBA (each pixel has 4 channels)
         // Texture width is width / 2
-        vec4 yuyv_vec = texture(raw_tex, v_tc);
+        vec4 yuyv_vec = texture(raw_tex, shifted_tc);
         
         // Determine if we want the first or second Y based on X coordinate
         // We multiply by 2 because each texture pixel contains 2 source pixels
-        float x_idx = v_tc.x * textureSize(raw_tex, 0).x * 2.0;
+        float x_idx = shifted_tc.x * textureSize(raw_tex, 0).x * 2.0;
         float y_val;
         if (int(floor(x_idx)) % 2 == 0) {
             y_val = yuyv_vec.r; // Y0

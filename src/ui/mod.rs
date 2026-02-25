@@ -134,6 +134,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             let horizontal_stretch = state.video.horizontal_stretch;
             let median_filter_enabled = state.video.median_filter_enabled;
             let vibrance = state.video.vibrance;
+            let overscan_x = state.video.overscan_x;
+            let overscan_y = state.video.overscan_y;
             let scaler_filter = state.scaler_filter.load(std::sync::atomic::Ordering::Relaxed);
             let latest_frame = state.latest_frame.clone();
             let video_texture = state.video_texture.as_ref().map(|t| t.id());
@@ -157,6 +159,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         median_filter_enabled,
                         vibrance,
                         scaler_filter,
+                        overscan_x,
+                        overscan_y,
                     );
                 })),
             };

@@ -55,6 +55,8 @@ pub struct VideoSettings {
     pub horizontal_stretch: f32,
     pub median_filter_enabled: bool,
     pub vibrance: f32,
+    pub overscan_x: f32,
+    pub overscan_y: f32,
 }
 
 pub struct AppState {
@@ -131,6 +133,8 @@ impl Default for AppState {
                 horizontal_stretch: 1.0,
                 median_filter_enabled: false,
                 vibrance: 1.0,
+                overscan_x: 0.0,
+                overscan_y: 0.0,
             },
             toasts: egui_toast::Toasts::new().anchor(egui::Align2::RIGHT_BOTTOM, (-10.0, -10.0)).direction(egui::Direction::BottomUp),
             video_thread: None,
