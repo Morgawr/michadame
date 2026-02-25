@@ -112,7 +112,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             }
             if ui
                 .add(
-                    egui::Slider::new(&mut state.video.horizontal_stretch, 1.0..=1.5)
+                    egui::Slider::new(&mut state.video.horizontal_stretch, 0.5..=1.5)
                         .text("Horizontal Stretch")
                         .step_by(0.001)
                         .custom_formatter(|n, _| format!("{:.1}%", n * 100.0)),
@@ -128,7 +128,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 .add(
                     egui::Slider::new(&mut state.video.overscan_x, -0.2..=0.2)
                         .text("Overscan X")
-                        .step_by(0.001)
+                        .step_by(0.0005)
                         .custom_formatter(|n, _| format!("{:.1}%", n * 100.0)),
                 )
                 .changed()
