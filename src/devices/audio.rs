@@ -23,7 +23,6 @@ struct LiveSource {
     underruns: Arc<AtomicU64>,
     peak_amplitude_shared: Arc<AtomicU64>,
     audio_latency_ms: Arc<AtomicU64>,
-    pause_counter: usize,
     local_buf: Vec<f32>,
     local_idx: usize,
     valid_len: usize,
@@ -33,11 +32,6 @@ impl Iterator for LiveSource {
     type Item = f32;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.pause_counter > 0 {
-            self.pause_counter -= 1;
-            return Some(0.0);
-        }
-
         if self.local_idx >= self.valid_len {
             let queued_samples = self.consumer.slots();
             let safe_queued = (queued_samples / self.channels as usize) * self.channels as usize;
@@ -80,9 +74,12 @@ impl Iterator for LiveSource {
                 self.underruns.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!("Audio underrun! Ringbuffer exhausted.");
                 
-                // If we underrun, instead of pausing for 40ms, we just return a single 0.0 sample 
-                // and try again next iteration. This is more transparent to the player.
-                return Some(0.0);
+                // We MUST insert a full frame of silence (e.g. 2 samples for stereo)
+                // to prevent L/R channels from permanently desyncing/swapping.
+                let frame_size = self.channels as usize;
+                self.local_buf[..frame_size].fill(0.0);
+                self.valid_len = frame_size;
+                self.local_idx = 0;
             }
         }
 
@@ -122,7 +119,7 @@ impl Source for LiveSource {
 
 #[inline(always)]
 fn i16_to_f32(s: i16) -> f32 {
-    s as f32 / i16::MAX as f32
+    s as f32 / 32768.0
 }
 
 extern "C" fn alsa_error_handler(
@@ -205,7 +202,6 @@ pub fn start_audio_stream(
         underruns: Arc::new(AtomicU64::new(0)),
         peak_amplitude_shared,
         audio_latency_ms,
-        pause_counter: 0,
         local_buf: vec![0.0; 1024],
         local_idx: 0,
         valid_len: 0,
