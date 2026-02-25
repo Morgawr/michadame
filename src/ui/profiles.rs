@@ -14,15 +14,13 @@ pub fn draw_profile_management(ui: &mut egui::Ui, state: &mut AppState) -> bool 
             egui::ComboBox::from_id_source("profile_selector")
                 .selected_text(&state.active_profile)
                 .show_ui(ui, |ui| {
-                    let mut profile_keys: Vec<String> = state.profiles.keys().cloned().collect();
-                    profile_keys.sort();
-
-                    for key in profile_keys {
+                    for key in state.profiles.keys() {
                         combo_changed |= ui
                             .selectable_value(&mut state.active_profile, key.clone(), key)
                             .changed();
                     }
                 });
+
 
             if combo_changed && pre_selected != state.active_profile {
                 let profile_to_apply = state.profiles.get(&state.active_profile).cloned();

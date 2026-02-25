@@ -166,8 +166,8 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             let mut mask = state.crt.shadow_mask as f32;
             let mut bloom_pix = state.crt.hard_bloom_pix as f32;
             let mut bloom_scan = state.crt.hard_bloom_scan as f32;
-            let mut bloom_amount = state.crt.bloom_amount as f32;
-            let mut shape = state.crt.shape as f32;
+            let mut bloom_amount = state.crt.bloom_amount;
+            let mut shape = state.crt.shape;
 
             ui.horizontal_wrapped(|ui| {
                 if ui

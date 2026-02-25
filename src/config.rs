@@ -1,6 +1,6 @@
 use crate::app::AppState;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 
 #[derive(Default, Serialize, Deserialize, Clone)]
@@ -43,7 +43,7 @@ struct LegacyConfig {
     #[serde(default = "default_active_profile")]
     active_profile: String,
     #[serde(default)]
-    profiles: HashMap<String, Profile>,
+    profiles: BTreeMap<String, Profile>,
 
     audio_source: Option<String>,
     video_format_fourcc: Option<String>,
@@ -83,7 +83,7 @@ pub struct MichadameConfig {
     pub reset_usb_on_startup: Option<bool>,
     pub has_shown_first_run_warning: Option<bool>,
     pub active_profile: String,
-    pub profiles: HashMap<String, Profile>,
+    pub profiles: BTreeMap<String, Profile>,
 }
 
 impl From<LegacyConfig> for MichadameConfig {
@@ -135,7 +135,7 @@ impl From<LegacyConfig> for MichadameConfig {
 
 impl Default for MichadameConfig {
     fn default() -> Self {
-        let mut profiles = HashMap::new();
+        let mut profiles = BTreeMap::new();
         profiles.insert("Default".to_string(), Profile::default());
         Self {
             video_device: None,
@@ -219,10 +219,7 @@ pub fn save_config(state: &AppState) {
 }
 
 pub fn save_global_hardware_config(state: &AppState) {
-    let mut cfg = match confy::load::<MichadameConfig>("michadame", None) {
-        Ok(c) => c,
-        Err(_) => MichadameConfig::default(),
-    };
+    let mut cfg = confy::load::<MichadameConfig>("michadame", None).unwrap_or_default();
 
     // Update global settings
     cfg.video_device = Some(state.hardware.selected_video_device.clone());
@@ -387,7 +384,7 @@ mod tests {
             reset_usb_on_startup: Some(true),
             has_shown_first_run_warning: Some(false),
             active_profile: "OldProfile".to_string(), // Should be overridden to Default if profiles empty
-            profiles: HashMap::new(),
+            profiles: std::collections::BTreeMap::new(),
             audio_source: Some("TestAudio".to_string()),
             video_format_fourcc: Some("YUYV".to_string()),
             crt_filter: Some(1),
@@ -427,7 +424,7 @@ mod tests {
 
     #[test]
     fn test_legacy_config_migration_with_profiles() {
-        let mut profiles = HashMap::new();
+        let mut profiles = BTreeMap::new();
         let mut custom_profile = Profile::default();
         custom_profile.audio_source = Some("CustomAudio".to_string());
         profiles.insert("Custom".to_string(), custom_profile);
@@ -465,6 +462,7 @@ mod tests {
             overscan_x: None,
             overscan_y: None,
         };
+
 
         let new_config: MichadameConfig = legacy.into();
         assert_eq!(new_config.active_profile, "Custom");

@@ -22,6 +22,7 @@ struct LiveSource {
     samples_played: Arc<AtomicU64>,
     underruns: Arc<AtomicU64>,
     peak_amplitude_shared: Arc<AtomicU64>,
+    audio_latency_ms: Arc<AtomicU64>,
     pause_counter: usize,
     local_buf: Vec<f32>,
     local_idx: usize,
@@ -38,6 +39,11 @@ impl Iterator for LiveSource {
         }
 
         if self.local_idx >= self.valid_len {
+            // Track audio latency before popping new data
+            let queued_samples = self.consumer.slots() as f64;
+            let latency = (queued_samples / self.channels as f64 / self.sample_rate as f64 * 1000.0) as u64;
+            self.audio_latency_ms.store(latency, Ordering::Relaxed);
+
             let (popped, _) = self.consumer.pop_partial_slice(&mut self.local_buf);
             if popped.is_empty() {
                 self.underruns.fetch_add(1, Ordering::Relaxed);
@@ -60,7 +66,7 @@ impl Iterator for LiveSource {
         self.peak_amplitude_shared.fetch_max(amp_bits, Ordering::Relaxed);
 
         let count = self.samples_played.fetch_add(1, Ordering::Relaxed);
-        if count % 48000 == 0 {
+        if count.is_multiple_of(48000) {
              let underrun_count = self.underruns.swap(0, Ordering::Relaxed);
              tracing::debug!("Audio output heartbeats: {} samples played ({} underruns)", count, underrun_count);
         }
@@ -145,7 +151,11 @@ pub fn find_audio_devices() -> Result<Vec<(String, String)>> {
     Ok(sources)
 }
 
-pub fn start_audio_stream(source_name: &str, peak_amplitude_shared: Arc<AtomicU64>) -> Result<AudioStreamHandle> {
+pub fn start_audio_stream(
+    source_name: &str, 
+    peak_amplitude_shared: Arc<AtomicU64>,
+    audio_latency_ms: Arc<AtomicU64>,
+) -> Result<AudioStreamHandle> {
     // Shared ring buffer for capture-to-playback bridge.
     // Increased to ~100ms of audio (48k * 0.1s * 2 channels) to provide jitter stability.
     let ring_size = (48000.0 * 0.1 * 2.0) as usize; 
@@ -166,6 +176,7 @@ pub fn start_audio_stream(source_name: &str, peak_amplitude_shared: Arc<AtomicU6
         samples_played: Arc::new(AtomicU64::new(0)),
         underruns: Arc::new(AtomicU64::new(0)),
         peak_amplitude_shared,
+        audio_latency_ms,
         pause_counter: 0,
         local_buf: vec![0.0; 1024],
         local_idx: 0,
@@ -229,8 +240,8 @@ fn start_alsa_capture(
                     let mut local_max = 0.0f32;
                     let mut f32_buf = Vec::with_capacity(sample_count);
                     
-                    for i in 0..sample_count {
-                        let f = i16_to_f32(buf[i]);
+                    for &sample in buf.iter().take(sample_count) {
+                        let f = i16_to_f32(sample);
                         local_max = local_max.max(f.abs());
                         f32_buf.push(f);
                     }

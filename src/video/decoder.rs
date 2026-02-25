@@ -67,9 +67,8 @@ pub fn video_thread_main(
         let mut ictx = ictx;
         for (stream, packet) in ictx.packets() {
             if stream.index() == video_stream_index {
-                match packet_tx.try_send(packet) {
-                    Err(crossbeam_channel::TrySendError::Disconnected(_)) => break,
-                    _ => {} // Ignore Full or Ok
+                if let Err(crossbeam_channel::TrySendError::Disconnected(_)) = packet_tx.try_send(packet) {
+                    break;
                 }
             }
         }
@@ -84,7 +83,7 @@ pub fn video_thread_main(
         decoder.format(),
         decoder.width(),
         decoder.height(),
-        crate::video::types::ScalerFilter::from_u8(current_scaler_val).to_ffmpeg_flag(),
+        crate::video::types::ScalerFilter::from_u8(current_scaler_val).into_ffmpeg_flag(),
     )
     .context("Failed to create software scaler for normalization")?;
 
@@ -99,7 +98,7 @@ pub fn video_thread_main(
                 decoder.format(),
                 decoder.width(),
                 decoder.height(),
-                crate::video::types::ScalerFilter::from_u8(current_scaler_val).to_ffmpeg_flag(),
+                crate::video::types::ScalerFilter::from_u8(current_scaler_val).into_ffmpeg_flag(),
             )
             .context("Failed to re-create software scaler")?;
         }
@@ -136,9 +135,8 @@ pub fn video_thread_main(
                     color_range: crate::video::types::ColorRange::from_u8(range_val),
                 });
 
-                match frame_sender.try_send(raw_frame) {
-                    Err(crossbeam_channel::TrySendError::Disconnected(_)) => return Ok(()),
-                    _ => {} // Ignore Full or Ok
+                if let Err(crossbeam_channel::TrySendError::Disconnected(_)) = frame_sender.try_send(raw_frame) {
+                    return Ok(());
                 }
             }
         } else {

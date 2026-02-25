@@ -92,16 +92,7 @@ impl ScalerFilter {
             _ => ScalerFilter::FastBilinear,
         }
     }
-    pub fn to_string(&self) -> String {
-        match self {
-            ScalerFilter::FastBilinear => "Fast Bilinear".to_string(),
-            ScalerFilter::Bilinear => "Bilinear".to_string(),
-            ScalerFilter::Bicubic => "Bicubic".to_string(),
-            ScalerFilter::Point => "Point (Nearest)".to_string(),
-            ScalerFilter::Lanczos => "Lanczos".to_string(),
-        }
-    }
-    pub fn to_ffmpeg_flag(&self) -> ffmpeg_next::software::scaling::flag::Flags {
+    pub fn into_ffmpeg_flag(self) -> ffmpeg_next::software::scaling::flag::Flags {
         match self {
             ScalerFilter::FastBilinear => ffmpeg_next::software::scaling::flag::Flags::FAST_BILINEAR,
             ScalerFilter::Bilinear => ffmpeg_next::software::scaling::flag::Flags::BILINEAR,
@@ -111,6 +102,20 @@ impl ScalerFilter {
         }
     }
 }
+
+impl std::fmt::Display for ScalerFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            ScalerFilter::FastBilinear => "Fast Bilinear",
+            ScalerFilter::Bilinear => "Bilinear",
+            ScalerFilter::Bicubic => "Bicubic",
+            ScalerFilter::Point => "Point (Nearest)",
+            ScalerFilter::Lanczos => "Lanczos",
+        };
+        write!(f, "{}", text)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorRange {
     Full = 0,
@@ -124,11 +129,15 @@ impl ColorRange {
             _ => ColorRange::Full,
         }
     }
-    pub fn to_string(&self) -> String {
-        match self {
-            ColorRange::Full => "Full (PC)".to_string(),
-            ColorRange::Limited => "Limited (TV)".to_string(),
-        }
+}
+
+impl std::fmt::Display for ColorRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            ColorRange::Full => "Full (PC)",
+            ColorRange::Limited => "Limited (TV)",
+        };
+        write!(f, "{}", text)
     }
 }
 
@@ -155,21 +164,12 @@ mod tests {
     }
 
     #[test]
-    fn test_scaler_filter_to_string() {
-        assert_eq!(ScalerFilter::FastBilinear.to_string(), "Fast Bilinear");
-        assert_eq!(ScalerFilter::Bilinear.to_string(), "Bilinear");
-        assert_eq!(ScalerFilter::Bicubic.to_string(), "Bicubic");
-        assert_eq!(ScalerFilter::Point.to_string(), "Point (Nearest)");
-        assert_eq!(ScalerFilter::Lanczos.to_string(), "Lanczos");
-    }
-
-    #[test]
-    fn test_scaler_filter_to_ffmpeg_flag() {
-        assert_eq!(ScalerFilter::FastBilinear.to_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::FAST_BILINEAR);
-        assert_eq!(ScalerFilter::Bilinear.to_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::BILINEAR);
-        assert_eq!(ScalerFilter::Bicubic.to_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::BICUBIC);
-        assert_eq!(ScalerFilter::Point.to_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::POINT);
-        assert_eq!(ScalerFilter::Lanczos.to_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::LANCZOS);
+    fn test_scaler_filter_into_ffmpeg_flag() {
+        assert_eq!(ScalerFilter::FastBilinear.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::FAST_BILINEAR);
+        assert_eq!(ScalerFilter::Bilinear.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::BILINEAR);
+        assert_eq!(ScalerFilter::Bicubic.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::BICUBIC);
+        assert_eq!(ScalerFilter::Point.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::POINT);
+        assert_eq!(ScalerFilter::Lanczos.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::LANCZOS);
     }
 
     #[test]
@@ -177,11 +177,5 @@ mod tests {
         assert_eq!(ColorRange::from_u8(0), ColorRange::Full);
         assert_eq!(ColorRange::from_u8(1), ColorRange::Limited);
         assert_eq!(ColorRange::from_u8(2), ColorRange::Full); // Default
-    }
-
-    #[test]
-    fn test_color_range_to_string() {
-        assert_eq!(ColorRange::Full.to_string(), "Full (PC)");
-        assert_eq!(ColorRange::Limited.to_string(), "Limited (TV)");
     }
 }

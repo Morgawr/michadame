@@ -399,6 +399,7 @@ impl CrtFilterRenderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn paint(
         &mut self,
         gl: &glow::Context,
@@ -695,6 +696,7 @@ impl CrtFilterRenderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_passthrough(
         &mut self,
         gl: &glow::Context,

@@ -1,7 +1,7 @@
 use crate::video::VideoFormat;
 use crate::{config, devices, devices::filter_type::CrtFilter, ui, video};
 use eframe::egui;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::{
     atomic::{AtomicU64, AtomicU8, Ordering},
     Arc, Mutex,
@@ -12,6 +12,7 @@ use std::time::Instant;
 
 pub struct HardwareState {
     pub audio_peak_amplitude: Arc<AtomicU64>,
+    pub audio_latency_ms: Arc<AtomicU64>,
     pub video_devices: Vec<String>,
     pub usb_devices: Vec<(String, String)>,
     pub selected_usb_device: Option<String>,
@@ -82,7 +83,7 @@ pub struct AppState {
     pub crt_renderer: Option<Arc<Mutex<video::gpu_filter::CrtFilterRenderer>>>,
     pub fullscreen_toggle_frame_count: Option<u8>,
 
-    pub profiles: HashMap<String, config::Profile>,
+    pub profiles: BTreeMap<String, config::Profile>,
     pub active_profile: String,
     pub new_profile_name: String,
 }
@@ -92,6 +93,7 @@ impl Default for AppState {
         Self {
             hardware: HardwareState {
                 audio_peak_amplitude: Arc::new(AtomicU64::new(0)),
+                audio_latency_ms: Arc::new(AtomicU64::new(0)),
                 video_devices: Vec::new(),
                 usb_devices: Vec::new(),
                 selected_usb_device: None,
@@ -151,7 +153,7 @@ impl Default for AppState {
             fullscreen_toggle_frame_count: None,
             latest_frame: None,
             profiles: {
-                let mut p = HashMap::new();
+                let mut p = BTreeMap::new();
                 p.insert("Default".to_string(), config::Profile::default());
                 p
             },
@@ -212,9 +214,12 @@ impl AppState {
         } else {
             0.0
         };
+
+        let audio_latency = self.hardware.audio_latency_ms.load(Ordering::Relaxed);
+
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-            "Michadame Viewer | UI: {:.0} FPS | Video: {:.0} FPS",
-            gui_fps, video_fps
+            "Michadame Viewer | UI: {:.0} FPS | Video: {:.0} FPS | Audio Latency: {} ms",
+            gui_fps, video_fps, audio_latency
         )));
     }
 
@@ -225,9 +230,12 @@ impl AppState {
         }
 
         if let Some(mic) = &self.hardware.selected_audio_source_name {
-            match devices::audio::start_audio_stream(mic, Arc::clone(&self.hardware.audio_peak_amplitude)) {
-                Ok(handle) => {
-                    self.hardware.active_audio_stream = Some(handle);
+            match devices::audio::start_audio_stream(
+                mic, 
+                Arc::clone(&self.hardware.audio_peak_amplitude),
+                Arc::clone(&self.hardware.audio_latency_ms)
+            ) {
+                Ok(handle) => {                    self.hardware.active_audio_stream = Some(handle);
                     self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: "Audio stream started.".to_string().into() });
                 }
                 Err(e) => {
