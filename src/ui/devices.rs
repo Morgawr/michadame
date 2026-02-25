@@ -230,6 +230,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         .changed();
                 }
                 if combo_changed {
+                    crate::config::save_config(state);
                     changed = true;
                 }
             });
@@ -239,12 +240,18 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             .iter()
             .find(|(_, name)| Some(name) == state.hardware.selected_audio_sink_name.as_ref())
             .map(|(desc, _)| desc.as_str())
-            .unwrap_or("Select an Output");
+            .unwrap_or("System Default");
 
         egui::ComboBox::from_label("Output (Sink)")
             .selected_text(selected_sink_desc)
             .show_ui(ui, |ui| {
-                let mut combo_changed = false;
+                let mut combo_changed = ui
+                    .selectable_value(
+                        &mut state.hardware.selected_audio_sink_name,
+                        None,
+                        "System Default",
+                    )
+                    .changed();
                 for (desc, name) in &state.hardware.audio_sinks {
                     combo_changed |= ui
                         .selectable_value(
@@ -255,6 +262,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         .changed();
                 }
                 if combo_changed {
+                    crate::config::save_config(state);
                     changed = true;
                 }
             });

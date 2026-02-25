@@ -1,10 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::Sample;
 use alsa::device_name::HintIter;
 use ringbuf::traits::{Consumer, Producer, Split};
 use ringbuf::HeapRb;
-use std::sync::Arc;
 
 pub struct AudioStreamHandle {
     _input_stream: cpal::Stream,
@@ -31,11 +29,19 @@ fn f32_to_u16(s: f32) -> u16 {
     ((s.clamp(-1.0, 1.0) * 32768.0) + 32768.0) as u16
 }
 
+/// A no-op error handler to suppress ALSA's internal verbose logging to stderr.
+#[cfg(target_os = "linux")]
+extern "C" fn alsa_error_handler(
+    _file: *const libc::c_char,
+    _line: libc::c_int,
+    _function: *const libc::c_char,
+    _err: libc::c_int,
+    _fmt: *const libc::c_char,
+) {}
+
 fn get_alsa_device_name(name: &str) -> String {
     #[cfg(target_os = "linux")]
     {
-        // cpal sometimes returns names like "sysdefault:CARD=USB" or "hw:0,0".
-        // We can use ALSA's HintIter to find the matching description.
         if let Ok(hints) = HintIter::new_str(None, "pcm") {
             for hint in hints {
                 if let Some(hint_name) = &hint.name {
@@ -52,6 +58,17 @@ fn get_alsa_device_name(name: &str) -> String {
 }
 
 pub fn find_audio_devices() -> Result<(Vec<(String, String)>, Vec<(String, String)>)> {
+    #[cfg(target_os = "linux")]
+    {
+        unsafe {
+            use libc::{c_int, c_void};
+            extern "C" {
+                fn snd_lib_error_set_handler(handler: *const c_void) -> c_int;
+            }
+            snd_lib_error_set_handler(alsa_error_handler as *const c_void);
+        }
+    }
+
     let host = cpal::default_host();
     let mut sources = Vec::new();
     let mut sinks = Vec::new();
@@ -77,7 +94,7 @@ pub fn find_audio_devices() -> Result<(Vec<(String, String)>, Vec<(String, Strin
     Ok((sources, sinks))
 }
 
-pub fn start_audio_stream(source_name: &str, sink_name: &str) -> Result<AudioStreamHandle> {
+pub fn start_audio_stream(source_name: &str, sink_name: Option<&str>) -> Result<AudioStreamHandle> {
     let host = cpal::default_host();
 
     let input_device = host
@@ -86,11 +103,16 @@ pub fn start_audio_stream(source_name: &str, sink_name: &str) -> Result<AudioStr
         .find(|d| d.name().unwrap_or_default() == source_name)
         .ok_or_else(|| anyhow!("Input device '{}' not found", source_name))?;
 
-    let output_device = host
-        .output_devices()
-        .context("Failed to get output devices")?
-        .find(|d| d.name().unwrap_or_default() == sink_name)
-        .ok_or_else(|| anyhow!("Output device '{}' not found", sink_name))?;
+    let output_device = match sink_name {
+        Some(name) => host
+            .output_devices()
+            .context("Failed to get output devices")?
+            .find(|d| d.name().unwrap_or_default() == name)
+            .ok_or_else(|| anyhow!("Output device '{}' not found", name))?,
+        None => host
+            .default_output_device()
+            .context("No default output device found")?,
+    };
 
     let input_supported = input_device
         .default_input_config()
@@ -102,9 +124,13 @@ pub fn start_audio_stream(source_name: &str, sink_name: &str) -> Result<AudioStr
     let input_config = input_supported.config();
     let output_config = output_supported.config();
 
-    // Size for ~50ms of audio buffer
-    let latency_frames = (input_config.sample_rate.0 as f32 * 0.05) as usize;
-    let ring_size = latency_frames * input_config.channels as usize * 4;
+    let input_sample_rate = input_config.sample_rate.0 as f64;
+    let output_sample_rate = output_config.sample_rate.0 as f64;
+    let input_channels = input_config.channels as usize;
+    let output_channels = output_config.channels as usize;
+
+    // Fixed-size buffer for raw input PCM samples. Size for ~100ms.
+    let ring_size = (input_sample_rate * 0.1) as usize * input_channels;
     let ring = HeapRb::<f32>::new(ring_size);
     let (mut producer, mut consumer) = ring.split();
 
@@ -114,7 +140,7 @@ pub fn start_audio_stream(source_name: &str, sink_name: &str) -> Result<AudioStr
         cpal::SampleFormat::F32 => input_device.build_input_stream(
             &input_config,
             move |data: &[f32], _: &_| {
-                producer.push_slice(data);
+                let _ = producer.push_slice(data);
             },
             err_fn,
             None,
@@ -123,8 +149,7 @@ pub fn start_audio_stream(source_name: &str, sink_name: &str) -> Result<AudioStr
             &input_config,
             move |data: &[i16], _: &_| {
                 for &sample in data {
-                    let f = i16_to_f32(sample);
-                    let _ = producer.try_push(f);
+                    let _ = producer.try_push(i16_to_f32(sample));
                 }
             },
             err_fn,
@@ -134,8 +159,7 @@ pub fn start_audio_stream(source_name: &str, sink_name: &str) -> Result<AudioStr
             &input_config,
             move |data: &[u16], _: &_| {
                 for &sample in data {
-                     let f = u16_to_f32(sample);
-                     let _ = producer.try_push(f);
+                     let _ = producer.try_push(u16_to_f32(sample));
                 }
             },
             err_fn,
@@ -144,39 +168,80 @@ pub fn start_audio_stream(source_name: &str, sink_name: &str) -> Result<AudioStr
         _ => return Err(anyhow!("Unsupported input sample format")),
     }?;
 
+    // Resampling state
+    let resample_ratio = input_sample_rate / output_sample_rate;
+    let mut input_cursor = 0.0;
+    
+    // We'll use this to track the mono-summed input stream.
+    let mut current_input_sample = 0.0;
+
+    let mut callback = move |data: &mut [f32]| {
+        for frame in data.chunks_mut(output_channels) {
+            // "Consume" input samples according to the resample ratio.
+            // If input_cursor < 1.0, we need more input samples to determine the next output sample.
+            while input_cursor < 1.0 {
+                let mut sum = 0.0;
+                let mut count = 0;
+                for _ in 0..input_channels {
+                    if let Some(s) = consumer.try_pop() {
+                        sum += s;
+                        count += 1;
+                    }
+                }
+                if count > 0 {
+                    current_input_sample = sum / count as f32;
+                }
+                input_cursor += 1.0;
+            }
+            
+            // Nearest-neighbor resampling (can be refined later to linear if needed)
+            let output_sample = current_input_sample;
+            
+            for sample in frame.iter_mut() {
+                *sample = output_sample;
+            }
+            
+            input_cursor -= resample_ratio;
+        }
+    };
+
     let output_stream = match output_supported.sample_format() {
         cpal::SampleFormat::F32 => output_device.build_output_stream(
             &output_config,
-            move |data: &mut [f32], _: &_| {
-                for sample in data.iter_mut() {
-                    *sample = consumer.try_pop().unwrap_or(0.0);
-                }
-            },
+            move |data: &mut [f32], _: &_| callback(data),
             err_fn,
             None,
         ),
-        cpal::SampleFormat::I16 => output_device.build_output_stream(
-            &output_config,
-            move |data: &mut [i16], _: &_| {
-                for sample in data.iter_mut() {
-                    let f_sample = consumer.try_pop().unwrap_or(0.0);
-                    *sample = f32_to_i16(f_sample);
-                }
-            },
-            err_fn,
-            None,
-        ),
-        cpal::SampleFormat::U16 => output_device.build_output_stream(
-            &output_config,
-            move |data: &mut [u16], _: &_| {
-                for sample in data.iter_mut() {
-                    let f_sample = consumer.try_pop().unwrap_or(0.0);
-                    *sample = f32_to_u16(f_sample);
-                }
-            },
-            err_fn,
-            None,
-        ),
+        cpal::SampleFormat::I16 => {
+            let mut f32_buf = Vec::new();
+            output_device.build_output_stream(
+                &output_config,
+                move |data: &mut [i16], _: &_| {
+                    f32_buf.resize(data.len(), 0.0);
+                    callback(&mut f32_buf);
+                    for (i, &s) in f32_buf.iter().enumerate() {
+                        data[i] = f32_to_i16(s);
+                    }
+                },
+                err_fn,
+                None,
+            )
+        },
+        cpal::SampleFormat::U16 => {
+            let mut f32_buf = Vec::new();
+            output_device.build_output_stream(
+                &output_config,
+                move |data: &mut [u16], _: &_| {
+                    f32_buf.resize(data.len(), 0.0);
+                    callback(&mut f32_buf);
+                    for (i, &s) in f32_buf.iter().enumerate() {
+                        data[i] = f32_to_u16(s);
+                    }
+                },
+                err_fn,
+                None,
+            )
+        },
         _ => return Err(anyhow!("Unsupported output sample format")),
     }?;
 

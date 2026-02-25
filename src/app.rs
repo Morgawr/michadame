@@ -226,7 +226,7 @@ impl AppState {
             &self.hardware.selected_audio_source_name,
             &self.hardware.selected_audio_sink_name,
         ) {
-            (Some(mic), Some(sink)) => match devices::audio::start_audio_stream(mic, sink) {
+            (Some(mic), sink_opt) => match devices::audio::start_audio_stream(mic, sink_opt.as_deref()) {
                 Ok(handle) => {
                     self.hardware.active_audio_stream = Some(handle);
                     self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Audio stream started.".to_string().into() });
