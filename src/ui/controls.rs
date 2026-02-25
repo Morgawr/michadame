@@ -19,7 +19,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         if state.ui.video_window_open {
             if ui.button("🛑 Stop Stream").clicked() {
                 state.stop_stream(ui.ctx());
-                state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Stream stopped.".to_string().into() });
+                state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: "Stream stopped.".to_string().into() });
             }
             
             // Audio Level Meter
@@ -34,7 +34,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 .clicked()
             {
                 state.start_stream(ui.ctx());
-                state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Stream starting...".to_string().into() });
+                state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: "Stream starting...".to_string().into() });
             }
             if !can_stream {
                 ui.label("Select Video Format/Resolution first.");

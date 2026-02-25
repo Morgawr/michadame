@@ -344,7 +344,7 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     state.ui.reset_usb_on_startup = cfg.reset_usb_on_startup.unwrap_or(false);
     if state.ui.reset_usb_on_startup {
         if let Some(device_to_reset) = &state.hardware.selected_usb_device {
-            state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: (match crate::devices::usb::reset_usb_device(device_to_reset) {
+            state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: (match crate::devices::usb::reset_usb_device(device_to_reset) {
                 Ok(_) => "Auto-reset USB device successfully.".to_string(),
                 Err(e) => format!("Failed to auto-reset USB: {}", e),
             }).into() });

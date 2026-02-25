@@ -134,7 +134,7 @@ impl Default for AppState {
                 overscan_x: 0.0,
                 overscan_y: 0.0,
             },
-            toasts: egui_toast::Toasts::new().anchor(egui::Align2::RIGHT_BOTTOM, (-10.0, -10.0)).direction(egui::Direction::BottomUp),
+            toasts: egui_toast::Toasts::new().anchor(egui::Align2::LEFT_TOP, (10.0, 10.0)).direction(egui::Direction::TopDown),
             video_thread: None,
             video_texture: None,
             frame_receiver: None,
@@ -174,11 +174,11 @@ impl AppState {
                 if let Ok(cfg) = confy::load::<config::MichadameConfig>("michadame", None) {
                     config::apply_config(self, &cfg);
                 }
-                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Devices loaded successfully.".to_string().into() });
+                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: "Devices loaded successfully.".to_string().into() });
                 true
             }
             Err(e) => {
-                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: format!("Error: {}", e).into() });
+                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: format!("Error: {}", e).into() });
                 false
             }
         };
@@ -228,22 +228,22 @@ impl AppState {
             match devices::audio::start_audio_stream(mic, Arc::clone(&self.hardware.audio_peak_amplitude)) {
                 Ok(handle) => {
                     self.hardware.active_audio_stream = Some(handle);
-                    self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Audio stream started.".to_string().into() });
+                    self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: "Audio stream started.".to_string().into() });
                 }
                 Err(e) => {
-                    self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: format!("Failed to start audio stream: {}", e).into() });
+                    self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: format!("Failed to start audio stream: {}", e).into() });
                     return;
                 }
             }
         } else {
-            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Cannot start: Missing audio input device.".to_string().into() });
+            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: "Cannot start: Missing audio input device.".to_string().into() });
             return;
         }
 
         let format = if let Some(f) = self.hardware.supported_formats.get(self.hardware.selected_format_index) {
             f
         } else {
-            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Cannot start: No video format selected.".to_string().into() });
+            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: "Cannot start: No video format selected.".to_string().into() });
             return;
         };
 
@@ -281,7 +281,7 @@ impl AppState {
             }
         });
         self.video_thread = Some(handle);
-        self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Stream started.".to_string().into() });
+        self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: "Stream started.".to_string().into() });
         self.ui.video_window_open = true;
         self.ui.control_window_open = false;
 
@@ -314,9 +314,9 @@ impl AppState {
         }
 
         if self.hardware.active_audio_stream.take().is_some() {
-            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Stream stopped and audio stream dropped.".to_string().into() });
+            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: "Stream stopped and audio stream dropped.".to_string().into() });
         } else {
-            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Stream stopped.".to_string().into() });
+            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: "Stream stopped.".to_string().into() });
         }
 
         self.frame_receiver = None;
@@ -406,7 +406,7 @@ impl eframe::App for AppState {
             let next_filter = current_filter.next();
             self.crt_filter.store(next_filter as u8, Ordering::Relaxed);
             config::save_config(self);
-            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: format!("CRT filter set to: {}", next_filter.to_string()).into() });
+            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: format!("CRT filter set to: {}", next_filter.to_string()).into() });
         }
         if ctx.input(|i| i.key_pressed(egui::Key::G)) {
             self.video.pixelate_filter_enabled = !self.video.pixelate_filter_enabled;
@@ -415,7 +415,7 @@ impl eframe::App for AppState {
             } else {
                 "disabled"
             };
-            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: format!("480p Pixelate filter {}.", status).into() });
+            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: format!("480p Pixelate filter {}.", status).into() });
             config::save_config(self);
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
