@@ -1,137 +1,167 @@
 use anyhow::{anyhow, Context, Result};
-use libpulse_binding::callbacks::ListResult;
-use libpulse_binding::context::{
-    Context as PulseContext, FlagSet as PulseContextFlagSet, State as PulseContextState,
-};
-use libpulse_binding::mainloop::standard::{IterateResult, Mainloop};
-use libpulse_binding::operation::State as OperationState;
-use std::cell::RefCell;
-use std::rc::Rc;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::Sample;
+use ringbuf::traits::{Consumer, Producer, Split};
+use ringbuf::HeapRb;
+use std::sync::Arc;
 
-fn run_pulse_op<F, T>(op_logic: F) -> Result<T>
-where
-    F: FnOnce(&mut PulseContext, &mut Mainloop) -> Result<T>,
-{
-    let mut mainloop = Mainloop::new().context("Failed to create mainloop")?;
-    let mut context =
-        PulseContext::new(&mainloop, "pa-client").context("Failed to create context")?;
+pub struct AudioStreamHandle {
+    _input_stream: cpal::Stream,
+    _output_stream: cpal::Stream,
+}
 
-    context
-        .connect(None, PulseContextFlagSet::empty(), None)
-        .context("Failed to connect context")?;
+#[inline(always)]
+fn i16_to_f32(s: i16) -> f32 {
+    s as f32 / i16::MAX as f32
+}
 
-    loop {
-        // Use `iterate(false)` to yield the CPU and block until an event occurs
-        match mainloop.iterate(false) {
-            IterateResult::Err(e) => return Err(anyhow!("Mainloop iterate error: {}", e)),
-            IterateResult::Quit(_) => return Err(anyhow!("Mainloop quit unexpectedly")),
-            _ => {}
-        }
-        match context.get_state() {
-            PulseContextState::Ready => break,
-            PulseContextState::Failed | PulseContextState::Terminated => {
-                return Err(anyhow!("Context state failed or terminated"));
+#[inline(always)]
+fn u16_to_f32(s: u16) -> f32 {
+    (s as f32 - 32768.0) / 32768.0
+}
+
+#[inline(always)]
+fn f32_to_i16(s: f32) -> i16 {
+    (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
+}
+
+#[inline(always)]
+fn f32_to_u16(s: f32) -> u16 {
+    ((s.clamp(-1.0, 1.0) * 32768.0) + 32768.0) as u16
+}
+
+pub fn find_audio_devices() -> Result<(Vec<(String, String)>, Vec<(String, String)>)> {
+    let host = cpal::default_host();
+    let mut sources = Vec::new();
+    let mut sinks = Vec::new();
+
+    if let Ok(devices) = host.input_devices() {
+        for device in devices {
+            if let Ok(name) = device.name() {
+                sources.push((name.clone(), name));
             }
-            _ => {}
         }
     }
 
-    let result = op_logic(&mut context, &mut mainloop);
-    context.disconnect();
-    result
-}
-
-pub fn find_pulse_devices() -> Result<(Vec<(String, String)>, Vec<(String, String)>)> {
-    run_pulse_op(|context, mainloop| {
-        let sources = Rc::new(RefCell::new(Vec::new()));
-        let sinks = Rc::new(RefCell::new(Vec::new()));
-        let lists_completed = Rc::new(RefCell::new(0));
-
-        {
-            let op_source = context.introspect().get_source_info_list({
-                let sources = Rc::clone(&sources);
-                let lists_completed = Rc::clone(&lists_completed);
-                move |res| {
-                    if let ListResult::Item(item) = res {
-                        if let (Some(name_cstr), Some(desc_cstr)) = (item.name.as_ref(), item.description.as_ref()) {
-                            let name = String::from_utf8_lossy(name_cstr.as_bytes()).to_string();
-                            let desc = String::from_utf8_lossy(desc_cstr.as_bytes()).to_string();
-                            tracing::info!(source_name = %name, source_desc = %desc, "Found PulseAudio Source");
-                            sources.borrow_mut().push((desc, name));
-                        }
-                    } else {
-                        *lists_completed.borrow_mut() += 1;
-                    }
-                }
-            });
-
-            let op_sink = context.introspect().get_sink_info_list({
-                let sinks = Rc::clone(&sinks);
-                let lists_completed = Rc::clone(&lists_completed);
-                move |res| {
-                    if let ListResult::Item(item) = res {
-                        if let (Some(name_cstr), Some(desc_cstr)) = (item.name.as_ref(), item.description.as_ref()) {
-                            let name = String::from_utf8_lossy(name_cstr.as_bytes()).to_string();
-                            let desc = String::from_utf8_lossy(desc_cstr.as_bytes()).to_string();
-                            tracing::info!(sink_name = %name, sink_desc = %desc, "Found PulseAudio Sink");
-                            sinks.borrow_mut().push((desc, name));
-                        }
-                    } else {
-                        *lists_completed.borrow_mut() += 1;
-                    }
-                }
-            });
-
-            while *lists_completed.borrow() < 2 {
-                if matches!(mainloop.iterate(false), IterateResult::Quit(_)) {
-                    return Err(anyhow!("Mainloop quit while getting devices"));
-                }
-            }
-            drop(op_source);
-            drop(op_sink);
-        }
-
-        let final_sources = sources.borrow().clone();
-        let final_sinks = sinks.borrow().clone();
-        Ok((final_sources, final_sinks))
-    })
-}
-
-pub fn load_pulse_loopback(source: &str, sink: &str) -> Result<u32> {
-    // Inject latency_msec=1 to establish a low-latency pipeline suitable for game capture streams
-    let args = format!(r#"source="{}" sink="{}" latency_msec=1"#, source, sink);
-    run_pulse_op(|context, mainloop| {
-        let index = Rc::new(RefCell::new(None));
-        {
-            let op = context.introspect().load_module("module-loopback", &args, {
-                let index_clone = Rc::clone(&index);
-                move |idx| {
-                    if idx != libpulse_binding::def::INVALID_INDEX {
-                        *index_clone.borrow_mut() = Some(idx);
-                    }
-                }
-            });
-
-            while op.get_state() == OperationState::Running {
-                if matches!(mainloop.iterate(false), IterateResult::Quit(_)) {
-                    return Err(anyhow!("Mainloop quit while loading module"));
-                }
+    if let Ok(devices) = host.output_devices() {
+        for device in devices {
+            if let Ok(name) = device.name() {
+                sinks.push((name.clone(), name));
             }
         }
-        // Explicitly scope the borrow to ensure the RefMut guard is dropped before the closure ends.
-        let result = index.borrow_mut().take();
-        result.context("Failed to get module index or the module failed to load.")
-    })
+    }
+
+    Ok((sources, sinks))
 }
 
-pub fn unload_pulse_loopback(module_index: u32) -> Result<()> {
-    run_pulse_op(|context, mainloop| {
-        let op = context.introspect().unload_module(module_index, |_| {});
-        while op.get_state() == OperationState::Running {
-            if matches!(mainloop.iterate(false), IterateResult::Quit(_)) {
-                return Err(anyhow!("Mainloop quit while unloading module"));
-            }
-        }
-        Ok(())
+pub fn start_audio_stream(source_name: &str, sink_name: &str) -> Result<AudioStreamHandle> {
+    let host = cpal::default_host();
+
+    let input_device = host
+        .input_devices()
+        .context("Failed to get input devices")?
+        .find(|d| d.name().unwrap_or_default() == source_name)
+        .ok_or_else(|| anyhow!("Input device '{}' not found", source_name))?;
+
+    let output_device = host
+        .output_devices()
+        .context("Failed to get output devices")?
+        .find(|d| d.name().unwrap_or_default() == sink_name)
+        .ok_or_else(|| anyhow!("Output device '{}' not found", sink_name))?;
+
+    let input_supported = input_device
+        .default_input_config()
+        .context("Failed to get default input config")?;
+    let output_supported = output_device
+        .default_output_config()
+        .context("Failed to get default output config")?;
+
+    let input_config = input_supported.config();
+    let output_config = output_supported.config();
+
+    // Size for ~50ms of audio buffer
+    let latency_frames = (input_config.sample_rate.0 as f32 * 0.05) as usize;
+    let ring_size = latency_frames * input_config.channels as usize * 4;
+    let ring = HeapRb::<f32>::new(ring_size);
+    let (mut producer, mut consumer) = ring.split();
+
+    let err_fn = |err| tracing::error!("An error occurred on stream: {}", err);
+
+    let input_stream = match input_supported.sample_format() {
+        cpal::SampleFormat::F32 => input_device.build_input_stream(
+            &input_config,
+            move |data: &[f32], _: &_| {
+                producer.push_slice(data);
+            },
+            err_fn,
+            None,
+        ),
+        cpal::SampleFormat::I16 => input_device.build_input_stream(
+            &input_config,
+            move |data: &[i16], _: &_| {
+                for &sample in data {
+                    let f = i16_to_f32(sample);
+                    let _ = producer.try_push(f);
+                }
+            },
+            err_fn,
+            None,
+        ),
+        cpal::SampleFormat::U16 => input_device.build_input_stream(
+            &input_config,
+            move |data: &[u16], _: &_| {
+                for &sample in data {
+                     let f = u16_to_f32(sample);
+                     let _ = producer.try_push(f);
+                }
+            },
+            err_fn,
+            None,
+        ),
+        _ => return Err(anyhow!("Unsupported input sample format")),
+    }?;
+
+    let output_stream = match output_supported.sample_format() {
+        cpal::SampleFormat::F32 => output_device.build_output_stream(
+            &output_config,
+            move |data: &mut [f32], _: &_| {
+                for sample in data.iter_mut() {
+                    *sample = consumer.try_pop().unwrap_or(0.0);
+                }
+            },
+            err_fn,
+            None,
+        ),
+        cpal::SampleFormat::I16 => output_device.build_output_stream(
+            &output_config,
+            move |data: &mut [i16], _: &_| {
+                for sample in data.iter_mut() {
+                    let f_sample = consumer.try_pop().unwrap_or(0.0);
+                    *sample = f32_to_i16(f_sample);
+                }
+            },
+            err_fn,
+            None,
+        ),
+        cpal::SampleFormat::U16 => output_device.build_output_stream(
+            &output_config,
+            move |data: &mut [u16], _: &_| {
+                for sample in data.iter_mut() {
+                    let f_sample = consumer.try_pop().unwrap_or(0.0);
+                    *sample = f32_to_u16(f_sample);
+                }
+            },
+            err_fn,
+            None,
+        ),
+        _ => return Err(anyhow!("Unsupported output sample format")),
+    }?;
+
+    input_stream.play()?;
+    output_stream.play()?;
+
+    Ok(AudioStreamHandle {
+        _input_stream: input_stream,
+        _output_stream: output_stream,
     })
 }

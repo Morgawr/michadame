@@ -15,11 +15,11 @@ pub struct HardwareState {
     pub usb_devices: Vec<(String, String)>,
     pub selected_usb_device: Option<String>,
     pub selected_video_device: String,
-    pub pulse_sources: Vec<(String, String)>,
-    pub pulse_sinks: Vec<(String, String)>,
-    pub selected_pulse_source_name: Option<String>,
-    pub selected_pulse_sink_name: Option<String>,
-    pub pulse_loopback_module_index: Option<u32>,
+    pub audio_sources: Vec<(String, String)>,
+    pub audio_sinks: Vec<(String, String)>,
+    pub selected_audio_source_name: Option<String>,
+    pub selected_audio_sink_name: Option<String>,
+    pub active_audio_stream: Option<devices::audio::AudioStreamHandle>,
     pub supported_formats: Vec<VideoFormat>,
     pub selected_format_index: usize,
     pub selected_resolution: (u32, u32),
@@ -96,11 +96,11 @@ impl Default for AppState {
                 usb_devices: Vec::new(),
                 selected_usb_device: None,
                 selected_video_device: String::new(),
-                pulse_sources: Vec::new(),
-                pulse_sinks: Vec::new(),
-                selected_pulse_source_name: None,
-                selected_pulse_sink_name: None,
-                pulse_loopback_module_index: None,
+                audio_sources: Vec::new(),
+                audio_sinks: Vec::new(),
+                selected_audio_source_name: None,
+                selected_audio_sink_name: None,
+                active_audio_stream: None,
                 supported_formats: Vec::new(),
                 selected_format_index: 0,
                 selected_resolution: (0, 0),
@@ -166,12 +166,12 @@ impl Default for AppState {
 impl AppState {
     fn handle_device_scan_result(&mut self, result: devices::DeviceScanResult) -> bool {
         let scan_successful = match result {
-            Ok((video_devices, pulse_sources, pulse_sinks, usb_devices)) => {
+            Ok((video_devices, audio_sources, audio_sinks, usb_devices)) => {
                 self.hardware.video_devices = video_devices;
                 self.hardware.selected_video_device =
                     self.hardware.video_devices.first().cloned().unwrap_or_default();
-                self.hardware.pulse_sources = pulse_sources;
-                self.hardware.pulse_sinks = pulse_sinks;
+                self.hardware.audio_sources = audio_sources;
+                self.hardware.audio_sinks = audio_sinks;
                 self.hardware.usb_devices = usb_devices;
 
                 if let Ok(cfg) = confy::load::<config::MichadameConfig>("michadame", None) {
@@ -223,21 +223,21 @@ impl AppState {
 
     pub fn start_stream(&mut self, ctx: &egui::Context) {
         match (
-            &self.hardware.selected_pulse_source_name,
-            &self.hardware.selected_pulse_sink_name,
+            &self.hardware.selected_audio_source_name,
+            &self.hardware.selected_audio_sink_name,
         ) {
-            (Some(mic), Some(sink)) => match devices::audio::load_pulse_loopback(mic, sink) {
-                Ok(index) => {
-                    self.hardware.pulse_loopback_module_index = Some(index);
-                    self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "PulseAudio loopback loaded.".to_string().into() });
+            (Some(mic), Some(sink)) => match devices::audio::start_audio_stream(mic, sink) {
+                Ok(handle) => {
+                    self.hardware.active_audio_stream = Some(handle);
+                    self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Audio stream started.".to_string().into() });
                 }
                 Err(e) => {
-                    self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: format!("Failed to load loopback: {}", e).into() });
+                    self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: format!("Failed to start audio stream: {}", e).into() });
                     return;
                 }
             },
             _ => {
-                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Cannot start: Missing PulseAudio devices.".to_string().into() });
+                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Cannot start: Missing audio devices.".to_string().into() });
                 return;
             }
         }
@@ -315,15 +315,8 @@ impl AppState {
             let _ = handle.join();
         }
 
-        if let Some(index) = self.hardware.pulse_loopback_module_index.take() {
-            if let Err(e) = devices::audio::unload_pulse_loopback(index) {
-                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: format!(
-                    "Stream stopped, but failed to unload PulseAudio module: {}",
-                    e
-                ).into() });
-            } else {
-                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Stream stopped and PulseAudio module unloaded.".to_string().into() });
-            }
+        if self.hardware.active_audio_stream.take().is_some() {
+            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Stream stopped and audio stream dropped.".to_string().into() });
         } else {
             self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Stream stopped.".to_string().into() });
         }

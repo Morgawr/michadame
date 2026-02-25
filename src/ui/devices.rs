@@ -202,7 +202,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     // --- Audio Devices ---
     ui.group(|ui| {
         ui.horizontal_wrapped(|ui| {
-            ui.label("PulseAudio Configuration:");
+            ui.label("Audio Configuration:");
             if ui.button("🔄 Refresh").clicked() {
                 state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Refresh clicked. Please restart the app to re-scan devices.".to_string().into() });
                 changed = true;
@@ -210,9 +210,9 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         });
 
         let selected_source_desc = state
-            .hardware.pulse_sources
+            .hardware.audio_sources
             .iter()
-            .find(|(_, name)| Some(name) == state.hardware.selected_pulse_source_name.as_ref())
+            .find(|(_, name)| Some(name) == state.hardware.selected_audio_source_name.as_ref())
             .map(|(desc, _)| desc.as_str())
             .unwrap_or("Select an Input");
 
@@ -220,10 +220,10 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             .selected_text(selected_source_desc)
             .show_ui(ui, |ui| {
                 let mut combo_changed = false;
-                for (desc, name) in &state.hardware.pulse_sources {
+                for (desc, name) in &state.hardware.audio_sources {
                     combo_changed |= ui
                         .selectable_value(
-                            &mut state.hardware.selected_pulse_source_name,
+                            &mut state.hardware.selected_audio_source_name,
                             Some(name.clone()),
                             desc,
                         )
@@ -235,9 +235,9 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             });
 
         let selected_sink_desc = state
-            .hardware.pulse_sinks
+            .hardware.audio_sinks
             .iter()
-            .find(|(_, name)| Some(name) == state.hardware.selected_pulse_sink_name.as_ref())
+            .find(|(_, name)| Some(name) == state.hardware.selected_audio_sink_name.as_ref())
             .map(|(desc, _)| desc.as_str())
             .unwrap_or("Select an Output");
 
@@ -245,10 +245,10 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             .selected_text(selected_sink_desc)
             .show_ui(ui, |ui| {
                 let mut combo_changed = false;
-                for (desc, name) in &state.hardware.pulse_sinks {
+                for (desc, name) in &state.hardware.audio_sinks {
                     combo_changed |= ui
                         .selectable_value(
-                            &mut state.hardware.selected_pulse_sink_name,
+                            &mut state.hardware.selected_audio_sink_name,
                             Some(name.clone()),
                             desc,
                         )

@@ -5,8 +5,8 @@ use std::sync::atomic::Ordering;
 
 #[derive(Default, Serialize, Deserialize, Clone)]
 pub struct Profile {
-    pub pulse_source: Option<String>,
-    pub pulse_sink: Option<String>,
+    pub audio_source: Option<String>,
+    pub audio_sink: Option<String>,
     pub video_format_fourcc: Option<String>,
     pub crt_filter: Option<u8>,
     pub scaler_filter: Option<u8>,
@@ -46,8 +46,8 @@ struct LegacyConfig {
     #[serde(default)]
     profiles: HashMap<String, Profile>,
 
-    pulse_source: Option<String>,
-    pulse_sink: Option<String>,
+    audio_source: Option<String>,
+    audio_sink: Option<String>,
     video_format_fourcc: Option<String>,
     crt_filter: Option<u8>,
     scaler_filter: Option<u8>,
@@ -95,8 +95,8 @@ impl From<LegacyConfig> for MichadameConfig {
 
         if profiles.is_empty() {
             let legacy_profile = Profile {
-                pulse_source: legacy.pulse_source,
-                pulse_sink: legacy.pulse_sink,
+                audio_source: legacy.audio_source,
+                audio_sink: legacy.audio_sink,
                 video_format_fourcc: legacy.video_format_fourcc,
                 crt_filter: legacy.crt_filter,
                 scaler_filter: legacy.scaler_filter,
@@ -155,8 +155,8 @@ impl Default for MichadameConfig {
 
 pub fn build_profile_from_state(state: &AppState) -> Profile {
     Profile {
-        pulse_source: state.hardware.selected_pulse_source_name.clone(),
-        pulse_sink: state.hardware.selected_pulse_sink_name.clone(),
+        audio_source: state.hardware.selected_audio_source_name.clone(),
+        audio_sink: state.hardware.selected_audio_sink_name.clone(),
         video_format_fourcc: state.hardware
             .supported_formats
             .get(state.hardware.selected_format_index)
@@ -256,18 +256,18 @@ pub fn save_global_hardware_config(state: &AppState) {
 }
 
 pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) {
-    if let Some(saved_source) = &profile.pulse_source {
+    if let Some(saved_source) = &profile.audio_source {
         if state
-            .hardware.pulse_sources
+            .hardware.audio_sources
             .iter()
             .any(|(_, name)| name == saved_source)
         {
-            state.hardware.selected_pulse_source_name = Some(saved_source.clone());
+            state.hardware.selected_audio_source_name = Some(saved_source.clone());
         }
     }
-    if let Some(saved_sink) = &profile.pulse_sink {
-        if state.hardware.pulse_sinks.iter().any(|(_, name)| name == saved_sink) {
-            state.hardware.selected_pulse_sink_name = Some(saved_sink.clone());
+    if let Some(saved_sink) = &profile.audio_sink {
+        if state.hardware.audio_sinks.iter().any(|(_, name)| name == saved_sink) {
+            state.hardware.selected_audio_sink_name = Some(saved_sink.clone());
         }
     }
     if let Some(filter) = profile.crt_filter {

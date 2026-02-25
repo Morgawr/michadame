@@ -26,12 +26,12 @@ pub fn init_app_state(cc: &eframe::CreationContext) -> AppState {
     config::apply_config(&mut state, &loaded_cfg);
 
     let (tx, _rx) = crossbeam_channel::unbounded();
-    let (video_devices, pulse_sources, pulse_sinks, usb_devices) =
+    let (video_devices, audio_sources, audio_sinks, usb_devices) =
         crate::devices::scan_devices(None, None, tx);
     state.hardware.video_devices = video_devices;
     state.hardware.usb_devices = usb_devices;
-    state.hardware.pulse_sources = pulse_sources;
-    state.hardware.pulse_sinks = pulse_sinks;
+    state.hardware.audio_sources = audio_sources;
+    state.hardware.audio_sinks = audio_sinks;
 
     if !state.hardware.selected_video_device.is_empty() {
         match crate::devices::video::find_video_formats(&state.hardware.selected_video_device) {
@@ -50,14 +50,14 @@ pub fn init_app_state(cc: &eframe::CreationContext) -> AppState {
     state.device_scan_receiver = Some(rx);
     std::thread::spawn(move || {
         let video_result = crate::devices::video::find_video_devices();
-        let pulse_result = crate::devices::audio::find_pulse_devices();
+        let audio_result = crate::devices::audio::find_audio_devices();
         let usb_result = crate::devices::usb::find_usb_devices();
 
         let result: crate::devices::DeviceScanResult = (|| {
             let video_devices = video_result?;
-            let (pulse_sources, pulse_sinks) = pulse_result?;
+            let (audio_sources, audio_sinks) = audio_result?;
             let usb_devices = usb_result?;
-            Ok((video_devices, pulse_sources, pulse_sinks, usb_devices))
+            Ok((video_devices, audio_sources, audio_sinks, usb_devices))
         })();
 
         if let Err(e) = &result {
