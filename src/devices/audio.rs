@@ -1,8 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait};
 use alsa::device_name::HintIter;
-use ringbuf::traits::{Consumer, Producer, Split};
-use ringbuf::HeapRb;
+use rtrb::{Consumer, Producer, RingBuffer};
 use rodio::{OutputStream, Sink, Source};
 use std::time::Duration;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,25 +19,46 @@ pub struct AudioStreamHandle {
     _sink: Sink,
 }
 
-struct LiveSource<C: Consumer<Item = f32>> {
-    consumer: C,
+struct LiveSource {
+    consumer: Consumer<f32>,
     channels: u16,
     sample_rate: u32,
     samples_played: Arc<AtomicU64>,
     underruns: Arc<AtomicU64>,
     peak_amplitude_shared: Arc<AtomicU64>,
+    pause_counter: usize,
+    local_buf: Vec<f32>,
+    local_idx: usize,
+    valid_len: usize,
 }
 
-impl<C: Consumer<Item = f32>> Iterator for LiveSource<C> {
+impl Iterator for LiveSource {
     type Item = f32;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let sample_opt = self.consumer.try_pop();
-        if sample_opt.is_none() {
-            self.underruns.fetch_add(1, Ordering::Relaxed);
+        if self.pause_counter > 0 {
+            self.pause_counter -= 1;
+            return Some(0.0);
         }
-        let sample = sample_opt.unwrap_or(0.0);
-        
+
+        if self.local_idx >= self.valid_len {
+            let (popped, _) = self.consumer.pop_partial_slice(&mut self.local_buf);
+            if popped.is_empty() {
+                self.underruns.fetch_add(1, Ordering::Relaxed);
+                
+                // On underrun, insert ~40ms of silence. This allows the capture thread 
+                // to accumulate a 40ms forward buffer before we start popping again,
+                // preventing a rapid succession of 1-sample crackles.
+                self.pause_counter = (self.sample_rate as usize * self.channels as usize * 40) / 1000 - 1;
+                return Some(0.0);
+            }
+            self.valid_len = popped.len();
+            self.local_idx = 0;
+        }
+
+        let sample = self.local_buf[self.local_idx];
+        self.local_idx += 1;
+
         let amp = sample.abs();
         let amp_bits = (amp * 1000.0) as u64;
         self.peak_amplitude_shared.fetch_max(amp_bits, Ordering::Relaxed);
@@ -52,7 +72,7 @@ impl<C: Consumer<Item = f32>> Iterator for LiveSource<C> {
     }
 }
 
-impl<C: Consumer<Item = f32>> Source for LiveSource<C> {
+impl Source for LiveSource {
     fn current_frame_len(&self) -> Option<usize> {
         None 
     }
@@ -151,136 +171,18 @@ pub fn find_audio_devices() -> Result<Vec<(String, String)>> {
 
 pub fn start_audio_stream(source_name: &str, peak_amplitude_shared: Arc<AtomicU64>) -> Result<AudioStreamHandle> {
     // Shared ring buffer for capture-to-playback bridge.
-    // Increased to ~250ms of audio (48k * 0.25s * 2 channels) to provide jitter stability.
-    let ring_size = (48000.0 * 0.25 * 2.0) as usize; 
-    let ring = HeapRb::<f32>::new(ring_size);
-    let (mut producer, consumer) = ring.split();
+    // Increased to ~100ms of audio (48k * 0.1s * 2 channels) to provide jitter stability.
+    let ring_size = (48000.0 * 0.1 * 2.0) as usize; 
+    let (producer, consumer) = RingBuffer::<f32>::new(ring_size);
 
     #[cfg(target_os = "linux")]
-    let (alsa_thread, input_channels, input_sample_rate) = {
-        use alsa::pcm::{PCM, HwParams, Access, Format};
-        use alsa::Direction;
-
-        // 1. Probe the device briefly to get its supported rate and channels.
-        let (rate, channels) = {
-            let pcm_probe = PCM::new(source_name, Direction::Capture, false)
-                .map_err(|e| anyhow!("Failed to probe ALSA device {}: {}", source_name, e))?;
-            let hwp_probe = HwParams::any(&pcm_probe)?;
-            let r = hwp_probe.set_rate_near(48000, alsa::ValueOr::Nearest)?;
-            let c = hwp_probe.set_channels_near(2)? as u16;
-            (r, c)
-        };
-
-        let samples_captured = Arc::new(AtomicU64::new(0));
-        let peak_amplitude = Arc::new(AtomicU64::new(0));
-        let source_name_owned = source_name.to_string();
-
-        let handle = thread::spawn(move || {
-            let pcm = match PCM::new(&source_name_owned, Direction::Capture, false) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::error!("Failed to open ALSA device in thread: {}", e);
-                    return;
-                }
-            };
-
-            let hwp = HwParams::any(&pcm).unwrap();
-            hwp.set_access(Access::RWInterleaved).unwrap();
-            hwp.set_format(Format::S16LE).unwrap();
-            hwp.set_rate_near(rate, alsa::ValueOr::Nearest).unwrap();
-            hwp.set_channels_near(channels as u32).unwrap();
-            
-            pcm.hw_params(&hwp).unwrap();
-
-            let io = pcm.io_i16().unwrap();
-            let mut buf = vec![0i16; 1024 * channels as usize];
-            
-            loop {
-                match io.readi(&mut buf) {
-                    Ok(frames) => {
-                        let sample_count = frames * channels as usize;
-                        let mut local_max = 0.0f32;
-                        for i in 0..sample_count {
-                            let f = i16_to_f32(buf[i]);
-                            local_max = local_max.max(f.abs());
-                            let _ = producer.try_push(f);
-                        }
-                        let peak_bits = (local_max * 1000.0) as u64;
-                        peak_amplitude.fetch_max(peak_bits, Ordering::Relaxed);
-                        let _ = samples_captured.fetch_add(sample_count as u64, Ordering::Relaxed);
-                    }
-                    Err(e) => {
-                        let err_str = e.to_string();
-                        if err_str.contains("Broken pipe") || err_str.contains("EPIPE") {
-                            let _ = pcm.prepare();
-                        } else {
-                            tracing::error!("ALSA read error: {}", e);
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-
-        (Some(handle), channels, rate)
-    };
+    let (alsa_thread, input_channels, input_sample_rate) = start_alsa_capture(source_name, producer, peak_amplitude_shared.clone())?;
 
     #[cfg(not(target_os = "linux"))]
-    let (input_stream, input_channels, input_sample_rate) = {
-        use cpal::traits::{HostTrait, DeviceTrait};
-        let host = cpal::default_host();
-        let input_device = host.input_devices()?
-            .find(|d| d.name().unwrap_or_default() == source_name)
-            .ok_or_else(|| anyhow!("Input device not found"))?;
-        let config = input_device.default_input_config()?;
-        let channels = config.channels();
-        let rate = config.sample_rate().0;
-        
-        let err_fn = |err| tracing::error!("CPAL input error: {}", err);
-        let stream = input_device.build_input_stream(
-            &config.into(),
-            move |data: &[f32], _: &_| {
-                let _ = producer.push_slice(data);
-            },
-            err_fn,
-            None,
-        )?;
-        stream.play()?;
-        (stream, channels, rate)
-    };
+    let (input_stream, input_channels, input_sample_rate) = start_cpal_capture(source_name, producer)?;
 
     // Playback via Rodio
-    // On Linux, the "default" host is ALSA, but for output we want to hit the sound server (Pulse/PipeWire).
-    // If we can find a Host for PulseAudio or if the default host has a "pulse"/"pipewire" device, we prefer it.
-    let (output_stream_guard, stream_handle) = {
-        let host = cpal::default_host();
-        let mut target_device = None;
-        
-        #[cfg(target_os = "linux")]
-        {
-            if let Ok(devices) = host.output_devices() {
-                for device in devices {
-                    if let Ok(name) = device.name() {
-                        let n = name.to_lowercase();
-                        if n.contains("pipewire") || n.contains("pulse") {
-                            tracing::info!("Found prioritized output device: {}", name);
-                            target_device = Some(device);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(device) = target_device {
-            OutputStream::try_from_device(&device)
-                .context("Failed to open prioritized output stream")?
-        } else {
-            tracing::info!("Using system default output stream");
-            OutputStream::try_default()
-                .context("Failed to open default output stream")?
-        }
-    };
+    let (output_stream_guard, stream_handle) = initialize_rodio_playback()?;
     
     let sink = Sink::try_new(&stream_handle).context("Failed to create rodio sink")?;
     sink.set_volume(1.0);
@@ -292,6 +194,10 @@ pub fn start_audio_stream(source_name: &str, peak_amplitude_shared: Arc<AtomicU6
         samples_played: Arc::new(AtomicU64::new(0)),
         underruns: Arc::new(AtomicU64::new(0)),
         peak_amplitude_shared,
+        pause_counter: 0,
+        local_buf: vec![0.0; 1024],
+        local_idx: 0,
+        valid_len: 0,
     };
     sink.append(live_source);
 
@@ -305,4 +211,172 @@ pub fn start_audio_stream(source_name: &str, peak_amplitude_shared: Arc<AtomicU6
         _output_stream_handle: stream_handle,
         _sink: sink,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn start_alsa_capture(
+    source_name: &str,
+    mut producer: Producer<f32>,
+    peak_amplitude_shared: Arc<AtomicU64>,
+) -> Result<(Option<thread::JoinHandle<()>>, u16, u32)> {
+    use alsa::pcm::{PCM, HwParams, Access, Format};
+    use alsa::Direction;
+
+    // 1. Probe the device briefly to get its supported rate and channels.
+    let (rate, channels) = {
+        let pcm_probe = PCM::new(source_name, Direction::Capture, false)
+            .map_err(|e| anyhow!("Failed to probe ALSA device {}: {}", source_name, e))?;
+        let hwp_probe = HwParams::any(&pcm_probe)?;
+        let r = hwp_probe.set_rate_near(48000, alsa::ValueOr::Nearest)?;
+        let c = hwp_probe.set_channels_near(2)? as u16;
+        (r, c)
+    };
+
+    let samples_captured = Arc::new(AtomicU64::new(0));
+    let source_name_owned = source_name.to_string();
+
+    let handle = thread::spawn(move || {
+        let pcm = match PCM::new(&source_name_owned, Direction::Capture, false) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("Failed to open ALSA device in thread: {}", e);
+                return;
+            }
+        };
+
+        let hwp = HwParams::any(&pcm).unwrap();
+        hwp.set_access(Access::RWInterleaved).unwrap();
+        hwp.set_format(Format::S16LE).unwrap();
+        hwp.set_rate_near(rate, alsa::ValueOr::Nearest).unwrap();
+        hwp.set_channels_near(channels as u32).unwrap();
+        
+        pcm.hw_params(&hwp).unwrap();
+
+        let io = pcm.io_i16().unwrap();
+        let mut buf = vec![0i16; 1024 * channels as usize];
+        
+        loop {
+            match io.readi(&mut buf) {
+                Ok(frames) => {
+                    let sample_count = frames * channels as usize;
+                    let mut local_max = 0.0f32;
+                    let mut f32_buf = Vec::with_capacity(sample_count);
+                    
+                    for i in 0..sample_count {
+                        let f = i16_to_f32(buf[i]);
+                        local_max = local_max.max(f.abs());
+                        f32_buf.push(f);
+                    }
+                    
+                    // We must NEVER drop individual samples, only full frames (channels).
+                    // Otherwise L/R channels swap and create deafening interference.
+                    let free = producer.slots();
+                    let safe_free = (free / channels as usize) * channels as usize;
+                    let to_push = std::cmp::min(safe_free, sample_count);
+                    let safe_to_push = (to_push / channels as usize) * channels as usize;
+                    
+                    if safe_to_push > 0 {
+                        if let Ok(mut chunk) = producer.write_chunk(safe_to_push) {
+                            let (slice1, slice2) = chunk.as_mut_slices();
+                            let split_idx = slice1.len();
+                            slice1.copy_from_slice(&f32_buf[..split_idx]);
+                            if !slice2.is_empty() {
+                                slice2.copy_from_slice(&f32_buf[split_idx..safe_to_push]);
+                            }
+                            chunk.commit_all();
+                        }
+                    }
+                    
+                    let peak_bits = (local_max * 1000.0) as u64;
+                    peak_amplitude_shared.fetch_max(peak_bits, Ordering::Relaxed);
+                    let _ = samples_captured.fetch_add(sample_count as u64, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    let err_str = e.to_string();
+                    if err_str.contains("Broken pipe") || err_str.contains("EPIPE") {
+                        let _ = pcm.prepare();
+                    } else {
+                        tracing::error!("ALSA read error: {}", e);
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    Ok((Some(handle), channels, rate))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn start_cpal_capture(
+    source_name: &str, 
+    mut producer: Producer<f32>
+) -> Result<(cpal::Stream, u16, u32)> {
+    use cpal::traits::{HostTrait, DeviceTrait};
+    let host = cpal::default_host();
+    let input_device = host.input_devices()?
+        .find(|d| d.name().unwrap_or_default() == source_name)
+        .ok_or_else(|| anyhow!("Input device not found"))?;
+    let config = input_device.default_input_config()?;
+    let channels = config.channels();
+    let rate = config.sample_rate().0;
+    
+    let err_fn = |err| tracing::error!("CPAL input error: {}", err);
+    let stream = input_device.build_input_stream(
+        &config.into(),
+        move |data: &[f32], _: &_| {
+            let free = producer.slots();
+            let safe_free = (free / channels as usize) * channels as usize;
+            let to_push = std::cmp::min(safe_free, data.len());
+            let safe_to_push = (to_push / channels as usize) * channels as usize;
+            
+            if safe_to_push > 0 {
+                if let Ok(mut chunk) = producer.write_chunk(safe_to_push) {
+                    let (slice1, slice2) = chunk.as_mut_slices();
+                    let split_idx = slice1.len();
+                    slice1.copy_from_slice(&data[..split_idx]);
+                    if !slice2.is_empty() {
+                        slice2.copy_from_slice(&data[split_idx..safe_to_push]);
+                    }
+                    chunk.commit_all();
+                }
+            }
+        },
+        err_fn,
+        None,
+    )?;
+    stream.play()?;
+    Ok((stream, channels, rate))
+}
+
+fn initialize_rodio_playback() -> Result<(OutputStream, rodio::OutputStreamHandle)> {
+    // On Linux, the "default" host is ALSA, but for output we want to hit the sound server (Pulse/PipeWire).
+    // If we can find a Host for PulseAudio or if the default host has a "pulse"/"pipewire" device, we prefer it.
+    let host = cpal::default_host();
+    let mut target_device = None;
+    
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(devices) = host.output_devices() {
+            for device in devices {
+                if let Ok(name) = device.name() {
+                    let n = name.to_lowercase();
+                    if n.contains("pulse") {
+                        tracing::info!("Found prioritized output device: {}", name);
+                        target_device = Some(device);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(device) = target_device {
+        OutputStream::try_from_device(&device)
+            .context("Failed to open prioritized output stream")
+    } else {
+        tracing::info!("Using system default output stream");
+        OutputStream::try_default()
+            .context("Failed to open default output stream")
+    }
 }
