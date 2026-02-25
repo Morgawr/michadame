@@ -88,6 +88,7 @@ pub struct CrtFilterRenderer {
     passthrough_horizontal_stretch_loc: glow::UniformLocation,
     final_vibrance_loc: glow::UniformLocation,
     passthrough_vibrance_loc: glow::UniformLocation,
+    passthrough_scaler_filter_loc: glow::UniformLocation,
 
     last_size: (u32, u32),
     last_scaler_filter: Option<u8>,
@@ -113,6 +114,9 @@ impl CrtFilterRenderer {
                 .unwrap();
             let p_passthrough_output_res_loc = gl
                 .get_uniform_location(passthrough_prog, "outputResolution")
+                .unwrap();
+            let passthrough_scaler_filter_loc = gl
+                .get_uniform_location(passthrough_prog, "scaler_filter")
                 .unwrap();
 
             // Pixelate
@@ -392,6 +396,7 @@ impl CrtFilterRenderer {
                 passthrough_horizontal_stretch_loc,
                 final_vibrance_loc,
                 passthrough_vibrance_loc,
+                passthrough_scaler_filter_loc,
                 median_prog,
                 last_size: (0, 0),
                 last_scaler_filter: None,
@@ -662,6 +667,7 @@ impl CrtFilterRenderer {
                     params.horizontal_stretch,
                 );
                 gl.uniform_1_f32(Some(&self.passthrough_vibrance_loc), params.vibrance);
+                gl.uniform_1_i32(Some(&self.passthrough_scaler_filter_loc), params.scaler_filter as i32);
 
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             } else {
@@ -873,6 +879,7 @@ impl CrtFilterRenderer {
                 horizontal_stretch,
             );
             gl.uniform_1_f32(Some(&self.passthrough_vibrance_loc), vibrance);
+            gl.uniform_1_i32(Some(&self.passthrough_scaler_filter_loc), scaler_filter as i32);
 
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
