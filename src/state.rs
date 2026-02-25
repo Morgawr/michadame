@@ -37,9 +37,9 @@ pub fn init_app_state(cc: &eframe::CreationContext) -> AppState {
 
         let result: crate::devices::DeviceScanResult = (|| {
             let video_devices = video_result?;
-            let (audio_sources, audio_sinks) = audio_result?;
+            let audio_sources = audio_result?;
             let usb_devices = usb_result?;
-            Ok((video_devices, audio_sources, audio_sinks, usb_devices))
+            Ok((video_devices, audio_sources, usb_devices))
         })();
 
         if let Err(e) = &result {

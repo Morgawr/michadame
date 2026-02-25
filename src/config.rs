@@ -6,7 +6,6 @@ use std::sync::atomic::Ordering;
 #[derive(Default, Serialize, Deserialize, Clone)]
 pub struct Profile {
     pub audio_source: Option<String>,
-    pub audio_sink: Option<String>,
     pub video_format_fourcc: Option<String>,
     pub crt_filter: Option<u8>,
     pub scaler_filter: Option<u8>,
@@ -47,7 +46,6 @@ struct LegacyConfig {
     profiles: HashMap<String, Profile>,
 
     audio_source: Option<String>,
-    audio_sink: Option<String>,
     video_format_fourcc: Option<String>,
     crt_filter: Option<u8>,
     scaler_filter: Option<u8>,
@@ -96,7 +94,6 @@ impl From<LegacyConfig> for MichadameConfig {
         if profiles.is_empty() {
             let legacy_profile = Profile {
                 audio_source: legacy.audio_source,
-                audio_sink: legacy.audio_sink,
                 video_format_fourcc: legacy.video_format_fourcc,
                 crt_filter: legacy.crt_filter,
                 scaler_filter: legacy.scaler_filter,
@@ -156,7 +153,6 @@ impl Default for MichadameConfig {
 pub fn build_profile_from_state(state: &AppState) -> Profile {
     Profile {
         audio_source: state.hardware.selected_audio_source_name.clone(),
-        audio_sink: state.hardware.selected_audio_sink_name.clone(),
         video_format_fourcc: state.hardware
             .supported_formats
             .get(state.hardware.selected_format_index)
@@ -263,11 +259,6 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) {
             .any(|(_, name)| name == saved_source)
         {
             state.hardware.selected_audio_source_name = Some(saved_source.clone());
-        }
-    }
-    if let Some(saved_sink) = &profile.audio_sink {
-        if state.hardware.audio_sinks.iter().any(|(_, name)| name == saved_sink) {
-            state.hardware.selected_audio_sink_name = Some(saved_sink.clone());
         }
     }
     if let Some(filter) = profile.crt_filter {

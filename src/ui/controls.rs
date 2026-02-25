@@ -1,5 +1,6 @@
 use crate::app::AppState;
 use eframe::egui;
+use std::sync::atomic::Ordering;
 
 use crate::ui::{devices, filters, profiles};
 
@@ -20,6 +21,11 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 state.stop_stream(ui.ctx());
                 state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Stream stopped.".to_string().into() });
             }
+            
+            // Audio Level Meter
+            let peak = state.hardware.audio_peak_amplitude.swap(0, Ordering::Relaxed) as f32 / 1000.0;
+            let color = if peak > 0.9 { egui::Color32::RED } else if peak > 0.7 { egui::Color32::YELLOW } else { egui::Color32::GREEN };
+            ui.add(egui::ProgressBar::new(peak.min(1.0)).text(format!("Audio: {:.0}%", peak * 100.0)).fill(color));
         } else {
             let can_stream =
                 !state.hardware.selected_video_device.is_empty() && state.hardware.selected_resolution.0 > 0;

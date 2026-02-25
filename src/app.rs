@@ -3,7 +3,7 @@ use crate::{config, devices, devices::filter_type::CrtFilter, ui, video};
 use eframe::egui;
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicU8, Ordering},
+    atomic::{AtomicU64, AtomicU8, Ordering},
     Arc, Mutex,
 };
 use std::thread::{self, JoinHandle};
@@ -11,14 +11,13 @@ use std::time::Instant;
 
 
 pub struct HardwareState {
+    pub audio_peak_amplitude: Arc<AtomicU64>,
     pub video_devices: Vec<String>,
     pub usb_devices: Vec<(String, String)>,
     pub selected_usb_device: Option<String>,
     pub selected_video_device: String,
     pub audio_sources: Vec<(String, String)>,
-    pub audio_sinks: Vec<(String, String)>,
     pub selected_audio_source_name: Option<String>,
-    pub selected_audio_sink_name: Option<String>,
     pub active_audio_stream: Option<devices::audio::AudioStreamHandle>,
     pub supported_formats: Vec<VideoFormat>,
     pub selected_format_index: usize,
@@ -92,14 +91,13 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             hardware: HardwareState {
+                audio_peak_amplitude: Arc::new(AtomicU64::new(0)),
                 video_devices: Vec::new(),
                 usb_devices: Vec::new(),
                 selected_usb_device: None,
                 selected_video_device: String::new(),
                 audio_sources: Vec::new(),
-                audio_sinks: Vec::new(),
                 selected_audio_source_name: None,
-                selected_audio_sink_name: None,
                 active_audio_stream: None,
                 supported_formats: Vec::new(),
                 selected_format_index: 0,
@@ -166,12 +164,11 @@ impl Default for AppState {
 impl AppState {
     fn handle_device_scan_result(&mut self, result: devices::DeviceScanResult) -> bool {
         let scan_successful = match result {
-            Ok((video_devices, audio_sources, audio_sinks, usb_devices)) => {
+            Ok((video_devices, audio_sources, usb_devices)) => {
                 self.hardware.video_devices = video_devices;
                 self.hardware.selected_video_device =
                     self.hardware.video_devices.first().cloned().unwrap_or_default();
                 self.hardware.audio_sources = audio_sources;
-                self.hardware.audio_sinks = audio_sinks;
                 self.hardware.usb_devices = usb_devices;
 
                 if let Ok(cfg) = confy::load::<config::MichadameConfig>("michadame", None) {
@@ -222,11 +219,13 @@ impl AppState {
     }
 
     pub fn start_stream(&mut self, ctx: &egui::Context) {
-        match (
-            &self.hardware.selected_audio_source_name,
-            &self.hardware.selected_audio_sink_name,
-        ) {
-            (Some(mic), sink_opt) => match devices::audio::start_audio_stream(mic, sink_opt.as_deref()) {
+        if self.hardware.active_audio_stream.is_some() {
+            tracing::warn!("Stream already active, ignoring start request.");
+            return;
+        }
+
+        if let Some(mic) = &self.hardware.selected_audio_source_name {
+            match devices::audio::start_audio_stream(mic, Arc::clone(&self.hardware.audio_peak_amplitude)) {
                 Ok(handle) => {
                     self.hardware.active_audio_stream = Some(handle);
                     self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Audio stream started.".to_string().into() });
@@ -235,11 +234,10 @@ impl AppState {
                     self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: format!("Failed to start audio stream: {}", e).into() });
                     return;
                 }
-            },
-            _ => {
-                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Cannot start: Missing audio devices.".to_string().into() });
-                return;
             }
+        } else {
+            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Cannot start: Missing audio input device.".to_string().into() });
+            return;
         }
 
         let format = if let Some(f) = self.hardware.supported_formats.get(self.hardware.selected_format_index) {
