@@ -143,6 +143,18 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "alsa"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce34de545ad29bcc00cb1b87a94c132256dcf83aa7eeb9674482568405a6ff0a"
+dependencies = [
+ "alsa-sys",
+ "bitflags 2.10.0",
+ "libc",
+ "nix",
+]
+
+[[package]]
+name = "alsa"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed7572b7ba83a31e20d1b48970ee402d2e3e0537dcfe0a3ff4d6eb7508617d43"
@@ -1054,7 +1066,7 @@ version = "0.15.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "873dab07c8f743075e57f524c583985fbaf745602acbe916a01539364369a779"
 dependencies = [
- "alsa",
+ "alsa 0.9.1",
  "core-foundation-sys",
  "coreaudio-rs",
  "dasp_sample",
@@ -2492,6 +2504,7 @@ dependencies = [
 name = "michadame"
 version = "0.1.0"
 dependencies = [
+ "alsa 0.8.1",
  "anyhow",
  "bytemuck",
  "confy",

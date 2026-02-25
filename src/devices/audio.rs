@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Sample;
+use alsa::device_name::HintIter;
 use ringbuf::traits::{Consumer, Producer, Split};
 use ringbuf::HeapRb;
 use std::sync::Arc;
@@ -30,6 +31,26 @@ fn f32_to_u16(s: f32) -> u16 {
     ((s.clamp(-1.0, 1.0) * 32768.0) + 32768.0) as u16
 }
 
+fn get_alsa_device_name(name: &str) -> String {
+    #[cfg(target_os = "linux")]
+    {
+        // cpal sometimes returns names like "sysdefault:CARD=USB" or "hw:0,0".
+        // We can use ALSA's HintIter to find the matching description.
+        if let Ok(hints) = HintIter::new_str(None, "pcm") {
+            for hint in hints {
+                if let Some(hint_name) = &hint.name {
+                    if hint_name == name {
+                        if let Some(desc) = &hint.desc {
+                            return desc.replace("\n", " - ");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    name.to_string()
+}
+
 pub fn find_audio_devices() -> Result<(Vec<(String, String)>, Vec<(String, String)>)> {
     let host = cpal::default_host();
     let mut sources = Vec::new();
@@ -38,7 +59,8 @@ pub fn find_audio_devices() -> Result<(Vec<(String, String)>, Vec<(String, Strin
     if let Ok(devices) = host.input_devices() {
         for device in devices {
             if let Ok(name) = device.name() {
-                sources.push((name.clone(), name));
+                let readable_name = get_alsa_device_name(&name);
+                sources.push((readable_name, name));
             }
         }
     }
@@ -46,7 +68,8 @@ pub fn find_audio_devices() -> Result<(Vec<(String, String)>, Vec<(String, Strin
     if let Ok(devices) = host.output_devices() {
         for device in devices {
             if let Ok(name) = device.name() {
-                sinks.push((name.clone(), name));
+                let readable_name = get_alsa_device_name(&name);
+                sinks.push((readable_name, name));
             }
         }
     }
