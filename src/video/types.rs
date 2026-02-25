@@ -131,3 +131,57 @@ impl ColorRange {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_video_format_default() {
+        let default = VideoFormat::default();
+        assert_eq!(default.fourcc, "0000");
+        assert_eq!(default.description, "None");
+        assert!(default.resolutions.is_empty());
+    }
+
+    #[test]
+    fn test_scaler_filter_from_u8() {
+        assert_eq!(ScalerFilter::from_u8(0), ScalerFilter::FastBilinear);
+        assert_eq!(ScalerFilter::from_u8(1), ScalerFilter::Bilinear);
+        assert_eq!(ScalerFilter::from_u8(2), ScalerFilter::Bicubic);
+        assert_eq!(ScalerFilter::from_u8(3), ScalerFilter::Point);
+        assert_eq!(ScalerFilter::from_u8(4), ScalerFilter::Lanczos);
+        assert_eq!(ScalerFilter::from_u8(10), ScalerFilter::FastBilinear); // Default
+    }
+
+    #[test]
+    fn test_scaler_filter_to_string() {
+        assert_eq!(ScalerFilter::FastBilinear.to_string(), "Fast Bilinear");
+        assert_eq!(ScalerFilter::Bilinear.to_string(), "Bilinear");
+        assert_eq!(ScalerFilter::Bicubic.to_string(), "Bicubic");
+        assert_eq!(ScalerFilter::Point.to_string(), "Point (Nearest)");
+        assert_eq!(ScalerFilter::Lanczos.to_string(), "Lanczos");
+    }
+
+    #[test]
+    fn test_scaler_filter_to_ffmpeg_flag() {
+        assert_eq!(ScalerFilter::FastBilinear.to_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::FAST_BILINEAR);
+        assert_eq!(ScalerFilter::Bilinear.to_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::BILINEAR);
+        assert_eq!(ScalerFilter::Bicubic.to_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::BICUBIC);
+        assert_eq!(ScalerFilter::Point.to_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::POINT);
+        assert_eq!(ScalerFilter::Lanczos.to_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::LANCZOS);
+    }
+
+    #[test]
+    fn test_color_range_from_u8() {
+        assert_eq!(ColorRange::from_u8(0), ColorRange::Full);
+        assert_eq!(ColorRange::from_u8(1), ColorRange::Limited);
+        assert_eq!(ColorRange::from_u8(2), ColorRange::Full); // Default
+    }
+
+    #[test]
+    fn test_color_range_to_string() {
+        assert_eq!(ColorRange::Full.to_string(), "Full (PC)");
+        assert_eq!(ColorRange::Limited.to_string(), "Limited (TV)");
+    }
+}

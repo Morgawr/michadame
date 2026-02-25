@@ -149,3 +149,54 @@ pub fn video_thread_main(
     tracing::debug!("Video thread finished.");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_setup_ffmpeg_options_mjpg() {
+        ffmpeg_next::init().unwrap();
+        let format = VideoFormat {
+            fourcc: "MJPG\0".to_string(),
+            description: "MJPEG".to_string(),
+            resolutions: vec![],
+        };
+        let (pix_fmt, options) = setup_ffmpeg_options(&format, (1920, 1080), 60);
+        assert_eq!(pix_fmt, "mjpeg");
+        assert_eq!(options.get("video_size"), Some("1920x1080"));
+        assert_eq!(options.get("framerate"), Some("60"));
+        assert_eq!(options.get("input_format"), Some("mjpeg"));
+        assert_eq!(options.get("color_range"), Some("pc"));
+    }
+
+    #[test]
+    fn test_setup_ffmpeg_options_yuyv() {
+        ffmpeg_next::init().unwrap();
+        let format = VideoFormat {
+            fourcc: "YUYV".to_string(),
+            description: "YUYV 4:2:2".to_string(),
+            resolutions: vec![],
+        };
+        let (pix_fmt, options) = setup_ffmpeg_options(&format, (1280, 720), 30);
+        assert_eq!(pix_fmt, "yuyv422");
+        assert_eq!(options.get("video_size"), Some("1280x720"));
+        assert_eq!(options.get("framerate"), Some("30"));
+        assert_eq!(options.get("input_format"), Some("yuyv422"));
+    }
+
+    #[test]
+    fn test_setup_ffmpeg_options_other() {
+        ffmpeg_next::init().unwrap();
+        let format = VideoFormat {
+            fourcc: "nv12".to_string(),
+            description: "NV12".to_string(),
+            resolutions: vec![],
+        };
+        let (pix_fmt, options) = setup_ffmpeg_options(&format, (800, 600), 120);
+        assert_eq!(pix_fmt, "nv12");
+        assert_eq!(options.get("video_size"), Some("800x600"));
+        assert_eq!(options.get("framerate"), Some("120"));
+        assert_eq!(options.get("input_format"), Some("nv12"));
+    }
+}

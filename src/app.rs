@@ -466,3 +466,47 @@ impl eframe::App for AppState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_app_state_default() {
+        let state = AppState::default();
+        assert_eq!(state.active_profile, "Default");
+        assert!(state.profiles.contains_key("Default"));
+        assert!(state.hardware.video_devices.is_empty());
+        assert!(!state.ui.is_fullscreen);
+        assert!(state.ui.control_window_open);
+        assert!(!state.ui.video_window_open);
+        assert_eq!(state.crt.hard_scan, -8.0);
+    }
+
+    #[test]
+    fn test_handle_device_scan_result_success() {
+        let mut state = AppState::default();
+        let result = Ok((
+            vec!["/dev/video0".to_string()],
+            vec![("default".to_string(), "Default Audio".to_string())],
+            vec![("1234:5678".to_string(), "Test USB".to_string())],
+        ));
+        
+        let success = state.handle_device_scan_result(result);
+        assert!(success);
+        assert_eq!(state.hardware.video_devices.len(), 1);
+        assert_eq!(state.hardware.selected_video_device, "/dev/video0");
+        assert_eq!(state.hardware.audio_sources.len(), 1);
+        assert_eq!(state.hardware.usb_devices.len(), 1);
+    }
+
+    #[test]
+    fn test_handle_device_scan_result_error() {
+        let mut state = AppState::default();
+        let error = anyhow::anyhow!("Test failure");
+        
+        let success = state.handle_device_scan_result(Err(error));
+        assert!(!success);
+        assert_eq!(state.hardware.video_devices.len(), 0);
+    }
+}
