@@ -39,23 +39,51 @@ impl Iterator for LiveSource {
         }
 
         if self.local_idx >= self.valid_len {
-            // Track audio latency before popping new data
-            let queued_samples = self.consumer.slots() as f64;
-            let latency = (queued_samples / self.channels as f64 / self.sample_rate as f64 * 1000.0) as u64;
+            let queued_samples = self.consumer.slots();
+            let safe_queued = (queued_samples / self.channels as usize) * self.channels as usize;
+
+            let latency = (safe_queued as f64 / self.channels as f64 / self.sample_rate as f64 * 1000.0) as u64;
             self.audio_latency_ms.store(latency, Ordering::Relaxed);
 
-            let (popped, _) = self.consumer.pop_partial_slice(&mut self.local_buf);
-            if popped.is_empty() {
+            // Keep latency bounded (clock drift compensation). 
+            // If latency climbs above 100ms, drop down to 80ms to catch up smoothly without giant clicks.
+            if latency > 100 {
+                let target_samples = (self.sample_rate as f64 * self.channels as f64 * 0.08) as usize; // 80ms
+                if safe_queued > target_samples {
+                    let to_drop = safe_queued - target_samples;
+                    let drop_frames = (to_drop / self.channels as usize) * self.channels as usize;
+                    if let Ok(chunk) = self.consumer.read_chunk(drop_frames) {
+                        chunk.commit_all();
+                        tracing::debug!("Audio latency {}ms: Clock drift compensated by dropping {} samples", latency, drop_frames);
+                    }
+                }
+            }
+
+            let available = self.consumer.slots();
+            let safe_to_read = (available / self.channels as usize) * self.channels as usize;
+            let to_read = std::cmp::min(safe_to_read, self.local_buf.len());
+
+            if to_read > 0 {
+                // Ensure we only ever read a full even frame (no partial channels)
+                if let Ok(chunk) = self.consumer.read_chunk(to_read) {
+                    let (s1, s2) = chunk.as_slices();
+                    let l1 = s1.len();
+                    self.local_buf[..l1].copy_from_slice(s1);
+                    if !s2.is_empty() {
+                        self.local_buf[l1..to_read].copy_from_slice(s2);
+                    }
+                    chunk.commit_all();
+                    self.valid_len = to_read;
+                    self.local_idx = 0;
+                }
+            } else {
                 self.underruns.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!("Audio underrun! Ringbuffer exhausted.");
                 
-                // On underrun, insert ~40ms of silence. This allows the capture thread 
-                // to accumulate a 40ms forward buffer before we start popping again,
-                // preventing a rapid succession of 1-sample crackles.
-                self.pause_counter = (self.sample_rate as usize * self.channels as usize * 40) / 1000 - 1;
+                // If we underrun, instead of pausing for 40ms, we just return a single 0.0 sample 
+                // and try again next iteration. This is more transparent to the player.
                 return Some(0.0);
             }
-            self.valid_len = popped.len();
-            self.local_idx = 0;
         }
 
         let sample = self.local_buf[self.local_idx];
@@ -157,8 +185,8 @@ pub fn start_audio_stream(
     audio_latency_ms: Arc<AtomicU64>,
 ) -> Result<AudioStreamHandle> {
     // Shared ring buffer for capture-to-playback bridge.
-    // Increased to ~100ms of audio (48k * 0.1s * 2 channels) to provide jitter stability.
-    let ring_size = (48000.0 * 0.1 * 2.0) as usize; 
+    // Increased to ~1.0s of audio to provide complete buffer safety. We manage ideal latency from the consumer side.
+    let ring_size = (48000.0 * 1.0 * 2.0) as usize; 
     let (producer, consumer) = RingBuffer::<f32>::new(ring_size);
 
     let (alsa_thread, input_channels, input_sample_rate) = start_alsa_capture(source_name, producer, peak_amplitude_shared.clone())?;
