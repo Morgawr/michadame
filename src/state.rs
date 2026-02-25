@@ -25,25 +25,7 @@ pub fn init_app_state(cc: &eframe::CreationContext) -> AppState {
     let loaded_cfg = confy::load::<config::MichadameConfig>("michadame", None).unwrap_or(cfg);
     config::apply_config(&mut state, &loaded_cfg);
 
-    let (tx, _rx) = crossbeam_channel::unbounded();
-    let (video_devices, audio_sources, audio_sinks, usb_devices) =
-        crate::devices::scan_devices(None, None, tx);
-    state.hardware.video_devices = video_devices;
-    state.hardware.usb_devices = usb_devices;
-    state.hardware.audio_sources = audio_sources;
-    state.hardware.audio_sinks = audio_sinks;
 
-    if !state.hardware.selected_video_device.is_empty() {
-        match crate::devices::video::find_video_formats(&state.hardware.selected_video_device) {
-            Ok(formats) => {
-                state.hardware.supported_formats = formats;
-                crate::video::types::apply_saved_format_config(&mut state, &loaded_cfg);
-            }
-            Err(e) => {
-                tracing::error!("Device scan failed: {:?}", e);
-            }
-        }
-    }
 
     let egui_ctx = cc.egui_ctx.clone();
     let (tx, rx) = crossbeam_channel::unbounded();

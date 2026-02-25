@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use std::collections::HashMap;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use alsa::device_name::HintIter;
 use ringbuf::traits::{Consumer, Producer, Split};
@@ -39,32 +40,17 @@ extern "C" fn alsa_error_handler(
     _fmt: *const libc::c_char,
 ) {}
 
-fn get_alsa_device_name(name: &str) -> String {
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(hints) = HintIter::new_str(None, "pcm") {
-            for hint in hints {
-                if let Some(hint_name) = &hint.name {
-                    if hint_name == name {
-                        if let Some(desc) = &hint.desc {
-                            return desc.replace("\n", " - ");
-                        }
-                    }
-                }
-            }
-        }
-    }
-    name.to_string()
-}
 
 pub fn find_audio_devices() -> Result<(Vec<(String, String)>, Vec<(String, String)>)> {
     #[cfg(target_os = "linux")]
     {
+        // Suppress ALSA's noisy stderr logging for missing/unreachable devices during probing.
         unsafe {
             use libc::{c_int, c_void};
             extern "C" {
                 fn snd_lib_error_set_handler(handler: *const c_void) -> c_int;
             }
+            // We cast our non-variadic handler to a void pointer to skip the variadic type check.
             snd_lib_error_set_handler(alsa_error_handler as *const c_void);
         }
     }
@@ -73,11 +59,34 @@ pub fn find_audio_devices() -> Result<(Vec<(String, String)>, Vec<(String, Strin
     let mut sources = Vec::new();
     let mut sinks = Vec::new();
 
+    #[cfg(target_os = "linux")]
+    let alsa_hints: HashMap<String, String> = {
+        let mut map = HashMap::new();
+        if let Ok(hints) = HintIter::new_str(None, "pcm") {
+            for hint in hints {
+                if let (Some(name), Some(desc)) = (hint.name, hint.desc) {
+                    // Skip OSS emulation devices as they are slow to probe and often conflict
+                    if name.contains("oss") || desc.contains("OSS") {
+                        continue;
+                    }
+                    map.insert(name, desc.replace("\n", " - "));
+                }
+            }
+        }
+        map
+    };
+
     if let Ok(devices) = host.input_devices() {
         for device in devices {
             if let Ok(name) = device.name() {
-                let readable_name = get_alsa_device_name(&name);
-                sources.push((readable_name, name));
+                #[cfg(target_os = "linux")]
+                {
+                    if name.contains("oss") { continue; }
+                    let readable_name = alsa_hints.get(&name).cloned().unwrap_or_else(|| name.clone());
+                    sources.push((readable_name, name));
+                }
+                #[cfg(not(target_os = "linux"))]
+                sources.push((name.clone(), name));
             }
         }
     }
@@ -85,8 +94,14 @@ pub fn find_audio_devices() -> Result<(Vec<(String, String)>, Vec<(String, Strin
     if let Ok(devices) = host.output_devices() {
         for device in devices {
             if let Ok(name) = device.name() {
-                let readable_name = get_alsa_device_name(&name);
-                sinks.push((readable_name, name));
+                #[cfg(target_os = "linux")]
+                {
+                    if name.contains("oss") { continue; }
+                    let readable_name = alsa_hints.get(&name).cloned().unwrap_or_else(|| name.clone());
+                    sinks.push((readable_name, name));
+                }
+                #[cfg(not(target_os = "linux"))]
+                sinks.push((name.clone(), name));
             }
         }
     }
