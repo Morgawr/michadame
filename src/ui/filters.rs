@@ -5,89 +5,105 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     let mut changed = false;
 
     ui.separator();
-    ui.horizontal(|ui| {
+    ui.group(|ui| {
         ui.label("Appearance:");
-        ui.label("Filter:");
-        let current_filter = state.crt_filter.load(std::sync::atomic::Ordering::Relaxed);
-        let selected_text = CrtFilter::from_u8(current_filter).to_string();
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Filter:");
+            let current_filter = state.crt_filter.load(std::sync::atomic::Ordering::Relaxed);
+            let selected_text = CrtFilter::from_u8(current_filter).to_string();
 
-        egui::ComboBox::from_id_source("filter_selector")
-            .selected_text(selected_text)
-            .show_ui(ui, |ui| {
-                if ui
-                    .selectable_value(&mut current_filter.clone(), 0, "None")
-                    .clicked()
-                {
-                    state
-                        .crt_filter
-                        .store(0, std::sync::atomic::Ordering::Relaxed);
-                    changed = true;
-                }
-                if ui
-                    .selectable_value(&mut current_filter.clone(), 1, "Lottes")
-                    .clicked()
-                {
-                    state
-                        .crt_filter
-                        .store(1, std::sync::atomic::Ordering::Relaxed);
-                    changed = true;
-                }
-            });
-
-        ui.label("Scaler:");
-        let current_scaler = state
-            .scaler_filter
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let scaler_text = crate::video::types::ScalerFilter::from_u8(current_scaler).to_string();
-        egui::ComboBox::from_id_source("scaler_selector")
-            .selected_text(scaler_text)
-            .show_ui(ui, |ui| {
-                for i in 0..=4 {
-                    let text = crate::video::types::ScalerFilter::from_u8(i).to_string();
+            egui::ComboBox::from_id_source("filter_selector")
+                .selected_text(selected_text)
+                .show_ui(ui, |ui| {
                     if ui
-                        .selectable_value(&mut current_scaler.clone(), i, text)
+                        .selectable_value(&mut current_filter.clone(), 0, "None")
                         .clicked()
                     {
                         state
-                            .scaler_filter
-                            .store(i, std::sync::atomic::Ordering::Relaxed);
+                            .crt_filter
+                            .store(0, std::sync::atomic::Ordering::Relaxed);
                         changed = true;
                     }
-                }
-            });
-        
-        ui.label("Range:");
-        let current_range = state.color_range.load(std::sync::atomic::Ordering::Relaxed);
-        let range_text = crate::video::types::ColorRange::from_u8(current_range).to_string();
-        egui::ComboBox::from_id_source("range_selector")
-            .selected_text(range_text)
-            .show_ui(ui, |ui| {
-                if ui.selectable_value(&mut current_range.clone(), 0, "Full (PC)").clicked() {
-                    state.color_range.store(0, std::sync::atomic::Ordering::Relaxed);
-                    changed = true;
-                }
-                if ui.selectable_value(&mut current_range.clone(), 1, "Limited (TV)").clicked() {
-                    state.color_range.store(1, std::sync::atomic::Ordering::Relaxed);
-                    changed = true;
-                }
-            });
+                    if ui
+                        .selectable_value(&mut current_filter.clone(), 1, "Lottes")
+                        .clicked()
+                    {
+                        state
+                            .crt_filter
+                            .store(1, std::sync::atomic::Ordering::Relaxed);
+                        changed = true;
+                    }
+                });
+        });
 
-        if ui
-            .checkbox(&mut state.video.pixelate_filter_enabled, "Pixelate")
-            .changed()
-        {
-            changed = true;
-        }
-        if ui
-            .checkbox(&mut state.video.median_filter_enabled, "Median Filter 3x1")
-            .changed()
-        {
-            changed = true;
-        }
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Scaler:");
+            let current_scaler = state
+                .scaler_filter
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let scaler_text = crate::video::types::ScalerFilter::from_u8(current_scaler).to_string();
+            egui::ComboBox::from_id_source("scaler_selector")
+                .selected_text(scaler_text)
+                .show_ui(ui, |ui| {
+                    for i in 0..=4 {
+                        let text = crate::video::types::ScalerFilter::from_u8(i).to_string();
+                        if ui
+                            .selectable_value(&mut current_scaler.clone(), i, text)
+                            .clicked()
+                        {
+                            state
+                                .scaler_filter
+                                .store(i, std::sync::atomic::Ordering::Relaxed);
+                            changed = true;
+                        }
+                    }
+                });
+            
+            ui.label("Range:");
+            let current_range = state.color_range.load(std::sync::atomic::Ordering::Relaxed);
+            let range_text = crate::video::types::ColorRange::from_u8(current_range).to_string();
+            egui::ComboBox::from_id_source("range_selector")
+                .selected_text(range_text)
+                .show_ui(ui, |ui| {
+                    if ui.selectable_value(&mut current_range.clone(), 0, "Full (PC)").clicked() {
+                        state.color_range.store(0, std::sync::atomic::Ordering::Relaxed);
+                        changed = true;
+                    }
+                    if ui.selectable_value(&mut current_range.clone(), 1, "Limited (TV)").clicked() {
+                        state.color_range.store(1, std::sync::atomic::Ordering::Relaxed);
+                        changed = true;
+                    }
+                });
+        });
+
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .checkbox(&mut state.video.pixelate_filter_enabled, "Pixelate")
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .checkbox(&mut state.video.median_filter_enabled, "Median Filter 3x1")
+                .changed()
+            {
+                changed = true;
+            }
+        });
     });
 
     ui.group(|ui| {
         ui.label("Visual Tweaks:");
+
+        if ui
+            .checkbox(&mut state.video.use_magenta_background, "Magenta Background")
+            .on_hover_text(
+                "Uses a magenta background around the video stream instead of black.",
+            )
+            .changed()
+        {
+            changed = true;
+        }
 
         if ui
             .add(
@@ -99,54 +115,40 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         {
             changed = true;
         }
+        if ui
+            .add(
+                egui::Slider::new(&mut state.video.horizontal_stretch, 0.5..=1.5)
+                    .text("Horizontal Stretch")
+                    .step_by(0.001)
+                    .custom_formatter(|n, _| format!("{:.1}%", n * 100.0)),
+            )
+            .changed()
+        {
+            changed = true;
+        }
 
-        ui.horizontal(|ui| {
-            if ui
-                .checkbox(&mut state.video.use_magenta_background, "Magenta Background")
-                .on_hover_text(
-                    "Uses a magenta background around the video stream instead of black.",
-                )
-                .changed()
-            {
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.video.horizontal_stretch, 0.5..=1.5)
-                        .text("Horizontal Stretch")
-                        .step_by(0.001)
-                        .custom_formatter(|n, _| format!("{:.1}%", n * 100.0)),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-        });
-
-        ui.horizontal(|ui| {
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.video.overscan_x, -0.2..=0.2)
-                        .text("Overscan X")
-                        .step_by(0.0005)
-                        .custom_formatter(|n, _| format!("{:.1}%", n * 100.0)),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.video.overscan_y, -0.2..=0.2)
-                        .text("Overscan Y")
-                        .step_by(0.001)
-                        .custom_formatter(|n, _| format!("{:.1}%", n * 100.0)),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-        });
+        if ui
+            .add(
+                egui::Slider::new(&mut state.video.overscan_x, -0.2..=0.2)
+                    .text("Overscan X")
+                    .step_by(0.0005)
+                    .custom_formatter(|n, _| format!("{:.1}%", n * 100.0)),
+            )
+            .changed()
+        {
+            changed = true;
+        }
+        if ui
+            .add(
+                egui::Slider::new(&mut state.video.overscan_y, -0.2..=0.2)
+                    .text("Overscan Y")
+                    .step_by(0.001)
+                    .custom_formatter(|n, _| format!("{:.1}%", n * 100.0)),
+            )
+            .changed()
+        {
+            changed = true;
+        }
     });
 
     let current_filter =
@@ -167,7 +169,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             let mut bloom_amount = state.crt.bloom_amount as f32;
             let mut shape = state.crt.shape as f32;
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui
                     .add(egui::Slider::new(&mut scan, -20.0..=0.0).text("HardScan"))
                     .changed()
@@ -183,7 +185,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     changed = true;
                 }
             });
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui
                     .add(egui::Slider::new(&mut bright, 0.5..=2.0).text("Brightboost"))
                     .changed()
@@ -199,7 +201,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     changed = true;
                 }
             });
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui
                     .add(egui::Slider::new(&mut warp_x, 0.0..=0.125).text("WarpX"))
                     .changed()
@@ -215,7 +217,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     changed = true;
                 }
             });
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui
                     .add(egui::Slider::new(&mut mask, 0.0..=4.0).text("ShadowMask"))
                     .on_hover_text("0=None, 1=Compressed TV, 2=Aperture, 3=VGA, 4=VGA (lighter)")
@@ -225,7 +227,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     changed = true;
                 }
             });
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui
                     .add(egui::Slider::new(&mut shape, 0.0..=4.0).text("Shape"))
                     .on_hover_text("0=Linear, 1=Gaussian, 2=Sinc, etc.")
@@ -235,7 +237,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     changed = true;
                 }
             });
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui
                     .add(egui::Slider::new(&mut bloom_pix, -2.0..=2.0).text("BloomPix"))
                     .changed()

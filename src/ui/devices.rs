@@ -5,7 +5,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     let mut changed = false;
 
     // --- USB Devices ---
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label("USB Device to Reset:");
         let selected_text = state
             .hardware.selected_usb_device
@@ -59,7 +59,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     ui.separator();
 
     // --- Video Devices ---
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label("Video Device:");
         let _combo_box = egui::ComboBox::from_id_source("video_device_selector")
             .selected_text(state.hardware.selected_video_device.as_str())
@@ -115,7 +115,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
     // --- Video Format / Resolution ---
     if !state.hardware.supported_formats.is_empty() {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let selected_format_description = state.hardware.supported_formats[state.hardware.selected_format_index]
                 .description
                 .clone();
@@ -201,7 +201,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
     // --- Audio Devices ---
     ui.group(|ui| {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("PulseAudio Configuration:");
             if ui.button("🔄 Refresh").clicked() {
                 state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(2)), text: "Refresh clicked. Please restart the app to re-scan devices.".to_string().into() });

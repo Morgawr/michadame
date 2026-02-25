@@ -352,7 +352,7 @@ impl eframe::App for AppState {
                 egui::ViewportId::from_hash_of("control_window"),
                 egui::ViewportBuilder::default()
                     .with_title("Michadame Controls")
-                    .with_inner_size([640.0, 500.0]),
+                    .with_inner_size([900.0, 900.0]),
                 |ctx, class| {
                     assert!(
                         class == egui::ViewportClass::Immediate,

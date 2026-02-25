@@ -62,7 +62,9 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
                 repaint_requested |= dialogs::show_first_run_dialog(state, ctx, ui);
             }
 
-            repaint_requested |= controls::layout_top_ui(ui, state);
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                repaint_requested |= controls::layout_top_ui(ui, state);
+            });
 
             repaint_requested
         })
