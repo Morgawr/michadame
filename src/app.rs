@@ -13,6 +13,8 @@ use std::time::Instant;
 pub struct HardwareState {
     pub audio_peak_amplitude: Arc<AtomicU64>,
     pub audio_latency_ms: Arc<AtomicU64>,
+    pub audio_buffer_size: u32,
+    pub audio_sample_rate: u32,
     pub video_devices: Vec<String>,
     pub usb_devices: Vec<(String, String)>,
     pub selected_usb_device: Option<String>,
@@ -94,6 +96,8 @@ impl Default for AppState {
             hardware: HardwareState {
                 audio_peak_amplitude: Arc::new(AtomicU64::new(0)),
                 audio_latency_ms: Arc::new(AtomicU64::new(0)),
+                audio_buffer_size: 1024,
+                audio_sample_rate: 48000,
                 video_devices: Vec::new(),
                 usb_devices: Vec::new(),
                 selected_usb_device: None,
@@ -233,9 +237,12 @@ impl AppState {
             match devices::audio::start_audio_stream(
                 mic, 
                 Arc::clone(&self.hardware.audio_peak_amplitude),
-                Arc::clone(&self.hardware.audio_latency_ms)
+                Arc::clone(&self.hardware.audio_latency_ms),
+                self.hardware.audio_buffer_size,
+                self.hardware.audio_sample_rate,
             ) {
-                Ok(handle) => {                    self.hardware.active_audio_stream = Some(handle);
+                Ok(handle) => {
+                    self.hardware.active_audio_stream = Some(handle);
                     self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: "Audio stream started.".to_string().into() });
                 }
                 Err(e) => {
@@ -329,6 +336,29 @@ impl AppState {
 
         self.frame_receiver = None;
         self.ui.video_window_open = false;
+    }
+
+    pub fn restart_audio_stream(&mut self) {
+        // Drop current audio stream
+        self.hardware.active_audio_stream = None;
+        
+        if let Some(mic) = &self.hardware.selected_audio_source_name {
+            match devices::audio::start_audio_stream(
+                mic, 
+                Arc::clone(&self.hardware.audio_peak_amplitude),
+                Arc::clone(&self.hardware.audio_latency_ms),
+                self.hardware.audio_buffer_size,
+                self.hardware.audio_sample_rate,
+            ) {
+                Ok(handle) => {
+                    self.hardware.active_audio_stream = Some(handle);
+                    self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: "Audio stream restarted with new buffer size.".to_string().into() });
+                }
+                Err(e) => {
+                    self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Error, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: format!("Failed to restart audio: {}", e).into() });
+                }
+            }
+        }
     }
 }
 

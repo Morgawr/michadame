@@ -180,13 +180,15 @@ pub fn start_audio_stream(
     source_name: &str, 
     peak_amplitude_shared: Arc<AtomicU64>,
     audio_latency_ms: Arc<AtomicU64>,
+    buffer_size: u32,
+    sample_rate: u32,
 ) -> Result<AudioStreamHandle> {
     // Shared ring buffer for capture-to-playback bridge.
     // Increased to ~1.0s of audio to provide complete buffer safety. We manage ideal latency from the consumer side.
-    let ring_size = (48000.0 * 1.0 * 2.0) as usize; 
+    let ring_size = (sample_rate as f32 * 1.0 * 2.0) as usize; 
     let (producer, consumer) = RingBuffer::<f32>::new(ring_size);
 
-    let (alsa_thread, input_channels, input_sample_rate) = start_alsa_capture(source_name, producer, peak_amplitude_shared.clone())?;
+    let (alsa_thread, input_channels, input_sample_rate) = start_alsa_capture(source_name, producer, peak_amplitude_shared.clone(), buffer_size, sample_rate)?;
 
     // Playback via Rodio
     let (output_stream_guard, stream_handle) = initialize_rodio_playback()?;
@@ -202,7 +204,7 @@ pub fn start_audio_stream(
         underruns: Arc::new(AtomicU64::new(0)),
         peak_amplitude_shared,
         audio_latency_ms,
-        local_buf: vec![0.0; 1024],
+        local_buf: vec![0.0; buffer_size as usize * input_channels as usize],
         local_idx: 0,
         valid_len: 0,
     };
@@ -220,6 +222,8 @@ fn start_alsa_capture(
     source_name: &str,
     mut producer: Producer<f32>,
     peak_amplitude_shared: Arc<AtomicU64>,
+    buffer_size: u32,
+    sample_rate: u32,
 ) -> Result<(Option<thread::JoinHandle<()>>, u16, u32)> {
     use alsa::pcm::{PCM, HwParams, Access, Format};
     use alsa::Direction;
@@ -229,7 +233,7 @@ fn start_alsa_capture(
         let pcm_probe = PCM::new(source_name, Direction::Capture, false)
             .map_err(|e| anyhow!("Failed to probe ALSA device {}: {}", source_name, e))?;
         let hwp_probe = HwParams::any(&pcm_probe)?;
-        let r = hwp_probe.set_rate_near(48000, alsa::ValueOr::Nearest)?;
+        let r = hwp_probe.set_rate_near(sample_rate, alsa::ValueOr::Nearest)?;
         let c = hwp_probe.set_channels_near(2)? as u16;
         (r, c)
     };
@@ -251,11 +255,12 @@ fn start_alsa_capture(
         hwp.set_format(Format::S16LE).unwrap();
         hwp.set_rate_near(rate, alsa::ValueOr::Nearest).unwrap();
         hwp.set_channels_near(channels as u32).unwrap();
+        hwp.set_period_size_near(buffer_size as alsa::pcm::Frames, alsa::ValueOr::Nearest).unwrap_or_default();
         
         pcm.hw_params(&hwp).unwrap();
 
         let io = pcm.io_i16().unwrap();
-        let mut buf = vec![0i16; 1024 * channels as usize];
+        let mut buf = vec![0i16; buffer_size as usize * channels as usize];
         
         loop {
             match io.readi(&mut buf) {

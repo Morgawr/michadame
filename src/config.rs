@@ -5,7 +5,6 @@ use std::sync::atomic::Ordering;
 
 #[derive(Default, Serialize, Deserialize, Clone)]
 pub struct Profile {
-    pub audio_source: Option<String>,
     pub video_format_fourcc: Option<String>,
     pub crt_filter: Option<u8>,
     pub scaler_filter: Option<u8>,
@@ -51,6 +50,8 @@ struct LegacyConfig {
     scaler_filter: Option<u8>,
     color_range: Option<u8>,
     pixelate_filter_enabled: Option<bool>,
+    audio_buffer_size: Option<u32>,
+    audio_sample_rate: Option<u32>,
     crt_hard_scan: Option<f32>,
     crt_warp_x: Option<f32>,
     crt_warp_y: Option<f32>,
@@ -82,6 +83,9 @@ pub struct MichadameConfig {
     pub video_framerate: Option<u32>,
     pub reset_usb_on_startup: Option<bool>,
     pub has_shown_first_run_warning: Option<bool>,
+    pub audio_source: Option<String>,
+    pub audio_buffer_size: Option<u32>,
+    pub audio_sample_rate: Option<u32>,
     pub active_profile: String,
     pub profiles: BTreeMap<String, Profile>,
 }
@@ -93,7 +97,6 @@ impl From<LegacyConfig> for MichadameConfig {
 
         if profiles.is_empty() {
             let legacy_profile = Profile {
-                audio_source: legacy.audio_source,
                 video_format_fourcc: legacy.video_format_fourcc,
                 crt_filter: legacy.crt_filter,
                 scaler_filter: legacy.scaler_filter,
@@ -127,6 +130,9 @@ impl From<LegacyConfig> for MichadameConfig {
             video_framerate: legacy.video_framerate,
             reset_usb_on_startup: legacy.reset_usb_on_startup,
             has_shown_first_run_warning: legacy.has_shown_first_run_warning,
+            audio_source: legacy.audio_source,
+            audio_buffer_size: legacy.audio_buffer_size,
+            audio_sample_rate: legacy.audio_sample_rate,
             active_profile,
             profiles,
         }
@@ -144,6 +150,9 @@ impl Default for MichadameConfig {
             video_framerate: None,
             reset_usb_on_startup: None,
             has_shown_first_run_warning: None,
+            audio_source: None,
+            audio_buffer_size: None,
+            audio_sample_rate: None,
             active_profile: "Default".to_string(),
             profiles,
         }
@@ -152,7 +161,6 @@ impl Default for MichadameConfig {
 
 pub fn build_profile_from_state(state: &AppState) -> Profile {
     Profile {
-        audio_source: state.hardware.selected_audio_source_name.clone(),
         video_format_fourcc: state.hardware
             .supported_formats
             .get(state.hardware.selected_format_index)
@@ -202,6 +210,9 @@ pub fn save_config(state: &AppState) {
     };
     cfg.reset_usb_on_startup = Some(state.ui.reset_usb_on_startup);
     cfg.has_shown_first_run_warning = Some(!state.ui.show_first_run_dialog);
+    cfg.audio_source = state.hardware.selected_audio_source_name.clone();
+    cfg.audio_buffer_size = Some(state.hardware.audio_buffer_size);
+    cfg.audio_sample_rate = Some(state.hardware.audio_sample_rate);
 
     cfg.active_profile = state.active_profile.clone();
 
@@ -236,6 +247,9 @@ pub fn save_global_hardware_config(state: &AppState) {
     };
     cfg.reset_usb_on_startup = Some(state.ui.reset_usb_on_startup);
     cfg.has_shown_first_run_warning = Some(!state.ui.show_first_run_dialog);
+    cfg.audio_source = state.hardware.selected_audio_source_name.clone();
+    cfg.audio_buffer_size = Some(state.hardware.audio_buffer_size);
+    cfg.audio_sample_rate = Some(state.hardware.audio_sample_rate);
 
     cfg.active_profile = state.active_profile.clone();
     
@@ -249,15 +263,6 @@ pub fn save_global_hardware_config(state: &AppState) {
 }
 
 pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) {
-    if let Some(saved_source) = &profile.audio_source {
-        if state
-            .hardware.audio_sources
-            .iter()
-            .any(|(_, name)| name == saved_source)
-        {
-            state.hardware.selected_audio_source_name = Some(saved_source.clone());
-        }
-    }
     if let Some(filter) = profile.crt_filter {
         state.crt_filter.store(filter, Ordering::Relaxed);
     }
@@ -334,6 +339,25 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
             state.hardware.selected_usb_device = Some(saved_usb.clone());
         }
     }
+    if let Some(saved_source) = &cfg.audio_source {
+        if state
+            .hardware.audio_sources
+            .iter()
+            .any(|(_, name)| name == saved_source)
+        {
+            state.hardware.selected_audio_source_name = Some(saved_source.clone());
+        }
+    }
+    if let Some(val) = cfg.audio_buffer_size {
+        state.hardware.audio_buffer_size = val;
+    } else {
+        state.hardware.audio_buffer_size = 1024;
+    }
+    if let Some(val) = cfg.audio_sample_rate {
+        state.hardware.audio_sample_rate = val;
+    } else {
+        state.hardware.audio_sample_rate = 48000;
+    }
 
     if !state.hardware.selected_video_device.is_empty() {
         crate::video::types::apply_saved_format_config(state, cfg);
@@ -391,6 +415,8 @@ mod tests {
             scaler_filter: Some(2),
             color_range: Some(1),
             pixelate_filter_enabled: Some(true),
+            audio_buffer_size: Some(128),
+            audio_sample_rate: Some(48000),
             crt_hard_scan: Some(1.0),
             crt_warp_x: Some(2.0),
             crt_warp_y: Some(3.0),
@@ -413,9 +439,11 @@ mod tests {
         assert_eq!(new_config.video_device, Some("TestDevice".to_string()));
         assert_eq!(new_config.video_resolution, Some((1920, 1080)));
         assert_eq!(new_config.active_profile, "Default");
+        assert_eq!(new_config.audio_source, Some("TestAudio".to_string()));
+        assert_eq!(new_config.audio_buffer_size, Some(128));
+        assert_eq!(new_config.audio_sample_rate, Some(48000));
         
         let profile = new_config.profiles.get("Default").unwrap();
-        assert_eq!(profile.audio_source, Some("TestAudio".to_string()));
         assert_eq!(profile.video_format_fourcc, Some("YUYV".to_string()));
         assert_eq!(profile.crt_filter, Some(1));
         assert_eq!(profile.crt_hard_scan, Some(1.0));
@@ -425,8 +453,7 @@ mod tests {
     #[test]
     fn test_legacy_config_migration_with_profiles() {
         let mut profiles = BTreeMap::new();
-        let mut custom_profile = Profile::default();
-        custom_profile.audio_source = Some("CustomAudio".to_string());
+        let custom_profile = Profile::default();
         profiles.insert("Custom".to_string(), custom_profile);
 
         let legacy = LegacyConfig {
@@ -445,6 +472,8 @@ mod tests {
             scaler_filter: None,
             color_range: None,
             pixelate_filter_enabled: None,
+            audio_buffer_size: None,
+            audio_sample_rate: None,
             crt_hard_scan: None,
             crt_warp_x: None,
             crt_warp_y: None,
@@ -467,23 +496,19 @@ mod tests {
         let new_config: MichadameConfig = legacy.into();
         assert_eq!(new_config.active_profile, "Custom");
         assert!(new_config.profiles.contains_key("Custom"));
-        let profile = new_config.profiles.get("Custom").unwrap();
-        assert_eq!(profile.audio_source, Some("CustomAudio".to_string()));
+        assert_eq!(new_config.audio_source, Some("OldAudio".to_string()));
     }
 
     #[test]
     fn test_apply_profile_to_state() {
         let mut state = crate::app::AppState::default();
-        state.hardware.audio_sources = vec![("id1".to_string(), "MyAudio".to_string())];
         
         let mut profile = Profile::default();
-        profile.audio_source = Some("MyAudio".to_string());
         profile.crt_filter = Some(1);
         profile.horizontal_stretch = Some(1.5);
         
         apply_profile_to_state(&mut state, &profile);
         
-        assert_eq!(state.hardware.selected_audio_source_name, Some("MyAudio".to_string()));
         assert_eq!(state.crt_filter.load(Ordering::Relaxed), 1);
         assert_eq!(state.video.horizontal_stretch, 1.5);
     }
@@ -491,7 +516,6 @@ mod tests {
     #[test]
     fn test_build_profile_from_state() {
         let mut state = crate::app::AppState::default();
-        state.hardware.selected_audio_source_name = Some("SelectedAudio".to_string());
         state.hardware.supported_formats = vec![crate::video::types::VideoFormat {
             fourcc: "YUY2".to_string(),
             description: "YUY2".to_string(),
@@ -501,7 +525,6 @@ mod tests {
         state.scaler_filter.store(2, Ordering::Relaxed);
         
         let profile = build_profile_from_state(&state);
-        assert_eq!(profile.audio_source, Some("SelectedAudio".to_string()));
         assert_eq!(profile.video_format_fourcc, Some("YUY2".to_string()));
         assert_eq!(profile.scaler_filter, Some(2));
     }

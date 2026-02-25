@@ -230,10 +230,55 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         .changed();
                 }
                 if combo_changed {
-                    crate::config::save_config(state);
+                    crate::config::save_global_hardware_config(state);
+                    if state.hardware.active_audio_stream.is_some() {
+                        state.restart_audio_stream();
+                    }
                     changed = true;
                 }
             });
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Buffer Size (Samples):");
+            let buffer_sizes = [32, 64, 128, 256, 512, 1024, 2048, 4096];
+            let current_size = state.hardware.audio_buffer_size;
+            
+            egui::ComboBox::from_id_source("audio_buffer_size")
+                .selected_text(format!("{}", current_size))
+                .show_ui(ui, |ui| {
+                    let mut combo_changed = false;
+                    for &size in &buffer_sizes {
+                        combo_changed |= ui.selectable_value(&mut state.hardware.audio_buffer_size, size, format!("{}", size)).changed();
+                    }
+                    if combo_changed {
+                        crate::config::save_global_hardware_config(state);
+                        if state.hardware.active_audio_stream.is_some() {
+                            state.restart_audio_stream();
+                        }
+                        changed = true;
+                    }
+                });
+
+            ui.label("Sample Rate:");
+            let sample_rates = [44100, 48000];
+            let current_rate = state.hardware.audio_sample_rate;
+            
+            egui::ComboBox::from_id_source("audio_sample_rate")
+                .selected_text(format!("{} Hz", current_rate))
+                .show_ui(ui, |ui| {
+                    let mut combo_changed = false;
+                    for &rate in &sample_rates {
+                        combo_changed |= ui.selectable_value(&mut state.hardware.audio_sample_rate, rate, format!("{} Hz", rate)).changed();
+                    }
+                    if combo_changed {
+                        crate::config::save_global_hardware_config(state);
+                        if state.hardware.active_audio_stream.is_some() {
+                            state.restart_audio_stream();
+                        }
+                        changed = true;
+                    }
+                });
+        });
     });
 
     changed
