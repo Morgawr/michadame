@@ -9,11 +9,7 @@ use std::sync::Arc;
 use std::thread;
 
 pub struct AudioStreamHandle {
-    #[cfg(target_os = "linux")]
     _alsa_capture_thread: Option<thread::JoinHandle<()>>,
-    #[cfg(not(target_os = "linux"))]
-    _input_stream: cpal::Stream,
-    
     _output_stream_guard: OutputStream,
     _output_stream_handle: rodio::OutputStreamHandle,
     _sink: Sink,
@@ -95,7 +91,6 @@ fn i16_to_f32(s: i16) -> f32 {
     s as f32 / i16::MAX as f32
 }
 
-#[cfg(target_os = "linux")]
 extern "C" fn alsa_error_handler(
     _file: *const libc::c_char,
     _line: libc::c_int,
@@ -105,62 +100,43 @@ extern "C" fn alsa_error_handler(
 ) {}
 
 pub fn find_audio_devices() -> Result<Vec<(String, String)>> {
-    #[cfg(target_os = "linux")]
-    {
-        unsafe {
-            use libc::{c_int, c_void};
-            extern "C" {
-                fn snd_lib_error_set_handler(handler: *const c_void) -> c_int;
-            }
-            snd_lib_error_set_handler(alsa_error_handler as *const c_void);
+    unsafe {
+        use libc::{c_int, c_void};
+        extern "C" {
+            fn snd_lib_error_set_handler(handler: *const c_void) -> c_int;
         }
+        snd_lib_error_set_handler(alsa_error_handler as *const c_void);
     }
 
     let mut sources = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
 
-    #[cfg(target_os = "linux")]
-    {
-        use alsa::pcm::PCM;
-        use alsa::Direction;
+    use alsa::pcm::PCM;
+    use alsa::Direction;
 
-        if let Ok(hints) = HintIter::new_str(None, "pcm") {
-            for hint in hints {
-               if let (Some(name), Some(desc)) = (hint.name, hint.desc) {
-                   if name == "null" || name.contains("oss") {
-                       continue;
-                   }
-                   
-                   if seen_names.contains(&name) {
-                       continue;
-                   }
-                   
-                   // Probe for capture capability
-                   let is_input = match PCM::new(&name, Direction::Capture, true) {
-                       Ok(_) => true,
-                       Err(e) if e.to_string().contains("busy") => true,
-                       _ => false,
-                   };
+    if let Ok(hints) = HintIter::new_str(None, "pcm") {
+        for hint in hints {
+           if let (Some(name), Some(desc)) = (hint.name, hint.desc) {
+               if name == "null" || name.contains("oss") {
+                   continue;
+               }
+               
+               if seen_names.contains(&name) {
+                   continue;
+               }
+               
+               // Probe for capture capability
+               let is_input = match PCM::new(&name, Direction::Capture, true) {
+                   Ok(_) => true,
+                   Err(e) if e.to_string().contains("busy") => true,
+                   _ => false,
+               };
 
-                   if is_input {
-                       let display_name = desc.replace("\n", " - ");
-                       sources.push((display_name, name.clone()));
-                       seen_names.insert(name);
-                   }
-                }
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        use cpal::traits::{HostTrait, DeviceTrait};
-        let host = cpal::default_host();
-        if let Ok(devices) = host.input_devices() {
-            for device in devices {
-                if let Ok(name) = device.name() {
-                    sources.push((name.clone(), name));
-                }
+               if is_input {
+                   let display_name = desc.replace("\n", " - ");
+                   sources.push((display_name, name.clone()));
+                   seen_names.insert(name);
+               }
             }
         }
     }
@@ -175,11 +151,7 @@ pub fn start_audio_stream(source_name: &str, peak_amplitude_shared: Arc<AtomicU6
     let ring_size = (48000.0 * 0.1 * 2.0) as usize; 
     let (producer, consumer) = RingBuffer::<f32>::new(ring_size);
 
-    #[cfg(target_os = "linux")]
     let (alsa_thread, input_channels, input_sample_rate) = start_alsa_capture(source_name, producer, peak_amplitude_shared.clone())?;
-
-    #[cfg(not(target_os = "linux"))]
-    let (input_stream, input_channels, input_sample_rate) = start_cpal_capture(source_name, producer)?;
 
     // Playback via Rodio
     let (output_stream_guard, stream_handle) = initialize_rodio_playback()?;
@@ -202,18 +174,13 @@ pub fn start_audio_stream(source_name: &str, peak_amplitude_shared: Arc<AtomicU6
     sink.append(live_source);
 
     Ok(AudioStreamHandle {
-        #[cfg(target_os = "linux")]
         _alsa_capture_thread: alsa_thread,
-        #[cfg(not(target_os = "linux"))]
-        _input_stream: input_stream,
-        
         _output_stream_guard: output_stream_guard,
         _output_stream_handle: stream_handle,
         _sink: sink,
     })
 }
 
-#[cfg(target_os = "linux")]
 fn start_alsa_capture(
     source_name: &str,
     mut producer: Producer<f32>,
@@ -307,47 +274,7 @@ fn start_alsa_capture(
     Ok((Some(handle), channels, rate))
 }
 
-#[cfg(not(target_os = "linux"))]
-fn start_cpal_capture(
-    source_name: &str, 
-    mut producer: Producer<f32>
-) -> Result<(cpal::Stream, u16, u32)> {
-    use cpal::traits::{HostTrait, DeviceTrait};
-    let host = cpal::default_host();
-    let input_device = host.input_devices()?
-        .find(|d| d.name().unwrap_or_default() == source_name)
-        .ok_or_else(|| anyhow!("Input device not found"))?;
-    let config = input_device.default_input_config()?;
-    let channels = config.channels();
-    let rate = config.sample_rate().0;
-    
-    let err_fn = |err| tracing::error!("CPAL input error: {}", err);
-    let stream = input_device.build_input_stream(
-        &config.into(),
-        move |data: &[f32], _: &_| {
-            let free = producer.slots();
-            let safe_free = (free / channels as usize) * channels as usize;
-            let to_push = std::cmp::min(safe_free, data.len());
-            let safe_to_push = (to_push / channels as usize) * channels as usize;
-            
-            if safe_to_push > 0 {
-                if let Ok(mut chunk) = producer.write_chunk(safe_to_push) {
-                    let (slice1, slice2) = chunk.as_mut_slices();
-                    let split_idx = slice1.len();
-                    slice1.copy_from_slice(&data[..split_idx]);
-                    if !slice2.is_empty() {
-                        slice2.copy_from_slice(&data[split_idx..safe_to_push]);
-                    }
-                    chunk.commit_all();
-                }
-            }
-        },
-        err_fn,
-        None,
-    )?;
-    stream.play()?;
-    Ok((stream, channels, rate))
-}
+
 
 fn initialize_rodio_playback() -> Result<(OutputStream, rodio::OutputStreamHandle)> {
     // On Linux, the "default" host is ALSA, but for output we want to hit the sound server (Pulse/PipeWire).
@@ -355,17 +282,14 @@ fn initialize_rodio_playback() -> Result<(OutputStream, rodio::OutputStreamHandl
     let host = cpal::default_host();
     let mut target_device = None;
     
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(devices) = host.output_devices() {
-            for device in devices {
-                if let Ok(name) = device.name() {
-                    let n = name.to_lowercase();
-                    if n.contains("pulse") {
-                        tracing::info!("Found prioritized output device: {}", name);
-                        target_device = Some(device);
-                        break;
-                    }
+    if let Ok(devices) = host.output_devices() {
+        for device in devices {
+            if let Ok(name) = device.name() {
+                let n = name.to_lowercase();
+                if n.contains("pulse") {
+                    tracing::info!("Found prioritized output device: {}", name);
+                    target_device = Some(device);
+                    break;
                 }
             }
         }
