@@ -104,5 +104,57 @@ mod tests {
         assert_eq!(profile.video_format_fourcc, Some("MJPG".to_string()));
         assert_eq!(profile.crt_filter, Some(1));
         assert_eq!(profile.pixelate_filter_enabled, Some(true));
+        assert_eq!(profile.crt_hard_scan, Some(-8.0));
+        assert_eq!(profile.crt_warp_x, Some(0.031));
+    }
+
+    #[test]
+    fn test_legacy_config_with_existing_profiles() {
+        let mut profiles = BTreeMap::new();
+        profiles.insert("Custom".to_string(), Profile {
+            crt_hard_scan: Some(-10.0),
+            ..Default::default()
+        });
+
+        let legacy = LegacyConfig {
+            active_profile: "Custom".to_string(),
+            profiles,
+            video_device: None,
+            usb_device: None,
+            video_resolution: None,
+            video_framerate: None,
+            reset_usb_on_startup: None,
+            has_shown_first_run_warning: None,
+            audio_source: None,
+            video_format_fourcc: None,
+            crt_filter: None,
+            scaler_filter: None,
+            color_range: None,
+            pixelate_filter_enabled: None,
+            audio_buffer_size: None,
+            audio_sample_rate: None,
+            audio_sample_format: None,
+            crt_hard_scan: None,
+            crt_warp_x: None,
+            crt_warp_y: None,
+            crt_shadow_mask: None,
+            crt_brightboost: None,
+            crt_hard_bloom_pix: None,
+            crt_hard_bloom_scan: None,
+            crt_bloom_amount: None,
+            crt_shape: None,
+            crt_hard_pix: None,
+            use_magenta_background: None,
+            horizontal_stretch: None,
+            median_filter_enabled: None,
+            vibrance: None,
+            overscan_x: None,
+            overscan_y: None,
+        };
+
+        let config: MichadameConfig = MichadameConfig::from(legacy);
+        assert_eq!(config.active_profile, "Custom");
+        assert_eq!(config.profiles.len(), 1);
+        assert_eq!(config.profiles.get("Custom").unwrap().crt_hard_scan, Some(-10.0));
     }
 }

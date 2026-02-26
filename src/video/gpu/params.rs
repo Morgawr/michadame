@@ -97,4 +97,26 @@ mod tests {
         assert_eq!(params.hard_scan, -10.0);
         assert_eq!(params.background_color, [1.0, 0.0, 1.0]);
     }
+
+    #[test]
+    fn test_shader_params_background_color_combinations() {
+        let mut state = AppState::default();
+        
+        state.video.use_magenta_background = false;
+        let params = ShaderParams::from_state(&state);
+        assert_eq!(params.background_color, [0.0, 0.0, 0.0]);
+
+        state.video.use_magenta_background = true;
+        let params = ShaderParams::from_state(&state);
+        assert_eq!(params.background_color, [1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_shader_params_scaler_filter() {
+        let state = AppState::default();
+        state.scaler_filter.store(crate::video::types::ScalerFilter::Lanczos as u8, Ordering::Relaxed);
+        
+        let params = ShaderParams::from_state(&state);
+        assert_eq!(params.scaler_filter, crate::video::types::ScalerFilter::Lanczos as u8);
+    }
 }

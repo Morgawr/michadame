@@ -208,3 +208,67 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
         apply_profile_to_state(state, &profile);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::models::AppState;
+    use crate::config::models::{MichadameConfig, Profile};
+
+    #[test]
+    fn test_build_profile_from_state() {
+        let mut state = AppState::default();
+        state.crt.hard_scan = -12.0;
+        state.video.pixelate_filter_enabled = true;
+        state.crt_filter.store(crate::devices::filter_type::CrtFilter::Lottes as u8, Ordering::Relaxed);
+
+        let profile = build_profile_from_state(&state);
+        assert_eq!(profile.crt_hard_scan, Some(-12.0));
+        assert_eq!(profile.pixelate_filter_enabled, Some(true));
+        assert_eq!(profile.crt_filter, Some(crate::devices::filter_type::CrtFilter::Lottes as u8));
+    }
+
+    #[test]
+    fn test_apply_profile_to_state() {
+        let mut state = AppState::default();
+        let mut profile = Profile::default();
+        profile.crt_hard_scan = Some(-15.0);
+        profile.pixelate_filter_enabled = Some(true);
+        profile.crt_filter = Some(crate::devices::filter_type::CrtFilter::Lottes as u8);
+
+        apply_profile_to_state(&mut state, &profile);
+        assert_eq!(state.crt.hard_scan, -15.0);
+        assert_eq!(state.video.pixelate_filter_enabled, true);
+        assert_eq!(state.crt_filter.load(Ordering::Relaxed), crate::devices::filter_type::CrtFilter::Lottes as u8);
+    }
+
+    #[test]
+    fn test_apply_config_hardware_settings() {
+        let mut state = AppState::default();
+        state.hardware.video_devices = vec!["/dev/video0".to_string()];
+        state.hardware.audio_sources = vec![("id".to_string(), "Mic".to_string())];
+
+        let mut cfg = MichadameConfig::default();
+        cfg.video_device = Some("/dev/video0".to_string());
+        cfg.audio_source = Some("Mic".to_string());
+        cfg.audio_buffer_size = Some(2048);
+
+        apply_config(&mut state, &cfg);
+        assert_eq!(state.hardware.selected_video_device, "/dev/video0");
+        assert_eq!(state.hardware.selected_audio_source_name, Some("Mic".to_string()));
+        assert_eq!(state.hardware.audio_buffer_size, 2048);
+    }
+
+    #[test]
+    fn test_apply_config_with_missing_hardware() {
+        let mut state = AppState::default();
+        state.hardware.video_devices = vec![]; // No devices found during scan
+
+        let mut cfg = MichadameConfig::default();
+        cfg.video_device = Some("/dev/video0".to_string()); // Saved device not present
+
+        apply_config(&mut state, &cfg);
+        // Should NOT update if not in list
+        assert_eq!(state.hardware.selected_video_device, "");
+    }
+}
