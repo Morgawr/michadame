@@ -92,6 +92,8 @@ pub struct CrtFilterRenderer {
 
     last_size: (u32, u32),
     last_scaler_filter: Option<u8>,
+    last_frame_size: (u32, u32),
+    last_frame_format: Option<Pixel>,
 }
 
 impl CrtFilterRenderer {
@@ -400,6 +402,8 @@ impl CrtFilterRenderer {
                 median_prog,
                 last_size: (0, 0),
                 last_scaler_filter: None,
+                last_frame_size: (0, 0),
+                last_frame_format: None,
             }
         }
     }
@@ -471,63 +475,128 @@ impl CrtFilterRenderer {
 
                     gl.active_texture(glow::TEXTURE0);
                     gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[0]));
-                    gl.tex_image_2d(
-                        glow::TEXTURE_2D,
-                        0,
-                        glow::R8 as i32,
-                        frame.width as i32,
-                        frame.height as i32,
-                        0,
-                        glow::RED,
-                        glow::UNSIGNED_BYTE,
-                        Some(y_data),
-                    );
+                    let needs_realloc = frame.width != self.last_frame_size.0 || frame.height != self.last_frame_size.1 || Some(frame.format) != self.last_frame_format;
+                    if needs_realloc {
+                        gl.tex_image_2d(
+                            glow::TEXTURE_2D,
+                            0,
+                            glow::R8 as i32,
+                            frame.width as i32,
+                            frame.height as i32,
+                            0,
+                            glow::RED,
+                            glow::UNSIGNED_BYTE,
+                            Some(y_data),
+                        );
+                    } else {
+                        gl.tex_sub_image_2d(
+                            glow::TEXTURE_2D,
+                            0,
+                            0,
+                            0,
+                            frame.width as i32,
+                            frame.height as i32,
+                            glow::RED,
+                            glow::UNSIGNED_BYTE,
+                            glow::PixelUnpackData::Slice(y_data),
+                        );
+                    }
 
                     gl.active_texture(glow::TEXTURE1);
                     gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[1]));
-                    gl.tex_image_2d(
-                        glow::TEXTURE_2D,
-                        0,
-                        glow::R8 as i32,
-                        chroma_width as i32,
-                        chroma_height as i32,
-                        0,
-                        glow::RED,
-                        glow::UNSIGNED_BYTE,
-                        Some(u_data),
-                    );
+                    if needs_realloc {
+                        gl.tex_image_2d(
+                            glow::TEXTURE_2D,
+                            0,
+                            glow::R8 as i32,
+                            chroma_width as i32,
+                            chroma_height as i32,
+                            0,
+                            glow::RED,
+                            glow::UNSIGNED_BYTE,
+                            Some(u_data),
+                        );
+                    } else {
+                        gl.tex_sub_image_2d(
+                            glow::TEXTURE_2D,
+                            0,
+                            0,
+                            0,
+                            chroma_width as i32,
+                            chroma_height as i32,
+                            glow::RED,
+                            glow::UNSIGNED_BYTE,
+                            glow::PixelUnpackData::Slice(u_data),
+                        );
+                    }
 
                     gl.active_texture(glow::TEXTURE2);
                     gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[2]));
-                    gl.tex_image_2d(
-                        glow::TEXTURE_2D,
-                        0,
-                        glow::R8 as i32,
-                        chroma_width as i32,
-                        chroma_height as i32,
-                        0,
-                        glow::RED,
-                        glow::UNSIGNED_BYTE,
-                        Some(v_data),
-                    );
+                    if needs_realloc {
+                        gl.tex_image_2d(
+                            glow::TEXTURE_2D,
+                            0,
+                            glow::R8 as i32,
+                            chroma_width as i32,
+                            chroma_height as i32,
+                            0,
+                            glow::RED,
+                            glow::UNSIGNED_BYTE,
+                            Some(v_data),
+                        );
+                    } else {
+                        gl.tex_sub_image_2d(
+                            glow::TEXTURE_2D,
+                            0,
+                            0,
+                            0,
+                            chroma_width as i32,
+                            chroma_height as i32,
+                            glow::RED,
+                            glow::UNSIGNED_BYTE,
+                            glow::PixelUnpackData::Slice(v_data),
+                        );
+                    }
                     gl.uniform_1_i32(Some(&self.yuv_range_loc), frame.color_range as i32);
                     gl.uniform_2_f32(Some(&self.yuv_overscan_loc), params.overscan_x, params.overscan_y);
+                    
+                    if needs_realloc {
+                        self.last_frame_size = (frame.width, frame.height);
+                        self.last_frame_format = Some(frame.format);
+                    }
                 } else if frame.format == Pixel::YUYV422 {
                     gl.use_program(Some(self.yuyv_packed_prog));
                     gl.active_texture(glow::TEXTURE0);
                     gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[0]));
                     // YUYV is 2 bytes per pixel, we treat it as RGBA with width / 2
-                    gl.tex_image_2d(
-                        glow::TEXTURE_2D,
-                        0,
-                        glow::RGBA8 as i32,
-                        (frame.width / 2) as i32,
-                        frame.height as i32,
-                        0,
-                        glow::RGBA,
-                        glow::UNSIGNED_BYTE,
-                        Some(&frame.data),
-                    );
+                    let needs_realloc = frame.width != self.last_frame_size.0 || frame.height != self.last_frame_size.1 || Some(frame.format) != self.last_frame_format;
+                    if needs_realloc {
+                        gl.tex_image_2d(
+                            glow::TEXTURE_2D,
+                            0,
+                            glow::RGBA8 as i32,
+                            (frame.width / 2) as i32,
+                            frame.height as i32,
+                            0,
+                            glow::RGBA,
+                            glow::UNSIGNED_BYTE,
+                            Some(&frame.data),
+                        );
+                        self.last_frame_size = (frame.width, frame.height);
+                        self.last_frame_format = Some(frame.format);
+                    } else {
+                        gl.tex_sub_image_2d(
+                            glow::TEXTURE_2D,
+                            0,
+                            0,
+                            0,
+                            (frame.width / 2) as i32,
+                            frame.height as i32,
+                            glow::RGBA,
+                            glow::UNSIGNED_BYTE,
+                            glow::PixelUnpackData::Slice(&frame.data),
+                        );
+                    }
                     gl.uniform_1_i32(Some(&self.yuyv_range_loc), frame.color_range as i32);
                     gl.uniform_2_f32(Some(&self.yuyv_overscan_loc), params.overscan_x, params.overscan_y);
                 }
@@ -771,62 +840,127 @@ impl CrtFilterRenderer {
 
                     gl.active_texture(glow::TEXTURE0);
                     gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[0]));
-                    gl.tex_image_2d(
-                        glow::TEXTURE_2D,
-                        0,
-                        glow::R8 as i32,
-                        frame.width as i32,
-                        frame.height as i32,
-                        0,
-                        glow::RED,
-                        glow::UNSIGNED_BYTE,
-                        Some(y_data),
-                    );
+                    let needs_realloc = frame.width != self.last_frame_size.0 || frame.height != self.last_frame_size.1 || Some(frame.format) != self.last_frame_format;
+                    if needs_realloc {
+                        gl.tex_image_2d(
+                            glow::TEXTURE_2D,
+                            0,
+                            glow::R8 as i32,
+                            frame.width as i32,
+                            frame.height as i32,
+                            0,
+                            glow::RED,
+                            glow::UNSIGNED_BYTE,
+                            Some(y_data),
+                        );
+                    } else {
+                        gl.tex_sub_image_2d(
+                            glow::TEXTURE_2D,
+                            0,
+                            0,
+                            0,
+                            frame.width as i32,
+                            frame.height as i32,
+                            glow::RED,
+                            glow::UNSIGNED_BYTE,
+                            glow::PixelUnpackData::Slice(y_data),
+                        );
+                    }
 
                     gl.active_texture(glow::TEXTURE1);
                     gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[1]));
-                    gl.tex_image_2d(
-                        glow::TEXTURE_2D,
-                        0,
-                        glow::R8 as i32,
-                        chroma_width as i32,
-                        chroma_height as i32,
-                        0,
-                        glow::RED,
-                        glow::UNSIGNED_BYTE,
-                        Some(u_data),
-                    );
+                    if needs_realloc {
+                        gl.tex_image_2d(
+                            glow::TEXTURE_2D,
+                            0,
+                            glow::R8 as i32,
+                            chroma_width as i32,
+                            chroma_height as i32,
+                            0,
+                            glow::RED,
+                            glow::UNSIGNED_BYTE,
+                            Some(u_data),
+                        );
+                    } else {
+                        gl.tex_sub_image_2d(
+                            glow::TEXTURE_2D,
+                            0,
+                            0,
+                            0,
+                            chroma_width as i32,
+                            chroma_height as i32,
+                            glow::RED,
+                            glow::UNSIGNED_BYTE,
+                            glow::PixelUnpackData::Slice(u_data),
+                        );
+                    }
 
                     gl.active_texture(glow::TEXTURE2);
                     gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[2]));
-                    gl.tex_image_2d(
-                        glow::TEXTURE_2D,
-                        0,
-                        glow::R8 as i32,
-                        chroma_width as i32,
-                        chroma_height as i32,
-                        0,
-                        glow::RED,
-                        glow::UNSIGNED_BYTE,
-                        Some(v_data),
-                    );
+                    if needs_realloc {
+                        gl.tex_image_2d(
+                            glow::TEXTURE_2D,
+                            0,
+                            glow::R8 as i32,
+                            chroma_width as i32,
+                            chroma_height as i32,
+                            0,
+                            glow::RED,
+                            glow::UNSIGNED_BYTE,
+                            Some(v_data),
+                        );
+                    } else {
+                        gl.tex_sub_image_2d(
+                            glow::TEXTURE_2D,
+                            0,
+                            0,
+                            0,
+                            chroma_width as i32,
+                            chroma_height as i32,
+                            glow::RED,
+                            glow::UNSIGNED_BYTE,
+                            glow::PixelUnpackData::Slice(v_data),
+                        );
+                    }
                     gl.uniform_1_i32(Some(&self.yuv_range_loc), frame.color_range as i32);
                     gl.uniform_2_f32(Some(&self.yuv_overscan_loc), overscan_x, overscan_y);
+                    
+                    if needs_realloc {
+                        self.last_frame_size = (frame.width, frame.height);
+                        self.last_frame_format = Some(frame.format);
+                    }
                 } else if frame.format == Pixel::YUYV422 {
                     gl.use_program(Some(self.yuyv_packed_prog));
                     gl.active_texture(glow::TEXTURE0);
                     gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[0]));
-                    gl.tex_image_2d(
-                        glow::TEXTURE_2D,
-                        0,
-                        glow::RGBA8 as i32,
-                        (frame.width / 2) as i32,
-                        frame.height as i32,
-                        0,
-                        glow::RGBA,
-                        glow::UNSIGNED_BYTE,
-                        Some(&frame.data),
-                    );
+                    let needs_realloc = frame.width != self.last_frame_size.0 || frame.height != self.last_frame_size.1 || Some(frame.format) != self.last_frame_format;
+                    if needs_realloc {
+                        gl.tex_image_2d(
+                            glow::TEXTURE_2D,
+                            0,
+                            glow::RGBA8 as i32,
+                            (frame.width / 2) as i32,
+                            frame.height as i32,
+                            0,
+                            glow::RGBA,
+                            glow::UNSIGNED_BYTE,
+                            Some(&frame.data),
+                        );
+                        self.last_frame_size = (frame.width, frame.height);
+                        self.last_frame_format = Some(frame.format);
+                    } else {
+                        gl.tex_sub_image_2d(
+                            glow::TEXTURE_2D,
+                            0,
+                            0,
+                            0,
+                            (frame.width / 2) as i32,
+                            frame.height as i32,
+                            glow::RGBA,
+                            glow::UNSIGNED_BYTE,
+                            glow::PixelUnpackData::Slice(&frame.data),
+                        );
+                    }
                     gl.uniform_1_i32(Some(&self.yuyv_range_loc), frame.color_range as i32);
                     gl.uniform_2_f32(Some(&self.yuyv_overscan_loc), overscan_x, overscan_y);
                 }
