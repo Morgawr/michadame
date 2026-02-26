@@ -1,31 +1,25 @@
-use crate::{app::AppState, config};
+use crate::app::models::AppState;
+use crate::config;
+use eframe::egui;
+use std::sync::{Arc, Mutex};
 
 pub fn init_app_state(cc: &eframe::CreationContext) -> AppState {
     let mut state = AppState::default();
 
-    // Load fonts, styles, logo
     let ctx_clone = cc.egui_ctx.clone();
-    // Use fallback styles since fonts aren't actually in the repo based on previous compilation errors.
     crate::ui::setup_style(&ctx_clone);
-    // Load UI Logo Texture
-    let logo_image =
-        image::load_from_memory(include_bytes!("../assets/logo.png")).expect("Failed to load logo");
+
+    let logo_image = image::load_from_memory(include_bytes!("../../assets/logo.png")).expect("Failed to load logo");
     let logo_size = [logo_image.width() as _, logo_image.height() as _];
     let logo_rgba = logo_image.to_rgba8();
     let logo_pixels = logo_rgba.as_flat_samples();
-    let logo_color_image =
-        eframe::egui::ColorImage::from_rgba_unmultiplied(logo_size, logo_pixels.as_slice());
-    let logo_texture = cc
-        .egui_ctx
-        .load_texture("logo", logo_color_image, Default::default());
+    let logo_color_image = egui::ColorImage::from_rgba_unmultiplied(logo_size, logo_pixels.as_slice());
+    let logo_texture = cc.egui_ctx.load_texture("logo", logo_color_image, Default::default());
     state.logo_texture = Some(logo_texture);
 
-    // Apply config
     let cfg = config::MichadameConfig::default();
     let loaded_cfg = confy::load::<config::MichadameConfig>("michadame", None).unwrap_or(cfg);
     config::apply_config(&mut state, &loaded_cfg);
-
-
 
     let egui_ctx = cc.egui_ctx.clone();
     let (tx, rx) = crossbeam_channel::unbounded();
@@ -49,23 +43,22 @@ pub fn init_app_state(cc: &eframe::CreationContext) -> AppState {
         egui_ctx.request_repaint();
     });
 
-    // Pre-allocate the video texture
     let video_texture = {
         let tex_manager = cc.egui_ctx.tex_manager();
         let tex_id = tex_manager.write().alloc(
             "video_stream".to_string(),
-            eframe::egui::ImageData::Color(
-                eframe::egui::ColorImage::new([1, 1], eframe::egui::Color32::BLACK).into(),
+            egui::ImageData::Color(
+                egui::ColorImage::new([1, 1], egui::Color32::BLACK).into(),
             ),
-            eframe::egui::TextureOptions::LINEAR,
+            egui::TextureOptions::LINEAR,
         );
-        eframe::egui::TextureHandle::new(tex_manager, tex_id)
+        egui::TextureHandle::new(tex_manager, tex_id)
     };
     state.video_texture = Some(video_texture);
 
     if let Some(gl) = cc.gl.as_ref() {
-        state.crt_renderer = Some(std::sync::Arc::new(std::sync::Mutex::new(
-            crate::video::gpu_filter::CrtFilterRenderer::new(gl),
+        state.crt_renderer = Some(Arc::new(Mutex::new(
+            crate::video::gpu::CrtFilterRenderer::new(gl),
         )));
     }
 

@@ -1,5 +1,5 @@
 pub mod decoder;
-pub mod gpu_filter;
+pub mod gpu;
 pub mod types;
 
 pub use types::VideoFormat;

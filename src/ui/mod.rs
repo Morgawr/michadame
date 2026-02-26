@@ -1,45 +1,21 @@
 use crate::app::AppState;
-use crate::devices::filter_type::CrtFilter;
-use crate::video;
 use eframe::egui;
-use eframe::egui_glow;
-
-use std::thread;
-use tungstenite::{connect, Message};
-use url::Url;
 
 pub mod controls;
 pub mod devices;
 pub mod dialogs;
 pub mod filters;
 pub mod profiles;
+pub mod networking;
+pub mod video_player;
+
+pub use networking::send_ws_command;
+pub use video_player::draw_video_player;
 
 pub fn setup_style(ctx: &eframe::egui::Context) {
     let mut style = (*ctx.style()).clone();
     style.visuals.window_rounding = eframe::egui::Rounding::ZERO;
     ctx.set_style(style);
-}
-
-fn send_ws_command(command: serde_json::Value) {
-    thread::spawn(move || {
-        println!("Connecting to WebSocket at ws://127.0.0.1:9002 ...");
-        match connect(Url::parse("ws://127.0.0.1:9002").unwrap()) {
-            Ok((mut socket, _)) => {
-                println!("Connected to WebSocket.");
-                let msg = command.to_string();
-                if let Err(e) = socket.send(Message::Text(msg)) {
-                    println!("WebSocket write error: {}", e);
-                    return;
-                }
-                match socket.read() {
-                    Ok(msg) => println!("WebSocket received: {}", msg),
-                    Err(e) => println!("WebSocket read error: {}", e),
-                }
-                let _ = socket.close(None);
-            }
-            Err(e) => println!("Failed to connect to WebSocket: {}", e),
-        }
-    });
 }
 
 pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
@@ -69,108 +45,4 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
             repaint_requested
         })
         .inner
-}
-
-pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) {
-    if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-        println!("Spacebar pressed, sending command...");
-        send_ws_command(serde_json::json!({"command": "manual_ocr"}));
-    }
-
-    if state.ui.video_window_open {
-        let response = ui.allocate_response(ui.available_size(), egui::Sense::click());
-        let video_texture = state.video_texture.as_ref().unwrap();
-        let texture_size = video_texture.size_vec2();
-
-        let filter =
-            CrtFilter::from_u8(state.crt_filter.load(std::sync::atomic::Ordering::Relaxed));
-
-        // All GPU filtering is handled within a single paint callback to ensure correct state.
-        if state.video.pixelate_filter_enabled || filter == CrtFilter::Lottes {
-            if let Some(renderer_arc) = &state.crt_renderer {
-                let renderer_clone = renderer_arc.clone();
-                let params = video::gpu_filter::ShaderParams::from_state(state);
-                let pixelate = state.video.pixelate_filter_enabled;
-                let run_lottes = filter == CrtFilter::Lottes;
-                let rect = response.rect;
-                let latest_frame = state.latest_frame.clone();
-                let video_texture = state.video_texture.as_ref().map(|t| t.id());
-
-                let callback = egui::PaintCallback {
-                    rect: response.rect,
-                    callback: std::sync::Arc::new(egui_glow::CallbackFn::new(
-                        move |_info, painter| {
-                            let mut renderer = renderer_clone.lock().unwrap();
-                            let output_size = (rect.width(), rect.height());
-                            let fallback_tex = video_texture.and_then(|id| painter.texture(id));
-
-                            let res = latest_frame
-                                .as_ref()
-                                .map(|f| (f.width, f.height))
-                                .unwrap_or((texture_size.x as u32, texture_size.y as u32));
-
-                            renderer.paint(
-                                painter.gl(),
-                                latest_frame.as_deref(),
-                                fallback_tex,
-                                res,
-                                output_size,
-                                &params,
-                                pixelate,
-                                run_lottes,
-                            )
-                        },
-                    )),
-                };
-                ui.painter().add(callback);
-            }
-        } else {
-            // Fallback to a simple passthrough shader if no other GPU filters are active.
-            let renderer_clone = state.crt_renderer.as_ref().unwrap().clone();
-            let rect = response.rect;
-            let background_color = if state.video.use_magenta_background {
-                [1.0, 0.0, 1.0]
-            } else {
-                [0.0, 0.0, 0.0]
-            };
-            let horizontal_stretch = state.video.horizontal_stretch;
-            let median_filter_enabled = state.video.median_filter_enabled;
-            let vibrance = state.video.vibrance;
-            let overscan_x = state.video.overscan_x;
-            let overscan_y = state.video.overscan_y;
-            let scaler_filter = state.scaler_filter.load(std::sync::atomic::Ordering::Relaxed);
-            let latest_frame = state.latest_frame.clone();
-            let video_texture = state.video_texture.as_ref().map(|t| t.id());
-
-            let callback = egui::PaintCallback {
-                rect,
-                callback: std::sync::Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
-                    let fallback_tex = video_texture.and_then(|id| painter.texture(id));
-                    let res = latest_frame
-                        .as_ref()
-                        .map(|f| (f.width, f.height))
-                        .unwrap_or((texture_size.x as u32, texture_size.y as u32));
-                    renderer_clone.lock().unwrap().draw_passthrough(
-                        painter.gl(),
-                        latest_frame.as_deref(),
-                        fallback_tex,
-                        res,
-                        (rect.width(), rect.height()),
-                        background_color,
-                        horizontal_stretch,
-                        median_filter_enabled,
-                        vibrance,
-                        scaler_filter,
-                        overscan_x,
-                        overscan_y,
-                    );
-                })),
-            };
-            ui.painter().add(callback);
-        }
-        if response.double_clicked() {
-            let is_fullscreen = !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(is_fullscreen));
-        }
-    }
 }
