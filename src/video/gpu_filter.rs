@@ -52,6 +52,7 @@ pub struct CrtFilterRenderer {
     fbos: [glow::Framebuffer; 7], // 0-5 for passes, 6 for YUV conversion result
     pass_textures: [glow::Texture; 7], // 0-5 for passes, 6 for the YUV source texture
     yuv_planes: [glow::Texture; 3], // textures for Y, U, V planes
+    pbos: [glow::Buffer; 3], // pixel buffer objects for DMA async texture upload
     vertex_array: glow::VertexArray,
     vbo: glow::Buffer,
 
@@ -310,6 +311,11 @@ impl CrtFilterRenderer {
                 gl.create_texture().unwrap(),
                 gl.create_texture().unwrap(),
             ];
+            let pbos = [
+                gl.create_buffer().unwrap(),
+                gl.create_buffer().unwrap(),
+                gl.create_buffer().unwrap(),
+            ];
 
             let vertex_array = gl
                 .create_vertex_array()
@@ -375,6 +381,7 @@ impl CrtFilterRenderer {
                 fbos,
                 pass_textures,
                 yuv_planes,
+                pbos,
                 vertex_array,
                 vbo,
                 p_passthrough_video_res_loc,
@@ -486,21 +493,25 @@ impl CrtFilterRenderer {
                             0,
                             glow::RED,
                             glow::UNSIGNED_BYTE,
-                            Some(y_data),
-                        );
-                    } else {
-                        gl.tex_sub_image_2d(
-                            glow::TEXTURE_2D,
-                            0,
-                            0,
-                            0,
-                            frame.width as i32,
-                            frame.height as i32,
-                            glow::RED,
-                            glow::UNSIGNED_BYTE,
-                            glow::PixelUnpackData::Slice(y_data),
+                            None,
                         );
                     }
+                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[0]));
+                    if needs_realloc {
+                        gl.buffer_data_size(glow::PIXEL_UNPACK_BUFFER, y_data.len() as i32, glow::STREAM_DRAW);
+                    }
+                    gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, y_data);
+                    gl.tex_sub_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        0,
+                        0,
+                        frame.width as i32,
+                        frame.height as i32,
+                        glow::RED,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::BufferOffset(0),
+                    );
 
                     gl.active_texture(glow::TEXTURE1);
                     gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[1]));
@@ -514,21 +525,25 @@ impl CrtFilterRenderer {
                             0,
                             glow::RED,
                             glow::UNSIGNED_BYTE,
-                            Some(u_data),
-                        );
-                    } else {
-                        gl.tex_sub_image_2d(
-                            glow::TEXTURE_2D,
-                            0,
-                            0,
-                            0,
-                            chroma_width as i32,
-                            chroma_height as i32,
-                            glow::RED,
-                            glow::UNSIGNED_BYTE,
-                            glow::PixelUnpackData::Slice(u_data),
+                            None,
                         );
                     }
+                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[1]));
+                    if needs_realloc {
+                        gl.buffer_data_size(glow::PIXEL_UNPACK_BUFFER, u_data.len() as i32, glow::STREAM_DRAW);
+                    }
+                    gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, u_data);
+                    gl.tex_sub_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        0,
+                        0,
+                        chroma_width as i32,
+                        chroma_height as i32,
+                        glow::RED,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::BufferOffset(0),
+                    );
 
                     gl.active_texture(glow::TEXTURE2);
                     gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[2]));
@@ -542,21 +557,28 @@ impl CrtFilterRenderer {
                             0,
                             glow::RED,
                             glow::UNSIGNED_BYTE,
-                            Some(v_data),
-                        );
-                    } else {
-                        gl.tex_sub_image_2d(
-                            glow::TEXTURE_2D,
-                            0,
-                            0,
-                            0,
-                            chroma_width as i32,
-                            chroma_height as i32,
-                            glow::RED,
-                            glow::UNSIGNED_BYTE,
-                            glow::PixelUnpackData::Slice(v_data),
+                            None,
                         );
                     }
+                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[2]));
+                    if needs_realloc {
+                        gl.buffer_data_size(glow::PIXEL_UNPACK_BUFFER, v_data.len() as i32, glow::STREAM_DRAW);
+                    }
+                    gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, v_data);
+                    gl.tex_sub_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        0,
+                        0,
+                        chroma_width as i32,
+                        chroma_height as i32,
+                        glow::RED,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::BufferOffset(0),
+                    );
+
+                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
+
                     gl.uniform_1_i32(Some(&self.yuv_range_loc), frame.color_range as i32);
                     gl.uniform_2_f32(Some(&self.yuv_overscan_loc), params.overscan_x, params.overscan_y);
                     
@@ -580,22 +602,33 @@ impl CrtFilterRenderer {
                             0,
                             glow::RGBA,
                             glow::UNSIGNED_BYTE,
-                            Some(&frame.data),
+                            None,
                         );
+                    }
+                    
+                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[0]));
+                    if needs_realloc {
+                        gl.buffer_data_size(glow::PIXEL_UNPACK_BUFFER, frame.data.len() as i32, glow::STREAM_DRAW);
+                    }
+                    gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, &frame.data);
+                    
+                    gl.tex_sub_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        0,
+                        0,
+                        (frame.width / 2) as i32,
+                        frame.height as i32,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::BufferOffset(0),
+                    );
+                    
+                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
+                    
+                    if needs_realloc {
                         self.last_frame_size = (frame.width, frame.height);
                         self.last_frame_format = Some(frame.format);
-                    } else {
-                        gl.tex_sub_image_2d(
-                            glow::TEXTURE_2D,
-                            0,
-                            0,
-                            0,
-                            (frame.width / 2) as i32,
-                            frame.height as i32,
-                            glow::RGBA,
-                            glow::UNSIGNED_BYTE,
-                            glow::PixelUnpackData::Slice(&frame.data),
-                        );
                     }
                     gl.uniform_1_i32(Some(&self.yuyv_range_loc), frame.color_range as i32);
                     gl.uniform_2_f32(Some(&self.yuyv_overscan_loc), params.overscan_x, params.overscan_y);
@@ -851,21 +884,25 @@ impl CrtFilterRenderer {
                             0,
                             glow::RED,
                             glow::UNSIGNED_BYTE,
-                            Some(y_data),
-                        );
-                    } else {
-                        gl.tex_sub_image_2d(
-                            glow::TEXTURE_2D,
-                            0,
-                            0,
-                            0,
-                            frame.width as i32,
-                            frame.height as i32,
-                            glow::RED,
-                            glow::UNSIGNED_BYTE,
-                            glow::PixelUnpackData::Slice(y_data),
+                            None,
                         );
                     }
+                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[0]));
+                    if needs_realloc {
+                        gl.buffer_data_size(glow::PIXEL_UNPACK_BUFFER, y_data.len() as i32, glow::STREAM_DRAW);
+                    }
+                    gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, y_data);
+                    gl.tex_sub_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        0,
+                        0,
+                        frame.width as i32,
+                        frame.height as i32,
+                        glow::RED,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::BufferOffset(0),
+                    );
 
                     gl.active_texture(glow::TEXTURE1);
                     gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[1]));
@@ -879,21 +916,25 @@ impl CrtFilterRenderer {
                             0,
                             glow::RED,
                             glow::UNSIGNED_BYTE,
-                            Some(u_data),
-                        );
-                    } else {
-                        gl.tex_sub_image_2d(
-                            glow::TEXTURE_2D,
-                            0,
-                            0,
-                            0,
-                            chroma_width as i32,
-                            chroma_height as i32,
-                            glow::RED,
-                            glow::UNSIGNED_BYTE,
-                            glow::PixelUnpackData::Slice(u_data),
+                            None,
                         );
                     }
+                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[1]));
+                    if needs_realloc {
+                        gl.buffer_data_size(glow::PIXEL_UNPACK_BUFFER, u_data.len() as i32, glow::STREAM_DRAW);
+                    }
+                    gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, u_data);
+                    gl.tex_sub_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        0,
+                        0,
+                        chroma_width as i32,
+                        chroma_height as i32,
+                        glow::RED,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::BufferOffset(0),
+                    );
 
                     gl.active_texture(glow::TEXTURE2);
                     gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[2]));
@@ -907,21 +948,28 @@ impl CrtFilterRenderer {
                             0,
                             glow::RED,
                             glow::UNSIGNED_BYTE,
-                            Some(v_data),
-                        );
-                    } else {
-                        gl.tex_sub_image_2d(
-                            glow::TEXTURE_2D,
-                            0,
-                            0,
-                            0,
-                            chroma_width as i32,
-                            chroma_height as i32,
-                            glow::RED,
-                            glow::UNSIGNED_BYTE,
-                            glow::PixelUnpackData::Slice(v_data),
+                            None,
                         );
                     }
+                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[2]));
+                    if needs_realloc {
+                        gl.buffer_data_size(glow::PIXEL_UNPACK_BUFFER, v_data.len() as i32, glow::STREAM_DRAW);
+                    }
+                    gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, v_data);
+                    gl.tex_sub_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        0,
+                        0,
+                        chroma_width as i32,
+                        chroma_height as i32,
+                        glow::RED,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::BufferOffset(0),
+                    );
+
+                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
+
                     gl.uniform_1_i32(Some(&self.yuv_range_loc), frame.color_range as i32);
                     gl.uniform_2_f32(Some(&self.yuv_overscan_loc), overscan_x, overscan_y);
                     
@@ -944,22 +992,33 @@ impl CrtFilterRenderer {
                             0,
                             glow::RGBA,
                             glow::UNSIGNED_BYTE,
-                            Some(&frame.data),
+                            None,
                         );
+                    }
+                    
+                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[0]));
+                    if needs_realloc {
+                        gl.buffer_data_size(glow::PIXEL_UNPACK_BUFFER, frame.data.len() as i32, glow::STREAM_DRAW);
+                    }
+                    gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, &frame.data);
+                    
+                    gl.tex_sub_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        0,
+                        0,
+                        (frame.width / 2) as i32,
+                        frame.height as i32,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::BufferOffset(0),
+                    );
+                    
+                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
+                    
+                    if needs_realloc {
                         self.last_frame_size = (frame.width, frame.height);
                         self.last_frame_format = Some(frame.format);
-                    } else {
-                        gl.tex_sub_image_2d(
-                            glow::TEXTURE_2D,
-                            0,
-                            0,
-                            0,
-                            (frame.width / 2) as i32,
-                            frame.height as i32,
-                            glow::RGBA,
-                            glow::UNSIGNED_BYTE,
-                            glow::PixelUnpackData::Slice(&frame.data),
-                        );
                     }
                     gl.uniform_1_i32(Some(&self.yuyv_range_loc), frame.color_range as i32);
                     gl.uniform_2_f32(Some(&self.yuyv_overscan_loc), overscan_x, overscan_y);
@@ -1043,6 +1102,9 @@ impl CrtFilterRenderer {
             }
             for texture in self.yuv_planes {
                 gl.delete_texture(texture);
+            }
+            for pbo in self.pbos {
+                gl.delete_buffer(pbo);
             }
         }
     }
