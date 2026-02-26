@@ -102,11 +102,11 @@ impl AppState {
                 if let Ok(cfg) = confy::load::<config::MichadameConfig>("michadame", None) {
                     config::apply_config(self, &cfg);
                 }
-                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: "Devices loaded successfully.".to_string().into() });
+                self.info("Devices loaded successfully.");
                 true
             }
             Err(e) => {
-                self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: format!("Error: {}", e).into() });
+                self.error(format!("Error: {}", e));
                 false
             }
         };
@@ -147,6 +147,22 @@ impl AppState {
             "Michadame Viewer | UI: {:.0} FPS | Video: {:.0} FPS | Audio Latency: {} ms",
             gui_fps, video_fps, audio_latency
         )));
+    }
+
+    pub fn info(&mut self, text: impl Into<String>) {
+        self.toasts.add(egui_toast::Toast {
+            kind: egui_toast::ToastKind::Info,
+            options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)),
+            text: text.into().into(),
+        });
+    }
+
+    pub fn error(&mut self, text: impl Into<String>) {
+        self.toasts.add(egui_toast::Toast {
+            kind: egui_toast::ToastKind::Error,
+            options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)),
+            text: text.into().into(),
+        });
     }
 }
 
@@ -225,7 +241,7 @@ impl eframe::App for AppState {
             let next_filter = current_filter.next();
             self.crt_filter.store(next_filter as u8, Ordering::Relaxed);
             config::save_config(self);
-            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: format!("CRT filter set to: {}", next_filter.to_string()).into() });
+            self.info(format!("CRT filter set to: {}", next_filter.to_string()));
         }
         if ctx.input(|i| i.key_pressed(egui::Key::G)) {
             self.video.pixelate_filter_enabled = !self.video.pixelate_filter_enabled;
@@ -234,7 +250,7 @@ impl eframe::App for AppState {
             } else {
                 "disabled"
             };
-            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: format!("480p Pixelate filter {}.", status).into() });
+            self.info(format!("480p Pixelate filter {}.", status));
             config::save_config(self);
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {

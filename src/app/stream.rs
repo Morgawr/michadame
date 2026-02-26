@@ -22,22 +22,22 @@ impl AppState {
             ) {
                 Ok(handle) => {
                     self.hardware.active_audio_stream = Some(handle);
-                    self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: "Audio stream started.".to_string().into() });
+                    self.info("Audio stream started.");
                 }
                 Err(e) => {
-                    self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: format!("Failed to start audio stream: {}", e).into() });
+                    self.error(format!("Failed to start audio stream: {}", e));
                     return;
                 }
             }
         } else {
-            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: "Cannot start: Missing audio input device.".to_string().into() });
+            self.error("Cannot start: Missing audio input device.");
             return;
         }
 
         let format = if let Some(f) = self.hardware.supported_formats.get(self.hardware.selected_format_index) {
             f
         } else {
-            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: "Cannot start: No video format selected.".to_string().into() });
+            self.error("Cannot start: No video format selected.");
             return;
         };
 
@@ -73,7 +73,7 @@ impl AppState {
             }
         });
         self.video_thread = Some(handle);
-        self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: "Stream started.".to_string().into() });
+        self.info("Stream started.");
         self.ui.video_window_open = true;
         self.ui.control_window_open = false;
 
@@ -104,9 +104,9 @@ impl AppState {
         }
 
         if self.hardware.active_audio_stream.take().is_some() {
-            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: "Stream stopped and audio stream dropped.".to_string().into() });
+            self.info("Stream stopped and audio stream dropped.");
         } else {
-            self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: "Stream stopped.".to_string().into() });
+            self.info("Stream stopped.");
         }
 
         self.frame_receiver = None;
@@ -127,10 +127,10 @@ impl AppState {
             ) {
                 Ok(handle) => {
                     self.hardware.active_audio_stream = Some(handle);
-                    self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: "Audio stream restarted with new buffer size.".to_string().into() });
+                    self.info("Audio stream restarted with new buffer size.");
                 }
                 Err(e) => {
-                    self.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Error, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: format!("Failed to restart audio: {}", e).into() });
+                    self.error(format!("Failed to restart audio: {}", e));
                 }
             }
         }

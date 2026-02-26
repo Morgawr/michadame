@@ -40,10 +40,11 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
         if let Some(selected_device) = &state.hardware.selected_usb_device {
             if ui.button("Reset USB Device").clicked() {
-                state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: (match devices::usb::reset_usb_device(selected_device) {
+                let msg = match devices::usb::reset_usb_device(selected_device) {
                     Ok(_) => "USB device reset successfully.".to_string(),
                     Err(e) => format!("Failed to reset USB: {}", e),
-                }).into() });
+                };
+                state.info(msg);
             }
             if ui
                 .checkbox(&mut state.ui.reset_usb_on_startup, "Reset on startup")
@@ -81,11 +82,11 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
                     match devices::video::find_video_formats(&state.hardware.selected_video_device) {
                         Ok(formats) => {
-                            state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: format!(
+                            state.info(format!(
                                 "Found {} formats for {}.",
                                 formats.len(),
                                 state.hardware.selected_video_device
-                            ).into() });
+                            ));
                             state.hardware.supported_formats = formats;
                             if let Some(res) = state
                                 .hardware.supported_formats
@@ -104,7 +105,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             }
                         }
                         Err(e) => {
-                            state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: format!("Failed to scan formats: {}", e).into() });
+                            state.error(format!("Failed to scan formats: {}", e));
                         }
                     }
                     crate::config::save_global_hardware_config(state);
@@ -204,7 +205,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         ui.horizontal_wrapped(|ui| {
             ui.label("Audio Configuration:");
             if ui.button("🔄 Refresh").clicked() {
-                state.toasts.add(egui_toast::Toast { kind: egui_toast::ToastKind::Info, options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)), text: "Refresh clicked. Please restart the app to re-scan devices.".to_string().into() });
+                state.info("Refresh clicked. Please restart the app to re-scan devices.");
                 changed = true;
             }
         });
