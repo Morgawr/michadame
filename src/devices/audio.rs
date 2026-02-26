@@ -23,6 +23,7 @@ struct LiveSource {
     underruns: Arc<AtomicU64>,
     peak_amplitude_shared: Arc<AtomicU64>,
     audio_latency_ms: Arc<AtomicU64>,
+    capture_delay_ms: Arc<AtomicU64>,
     local_buf: Vec<f32>,
     local_idx: usize,
     valid_len: usize,
@@ -54,19 +55,27 @@ impl Iterator for LiveSource {
             let queued_samples = available;
             let safe_queued = (queued_samples / self.channels as usize) * self.channels as usize;
 
-            let latency = (safe_queued as f64 / self.channels as f64 / self.sample_rate as f64 * 1000.0) as u64;
-            self.audio_latency_ms.store(latency, Ordering::Relaxed);
+            let ring_buffer_ms = (safe_queued as f64 / self.channels as f64 / self.sample_rate as f64 * 1000.0) as u64;
+
+            let capture_ms = self.capture_delay_ms.load(Ordering::Relaxed);
+            
+            // Heuristic for playback latency: Rodio/CPAL usually buffers 2-3 periods.
+            // We'll estimate it as ~20ms as a safe baseline for modern Linux audio stacks (Pulse/PipeWire).
+            let playback_ms = 20;
+
+            let total_latency = capture_ms + ring_buffer_ms + playback_ms;
+            self.audio_latency_ms.store(total_latency, Ordering::Relaxed);
 
             // Keep latency bounded (clock drift compensation). 
-            // If latency climbs above 100ms, drop down to 80ms to catch up smoothly without giant clicks.
-            if latency > 100 {
+            // We use the ring buffer occupancy for this, as it's what we can control.
+            if ring_buffer_ms > 100 {
                 let target_samples = (self.sample_rate as f64 * self.channels as f64 * 0.08) as usize; // 80ms
                 if safe_queued > target_samples {
                     let to_drop = safe_queued - target_samples;
                     let drop_frames = (to_drop / self.channels as usize) * self.channels as usize;
                     if let Ok(chunk) = self.consumer.read_chunk(drop_frames) {
                         chunk.commit_all();
-                        tracing::debug!("Audio latency {}ms: Clock drift compensated by dropping {} samples", latency, drop_frames);
+                        tracing::debug!("Audio latency {}ms: Clock drift compensated by dropping {} samples", total_latency, drop_frames);
                     }
                 }
             }
@@ -212,7 +221,17 @@ pub fn start_audio_stream(
     let ring_size = (sample_rate as f32 * 1.0 * 2.0) as usize; 
     let (producer, consumer) = RingBuffer::<f32>::new(ring_size);
 
-    let (alsa_thread, input_channels, input_sample_rate) = start_alsa_capture(source_name, producer, peak_amplitude_shared.clone(), buffer_size, sample_rate, sample_format)?;
+    let capture_delay_ms = Arc::new(AtomicU64::new(0));
+
+    let (alsa_thread, input_channels, input_sample_rate) = start_alsa_capture(
+        source_name, 
+        producer, 
+        peak_amplitude_shared.clone(), 
+        capture_delay_ms.clone(),
+        buffer_size, 
+        sample_rate, 
+        sample_format
+    )?;
 
     // Playback via Rodio
     let (output_stream_guard, stream_handle) = initialize_rodio_playback()?;
@@ -228,6 +247,7 @@ pub fn start_audio_stream(
         underruns: Arc::new(AtomicU64::new(0)),
         peak_amplitude_shared,
         audio_latency_ms,
+        capture_delay_ms,
         local_buf: vec![0.0; buffer_size as usize * input_channels as usize],
         local_idx: 0,
         valid_len: 0,
@@ -246,6 +266,7 @@ fn start_alsa_capture(
     source_name: &str,
     mut producer: Producer<f32>,
     peak_amplitude_shared: Arc<AtomicU64>,
+    capture_delay_ms: Arc<AtomicU64>,
     buffer_size: u32,
     sample_rate: u32,
     sample_format: String,
@@ -296,6 +317,10 @@ fn start_alsa_capture(
                 let io = pcm.io_i32().unwrap();
                 let mut buf = vec![0i32; buffer_size as usize * channels as usize];
                 loop {
+                    if let Ok(delay_frames) = pcm.delay() {
+                        let delay_ms = (delay_frames as f64 / rate as f64 * 1000.0) as u64;
+                        capture_delay_ms.store(delay_ms, Ordering::Relaxed);
+                    }
                     match io.readi(&mut buf) {
                         Ok(frames) => {
                             let sample_count = frames * channels as usize;
@@ -324,6 +349,10 @@ fn start_alsa_capture(
                 let io = pcm.io_f32().unwrap();
                 let mut buf = vec![0.0f32; buffer_size as usize * channels as usize];
                 loop {
+                    if let Ok(delay_frames) = pcm.delay() {
+                        let delay_ms = (delay_frames as f64 / rate as f64 * 1000.0) as u64;
+                        capture_delay_ms.store(delay_ms, Ordering::Relaxed);
+                    }
                     match io.readi(&mut buf) {
                         Ok(frames) => {
                             let sample_count = frames * channels as usize;
@@ -349,6 +378,10 @@ fn start_alsa_capture(
                 let io = pcm.io_i16().unwrap();
                 let mut buf = vec![0i16; buffer_size as usize * channels as usize];
                 loop {
+                    if let Ok(delay_frames) = pcm.delay() {
+                        let delay_ms = (delay_frames as f64 / rate as f64 * 1000.0) as u64;
+                        capture_delay_ms.store(delay_ms, Ordering::Relaxed);
+                    }
                     match io.readi(&mut buf) {
                         Ok(frames) => {
                             let sample_count = frames * channels as usize;
