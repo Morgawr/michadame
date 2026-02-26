@@ -182,13 +182,14 @@ pub fn start_audio_stream(
     audio_latency_ms: Arc<AtomicU64>,
     buffer_size: u32,
     sample_rate: u32,
+    sample_format: String,
 ) -> Result<AudioStreamHandle> {
     // Shared ring buffer for capture-to-playback bridge.
     // Increased to ~1.0s of audio to provide complete buffer safety. We manage ideal latency from the consumer side.
     let ring_size = (sample_rate as f32 * 1.0 * 2.0) as usize; 
     let (producer, consumer) = RingBuffer::<f32>::new(ring_size);
 
-    let (alsa_thread, input_channels, input_sample_rate) = start_alsa_capture(source_name, producer, peak_amplitude_shared.clone(), buffer_size, sample_rate)?;
+    let (alsa_thread, input_channels, input_sample_rate) = start_alsa_capture(source_name, producer, peak_amplitude_shared.clone(), buffer_size, sample_rate, sample_format)?;
 
     // Playback via Rodio
     let (output_stream_guard, stream_handle) = initialize_rodio_playback()?;
@@ -224,6 +225,7 @@ fn start_alsa_capture(
     peak_amplitude_shared: Arc<AtomicU64>,
     buffer_size: u32,
     sample_rate: u32,
+    sample_format: String,
 ) -> Result<(Option<thread::JoinHandle<()>>, u16, u32)> {
     use alsa::pcm::{PCM, HwParams, Access, Format};
     use alsa::Direction;
@@ -252,59 +254,99 @@ fn start_alsa_capture(
 
         let hwp = HwParams::any(&pcm).unwrap();
         hwp.set_access(Access::RWInterleaved).unwrap();
-        hwp.set_format(Format::S16LE).unwrap();
+        
+        let pcm_format = match sample_format.as_str() {
+            "S32LE" => Format::S32LE,
+            "F32LE" => Format::FloatLE,
+            _ => Format::S16LE,
+        };
+        hwp.set_format(pcm_format).unwrap();
+        
         hwp.set_rate_near(rate, alsa::ValueOr::Nearest).unwrap();
         hwp.set_channels_near(channels as u32).unwrap();
         hwp.set_period_size_near(buffer_size as alsa::pcm::Frames, alsa::ValueOr::Nearest).unwrap_or_default();
         
         pcm.hw_params(&hwp).unwrap();
 
-        let io = pcm.io_i16().unwrap();
-        let mut buf = vec![0i16; buffer_size as usize * channels as usize];
-        
-        loop {
-            match io.readi(&mut buf) {
-                Ok(frames) => {
-                    let sample_count = frames * channels as usize;
-                    let mut local_max = 0.0f32;
-                    let mut f32_buf = Vec::with_capacity(sample_count);
-                    
-                    for &sample in buf.iter().take(sample_count) {
-                        let f = i16_to_f32(sample);
-                        local_max = local_max.max(f.abs());
-                        f32_buf.push(f);
-                    }
-                    
-                    // We must NEVER drop individual samples, only full frames (channels).
-                    // Otherwise L/R channels swap and create deafening interference.
-                    let free = producer.slots();
-                    let safe_free = (free / channels as usize) * channels as usize;
-                    let to_push = std::cmp::min(safe_free, sample_count);
-                    let safe_to_push = (to_push / channels as usize) * channels as usize;
-                    
-                    if safe_to_push > 0 {
-                        if let Ok(mut chunk) = producer.write_chunk(safe_to_push) {
-                            let (slice1, slice2) = chunk.as_mut_slices();
-                            let split_idx = slice1.len();
-                            slice1.copy_from_slice(&f32_buf[..split_idx]);
-                            if !slice2.is_empty() {
-                                slice2.copy_from_slice(&f32_buf[split_idx..safe_to_push]);
+        match sample_format.as_str() {
+            "S32LE" => {
+                let io = pcm.io_i32().unwrap();
+                let mut buf = vec![0i32; buffer_size as usize * channels as usize];
+                loop {
+                    match io.readi(&mut buf) {
+                        Ok(frames) => {
+                            let sample_count = frames * channels as usize;
+                            let mut local_max = 0.0f32;
+                            let mut f32_buf = Vec::with_capacity(sample_count);
+                            for &sample in buf.iter().take(sample_count) {
+                                let f = (sample as f64 / 2147483648.0) as f32;
+                                local_max = local_max.max(f.abs());
+                                f32_buf.push(f);
                             }
-                            chunk.commit_all();
+                            push_to_ring(&mut producer, &f32_buf, sample_count, channels as usize, local_max, &peak_amplitude_shared, &samples_captured);
+                        }
+                        Err(e) => {
+                            let err_str = e.to_string();
+                            if err_str.contains("Broken pipe") || err_str.contains("EPIPE") {
+                                let _ = pcm.prepare();
+                            } else {
+                                tracing::error!("ALSA read error: {}", e);
+                                break;
+                            }
                         }
                     }
-                    
-                    let peak_bits = (local_max * 1000.0) as u64;
-                    peak_amplitude_shared.fetch_max(peak_bits, Ordering::Relaxed);
-                    let _ = samples_captured.fetch_add(sample_count as u64, Ordering::Relaxed);
                 }
-                Err(e) => {
-                    let err_str = e.to_string();
-                    if err_str.contains("Broken pipe") || err_str.contains("EPIPE") {
-                        let _ = pcm.prepare();
-                    } else {
-                        tracing::error!("ALSA read error: {}", e);
-                        break;
+            }
+            "F32LE" => {
+                let io = pcm.io_f32().unwrap();
+                let mut buf = vec![0.0f32; buffer_size as usize * channels as usize];
+                loop {
+                    match io.readi(&mut buf) {
+                        Ok(frames) => {
+                            let sample_count = frames * channels as usize;
+                            let mut local_max = 0.0f32;
+                            for &sample in buf.iter().take(sample_count) {
+                                local_max = local_max.max(sample.abs());
+                            }
+                            push_to_ring(&mut producer, &buf, sample_count, channels as usize, local_max, &peak_amplitude_shared, &samples_captured);
+                        }
+                        Err(e) => {
+                            let err_str = e.to_string();
+                            if err_str.contains("Broken pipe") || err_str.contains("EPIPE") {
+                                let _ = pcm.prepare();
+                            } else {
+                                tracing::error!("ALSA read error: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => { // S16LE
+                let io = pcm.io_i16().unwrap();
+                let mut buf = vec![0i16; buffer_size as usize * channels as usize];
+                loop {
+                    match io.readi(&mut buf) {
+                        Ok(frames) => {
+                            let sample_count = frames * channels as usize;
+                            let mut local_max = 0.0f32;
+                            let mut f32_buf = Vec::with_capacity(sample_count);
+                            for &sample in buf.iter().take(sample_count) {
+                                let f = i16_to_f32(sample);
+                                local_max = local_max.max(f.abs());
+                                f32_buf.push(f);
+                            }
+                            push_to_ring(&mut producer, &f32_buf, sample_count, channels as usize, local_max, &peak_amplitude_shared, &samples_captured);
+                        }
+                        Err(e) => {
+                            let err_str = e.to_string();
+                            if err_str.contains("Broken pipe") || err_str.contains("EPIPE") {
+                                let _ = pcm.prepare();
+                            } else {
+                                tracing::error!("ALSA read error: {}", e);
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -314,7 +356,36 @@ fn start_alsa_capture(
     Ok((Some(handle), channels, rate))
 }
 
-
+fn push_to_ring(
+    producer: &mut Producer<f32>,
+    f32_buf: &[f32],
+    sample_count: usize,
+    channels: usize,
+    local_max: f32,
+    peak_amplitude_shared: &Arc<AtomicU64>,
+    samples_captured: &Arc<AtomicU64>,
+) {
+    let free = producer.slots();
+    let safe_free = (free / channels) * channels;
+    let to_push = std::cmp::min(safe_free, sample_count);
+    let safe_to_push = (to_push / channels) * channels;
+    
+    if safe_to_push > 0 {
+        if let Ok(mut chunk) = producer.write_chunk(safe_to_push) {
+            let (slice1, slice2) = chunk.as_mut_slices();
+            let split_idx = slice1.len();
+            slice1.copy_from_slice(&f32_buf[..split_idx]);
+            if !slice2.is_empty() {
+                slice2.copy_from_slice(&f32_buf[split_idx..safe_to_push]);
+            }
+            chunk.commit_all();
+        }
+    }
+    
+    let peak_bits = (local_max * 1000.0) as u64;
+    peak_amplitude_shared.fetch_max(peak_bits, Ordering::Relaxed);
+    let _ = samples_captured.fetch_add(sample_count as u64, Ordering::Relaxed);
+}
 
 fn initialize_rodio_playback() -> Result<(OutputStream, rodio::OutputStreamHandle)> {
     // On Linux, the "default" host is ALSA, but for output we want to hit the sound server (Pulse/PipeWire).

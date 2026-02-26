@@ -278,6 +278,26 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         changed = true;
                     }
                 });
+            
+            ui.label("Format:");
+            let formats = ["S16LE", "S32LE", "F32LE"];
+            let current_format = &state.hardware.audio_sample_format;
+            
+            egui::ComboBox::from_id_source("audio_sample_format")
+                .selected_text(current_format)
+                .show_ui(ui, |ui| {
+                    let mut combo_changed = false;
+                    for &fmt in &formats {
+                        combo_changed |= ui.selectable_value(&mut state.hardware.audio_sample_format, fmt.to_string(), fmt).changed();
+                    }
+                    if combo_changed {
+                        crate::config::save_global_hardware_config(state);
+                        if state.hardware.active_audio_stream.is_some() {
+                            state.restart_audio_stream();
+                        }
+                        changed = true;
+                    }
+                });
         });
     });
 

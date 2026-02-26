@@ -52,6 +52,7 @@ struct LegacyConfig {
     pixelate_filter_enabled: Option<bool>,
     audio_buffer_size: Option<u32>,
     audio_sample_rate: Option<u32>,
+    audio_sample_format: Option<String>,
     crt_hard_scan: Option<f32>,
     crt_warp_x: Option<f32>,
     crt_warp_y: Option<f32>,
@@ -86,6 +87,7 @@ pub struct MichadameConfig {
     pub audio_source: Option<String>,
     pub audio_buffer_size: Option<u32>,
     pub audio_sample_rate: Option<u32>,
+    pub audio_sample_format: Option<String>,
     pub active_profile: String,
     pub profiles: BTreeMap<String, Profile>,
 }
@@ -133,6 +135,7 @@ impl From<LegacyConfig> for MichadameConfig {
             audio_source: legacy.audio_source,
             audio_buffer_size: legacy.audio_buffer_size,
             audio_sample_rate: legacy.audio_sample_rate,
+            audio_sample_format: legacy.audio_sample_format,
             active_profile,
             profiles,
         }
@@ -153,6 +156,7 @@ impl Default for MichadameConfig {
             audio_source: None,
             audio_buffer_size: None,
             audio_sample_rate: None,
+            audio_sample_format: None,
             active_profile: "Default".to_string(),
             profiles,
         }
@@ -213,6 +217,7 @@ pub fn save_config(state: &AppState) {
     cfg.audio_source = state.hardware.selected_audio_source_name.clone();
     cfg.audio_buffer_size = Some(state.hardware.audio_buffer_size);
     cfg.audio_sample_rate = Some(state.hardware.audio_sample_rate);
+    cfg.audio_sample_format = Some(state.hardware.audio_sample_format.clone());
 
     cfg.active_profile = state.active_profile.clone();
 
@@ -250,6 +255,7 @@ pub fn save_global_hardware_config(state: &AppState) {
     cfg.audio_source = state.hardware.selected_audio_source_name.clone();
     cfg.audio_buffer_size = Some(state.hardware.audio_buffer_size);
     cfg.audio_sample_rate = Some(state.hardware.audio_sample_rate);
+    cfg.audio_sample_format = Some(state.hardware.audio_sample_format.clone());
 
     cfg.active_profile = state.active_profile.clone();
     
@@ -358,6 +364,11 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     } else {
         state.hardware.audio_sample_rate = 48000;
     }
+    if let Some(val) = &cfg.audio_sample_format {
+        state.hardware.audio_sample_format = val.clone();
+    } else {
+        state.hardware.audio_sample_format = "S16LE".to_string();
+    }
 
     if !state.hardware.selected_video_device.is_empty() {
         crate::video::types::apply_saved_format_config(state, cfg);
@@ -417,6 +428,7 @@ mod tests {
             pixelate_filter_enabled: Some(true),
             audio_buffer_size: Some(128),
             audio_sample_rate: Some(48000),
+            audio_sample_format: Some("S16LE".to_string()),
             crt_hard_scan: Some(1.0),
             crt_warp_x: Some(2.0),
             crt_warp_y: Some(3.0),
@@ -442,6 +454,7 @@ mod tests {
         assert_eq!(new_config.audio_source, Some("TestAudio".to_string()));
         assert_eq!(new_config.audio_buffer_size, Some(128));
         assert_eq!(new_config.audio_sample_rate, Some(48000));
+        assert_eq!(new_config.audio_sample_format, Some("S16LE".to_string()));
         
         let profile = new_config.profiles.get("Default").unwrap();
         assert_eq!(profile.video_format_fourcc, Some("YUYV".to_string()));
@@ -474,6 +487,7 @@ mod tests {
             pixelate_filter_enabled: None,
             audio_buffer_size: None,
             audio_sample_rate: None,
+            audio_sample_format: None,
             crt_hard_scan: None,
             crt_warp_x: None,
             crt_warp_y: None,

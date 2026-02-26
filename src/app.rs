@@ -15,6 +15,7 @@ pub struct HardwareState {
     pub audio_latency_ms: Arc<AtomicU64>,
     pub audio_buffer_size: u32,
     pub audio_sample_rate: u32,
+    pub audio_sample_format: String,
     pub video_devices: Vec<String>,
     pub usb_devices: Vec<(String, String)>,
     pub selected_usb_device: Option<String>,
@@ -98,6 +99,7 @@ impl Default for AppState {
                 audio_latency_ms: Arc::new(AtomicU64::new(0)),
                 audio_buffer_size: 1024,
                 audio_sample_rate: 48000,
+                audio_sample_format: "S16LE".to_string(),
                 video_devices: Vec::new(),
                 usb_devices: Vec::new(),
                 selected_usb_device: None,
@@ -240,6 +242,7 @@ impl AppState {
                 Arc::clone(&self.hardware.audio_latency_ms),
                 self.hardware.audio_buffer_size,
                 self.hardware.audio_sample_rate,
+                self.hardware.audio_sample_format.clone(),
             ) {
                 Ok(handle) => {
                     self.hardware.active_audio_stream = Some(handle);
@@ -349,6 +352,7 @@ impl AppState {
                 Arc::clone(&self.hardware.audio_latency_ms),
                 self.hardware.audio_buffer_size,
                 self.hardware.audio_sample_rate,
+                self.hardware.audio_sample_format.clone(),
             ) {
                 Ok(handle) => {
                     self.hardware.active_audio_stream = Some(handle);
