@@ -281,3 +281,35 @@ impl eframe::App for AppState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_handle_device_scan_result_success() {
+        let mut state = AppState::default();
+        let result = Ok((
+            vec!["/dev/video0".to_string()],
+            vec![("default".to_string(), "Default Audio".to_string())],
+            vec![("1234:5678".to_string(), "Test USB".to_string())],
+        ));
+        
+        let success = state.handle_device_scan_result(result);
+        assert!(success);
+        assert_eq!(state.hardware.video_devices.len(), 1);
+        assert_eq!(state.hardware.selected_video_device, "/dev/video0");
+        assert_eq!(state.hardware.audio_sources.len(), 1);
+        assert_eq!(state.hardware.usb_devices.len(), 1);
+    }
+
+    #[test]
+    fn test_handle_device_scan_result_error() {
+        let mut state = AppState::default();
+        let error = anyhow::anyhow!("Test failure");
+        
+        let success = state.handle_device_scan_result(Err(error));
+        assert!(!success);
+        assert_eq!(state.hardware.video_devices.len(), 0);
+    }
+}

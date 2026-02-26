@@ -74,3 +74,27 @@ impl Default for ShaderParams {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shader_params_default() {
+        let params = ShaderParams::default();
+        assert_eq!(params.hard_scan, -8.0);
+        assert_eq!(params.warp_x, 0.031);
+        assert_eq!(params.shadow_mask, 3.0);
+    }
+
+    #[test]
+    fn test_shader_params_from_state() {
+        let mut state = AppState::default();
+        state.crt.hard_scan = -10.0;
+        state.video.use_magenta_background = true;
+        
+        let params = ShaderParams::from_state(&state);
+        assert_eq!(params.hard_scan, -10.0);
+        assert_eq!(params.background_color, [1.0, 0.0, 1.0]);
+    }
+}

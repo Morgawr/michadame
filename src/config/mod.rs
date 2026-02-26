@@ -53,3 +53,56 @@ impl From<LegacyConfig> for MichadameConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn test_legacy_config_conversion() {
+        let legacy = LegacyConfig {
+            video_device: Some("/dev/video0".to_string()),
+            usb_device: None,
+            video_resolution: Some((640, 480)),
+            video_framerate: Some(60),
+            reset_usb_on_startup: Some(true),
+            has_shown_first_run_warning: Some(true),
+            active_profile: "Default".to_string(),
+            profiles: BTreeMap::new(),
+            audio_source: Some("mic".to_string()),
+            video_format_fourcc: Some("MJPG".to_string()),
+            crt_filter: Some(1),
+            scaler_filter: Some(2),
+            color_range: Some(0),
+            pixelate_filter_enabled: Some(true),
+            audio_buffer_size: Some(1024),
+            audio_sample_rate: Some(48000),
+            audio_sample_format: Some("S16LE".to_string()),
+            crt_hard_scan: Some(-8.0),
+            crt_warp_x: Some(0.031),
+            crt_warp_y: Some(0.041),
+            crt_shadow_mask: Some(3.0),
+            crt_brightboost: Some(1.0),
+            crt_hard_bloom_pix: Some(-1.5),
+            crt_hard_bloom_scan: Some(-2.0),
+            crt_bloom_amount: Some(0.15),
+            crt_shape: Some(2.0),
+            crt_hard_pix: Some(-3.0),
+            use_magenta_background: Some(false),
+            horizontal_stretch: Some(1.0),
+            median_filter_enabled: Some(false),
+            vibrance: Some(1.0),
+            overscan_x: Some(0.0),
+            overscan_y: Some(0.0),
+        };
+
+        let config: MichadameConfig = MichadameConfig::from(legacy);
+        assert_eq!(config.video_device, Some("/dev/video0".to_string()));
+        assert_eq!(config.profiles.len(), 1);
+        let profile = config.profiles.get("Default").unwrap();
+        assert_eq!(profile.video_format_fourcc, Some("MJPG".to_string()));
+        assert_eq!(profile.crt_filter, Some(1));
+        assert_eq!(profile.pixelate_filter_enabled, Some(true));
+    }
+}

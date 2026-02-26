@@ -87,3 +87,39 @@ pub struct AppState {
     pub active_profile: String,
     pub new_profile_name: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn test_app_state_default() {
+        let state = AppState::default();
+        assert_eq!(state.active_profile, "Default");
+        assert!(state.profiles.contains_key("Default"));
+        assert!(state.hardware.video_devices.is_empty());
+        assert!(!state.ui.is_fullscreen);
+        assert!(state.ui.control_window_open);
+        assert!(!state.ui.video_window_open);
+        assert_eq!(state.crt.hard_scan, -8.0);
+        assert_eq!(state.video.horizontal_stretch, 1.0);
+    }
+
+    #[test]
+    fn test_hardware_state_defaults() {
+        let state = AppState::default();
+        assert_eq!(state.hardware.audio_buffer_size, 1024);
+        assert_eq!(state.hardware.audio_sample_rate, 48000);
+        assert_eq!(state.hardware.audio_sample_format, "S16LE");
+        assert!(state.hardware.video_devices.is_empty());
+    }
+
+    #[test]
+    fn test_atomic_defaults() {
+        let state = AppState::default();
+        assert_eq!(state.crt_filter.load(Ordering::Relaxed), crate::devices::filter_type::CrtFilter::Off as u8);
+        assert_eq!(state.scaler_filter.load(Ordering::Relaxed), crate::video::types::ScalerFilter::Bicubic as u8);
+        assert_eq!(state.color_range.load(Ordering::Relaxed), crate::video::types::ColorRange::Full as u8);
+    }
+}
