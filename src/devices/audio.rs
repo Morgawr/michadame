@@ -33,7 +33,25 @@ impl Iterator for LiveSource {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.local_idx >= self.valid_len {
-            let queued_samples = self.consumer.slots();
+            let mut available = self.consumer.slots();
+            
+            // Safety threshold: ~5ms of audio at the current sample rate
+            let safety_threshold = (self.sample_rate as f32 * 0.005 * self.channels as f32) as usize;
+
+            // If the buffer is below threshold, wait to see if more data arrives.
+            // This syncs the consumer thread with the producer and prevents "crackling"
+            // where we rapidly toggle between a few samples and silence.
+            if available < safety_threshold {
+                let mut retries = 0;
+                // Wait up to 20ms total (20 * 1ms)
+                while retries < 20 && available < safety_threshold {
+                    thread::sleep(Duration::from_millis(1)); 
+                    available = self.consumer.slots();
+                    retries += 1;
+                }
+            }
+
+            let queued_samples = available;
             let safe_queued = (queued_samples / self.channels as usize) * self.channels as usize;
 
             let latency = (safe_queued as f64 / self.channels as f64 / self.sample_rate as f64 * 1000.0) as u64;
@@ -71,14 +89,19 @@ impl Iterator for LiveSource {
                     self.local_idx = 0;
                 }
             } else {
-                self.underruns.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!("Audio underrun! Ringbuffer exhausted.");
+                let underruns = self.underruns.fetch_add(1, Ordering::Relaxed);
+                if underruns % 100 == 0 {
+                    tracing::warn!("Audio underrun! Ringbuffer exhausted (count: {}).", underruns);
+                }
                 
-                // We MUST insert a full frame of silence (e.g. 2 samples for stereo)
-                // to prevent L/R channels from permanently desyncing/swapping.
-                let frame_size = self.channels as usize;
-                self.local_buf[..frame_size].fill(0.0);
-                self.valid_len = frame_size;
+                // On underrun, insert a larger chunk of silence (e.g. 10ms)
+                // to give the producer a chance to catch up and prevent rapid crackling.
+                let silence_samples = (self.sample_rate as f32 * 0.010 * self.channels as f32) as usize;
+                let silence_to_insert = std::cmp::min(silence_samples, self.local_buf.len());
+                let safe_silence = (silence_to_insert / self.channels as usize) * self.channels as usize;
+                
+                self.local_buf[..safe_silence].fill(0.0);
+                self.valid_len = safe_silence;
                 self.local_idx = 0;
             }
         }
