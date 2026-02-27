@@ -58,6 +58,7 @@ impl Default for AppState {
                 use_magenta_background: false,
                 horizontal_stretch: 1.0,
                 median_filter_enabled: false,
+                median_mix: 1.0,
                 vibrance: 1.0,
                 overscan_x: 0.0,
                 overscan_y: 0.0,

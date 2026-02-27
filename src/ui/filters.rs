@@ -89,6 +89,18 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             {
                 changed = true;
             }
+            if state.video.median_filter_enabled {
+                if ui
+                    .add(
+                        egui::Slider::new(&mut state.video.median_mix, 0.0..=1.0)
+                            .text("Intensity")
+                            .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+            }
         });
         ui.horizontal_wrapped(|ui| {
             if ui
@@ -347,6 +359,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 state.video.horizontal_stretch = 1.0;
                 state.video.pixelate_filter_enabled = false;
                 state.video.median_filter_enabled = false;
+                state.video.median_mix = 1.0;
                 state.video.overscan_x = 0.0;
                 state.video.overscan_y = 0.0;
                 changed = true;

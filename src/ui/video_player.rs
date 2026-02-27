@@ -77,6 +77,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             };
             let horizontal_stretch = state.video.horizontal_stretch;
             let median_filter_enabled = state.video.median_filter_enabled;
+            let median_mix = state.video.median_mix;
             let vibrance = state.video.vibrance;
             let overscan_x = state.video.overscan_x;
             let overscan_y = state.video.overscan_y;
@@ -104,6 +105,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         background_color,
                         horizontal_stretch,
                         median_filter_enabled,
+                        median_mix,
                         vibrance,
                         scaler_filter,
                         overscan_x,

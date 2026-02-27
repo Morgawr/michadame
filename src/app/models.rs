@@ -54,6 +54,7 @@ pub struct VideoSettings {
     pub use_magenta_background: bool,
     pub horizontal_stretch: f32,
     pub median_filter_enabled: bool,
+    pub median_mix: f32,
     pub vibrance: f32,
     pub overscan_x: f32,
     pub overscan_y: f32,

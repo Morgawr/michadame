@@ -22,6 +22,7 @@ pub struct CrtFilterRenderer {
     yuyv_range_loc: glow::UniformLocation,
     yuv_overscan_loc: glow::UniformLocation,
     yuyv_overscan_loc: glow::UniformLocation,
+    median_mix_loc: glow::UniformLocation,
 
     fbos: [glow::Framebuffer; 7],
     pass_textures: [glow::Texture; 7],
@@ -83,6 +84,7 @@ impl CrtFilterRenderer {
             let p2_hard_pix_loc = gl.get_uniform_location(pass2_prog, "hardPix").unwrap();
             let p3_hard_scan_loc = gl.get_uniform_location(pass3_prog, "hardScan").unwrap();
             let p3_shape_loc = gl.get_uniform_location(pass3_prog, "shape").unwrap();
+            let median_mix_loc = gl.get_uniform_location(median_prog, "mix_amount").unwrap();
 
             gl.use_program(Some(median_prog));
             gl.uniform_1_i32(Some(&gl.get_uniform_location(median_prog, "video_texture").unwrap()), 0);
@@ -184,7 +186,7 @@ impl CrtFilterRenderer {
                 final_brightboost_loc, final_bloom_amount_loc, final_background_color_loc,
                 passthrough_background_color_loc, final_horizontal_stretch_loc,
                 passthrough_horizontal_stretch_loc, final_vibrance_loc, passthrough_vibrance_loc,
-                passthrough_scaler_filter_loc, median_prog, last_size: (0, 0),
+                passthrough_scaler_filter_loc, median_prog, median_mix_loc, last_size: (0, 0),
                 last_scaler_filter: None, last_frame_size: (0, 0), last_frame_format: None,
             }
         }
@@ -327,6 +329,7 @@ impl CrtFilterRenderer {
             if params.median_filter_enabled {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[5]));
                 gl.use_program(Some(self.median_prog));
+                gl.uniform_1_f32(Some(&self.median_mix_loc), params.median_mix);
                 gl.active_texture(glow::TEXTURE0);
                 gl.bind_texture(glow::TEXTURE_2D, video_texture);
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
@@ -408,7 +411,7 @@ impl CrtFilterRenderer {
                 gl.uniform_1_i32(Some(&self.passthrough_scaler_filter_loc), params.scaler_filter as i32);
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             } else {
-                self.draw_passthrough(gl, None, Some(lottes_input_texture), resolution, output_size, params.background_color, params.horizontal_stretch, params.median_filter_enabled, params.vibrance, params.scaler_filter, params.overscan_x, params.overscan_y, None, 0.0, 0.0);
+                self.draw_passthrough(gl, None, Some(lottes_input_texture), resolution, output_size, params.background_color, params.horizontal_stretch, params.median_filter_enabled, params.median_mix, params.vibrance, params.scaler_filter, params.overscan_x, params.overscan_y, None, 0.0, 0.0);
             }
 
             gl.bind_vertex_array(None);
@@ -431,6 +434,7 @@ impl CrtFilterRenderer {
         background_color: [f32; 3],
         horizontal_stretch: f32,
         median_filter_enabled: bool,
+        median_mix: f32,
         vibrance: f32,
         scaler_filter: u8,
         overscan_x: f32,
@@ -463,6 +467,7 @@ impl CrtFilterRenderer {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[5]));
                 gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
                 gl.use_program(Some(self.median_prog));
+                gl.uniform_1_f32(Some(&self.median_mix_loc), median_mix);
                 gl.active_texture(glow::TEXTURE0);
                 gl.bind_texture(glow::TEXTURE_2D, Some(input_texture));
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);

@@ -26,6 +26,7 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         use_magenta_background: Some(state.video.use_magenta_background),
         horizontal_stretch: Some(state.video.horizontal_stretch),
         median_filter_enabled: Some(state.video.median_filter_enabled),
+        median_mix: Some(state.video.median_mix),
         vibrance: Some(state.video.vibrance),
         overscan_x: Some(state.video.overscan_x),
         overscan_y: Some(state.video.overscan_y),
@@ -149,6 +150,9 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) {
     }
     if let Some(val) = profile.median_filter_enabled {
         state.video.median_filter_enabled = val;
+    }
+    if let Some(val) = profile.median_mix {
+        state.video.median_mix = val;
     }
     if let Some(val) = profile.vibrance {
         state.video.vibrance = val;
