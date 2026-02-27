@@ -89,6 +89,7 @@ impl Default for AppState {
             new_profile_name: String::new(),
             fft_filter: None,
             fft_mask_data: Vec::new(),
+            fft_mask_dirty: false,
             fft_mask_resolution: (0, 0),
             fft_brush_radius: 8.0,
             fft_mask_threshold: 0.0,
@@ -314,26 +315,29 @@ impl eframe::App for AppState {
         if self.video.fft_mask_window_open {
             let mask_changed = ui::fft_mask::draw_fft_mask_editor(self, ctx);
             if mask_changed {
-                // Upload updated mask to GPU via a paint callback
-                let fft_arc = self.fft_filter.clone();
-                let mask_data = self.fft_mask_data.clone();
-                let mask_res = self.fft_mask_resolution;
-                if let Some(fft_arc) = fft_arc {
-                    // We need GL context for upload - use a paint callback
-                    let callback = egui::PaintCallback {
-                        rect: egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1.0, 1.0)),
-                        callback: std::sync::Arc::new(eframe::egui_glow::CallbackFn::new(
-                            move |_info, painter| {
-                                let fft = fft_arc.lock().unwrap();
-                                fft.upload_mask(painter.gl(), &mask_data, mask_res.0, mask_res.1);
-                            },
-                        )),
-                    };
-                    // Register the callback on the main viewport's painter
-                    ctx.layer_painter(egui::LayerId::background()).add(callback);
-                }
-                repaint_requested = true;
+                self.fft_mask_dirty = true;
             }
+        }
+
+        // Upload mask to GPU when dirty (from painting or loading from disk)
+        if self.fft_mask_dirty {
+            self.fft_mask_dirty = false;
+            let fft_arc = self.fft_filter.clone();
+            let mask_data = self.fft_mask_data.clone();
+            let mask_res = self.fft_mask_resolution;
+            if let Some(fft_arc) = fft_arc {
+                let callback = egui::PaintCallback {
+                    rect: egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1.0, 1.0)),
+                    callback: std::sync::Arc::new(eframe::egui_glow::CallbackFn::new(
+                        move |_info, painter| {
+                            let fft = fft_arc.lock().unwrap();
+                            fft.upload_mask(painter.gl(), &mask_data, mask_res.0, mask_res.1);
+                        },
+                    )),
+                };
+                ctx.layer_painter(egui::LayerId::background()).add(callback);
+            }
+            repaint_requested = true;
         }
 
         self.update_fps_counters(ctx);

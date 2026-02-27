@@ -1,5 +1,4 @@
 use crate::app::AppState;
-use crate::config;
 use eframe::egui;
 use eframe::egui_glow;
 
@@ -63,79 +62,15 @@ pub fn draw_fft_mask_editor(state: &mut AppState, ctx: &egui::Context) -> bool {
 
             ui.separator();
 
-            // === Save/Load masks ===
-            let (fft_w, fft_h) = state.fft_mask_resolution;
-            let has_frame = fft_w > 0 && fft_h > 0;
-            let stream_res = state.latest_frame.as_ref()
-                .map(|f| (f.width, f.height))
-                .unwrap_or((0, 0));
+            // === Save/Load is in the Settings panel ===
 
-            if has_frame && stream_res.0 > 0 {
-                ui.horizontal(|ui| {
-                    ui.label("Mask name:");
-                    ui.text_edit_singleline(&mut state.fft_mask_save_name);
-                    if ui.button("💾 Save").clicked() && !state.fft_mask_save_name.is_empty() {
-                        match config::fft_masks::save_mask(
-                            &state.fft_mask_save_name,
-                            stream_res,
-                            (fft_w, fft_h),
-                            &state.fft_mask_data,
-                            state.fft_mask_threshold,
-                            state.fft_black_threshold,
-                        ) {
-                            Ok(()) => {
-                                state.info(format!("Saved FFT mask '{}'", state.fft_mask_save_name));
-                                // Refresh available masks list
-                                state.fft_available_masks = config::fft_masks::list_masks_for_resolution(stream_res);
-                            }
-                            Err(e) => {
-                                state.error(format!("Failed to save mask: {}", e));
-                            }
-                        }
-                    }
-                });
-
-                // Refresh available masks when resolution changes
-                if state.fft_available_masks.is_empty() {
-                    state.fft_available_masks = config::fft_masks::list_masks_for_resolution(stream_res);
-                }
-
-                if !state.fft_available_masks.is_empty() {
-                    ui.horizontal(|ui| {
-                        ui.label("Load mask:");
-                        for mask_name in state.fft_available_masks.clone() {
-                            if ui.button(&mask_name).clicked() {
-                                match config::fft_masks::load_mask(&mask_name, stream_res) {
-                                    Ok((data, fft_res, mask_thresh, black_thresh)) => {
-                                        if fft_res == (fft_w, fft_h) {
-                                            state.fft_mask_data = data;
-                                            state.fft_mask_threshold = mask_thresh;
-                                            state.fft_black_threshold = black_thresh;
-                                            state.fft_mask_save_name = mask_name.clone();
-                                            mask_changed = true;
-                                            state.info(format!("Loaded FFT mask '{}'", mask_name));
-                                        } else {
-                                            state.error(format!(
-                                                "FFT size mismatch: mask is {}x{} but current is {}x{}",
-                                                fft_res.0, fft_res.1, fft_w, fft_h
-                                            ));
-                                        }
-                                    }
-                                    Err(e) => {
-                                        state.error(format!("Failed to load mask: {}", e));
-                                    }
-                                }
-                            }
-                        }
-                    });
-                }
-            }
-
-            ui.separator();
             ui.label("Left-drag: block frequencies | Right-drag: restore | Scroll: brush size");
+            ui.separator();
 
             // Render the spectrum+mask preview using GL texture
             let available = ui.available_size();
+            let (fft_w, fft_h) = state.fft_mask_resolution;
+            let has_frame = fft_w > 0 && fft_h > 0;
 
             if has_frame {
                 // Maintain aspect ratio while filling available space

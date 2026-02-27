@@ -91,6 +91,7 @@ pub struct AppState {
 
     pub fft_filter: Option<Arc<Mutex<crate::video::gpu::FftFilter>>>,
     pub fft_mask_data: Vec<u8>,
+    pub fft_mask_dirty: bool,
     pub fft_mask_resolution: (u32, u32),
     pub fft_brush_radius: f32,
     pub fft_mask_threshold: f32,

@@ -454,12 +454,6 @@ impl FftFilter {
     pub fn spectrum_texture(&self) -> glow::Texture {
         self.spectrum_tex
     }
-
-    /// Returns the current FFT dimensions (power-of-2).
-    pub fn current_fft_size(&self) -> (u32, u32) {
-        self.last_fft_size
-    }
-
     pub fn destroy(&self, gl: &glow::Context) {
         unsafe {
             gl.delete_program(self.init_prog);
