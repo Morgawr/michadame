@@ -203,6 +203,7 @@ impl CrtFilterRenderer {
         run_lottes: bool,
         fft_filter: Option<&Arc<Mutex<FftFilter>>>,
         fft_mask_threshold: f32,
+        fft_black_threshold: f32,
     ) {
         let mut video_texture = fallback_texture;
 
@@ -297,7 +298,7 @@ impl CrtFilterRenderer {
                 if let Some(fft_arc) = fft_filter {
                     if let Some(tex) = video_texture {
                         let mut fft = fft_arc.lock().unwrap();
-                        let filtered = fft.apply(gl, tex, frame.width, frame.height, fft_mask_threshold);
+                        let filtered = fft.apply(gl, tex, frame.width, frame.height, fft_mask_threshold, fft_black_threshold);
                         video_texture = Some(filtered);
                         // Restore our VAO and viewport after FFT used its own
                         gl.bind_vertex_array(Some(self.vertex_array));
@@ -394,7 +395,7 @@ impl CrtFilterRenderer {
                 gl.uniform_1_i32(Some(&self.passthrough_scaler_filter_loc), params.scaler_filter as i32);
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             } else {
-                self.draw_passthrough(gl, None, Some(lottes_input_texture), resolution, output_size, params.background_color, params.horizontal_stretch, params.median_filter_enabled, params.vibrance, params.scaler_filter, params.overscan_x, params.overscan_y, None, 0.0);
+                self.draw_passthrough(gl, None, Some(lottes_input_texture), resolution, output_size, params.background_color, params.horizontal_stretch, params.median_filter_enabled, params.vibrance, params.scaler_filter, params.overscan_x, params.overscan_y, None, 0.0, 0.0);
             }
 
             gl.bind_vertex_array(None);
@@ -423,6 +424,7 @@ impl CrtFilterRenderer {
         overscan_y: f32,
         fft_filter: Option<&Arc<Mutex<FftFilter>>>,
         fft_mask_threshold: f32,
+        fft_black_threshold: f32,
     ) {
         let mut video_texture = fallback_texture;
 
@@ -514,7 +516,7 @@ impl CrtFilterRenderer {
                 if let Some(fft_arc) = fft_filter {
                     if let Some(tex) = video_texture {
                         let mut fft = fft_arc.lock().unwrap();
-                        let filtered = fft.apply(gl, tex, frame.width, frame.height, fft_mask_threshold);
+                        let filtered = fft.apply(gl, tex, frame.width, frame.height, fft_mask_threshold, fft_black_threshold);
                         video_texture = Some(filtered);
                         // Restore our VAO and viewport after FFT used its own
                         gl.bind_vertex_array(Some(self.vertex_array));

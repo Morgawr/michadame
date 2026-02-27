@@ -35,6 +35,7 @@ pub struct FftFilter {
     extract_orig_loc: Option<glow::UniformLocation>,
     extract_fft_size_loc: Option<glow::UniformLocation>,
     extract_orig_size_loc: Option<glow::UniformLocation>,
+    extract_black_threshold_loc: Option<glow::UniformLocation>,
 
     spectrum_fft_loc: Option<glow::UniformLocation>,
     spectrum_mask_loc: Option<glow::UniformLocation>,
@@ -140,6 +141,7 @@ impl FftFilter {
             let extract_orig_loc = gl.get_uniform_location(extract_prog, "original_texture");
             let extract_fft_size_loc = gl.get_uniform_location(extract_prog, "fft_size");
             let extract_orig_size_loc = gl.get_uniform_location(extract_prog, "orig_size");
+            let extract_black_threshold_loc = gl.get_uniform_location(extract_prog, "black_threshold");
             gl.use_program(Some(extract_prog));
             gl.uniform_1_i32(extract_ifft_loc.as_ref(), 0);
             gl.uniform_1_i32(extract_orig_loc.as_ref(), 1);
@@ -189,7 +191,7 @@ impl FftFilter {
                 butterfly_input_loc, butterfly_axis_loc, butterfly_stage_loc,
                 butterfly_direction_loc, butterfly_fft_size_loc,
                 mask_fft_loc, mask_mask_loc, mask_fft_size_loc, mask_threshold_loc,
-                extract_ifft_loc, extract_orig_loc, extract_fft_size_loc, extract_orig_size_loc,
+                extract_ifft_loc, extract_orig_loc, extract_fft_size_loc, extract_orig_size_loc, extract_black_threshold_loc,
                 spectrum_fft_loc, spectrum_mask_loc, spectrum_fft_size_loc,
                 bitrev_input_loc, bitrev_fft_size_loc,
                 tex, fbo,
@@ -299,6 +301,7 @@ impl FftFilter {
         orig_width: u32,
         orig_height: u32,
         mask_threshold: f32,
+        black_threshold: f32,
     ) -> glow::Texture {
         let (fft_w, fft_h) = Self::fft_dimensions(orig_width, orig_height);
         self.setup_resources(gl, fft_w, fft_h, orig_width, orig_height);
@@ -417,6 +420,7 @@ impl FftFilter {
             gl.bind_texture(glow::TEXTURE_2D, Some(input_texture));
             gl.uniform_2_i32(self.extract_fft_size_loc.as_ref(), fft_w as i32, fft_h as i32);
             gl.uniform_2_i32(self.extract_orig_size_loc.as_ref(), orig_width as i32, orig_height as i32);
+            gl.uniform_1_f32(self.extract_black_threshold_loc.as_ref(), black_threshold);
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
             // === Cleanup ===
