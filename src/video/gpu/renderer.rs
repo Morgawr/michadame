@@ -190,6 +190,104 @@ impl CrtFilterRenderer {
         }
     }
 
+    /// Private helper to decode a raw YUV frame into an RGB texture and optionally apply the FFT filter.
+    /// Returns the texture containing the result (usually self.pass_textures[6] or the FFT output).
+    unsafe fn prepare_input_texture(
+        &mut self,
+        gl: &glow::Context,
+        frame: &RawFrame,
+        overscan_x: f32,
+        overscan_y: f32,
+        fft_filter: Option<&Arc<Mutex<FftFilter>>>,
+        fft_mask_threshold: f32,
+        fft_black_threshold: f32,
+    ) -> glow::Texture {
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[6]));
+        gl.viewport(0, 0, frame.width as i32, frame.height as i32);
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+        gl.clear(glow::COLOR_BUFFER_BIT);
+
+        if frame.format == Pixel::YUV422P || frame.format == Pixel::YUV420P || frame.format == Pixel::YUVJ422P || frame.format == Pixel::YUVJ420P {
+            gl.use_program(Some(self.yuv_planar_prog));
+            let (y_end, u_end) = if frame.format == Pixel::YUV422P || frame.format == Pixel::YUVJ422P {
+                ((frame.width * frame.height) as usize, (frame.width * frame.height * 3 / 2) as usize)
+            } else {
+                ((frame.width * frame.height) as usize, (frame.width * frame.height * 5 / 4) as usize)
+            };
+
+            let y_data = &frame.data[0..y_end];
+            let u_data = &frame.data[y_end..u_end];
+            let v_data = &frame.data[u_end..];
+            let chroma_width = frame.width / 2;
+            let chroma_height = if frame.format == Pixel::YUV422P || frame.format == Pixel::YUVJ422P { frame.height } else { frame.height / 2 };
+
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[0]));
+            let needs_realloc = frame.width != self.last_frame_size.0 || frame.height != self.last_frame_size.1 || Some(frame.format) != self.last_frame_format;
+            if needs_realloc {
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R8 as i32, frame.width as i32, frame.height as i32, 0, glow::RED, glow::UNSIGNED_BYTE, None);
+            }
+            gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[0]));
+            if needs_realloc { gl.buffer_data_size(glow::PIXEL_UNPACK_BUFFER, y_data.len() as i32, glow::STREAM_DRAW); }
+            gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, y_data);
+            gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, frame.width as i32, frame.height as i32, glow::RED, glow::UNSIGNED_BYTE, glow::PixelUnpackData::BufferOffset(0));
+
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[1]));
+            if needs_realloc {
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R8 as i32, chroma_width as i32, chroma_height as i32, 0, glow::RED, glow::UNSIGNED_BYTE, None);
+            }
+            gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[1]));
+            if needs_realloc { gl.buffer_data_size(glow::PIXEL_UNPACK_BUFFER, u_data.len() as i32, glow::STREAM_DRAW); }
+            gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, u_data);
+            gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, chroma_width as i32, chroma_height as i32, glow::RED, glow::UNSIGNED_BYTE, glow::PixelUnpackData::BufferOffset(0));
+
+            gl.active_texture(glow::TEXTURE2);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[2]));
+            if needs_realloc {
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R8 as i32, chroma_width as i32, chroma_height as i32, 0, glow::RED, glow::UNSIGNED_BYTE, None);
+            }
+            gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[2]));
+            if needs_realloc { gl.buffer_data_size(glow::PIXEL_UNPACK_BUFFER, v_data.len() as i32, glow::STREAM_DRAW); }
+            gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, v_data);
+            gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, chroma_width as i32, chroma_height as i32, glow::RED, glow::UNSIGNED_BYTE, glow::PixelUnpackData::BufferOffset(0));
+
+            gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
+            gl.uniform_1_i32(Some(&self.yuv_range_loc), frame.color_range as i32);
+            gl.uniform_2_f32(Some(&self.yuv_overscan_loc), overscan_x, overscan_y);
+            if needs_realloc { self.last_frame_size = (frame.width, frame.height); self.last_frame_format = Some(frame.format); }
+        } else if frame.format == Pixel::YUYV422 {
+            gl.use_program(Some(self.yuyv_packed_prog));
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[0]));
+            let needs_realloc = frame.width != self.last_frame_size.0 || frame.height != self.last_frame_size.1 || Some(frame.format) != self.last_frame_format;
+            if needs_realloc {
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, (frame.width / 2) as i32, frame.height as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, None);
+            }
+            gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[0]));
+            if needs_realloc { gl.buffer_data_size(glow::PIXEL_UNPACK_BUFFER, frame.data.len() as i32, glow::STREAM_DRAW); }
+            gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, &frame.data);
+            gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, (frame.width / 2) as i32, frame.height as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::BufferOffset(0));
+            gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
+            if needs_realloc { self.last_frame_size = (frame.width, frame.height); self.last_frame_format = Some(frame.format); }
+            gl.uniform_1_i32(Some(&self.yuyv_range_loc), frame.color_range as i32);
+            gl.uniform_2_f32(Some(&self.yuyv_overscan_loc), overscan_x, overscan_y);
+        }
+
+        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        let mut tex = self.pass_textures[6];
+
+        // Apply FFT filter to raw frame data (at capture card resolution, before any scaling)
+        if let Some(fft_arc) = fft_filter {
+            let mut fft = fft_arc.lock().unwrap();
+            tex = fft.apply(gl, tex, frame.width, frame.height, fft_mask_threshold, fft_black_threshold);
+            // Restore our VAO after FFT used its own
+            gl.bind_vertex_array(Some(self.vertex_array));
+        }
+
+        tex
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn paint(
         &mut self,
@@ -219,92 +317,7 @@ impl CrtFilterRenderer {
             gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
 
             if let Some(frame) = raw_frame {
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[6]));
-                gl.viewport(0, 0, frame.width as i32, frame.height as i32);
-                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-                gl.clear(glow::COLOR_BUFFER_BIT);
-
-                if frame.format == Pixel::YUV422P || frame.format == Pixel::YUV420P || frame.format == Pixel::YUVJ422P || frame.format == Pixel::YUVJ420P {
-                    gl.use_program(Some(self.yuv_planar_prog));
-                    let (y_end, u_end) = if frame.format == Pixel::YUV422P || frame.format == Pixel::YUVJ422P {
-                        ((frame.width * frame.height) as usize, (frame.width * frame.height * 3 / 2) as usize)
-                    } else {
-                        ((frame.width * frame.height) as usize, (frame.width * frame.height * 5 / 4) as usize)
-                    };
-
-                    let y_data = &frame.data[0..y_end];
-                    let u_data = &frame.data[y_end..u_end];
-                    let v_data = &frame.data[u_end..];
-                    let chroma_width = frame.width / 2;
-                    let chroma_height = if frame.format == Pixel::YUV422P || frame.format == Pixel::YUVJ422P { frame.height } else { frame.height / 2 };
-
-                    gl.active_texture(glow::TEXTURE0);
-                    gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[0]));
-                    let needs_realloc = frame.width != self.last_frame_size.0 || frame.height != self.last_frame_size.1 || Some(frame.format) != self.last_frame_format;
-                    if needs_realloc {
-                        gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R8 as i32, frame.width as i32, frame.height as i32, 0, glow::RED, glow::UNSIGNED_BYTE, None);
-                    }
-                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[0]));
-                    if needs_realloc { gl.buffer_data_size(glow::PIXEL_UNPACK_BUFFER, y_data.len() as i32, glow::STREAM_DRAW); }
-                    gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, y_data);
-                    gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, frame.width as i32, frame.height as i32, glow::RED, glow::UNSIGNED_BYTE, glow::PixelUnpackData::BufferOffset(0));
-
-                    gl.active_texture(glow::TEXTURE1);
-                    gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[1]));
-                    if needs_realloc {
-                        gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R8 as i32, chroma_width as i32, chroma_height as i32, 0, glow::RED, glow::UNSIGNED_BYTE, None);
-                    }
-                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[1]));
-                    if needs_realloc { gl.buffer_data_size(glow::PIXEL_UNPACK_BUFFER, u_data.len() as i32, glow::STREAM_DRAW); }
-                    gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, u_data);
-                    gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, chroma_width as i32, chroma_height as i32, glow::RED, glow::UNSIGNED_BYTE, glow::PixelUnpackData::BufferOffset(0));
-
-                    gl.active_texture(glow::TEXTURE2);
-                    gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[2]));
-                    if needs_realloc {
-                        gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R8 as i32, chroma_width as i32, chroma_height as i32, 0, glow::RED, glow::UNSIGNED_BYTE, None);
-                    }
-                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[2]));
-                    if needs_realloc { gl.buffer_data_size(glow::PIXEL_UNPACK_BUFFER, v_data.len() as i32, glow::STREAM_DRAW); }
-                    gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, v_data);
-                    gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, chroma_width as i32, chroma_height as i32, glow::RED, glow::UNSIGNED_BYTE, glow::PixelUnpackData::BufferOffset(0));
-
-                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
-                    gl.uniform_1_i32(Some(&self.yuv_range_loc), frame.color_range as i32);
-                    gl.uniform_2_f32(Some(&self.yuv_overscan_loc), params.overscan_x, params.overscan_y);
-                    if needs_realloc { self.last_frame_size = (frame.width, frame.height); self.last_frame_format = Some(frame.format); }
-                } else if frame.format == Pixel::YUYV422 {
-                    gl.use_program(Some(self.yuyv_packed_prog));
-                    gl.active_texture(glow::TEXTURE0);
-                    gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[0]));
-                    let needs_realloc = frame.width != self.last_frame_size.0 || frame.height != self.last_frame_size.1 || Some(frame.format) != self.last_frame_format;
-                    if needs_realloc {
-                        gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, (frame.width / 2) as i32, frame.height as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, None);
-                    }
-                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[0]));
-                    if needs_realloc { gl.buffer_data_size(glow::PIXEL_UNPACK_BUFFER, frame.data.len() as i32, glow::STREAM_DRAW); }
-                    gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, &frame.data);
-                    gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, (frame.width / 2) as i32, frame.height as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::BufferOffset(0));
-                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
-                    if needs_realloc { self.last_frame_size = (frame.width, frame.height); self.last_frame_format = Some(frame.format); }
-                    gl.uniform_1_i32(Some(&self.yuyv_range_loc), frame.color_range as i32);
-                    gl.uniform_2_f32(Some(&self.yuyv_overscan_loc), params.overscan_x, params.overscan_y);
-                }
-
-                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                video_texture = Some(self.pass_textures[6]);
-
-                // Apply FFT filter to raw frame data (at capture card resolution, before any scaling)
-                if let Some(fft_arc) = fft_filter {
-                    if let Some(tex) = video_texture {
-                        let mut fft = fft_arc.lock().unwrap();
-                        let filtered = fft.apply(gl, tex, frame.width, frame.height, fft_mask_threshold, fft_black_threshold);
-                        video_texture = Some(filtered);
-                        // Restore our VAO and viewport after FFT used its own
-                        gl.bind_vertex_array(Some(self.vertex_array));
-                    }
-                }
-
+                video_texture = Some(self.prepare_input_texture(gl, frame, params.overscan_x, params.overscan_y, fft_filter, fft_mask_threshold, fft_black_threshold));
                 gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
             }
 
@@ -439,90 +452,7 @@ impl CrtFilterRenderer {
             gl.bind_vertex_array(Some(self.vertex_array));
 
             if let Some(frame) = raw_frame {
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[6]));
-                gl.viewport(0, 0, frame.width as i32, frame.height as i32);
-                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-                gl.clear(glow::COLOR_BUFFER_BIT);
-
-                if frame.format == Pixel::YUV422P || frame.format == Pixel::YUV420P || frame.format == Pixel::YUVJ422P || frame.format == Pixel::YUVJ420P {
-                    gl.use_program(Some(self.yuv_planar_prog));
-                    let (y_end, u_end) = if frame.format == Pixel::YUV422P || frame.format == Pixel::YUVJ422P {
-                        ((frame.width * frame.height) as usize, (frame.width * frame.height * 3 / 2) as usize)
-                    } else {
-                        ((frame.width * frame.height) as usize, (frame.width * frame.height * 5 / 4) as usize)
-                    };
-                    let y_data = &frame.data[0..y_end];
-                    let u_data = &frame.data[y_end..u_end];
-                    let v_data = &frame.data[u_end..];
-                    let chroma_width = frame.width / 2;
-                    let chroma_height = if frame.format == Pixel::YUV422P || frame.format == Pixel::YUVJ422P { frame.height } else { frame.height / 2 };
-
-                    gl.active_texture(glow::TEXTURE0);
-                    gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[0]));
-                    let needs_realloc = frame.width != self.last_frame_size.0 || frame.height != self.last_frame_size.1 || Some(frame.format) != self.last_frame_format;
-                    if needs_realloc {
-                        gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R8 as i32, frame.width as i32, frame.height as i32, 0, glow::RED, glow::UNSIGNED_BYTE, None);
-                    }
-                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[0]));
-                    if needs_realloc { gl.buffer_data_size(glow::PIXEL_UNPACK_BUFFER, y_data.len() as i32, glow::STREAM_DRAW); }
-                    gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, y_data);
-                    gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, frame.width as i32, frame.height as i32, glow::RED, glow::UNSIGNED_BYTE, glow::PixelUnpackData::BufferOffset(0));
-
-                    gl.active_texture(glow::TEXTURE1);
-                    gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[1]));
-                    if needs_realloc {
-                        gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R8 as i32, chroma_width as i32, chroma_height as i32, 0, glow::RED, glow::UNSIGNED_BYTE, None);
-                    }
-                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[1]));
-                    if needs_realloc { gl.buffer_data_size(glow::PIXEL_UNPACK_BUFFER, u_data.len() as i32, glow::STREAM_DRAW); }
-                    gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, u_data);
-                    gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, chroma_width as i32, chroma_height as i32, glow::RED, glow::UNSIGNED_BYTE, glow::PixelUnpackData::BufferOffset(0));
-
-                    gl.active_texture(glow::TEXTURE2);
-                    gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[2]));
-                    if needs_realloc {
-                        gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R8 as i32, chroma_width as i32, chroma_height as i32, 0, glow::RED, glow::UNSIGNED_BYTE, None);
-                    }
-                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[2]));
-                    if needs_realloc { gl.buffer_data_size(glow::PIXEL_UNPACK_BUFFER, v_data.len() as i32, glow::STREAM_DRAW); }
-                    gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, v_data);
-                    gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, chroma_width as i32, chroma_height as i32, glow::RED, glow::UNSIGNED_BYTE, glow::PixelUnpackData::BufferOffset(0));
-                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
-                    gl.uniform_1_i32(Some(&self.yuv_range_loc), frame.color_range as i32);
-                    gl.uniform_2_f32(Some(&self.yuv_overscan_loc), overscan_x, overscan_y);
-                    if needs_realloc { self.last_frame_size = (frame.width, frame.height); self.last_frame_format = Some(frame.format); }
-                } else if frame.format == Pixel::YUYV422 {
-                    gl.use_program(Some(self.yuyv_packed_prog));
-                    gl.active_texture(glow::TEXTURE0);
-                    gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[0]));
-                    let needs_realloc = frame.width != self.last_frame_size.0 || frame.height != self.last_frame_size.1 || Some(frame.format) != self.last_frame_format;
-                    if needs_realloc {
-                        gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, (frame.width / 2) as i32, frame.height as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, None);
-                    }
-                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[0]));
-                    if needs_realloc { gl.buffer_data_size(glow::PIXEL_UNPACK_BUFFER, frame.data.len() as i32, glow::STREAM_DRAW); }
-                    gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, &frame.data);
-                    gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, (frame.width / 2) as i32, frame.height as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::BufferOffset(0));
-                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
-                    if needs_realloc { self.last_frame_size = (frame.width, frame.height); self.last_frame_format = Some(frame.format); }
-                    gl.uniform_1_i32(Some(&self.yuyv_range_loc), frame.color_range as i32);
-                    gl.uniform_2_f32(Some(&self.yuyv_overscan_loc), overscan_x, overscan_y);
-                }
-
-                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                video_texture = Some(self.pass_textures[6]);
-
-                // Apply FFT filter to raw frame data (at capture card resolution, before any scaling)
-                if let Some(fft_arc) = fft_filter {
-                    if let Some(tex) = video_texture {
-                        let mut fft = fft_arc.lock().unwrap();
-                        let filtered = fft.apply(gl, tex, frame.width, frame.height, fft_mask_threshold, fft_black_threshold);
-                        video_texture = Some(filtered);
-                        // Restore our VAO and viewport after FFT used its own
-                        gl.bind_vertex_array(Some(self.vertex_array));
-                    }
-                }
-
+                video_texture = Some(self.prepare_input_texture(gl, frame, overscan_x, overscan_y, fft_filter, fft_mask_threshold, fft_black_threshold));
                 gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
             }
 

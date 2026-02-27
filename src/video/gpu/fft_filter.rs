@@ -480,3 +480,56 @@ impl FftFilter {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_next_power_of_2() {
+        assert_eq!(next_power_of_2(0), 1);
+        assert_eq!(next_power_of_2(1), 1);
+        assert_eq!(next_power_of_2(2), 2);
+        assert_eq!(next_power_of_2(3), 4);
+        assert_eq!(next_power_of_2(4), 4);
+        assert_eq!(next_power_of_2(5), 8);
+        assert_eq!(next_power_of_2(255), 256);
+        assert_eq!(next_power_of_2(256), 256);
+        assert_eq!(next_power_of_2(257), 512);
+        assert_eq!(next_power_of_2(1000), 1024);
+        assert_eq!(next_power_of_2(1024), 1024);
+        assert_eq!(next_power_of_2(1920), 2048);
+    }
+
+    #[test]
+    fn test_log2_u32() {
+        assert_eq!(log2_u32(1), 0);
+        assert_eq!(log2_u32(2), 1);
+        assert_eq!(log2_u32(4), 2);
+        assert_eq!(log2_u32(8), 3);
+        assert_eq!(log2_u32(16), 4);
+        assert_eq!(log2_u32(256), 8);
+        assert_eq!(log2_u32(1024), 10);
+        assert_eq!(log2_u32(2048), 11);
+    }
+
+    #[test]
+    fn test_fft_dimensions_already_power_of_2() {
+        assert_eq!(FftFilter::fft_dimensions(256, 256), (256, 256));
+        assert_eq!(FftFilter::fft_dimensions(1024, 512), (1024, 512));
+    }
+
+    #[test]
+    fn test_fft_dimensions_non_power_of_2() {
+        assert_eq!(FftFilter::fft_dimensions(640, 480), (1024, 512));
+        assert_eq!(FftFilter::fft_dimensions(720, 480), (1024, 512));
+        assert_eq!(FftFilter::fft_dimensions(1920, 1080), (2048, 2048));
+        assert_eq!(FftFilter::fft_dimensions(1600, 1200), (2048, 2048));
+    }
+
+    #[test]
+    fn test_fft_dimensions_small() {
+        assert_eq!(FftFilter::fft_dimensions(1, 1), (1, 1));
+        assert_eq!(FftFilter::fft_dimensions(3, 5), (4, 8));
+    }
+}
