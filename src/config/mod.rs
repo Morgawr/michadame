@@ -1,5 +1,6 @@
 pub mod models;
 pub mod persistence;
+pub mod fft_masks;
 
 pub use models::*;
 pub use persistence::*;

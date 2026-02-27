@@ -95,6 +95,8 @@ pub struct AppState {
     pub fft_brush_radius: f32,
     pub fft_mask_threshold: f32,
     pub fft_black_threshold: f32,
+    pub fft_mask_save_name: String,
+    pub fft_available_masks: Vec<String>,
 }
 
 #[cfg(test)]

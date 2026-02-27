@@ -93,6 +93,8 @@ impl Default for AppState {
             fft_brush_radius: 8.0,
             fft_mask_threshold: 0.0,
             fft_black_threshold: 0.0,
+            fft_mask_save_name: String::new(),
+            fft_available_masks: Vec::new(),
         }
     }
 }

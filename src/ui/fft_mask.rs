@@ -1,10 +1,16 @@
 use crate::app::AppState;
+use crate::config;
 use eframe::egui;
 use eframe::egui_glow;
 
 /// Draw the FFT mask editor window.
 /// Returns true if the mask was modified this frame.
 pub fn draw_fft_mask_editor(state: &mut AppState, ctx: &egui::Context) -> bool {
+    // Auto-hide when FFT filter is disabled
+    if !state.video.fft_filter_enabled {
+        return false;
+    }
+
     if !state.video.fft_mask_window_open {
         return false;
     }
@@ -15,7 +21,7 @@ pub fn draw_fft_mask_editor(state: &mut AppState, ctx: &egui::Context) -> bool {
     egui::Window::new("FFT Mask Editor")
         .open(&mut window_open)
         .resizable(true)
-        .default_size([512.0, 540.0])
+        .default_size([512.0, 600.0])
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Brush size:");
@@ -55,14 +61,83 @@ pub fn draw_fft_mask_editor(state: &mut AppState, ctx: &egui::Context) -> bool {
                 }
             }).response.on_hover_text("Skip FFT filtering for dark areas.\nPixels whose 9×9 neighborhood average brightness\nis below this level use the original unfiltered image.\n0% = apply everywhere, higher = skip darker regions.");
 
-            ui.label("Left-drag: block frequencies | Right-drag: restore | Scroll: brush size");
             ui.separator();
+
+            // === Save/Load masks ===
+            let (fft_w, fft_h) = state.fft_mask_resolution;
+            let has_frame = fft_w > 0 && fft_h > 0;
+            let stream_res = state.latest_frame.as_ref()
+                .map(|f| (f.width, f.height))
+                .unwrap_or((0, 0));
+
+            if has_frame && stream_res.0 > 0 {
+                ui.horizontal(|ui| {
+                    ui.label("Mask name:");
+                    ui.text_edit_singleline(&mut state.fft_mask_save_name);
+                    if ui.button("💾 Save").clicked() && !state.fft_mask_save_name.is_empty() {
+                        match config::fft_masks::save_mask(
+                            &state.fft_mask_save_name,
+                            stream_res,
+                            (fft_w, fft_h),
+                            &state.fft_mask_data,
+                            state.fft_mask_threshold,
+                            state.fft_black_threshold,
+                        ) {
+                            Ok(()) => {
+                                state.info(format!("Saved FFT mask '{}'", state.fft_mask_save_name));
+                                // Refresh available masks list
+                                state.fft_available_masks = config::fft_masks::list_masks_for_resolution(stream_res);
+                            }
+                            Err(e) => {
+                                state.error(format!("Failed to save mask: {}", e));
+                            }
+                        }
+                    }
+                });
+
+                // Refresh available masks when resolution changes
+                if state.fft_available_masks.is_empty() {
+                    state.fft_available_masks = config::fft_masks::list_masks_for_resolution(stream_res);
+                }
+
+                if !state.fft_available_masks.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.label("Load mask:");
+                        for mask_name in state.fft_available_masks.clone() {
+                            if ui.button(&mask_name).clicked() {
+                                match config::fft_masks::load_mask(&mask_name, stream_res) {
+                                    Ok((data, fft_res, mask_thresh, black_thresh)) => {
+                                        if fft_res == (fft_w, fft_h) {
+                                            state.fft_mask_data = data;
+                                            state.fft_mask_threshold = mask_thresh;
+                                            state.fft_black_threshold = black_thresh;
+                                            state.fft_mask_save_name = mask_name.clone();
+                                            mask_changed = true;
+                                            state.info(format!("Loaded FFT mask '{}'", mask_name));
+                                        } else {
+                                            state.error(format!(
+                                                "FFT size mismatch: mask is {}x{} but current is {}x{}",
+                                                fft_res.0, fft_res.1, fft_w, fft_h
+                                            ));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        state.error(format!("Failed to load mask: {}", e));
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+
+            ui.separator();
+            ui.label("Left-drag: block frequencies | Right-drag: restore | Scroll: brush size");
 
             // Render the spectrum+mask preview using GL texture
             let available = ui.available_size();
-            let (fft_w, fft_h) = state.fft_mask_resolution;
 
-            if fft_w > 0 && fft_h > 0 {
+            if has_frame {
                 // Maintain aspect ratio while filling available space
                 let aspect = fft_w as f32 / fft_h as f32;
                 let display_w = available.x.min(available.y * aspect);
@@ -83,9 +158,6 @@ pub fn draw_fft_mask_editor(state: &mut AppState, ctx: &egui::Context) -> bool {
                                 let gl = painter.gl();
                                 let fft = fft_clone.lock().unwrap();
                                 let spectrum_tex = fft.spectrum_texture();
-
-                                // egui_glow sets up the correct viewport and scissor for us
-                                // in paint callbacks, so we just need to draw our textured quad
                                 fft.blit_texture(gl, spectrum_tex);
                             },
                         )),
@@ -112,8 +184,6 @@ pub fn draw_fft_mask_editor(state: &mut AppState, ctx: &egui::Context) -> bool {
 
                 if is_painting || is_erasing {
                     if let Some(pos) = response.interact_pointer_pos() {
-                        // Convert screen coordinates to mask coordinates
-                        // egui Y=0 is top, but GL texture Y=0 is bottom
                         let rel_x = (pos.x - rect.min.x) / rect.width();
                         let rel_y = (pos.y - rect.min.y) / rect.height();
 
@@ -124,7 +194,6 @@ pub fn draw_fft_mask_editor(state: &mut AppState, ctx: &egui::Context) -> bool {
                         let radius = state.fft_brush_radius as i32;
                         let value = if is_painting { 0u8 } else { 255u8 };
 
-                        // Paint a circle on the mask
                         let (w, h) = (fft_w as i32, fft_h as i32);
                         for dy in -radius..=radius {
                             for dx in -radius..=radius {
