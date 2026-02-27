@@ -61,6 +61,8 @@ impl Default for AppState {
                 vibrance: 1.0,
                 overscan_x: 0.0,
                 overscan_y: 0.0,
+                fft_filter_enabled: false,
+                fft_mask_window_open: false,
             },
             toasts: egui_toast::Toasts::new().anchor(egui::Align2::LEFT_TOP, (10.0, 10.0)).direction(egui::Direction::TopDown),
             video_thread: None,
@@ -85,6 +87,10 @@ impl Default for AppState {
             },
             active_profile: "Default".to_string(),
             new_profile_name: String::new(),
+            fft_filter: None,
+            fft_mask_data: Vec::new(),
+            fft_mask_resolution: (0, 0),
+            fft_brush_radius: 8.0,
         }
     }
 }
@@ -171,6 +177,9 @@ impl eframe::App for AppState {
         if let Some(gl) = _gl {
             if let Some(renderer) = self.crt_renderer.as_ref() {
                 renderer.lock().unwrap().destroy(gl);
+            }
+            if let Some(fft) = self.fft_filter.as_ref() {
+                fft.lock().unwrap().destroy(gl);
             }
         }
         self.stop_stream_resources();
@@ -283,10 +292,44 @@ impl eframe::App for AppState {
 
         if let Some(rx) = &self.frame_receiver {
             if let Ok(frame) = rx.try_recv() {
+                // Initialize or resize FFT mask when frame dimensions change
+                if self.video.fft_filter_enabled {
+                    let (fft_w, fft_h) = crate::video::gpu::FftFilter::fft_dimensions(frame.width, frame.height);
+                    if self.fft_mask_resolution != (fft_w, fft_h) {
+                        self.fft_mask_resolution = (fft_w, fft_h);
+                        self.fft_mask_data = vec![255u8; (fft_w * fft_h) as usize];
+                    }
+                }
                 self.latest_frame = Some(frame);
                 self.video_frames_since_last_check += 1;
             }
             repaint_requested = true;
+        }
+
+        // Draw FFT mask editor window and handle mask upload
+        if self.video.fft_mask_window_open {
+            let mask_changed = ui::fft_mask::draw_fft_mask_editor(self, ctx);
+            if mask_changed {
+                // Upload updated mask to GPU via a paint callback
+                let fft_arc = self.fft_filter.clone();
+                let mask_data = self.fft_mask_data.clone();
+                let mask_res = self.fft_mask_resolution;
+                if let Some(fft_arc) = fft_arc {
+                    // We need GL context for upload - use a paint callback
+                    let callback = egui::PaintCallback {
+                        rect: egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1.0, 1.0)),
+                        callback: std::sync::Arc::new(eframe::egui_glow::CallbackFn::new(
+                            move |_info, painter| {
+                                let fft = fft_arc.lock().unwrap();
+                                fft.upload_mask(painter.gl(), &mask_data, mask_res.0, mask_res.1);
+                            },
+                        )),
+                    };
+                    // Register the callback on the main viewport's painter
+                    ctx.layer_painter(egui::LayerId::background()).add(callback);
+                }
+                repaint_requested = true;
+            }
         }
 
         self.update_fps_counters(ctx);

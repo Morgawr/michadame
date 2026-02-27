@@ -60,6 +60,9 @@ pub fn init_app_state(cc: &eframe::CreationContext) -> AppState {
         state.crt_renderer = Some(Arc::new(Mutex::new(
             crate::video::gpu::CrtFilterRenderer::new(gl),
         )));
+        state.fft_filter = Some(Arc::new(Mutex::new(
+            crate::video::gpu::FftFilter::new(gl),
+        )));
     }
 
     state

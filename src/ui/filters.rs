@@ -90,6 +90,19 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 changed = true;
             }
         });
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .checkbox(&mut state.video.fft_filter_enabled, "FFT Mask Filter")
+                .changed()
+            {
+                changed = true;
+            }
+            if state.video.fft_filter_enabled {
+                if ui.button("Edit Mask…").clicked() {
+                    state.video.fft_mask_window_open = true;
+                }
+            }
+        });
     });
 
     ui.group(|ui| {

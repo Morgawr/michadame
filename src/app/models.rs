@@ -57,6 +57,8 @@ pub struct VideoSettings {
     pub vibrance: f32,
     pub overscan_x: f32,
     pub overscan_y: f32,
+    pub fft_filter_enabled: bool,
+    pub fft_mask_window_open: bool,
 }
 
 pub struct AppState {
@@ -86,6 +88,11 @@ pub struct AppState {
     pub profiles: BTreeMap<String, config::Profile>,
     pub active_profile: String,
     pub new_profile_name: String,
+
+    pub fft_filter: Option<Arc<Mutex<crate::video::gpu::FftFilter>>>,
+    pub fft_mask_data: Vec<u8>,
+    pub fft_mask_resolution: (u32, u32),
+    pub fft_brush_radius: f32,
 }
 
 #[cfg(test)]

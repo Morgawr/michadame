@@ -17,6 +17,11 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         let texture_size = video_texture.size_vec2();
 
         let filter = CrtFilter::from_u8(state.crt_filter.load(std::sync::atomic::Ordering::Relaxed));
+        let fft_filter_ref = if state.video.fft_filter_enabled {
+            state.fft_filter.clone()
+        } else {
+            None
+        };
 
         if state.video.pixelate_filter_enabled || filter == CrtFilter::Lottes {
             if let Some(renderer_arc) = &state.crt_renderer {
@@ -27,6 +32,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 let rect = response.rect;
                 let latest_frame = state.latest_frame.clone();
                 let video_texture_id = state.video_texture.as_ref().map(|t| t.id());
+                let fft_clone = fft_filter_ref.clone();
 
                 let callback = egui::PaintCallback {
                     rect: response.rect,
@@ -50,6 +56,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 &params,
                                 pixelate,
                                 run_lottes,
+                                fft_clone.as_ref(),
                             )
                         },
                     )),
@@ -72,6 +79,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             let scaler_filter = state.scaler_filter.load(std::sync::atomic::Ordering::Relaxed);
             let latest_frame = state.latest_frame.clone();
             let video_texture_id = state.video_texture.as_ref().map(|t| t.id());
+            let fft_clone = fft_filter_ref.clone();
 
             let callback = egui::PaintCallback {
                 rect,
@@ -94,6 +102,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         scaler_filter,
                         overscan_x,
                         overscan_y,
+                        fft_clone.as_ref(),
                     );
                 })),
             };

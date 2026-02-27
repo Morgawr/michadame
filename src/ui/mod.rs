@@ -8,6 +8,7 @@ pub mod filters;
 pub mod profiles;
 pub mod networking;
 pub mod video_player;
+pub mod fft_mask;
 
 pub use networking::send_ws_command;
 pub use video_player::draw_video_player;

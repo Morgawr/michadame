@@ -2,8 +2,10 @@ use eframe::glow::{self, HasContext};
 use crate::video::types::RawFrame;
 use ffmpeg_next::format::Pixel;
 use std::num::NonZero;
+use std::sync::{Arc, Mutex};
 use super::params::ShaderParams;
 use super::programs::*;
+use super::fft_filter::FftFilter;
 
 pub struct CrtFilterRenderer {
     passthrough_prog: glow::Program,
@@ -199,6 +201,7 @@ impl CrtFilterRenderer {
         params: &ShaderParams,
         run_pixelate: bool,
         run_lottes: bool,
+        fft_filter: Option<&Arc<Mutex<FftFilter>>>,
     ) {
         let mut video_texture = fallback_texture;
 
@@ -288,6 +291,18 @@ impl CrtFilterRenderer {
 
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 video_texture = Some(self.pass_textures[6]);
+
+                // Apply FFT filter to raw frame data (at capture card resolution, before any scaling)
+                if let Some(fft_arc) = fft_filter {
+                    if let Some(tex) = video_texture {
+                        let mut fft = fft_arc.lock().unwrap();
+                        let filtered = fft.apply(gl, tex, frame.width, frame.height);
+                        video_texture = Some(filtered);
+                        // Restore our VAO and viewport after FFT used its own
+                        gl.bind_vertex_array(Some(self.vertex_array));
+                    }
+                }
+
                 gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
             }
 
@@ -378,7 +393,7 @@ impl CrtFilterRenderer {
                 gl.uniform_1_i32(Some(&self.passthrough_scaler_filter_loc), params.scaler_filter as i32);
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             } else {
-                self.draw_passthrough(gl, None, Some(lottes_input_texture), resolution, output_size, params.background_color, params.horizontal_stretch, params.median_filter_enabled, params.vibrance, params.scaler_filter, params.overscan_x, params.overscan_y);
+                self.draw_passthrough(gl, None, Some(lottes_input_texture), resolution, output_size, params.background_color, params.horizontal_stretch, params.median_filter_enabled, params.vibrance, params.scaler_filter, params.overscan_x, params.overscan_y, None);
             }
 
             gl.bind_vertex_array(None);
@@ -405,6 +420,7 @@ impl CrtFilterRenderer {
         scaler_filter: u8,
         overscan_x: f32,
         overscan_y: f32,
+        fft_filter: Option<&Arc<Mutex<FftFilter>>>,
     ) {
         let mut video_texture = fallback_texture;
 
@@ -491,6 +507,18 @@ impl CrtFilterRenderer {
 
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 video_texture = Some(self.pass_textures[6]);
+
+                // Apply FFT filter to raw frame data (at capture card resolution, before any scaling)
+                if let Some(fft_arc) = fft_filter {
+                    if let Some(tex) = video_texture {
+                        let mut fft = fft_arc.lock().unwrap();
+                        let filtered = fft.apply(gl, tex, frame.width, frame.height);
+                        video_texture = Some(filtered);
+                        // Restore our VAO and viewport after FFT used its own
+                        gl.bind_vertex_array(Some(self.vertex_array));
+                    }
+                }
+
                 gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
             }
 

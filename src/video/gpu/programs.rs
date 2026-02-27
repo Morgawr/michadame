@@ -11,6 +11,12 @@ pub const FS_PASS1: &str = include_str!("../shaders/fs_pass1.glsl");
 pub const FS_PASS2: &str = include_str!("../shaders/fs_pass2.glsl");
 pub const FS_PASS3: &str = include_str!("../shaders/fs_pass3.glsl");
 pub const FS_FINAL: &str = include_str!("../shaders/fs_final.glsl");
+pub const FS_FFT_INIT: &str = include_str!("../shaders/fs_fft_init.glsl");
+pub const FS_FFT_BUTTERFLY: &str = include_str!("../shaders/fs_fft_butterfly.glsl");
+pub const FS_FFT_MASK: &str = include_str!("../shaders/fs_fft_mask.glsl");
+pub const FS_FFT_EXTRACT: &str = include_str!("../shaders/fs_fft_extract.glsl");
+pub const FS_FFT_SPECTRUM: &str = include_str!("../shaders/fs_fft_spectrum.glsl");
+pub const FS_FFT_BITREV: &str = include_str!("../shaders/fs_fft_bitrev.glsl");
 
 pub unsafe fn compile_program(gl: &glow::Context, vs_src: &str, fs_src: &str) -> glow::Program {
     let program = gl.create_program().expect("Cannot create program");
