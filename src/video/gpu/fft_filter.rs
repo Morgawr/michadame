@@ -29,6 +29,7 @@ pub struct FftFilter {
     mask_fft_loc: Option<glow::UniformLocation>,
     mask_mask_loc: Option<glow::UniformLocation>,
     mask_fft_size_loc: Option<glow::UniformLocation>,
+    mask_threshold_loc: Option<glow::UniformLocation>,
 
     extract_ifft_loc: Option<glow::UniformLocation>,
     extract_orig_loc: Option<glow::UniformLocation>,
@@ -130,6 +131,7 @@ impl FftFilter {
             let mask_fft_loc = gl.get_uniform_location(mask_prog, "fft_texture");
             let mask_mask_loc = gl.get_uniform_location(mask_prog, "mask_texture");
             let mask_fft_size_loc = gl.get_uniform_location(mask_prog, "fft_size");
+            let mask_threshold_loc = gl.get_uniform_location(mask_prog, "mask_threshold");
             gl.use_program(Some(mask_prog));
             gl.uniform_1_i32(mask_fft_loc.as_ref(), 0);
             gl.uniform_1_i32(mask_mask_loc.as_ref(), 1);
@@ -186,7 +188,7 @@ impl FftFilter {
                 init_input_loc, init_fft_size_loc, init_orig_size_loc,
                 butterfly_input_loc, butterfly_axis_loc, butterfly_stage_loc,
                 butterfly_direction_loc, butterfly_fft_size_loc,
-                mask_fft_loc, mask_mask_loc, mask_fft_size_loc,
+                mask_fft_loc, mask_mask_loc, mask_fft_size_loc, mask_threshold_loc,
                 extract_ifft_loc, extract_orig_loc, extract_fft_size_loc, extract_orig_size_loc,
                 spectrum_fft_loc, spectrum_mask_loc, spectrum_fft_size_loc,
                 bitrev_input_loc, bitrev_fft_size_loc,
@@ -296,6 +298,7 @@ impl FftFilter {
         input_texture: glow::Texture,
         orig_width: u32,
         orig_height: u32,
+        mask_threshold: f32,
     ) -> glow::Texture {
         let (fft_w, fft_h) = Self::fft_dimensions(orig_width, orig_height);
         self.setup_resources(gl, fft_w, fft_h, orig_width, orig_height);
@@ -365,6 +368,7 @@ impl FftFilter {
             gl.active_texture(glow::TEXTURE1);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.mask_tex));
             gl.uniform_2_i32(self.mask_fft_size_loc.as_ref(), fft_w as i32, fft_h as i32);
+            gl.uniform_1_f32(self.mask_threshold_loc.as_ref(), mask_threshold);
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             cur = mask_dst;
 

@@ -33,6 +33,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 let latest_frame = state.latest_frame.clone();
                 let video_texture_id = state.video_texture.as_ref().map(|t| t.id());
                 let fft_clone = fft_filter_ref.clone();
+                let fft_threshold = state.fft_mask_threshold;
 
                 let callback = egui::PaintCallback {
                     rect: response.rect,
@@ -57,6 +58,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 pixelate,
                                 run_lottes,
                                 fft_clone.as_ref(),
+                                fft_threshold,
                             )
                         },
                     )),
@@ -80,6 +82,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             let latest_frame = state.latest_frame.clone();
             let video_texture_id = state.video_texture.as_ref().map(|t| t.id());
             let fft_clone = fft_filter_ref.clone();
+            let fft_threshold = state.fft_mask_threshold;
 
             let callback = egui::PaintCallback {
                 rect,
@@ -103,6 +106,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         overscan_x,
                         overscan_y,
                         fft_clone.as_ref(),
+                        fft_threshold,
                     );
                 })),
             };

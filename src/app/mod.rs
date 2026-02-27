@@ -91,6 +91,7 @@ impl Default for AppState {
             fft_mask_data: Vec::new(),
             fft_mask_resolution: (0, 0),
             fft_brush_radius: 8.0,
+            fft_mask_threshold: 0.0,
         }
     }
 }

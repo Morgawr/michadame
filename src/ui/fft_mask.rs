@@ -39,6 +39,14 @@ pub fn draw_fft_mask_editor(state: &mut AppState, ctx: &egui::Context) -> bool {
                 }
             });
 
+            ui.horizontal(|ui| {
+                ui.label("Threshold:");
+                let mut pct = state.fft_mask_threshold * 100.0;
+                if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).suffix("%")).changed() {
+                    state.fft_mask_threshold = pct / 100.0;
+                }
+            }).response.on_hover_text("Only block frequencies brighter than this threshold.\n0% = block all masked, 100% = block only the brightest peaks.");
+
             ui.label("Left-drag: block frequencies | Right-drag: restore | Scroll: brush size");
             ui.separator();
 

@@ -93,6 +93,7 @@ pub struct AppState {
     pub fft_mask_data: Vec<u8>,
     pub fft_mask_resolution: (u32, u32),
     pub fft_brush_radius: f32,
+    pub fft_mask_threshold: f32,
 }
 
 #[cfg(test)]
