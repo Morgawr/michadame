@@ -337,9 +337,17 @@ impl CrtFilterRenderer {
 
         let scaler = ScalerFilter::from_u8(params.scaler_filter);
         let is_bunny = matches!(scaler, ScalerFilter::BuNNy | ScalerFilter::BuNNyMedium | ScalerFilter::BuNNyHigh | ScalerFilter::BuNNyNeutral | ScalerFilter::BuNNyNVL);
+        let is_anime4k = matches!(scaler, ScalerFilter::Anime4kSmall | ScalerFilter::Anime4kMedium | ScalerFilter::Anime4kLarge);
 
         let effective_res = if is_bunny {
             self.bunny.get_upscaled_size(resolution.0, resolution.1, output_size.0 as u32, output_size.1 as u32)
+        } else if is_anime4k {
+            match scaler {
+                ScalerFilter::Anime4kSmall => self.anime4k_small.get_upscaled_size(resolution.0, resolution.1, output_size.0 as u32, output_size.1 as u32),
+                ScalerFilter::Anime4kMedium => self.anime4k_medium.get_upscaled_size(resolution.0, resolution.1, output_size.0 as u32, output_size.1 as u32),
+                ScalerFilter::Anime4kLarge => self.anime4k_large.get_upscaled_size(resolution.0, resolution.1, output_size.0 as u32, output_size.1 as u32),
+                _ => unreachable!(),
+            }
         } else {
             resolution
         };
@@ -519,10 +527,28 @@ impl CrtFilterRenderer {
     ) {
         let mut video_texture = fallback_texture;
 
-        if self.last_size != resolution || self.last_scaler_filter != Some(scaler_filter) {
+        let scaler = ScalerFilter::from_u8(scaler_filter);
+        let is_bunny = matches!(scaler, ScalerFilter::BuNNy | ScalerFilter::BuNNyMedium | ScalerFilter::BuNNyHigh | ScalerFilter::BuNNyNeutral | ScalerFilter::BuNNyNVL);
+        let is_anime4k = matches!(scaler, ScalerFilter::Anime4kSmall | ScalerFilter::Anime4kMedium | ScalerFilter::Anime4kLarge);
+
+        let effective_res = if is_bunny {
+            self.bunny.get_upscaled_size(resolution.0, resolution.1, output_size.0 as u32, output_size.1 as u32)
+        } else if is_anime4k {
+            match scaler {
+                ScalerFilter::Anime4kSmall => self.anime4k_small.get_upscaled_size(resolution.0, resolution.1, output_size.0 as u32, output_size.1 as u32),
+                ScalerFilter::Anime4kMedium => self.anime4k_medium.get_upscaled_size(resolution.0, resolution.1, output_size.0 as u32, output_size.1 as u32),
+                ScalerFilter::Anime4kLarge => self.anime4k_large.get_upscaled_size(resolution.0, resolution.1, output_size.0 as u32, output_size.1 as u32),
+                _ => unreachable!(),
+            }
+        } else {
+            resolution
+        };
+
+        if self.last_size != resolution || self.last_scaler_filter != Some(scaler_filter) || self.last_pass_res != effective_res {
             self.setup_framebuffers(gl, resolution.0, resolution.1, output_size.0 as u32, output_size.1 as u32, scaler_filter);
             self.last_size = resolution;
             self.last_scaler_filter = Some(scaler_filter);
+            self.last_pass_res = effective_res;
         }
 
         unsafe {

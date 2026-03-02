@@ -52,8 +52,8 @@ impl CascadeData {
             } else {
                 gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA32F as i32, target_w as i32, target_h as i32, 0, glow::RGBA, glow::FLOAT, None);
             }
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
             
@@ -63,8 +63,8 @@ impl CascadeData {
         
         gl.bind_texture(glow::TEXTURE_2D, Some(self.cascade_tex));
         gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, out_w as i32, out_h as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, None);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.cascade_fbo));
@@ -328,6 +328,14 @@ impl Anime4kUpscaler {
                 pass_idx_loop += 1;
                 current_input = Some(input_tex);
             }
+            
+            // Fix: ensure the final dynamically cascaded FBO texture returned for downstream passes
+            // operates gracefully with LINEAR interpolation. Otherwise nearest-neighbor on high 
+            // frequency CNN residuals introduces visual grid/checkering under 4K window scalings.
+            gl.bind_texture(glow::TEXTURE_2D, Some(input_tex));
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+            gl.bind_texture(glow::TEXTURE_2D, None);
             
             // Restore FBO state
             if current_fbo[0] == 0 {
