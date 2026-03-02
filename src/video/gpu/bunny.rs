@@ -166,7 +166,8 @@ impl BunnyUpscaler {
         
         let mut pass_idx = 0;
 
-        while curr_width < target_width && curr_height < target_height {
+        // Apply hysteresis to only upscale if target is noticeably larger (at least 1.2x)
+        while curr_width * 6 < target_width * 5 && curr_height * 6 < target_height * 5 {
             // Ensure pass data exists and is correctly sized
             if pass_idx >= self.passes.len() {
                 self.passes.push(PassData::new(gl, curr_width, curr_height));
@@ -226,7 +227,8 @@ impl BunnyUpscaler {
     pub fn get_upscaled_size(&self, width: u32, height: u32, target_width: u32, target_height: u32) -> (u32, u32) {
         let mut curr_width = width;
         let mut curr_height = height;
-        while curr_width < target_width && curr_height < target_height {
+        // Apply hysteresis to only upscale if target is noticeably larger (at least 1.2x)
+        while curr_width * 6 < target_width * 5 && curr_height * 6 < target_height * 5 {
             curr_width *= 2;
             curr_height *= 2;
         }

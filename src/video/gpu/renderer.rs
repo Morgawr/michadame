@@ -7,6 +7,7 @@ use super::params::ShaderParams;
 use super::programs::*;
 use super::fft_filter::FftFilter;
 use super::bunny::BunnyUpscaler;
+use super::anime4k::{Anime4kUpscaler, Anime4kVariant};
 
 pub struct CrtFilterRenderer {
     passthrough_prog: glow::Program,
@@ -25,6 +26,9 @@ pub struct CrtFilterRenderer {
     yuyv_overscan_loc: glow::UniformLocation,
     median_mix_loc: glow::UniformLocation,
     bunny: BunnyUpscaler,
+    anime4k_small: Anime4kUpscaler,
+    anime4k_medium: Anime4kUpscaler,
+    anime4k_large: Anime4kUpscaler,
 
     fbos: [glow::Framebuffer; 7],
     pass_textures: [glow::Texture; 7],
@@ -190,6 +194,9 @@ impl CrtFilterRenderer {
                 passthrough_horizontal_stretch_loc, final_vibrance_loc, passthrough_vibrance_loc,
                 passthrough_scaler_filter_loc, median_prog, median_mix_loc, 
                 bunny: BunnyUpscaler::new(gl),
+                anime4k_small: Anime4kUpscaler::new(gl, Anime4kVariant::Small),
+                anime4k_medium: Anime4kUpscaler::new(gl, Anime4kVariant::Medium),
+                anime4k_large: Anime4kUpscaler::new(gl, Anime4kVariant::Large),
                 last_size: (0, 0),
                 last_scaler_filter: None,
                 last_pass_res: (0, 0),
@@ -292,6 +299,18 @@ impl CrtFilterRenderer {
         if let Some(fft_arc) = fft_filter {
             let mut fft = fft_arc.lock().unwrap();
             tex = fft.apply(gl, tex, frame.width, frame.height, fft_mask_threshold, fft_black_threshold);
+            
+            // Set filtering mode dynamically based on current params.scaler_filter
+            let current_filter = if self.last_scaler_filter == Some(crate::video::types::ScalerFilter::Point as u8) {
+                glow::NEAREST as i32
+            } else {
+                glow::LINEAR as i32
+            };
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, current_filter);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, current_filter);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+
             // Restore our VAO after FFT used its own
             gl.bind_vertex_array(Some(self.vertex_array));
         }
@@ -336,6 +355,8 @@ impl CrtFilterRenderer {
             let old_vbo = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
             let scissor_enabled = gl.is_enabled(glow::SCISSOR_TEST);
             gl.disable(glow::SCISSOR_TEST);
+            let blend_enabled = gl.is_enabled(glow::BLEND);
+            gl.disable(glow::BLEND);
             gl.bind_vertex_array(Some(self.vertex_array));
             gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
 
@@ -363,9 +384,19 @@ impl CrtFilterRenderer {
 
             let scaler = ScalerFilter::from_u8(params.scaler_filter);
             let is_bunny = matches!(scaler, ScalerFilter::BuNNy | ScalerFilter::BuNNyMedium | ScalerFilter::BuNNyHigh | ScalerFilter::BuNNyNeutral | ScalerFilter::BuNNyNVL);
+            let is_anime4k = matches!(scaler, ScalerFilter::Anime4kSmall | ScalerFilter::Anime4kMedium | ScalerFilter::Anime4kLarge);
 
             if is_bunny {
                 let upscaled = self.bunny.upscale(gl, current_video_texture, current_res.0, current_res.1, output_size.0 as u32, output_size.1 as u32, scaler);
+                current_video_texture = upscaled.0;
+                current_res = (upscaled.1, upscaled.2);
+            } else if is_anime4k {
+                let upscaled = match scaler {
+                    ScalerFilter::Anime4kSmall => self.anime4k_small.upscale(gl, current_video_texture, current_res.0, current_res.1, output_size.0 as u32, output_size.1 as u32),
+                    ScalerFilter::Anime4kMedium => self.anime4k_medium.upscale(gl, current_video_texture, current_res.0, current_res.1, output_size.0 as u32, output_size.1 as u32),
+                    ScalerFilter::Anime4kLarge => self.anime4k_large.upscale(gl, current_video_texture, current_res.0, current_res.1, output_size.0 as u32, output_size.1 as u32),
+                    _ => unreachable!(),
+                };
                 current_video_texture = upscaled.0;
                 current_res = (upscaled.1, upscaled.2);
             }
@@ -453,6 +484,10 @@ impl CrtFilterRenderer {
                 gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
                 self.draw_passthrough_internal(gl, current_video_texture, current_res, output_size, params.background_color, params.horizontal_stretch, params.vibrance, params.scaler_filter);
             }
+            
+            if blend_enabled {
+                gl.enable(glow::BLEND);
+            }
 
             gl.bind_vertex_array(None);
             if old_vbo != 0 {
@@ -494,6 +529,8 @@ impl CrtFilterRenderer {
             let old_vbo = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
             let scissor_enabled = gl.is_enabled(glow::SCISSOR_TEST);
             gl.disable(glow::SCISSOR_TEST);
+            let blend_enabled = gl.is_enabled(glow::BLEND);
+            gl.disable(glow::BLEND);
             gl.bind_vertex_array(Some(self.vertex_array));
 
             if let Some(frame) = raw_frame {
@@ -519,9 +556,19 @@ impl CrtFilterRenderer {
 
             let scaler = ScalerFilter::from_u8(scaler_filter);
             let is_bunny = matches!(scaler, ScalerFilter::BuNNy | ScalerFilter::BuNNyMedium | ScalerFilter::BuNNyHigh | ScalerFilter::BuNNyNeutral | ScalerFilter::BuNNyNVL);
+            let is_anime4k = matches!(scaler, ScalerFilter::Anime4kSmall | ScalerFilter::Anime4kMedium | ScalerFilter::Anime4kLarge);
 
             if is_bunny {
                 let upscaled = self.bunny.upscale(gl, current_video_texture, current_res.0, current_res.1, output_size.0 as u32, output_size.1 as u32, scaler);
+                current_video_texture = upscaled.0;
+                current_res = (upscaled.1, upscaled.2);
+            } else if is_anime4k {
+                let upscaled = match scaler {
+                    ScalerFilter::Anime4kSmall => self.anime4k_small.upscale(gl, current_video_texture, current_res.0, current_res.1, output_size.0 as u32, output_size.1 as u32),
+                    ScalerFilter::Anime4kMedium => self.anime4k_medium.upscale(gl, current_video_texture, current_res.0, current_res.1, output_size.0 as u32, output_size.1 as u32),
+                    ScalerFilter::Anime4kLarge => self.anime4k_large.upscale(gl, current_video_texture, current_res.0, current_res.1, output_size.0 as u32, output_size.1 as u32),
+                    _ => unreachable!(),
+                };
                 current_video_texture = upscaled.0;
                 current_res = (upscaled.1, upscaled.2);
             }
@@ -529,6 +576,9 @@ impl CrtFilterRenderer {
             if scissor_enabled { gl.enable(glow::SCISSOR_TEST); }
             self.draw_passthrough_internal(gl, current_video_texture, current_res, output_size, background_color, horizontal_stretch, vibrance, scaler_filter);
 
+            if blend_enabled {
+                gl.enable(glow::BLEND);
+            }
             gl.bind_vertex_array(Some(glow::VertexArray::from(glow::NativeVertexArray(NonZero::new(old_vbo as u32).unwrap()))));
         }
     }
@@ -574,6 +624,9 @@ impl CrtFilterRenderer {
             gl.delete_program(self.yuv_planar_prog);
             gl.delete_program(self.yuyv_packed_prog);
             self.bunny.destroy(gl);
+            self.anime4k_small.destroy(gl);
+            self.anime4k_medium.destroy(gl);
+            self.anime4k_large.destroy(gl);
             gl.delete_vertex_array(self.vertex_array);
             gl.delete_buffer(self.vbo);
             for fbo in self.fbos { gl.delete_framebuffer(fbo); }
@@ -586,8 +639,17 @@ impl CrtFilterRenderer {
     fn setup_framebuffers(&mut self, gl: &glow::Context, width: u32, height: u32, target_width: u32, target_height: u32, scaler_filter: u8) {
         let scaler = ScalerFilter::from_u8(scaler_filter);
         let is_bunny = matches!(scaler, ScalerFilter::BuNNy | ScalerFilter::BuNNyMedium | ScalerFilter::BuNNyHigh | ScalerFilter::BuNNyNeutral | ScalerFilter::BuNNyNVL);
+        let is_anime4k = matches!(scaler, ScalerFilter::Anime4kSmall | ScalerFilter::Anime4kMedium | ScalerFilter::Anime4kLarge);
+        
         let (effective_width, effective_height) = if is_bunny {
             self.bunny.get_upscaled_size(width, height, target_width, target_height)
+        } else if is_anime4k {
+            match scaler {
+                ScalerFilter::Anime4kSmall => self.anime4k_small.get_upscaled_size(width, height, target_width, target_height),
+                ScalerFilter::Anime4kMedium => self.anime4k_medium.get_upscaled_size(width, height, target_width, target_height),
+                ScalerFilter::Anime4kLarge => self.anime4k_large.get_upscaled_size(width, height, target_width, target_height),
+                _ => unreachable!(),
+            }
         } else {
             (width, height)
         };

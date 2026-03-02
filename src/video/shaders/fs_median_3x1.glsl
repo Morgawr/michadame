@@ -13,9 +13,9 @@
         vec2 dx = vec2(1.0 / tex_size.x, 0.0);
         
         vec3 col_m = texture(video_texture, v_tc - dx).rgb;
-        vec3 col_c = texture(video_texture, v_tc).rgb;
+        vec4 tex_c = texture(video_texture, v_tc);
         vec3 col_p = texture(video_texture, v_tc + dx).rgb;
         
-        vec3 result = median(col_m, col_c, col_p);
-        out_color = vec4(mix(col_c, result, mix_amount), 1.0);
+        vec3 result = median(col_m, tex_c.rgb, col_p);
+        out_color = vec4(mix(tex_c.rgb, result, mix_amount), tex_c.a);
     }

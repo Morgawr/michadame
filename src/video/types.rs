@@ -85,6 +85,9 @@ pub enum ScalerFilter {
     BuNNyHigh = 7,
     BuNNyNeutral = 8,
     BuNNyNVL = 9,
+    Anime4kSmall = 10,
+    Anime4kMedium = 11,
+    Anime4kLarge = 12,
 }
 
 impl ScalerFilter {
@@ -99,6 +102,9 @@ impl ScalerFilter {
             7 => ScalerFilter::BuNNyHigh,
             8 => ScalerFilter::BuNNyNeutral,
             9 => ScalerFilter::BuNNyNVL,
+            10 => ScalerFilter::Anime4kSmall,
+            11 => ScalerFilter::Anime4kMedium,
+            12 => ScalerFilter::Anime4kLarge,
             _ => ScalerFilter::FastBilinear,
         }
     }
@@ -110,7 +116,8 @@ impl ScalerFilter {
             ScalerFilter::Bicubic => ffmpeg_next::software::scaling::flag::Flags::BICUBIC,
             ScalerFilter::Point => ffmpeg_next::software::scaling::flag::Flags::POINT,
             ScalerFilter::Lanczos => ffmpeg_next::software::scaling::flag::Flags::LANCZOS,
-            ScalerFilter::BuNNy | ScalerFilter::BuNNyMedium | ScalerFilter::BuNNyHigh | ScalerFilter::BuNNyNeutral | ScalerFilter::BuNNyNVL => {
+            ScalerFilter::BuNNy | ScalerFilter::BuNNyMedium | ScalerFilter::BuNNyHigh | ScalerFilter::BuNNyNeutral | ScalerFilter::BuNNyNVL |
+            ScalerFilter::Anime4kSmall | ScalerFilter::Anime4kMedium | ScalerFilter::Anime4kLarge => {
                 ffmpeg_next::software::scaling::flag::Flags::LANCZOS
             }
         }
@@ -130,6 +137,9 @@ impl std::fmt::Display for ScalerFilter {
             ScalerFilter::BuNNyHigh => "BuNNy (CNN High)",
             ScalerFilter::BuNNyNeutral => "BuNNy (CNN 4x12 Neutral)",
             ScalerFilter::BuNNyNVL => "BuNNy (CNN 3x12 NVL)",
+            ScalerFilter::Anime4kSmall => "Anime4K S (Very Fast)",
+            ScalerFilter::Anime4kMedium => "Anime4K M (Fast)",
+            ScalerFilter::Anime4kLarge => "Anime4K L (Medium)",
         };
         write!(f, "{}", text)
     }
@@ -184,7 +194,10 @@ mod tests {
         assert_eq!(ScalerFilter::from_u8(7), ScalerFilter::BuNNyHigh);
         assert_eq!(ScalerFilter::from_u8(8), ScalerFilter::BuNNyNeutral);
         assert_eq!(ScalerFilter::from_u8(9), ScalerFilter::BuNNyNVL);
-        assert_eq!(ScalerFilter::from_u8(10), ScalerFilter::FastBilinear); // Default
+        assert_eq!(ScalerFilter::from_u8(10), ScalerFilter::Anime4kSmall);
+        assert_eq!(ScalerFilter::from_u8(11), ScalerFilter::Anime4kMedium);
+        assert_eq!(ScalerFilter::from_u8(12), ScalerFilter::Anime4kLarge);
+        assert_eq!(ScalerFilter::from_u8(13), ScalerFilter::FastBilinear); // Default
     }
 
     #[test]
@@ -199,6 +212,9 @@ mod tests {
         assert_eq!(ScalerFilter::BuNNyHigh.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::LANCZOS);
         assert_eq!(ScalerFilter::BuNNyNeutral.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::LANCZOS);
         assert_eq!(ScalerFilter::BuNNyNVL.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::LANCZOS);
+        assert_eq!(ScalerFilter::Anime4kSmall.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::LANCZOS);
+        assert_eq!(ScalerFilter::Anime4kMedium.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::LANCZOS);
+        assert_eq!(ScalerFilter::Anime4kLarge.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::LANCZOS);
     }
 
     #[test]
