@@ -37,7 +37,7 @@ impl PassData {
     }
 
     unsafe fn setup_textures(&self, gl: &glow::Context, width: u32, height: u32) {
-        // Intermediate textures: Always 3x width to handle up to 12 channels
+        // Intermediate textures: Always 3x width to handle up to 12 channels (3 vec4s)
         for tex in self.intermediate_textures {
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
             gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, (width * 3) as i32, height as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, None);
@@ -101,6 +101,29 @@ impl BunnyUpscaler {
                     Self::create_stage(gl, include_str!("../shaders/cs_bunny_soft_high_conv3.glsl"), false),
                     Self::create_stage(gl, include_str!("../shaders/cs_bunny_soft_high_conv4.glsl"), false),
                     Self::create_stage(gl, include_str!("../shaders/cs_bunny_soft_high_out.glsl"), true),
+                ]
+            });
+
+            // NEUTRAL 4x12 Variant
+            variants.insert(ScalerFilter::BuNNyNeutral, BunnyVariant {
+                stages: vec![
+                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_neutral_4x12_in.glsl"), false),
+                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_neutral_4x12_conv1.glsl"), false),
+                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_neutral_4x12_conv2.glsl"), false),
+                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_neutral_4x12_conv3.glsl"), false),
+                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_neutral_4x12_conv4.glsl"), false),
+                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_neutral_4x12_out.glsl"), true),
+                ]
+            });
+
+            // NVL 3x12 Variant
+            variants.insert(ScalerFilter::BuNNyNVL, BunnyVariant {
+                stages: vec![
+                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_3x12_in.glsl"), false),
+                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_3x12_conv1.glsl"), false),
+                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_3x12_conv2.glsl"), false),
+                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_3x12_conv3.glsl"), false),
+                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_3x12_out.glsl"), true),
                 ]
             });
 

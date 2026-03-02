@@ -315,7 +315,7 @@ impl CrtFilterRenderer {
         let mut video_texture = fallback_texture;
 
         let scaler = ScalerFilter::from_u8(params.scaler_filter);
-        let is_bunny = matches!(scaler, ScalerFilter::BuNNy | ScalerFilter::BuNNyMedium | ScalerFilter::BuNNyHigh);
+        let is_bunny = matches!(scaler, ScalerFilter::BuNNy | ScalerFilter::BuNNyMedium | ScalerFilter::BuNNyHigh | ScalerFilter::BuNNyNeutral | ScalerFilter::BuNNyNVL);
 
         let effective_res = if is_bunny {
             self.bunny.get_upscaled_size(resolution.0, resolution.1, output_size.0 as u32, output_size.1 as u32)
@@ -360,7 +360,7 @@ impl CrtFilterRenderer {
             }
 
             let scaler = ScalerFilter::from_u8(params.scaler_filter);
-            let is_bunny = matches!(scaler, ScalerFilter::BuNNy | ScalerFilter::BuNNyMedium | ScalerFilter::BuNNyHigh);
+            let is_bunny = matches!(scaler, ScalerFilter::BuNNy | ScalerFilter::BuNNyMedium | ScalerFilter::BuNNyHigh | ScalerFilter::BuNNyNeutral | ScalerFilter::BuNNyNVL);
 
             if is_bunny {
                 let upscaled = self.bunny.upscale(gl, current_video_texture, current_res.0, current_res.1, output_size.0 as u32, output_size.1 as u32, scaler);
@@ -516,7 +516,7 @@ impl CrtFilterRenderer {
             }
 
             let scaler = ScalerFilter::from_u8(scaler_filter);
-            let is_bunny = matches!(scaler, ScalerFilter::BuNNy | ScalerFilter::BuNNyMedium | ScalerFilter::BuNNyHigh);
+            let is_bunny = matches!(scaler, ScalerFilter::BuNNy | ScalerFilter::BuNNyMedium | ScalerFilter::BuNNyHigh | ScalerFilter::BuNNyNeutral | ScalerFilter::BuNNyNVL);
 
             if is_bunny {
                 let upscaled = self.bunny.upscale(gl, current_video_texture, current_res.0, current_res.1, output_size.0 as u32, output_size.1 as u32, scaler);
@@ -583,7 +583,7 @@ impl CrtFilterRenderer {
 
     fn setup_framebuffers(&mut self, gl: &glow::Context, width: u32, height: u32, target_width: u32, target_height: u32, scaler_filter: u8) {
         let scaler = ScalerFilter::from_u8(scaler_filter);
-        let is_bunny = matches!(scaler, ScalerFilter::BuNNy | ScalerFilter::BuNNyMedium | ScalerFilter::BuNNyHigh);
+        let is_bunny = matches!(scaler, ScalerFilter::BuNNy | ScalerFilter::BuNNyMedium | ScalerFilter::BuNNyHigh | ScalerFilter::BuNNyNeutral | ScalerFilter::BuNNyNVL);
         let (effective_width, effective_height) = if is_bunny {
             self.bunny.get_upscaled_size(width, height, target_width, target_height)
         } else {

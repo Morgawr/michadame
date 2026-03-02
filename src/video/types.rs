@@ -83,6 +83,8 @@ pub enum ScalerFilter {
     BuNNy = 5,
     BuNNyMedium = 6,
     BuNNyHigh = 7,
+    BuNNyNeutral = 8,
+    BuNNyNVL = 9,
 }
 
 impl ScalerFilter {
@@ -95,6 +97,8 @@ impl ScalerFilter {
             5 => ScalerFilter::BuNNy,
             6 => ScalerFilter::BuNNyMedium,
             7 => ScalerFilter::BuNNyHigh,
+            8 => ScalerFilter::BuNNyNeutral,
+            9 => ScalerFilter::BuNNyNVL,
             _ => ScalerFilter::FastBilinear,
         }
     }
@@ -106,7 +110,7 @@ impl ScalerFilter {
             ScalerFilter::Bicubic => ffmpeg_next::software::scaling::flag::Flags::BICUBIC,
             ScalerFilter::Point => ffmpeg_next::software::scaling::flag::Flags::POINT,
             ScalerFilter::Lanczos => ffmpeg_next::software::scaling::flag::Flags::LANCZOS,
-            ScalerFilter::BuNNy | ScalerFilter::BuNNyMedium | ScalerFilter::BuNNyHigh => {
+            ScalerFilter::BuNNy | ScalerFilter::BuNNyMedium | ScalerFilter::BuNNyHigh | ScalerFilter::BuNNyNeutral | ScalerFilter::BuNNyNVL => {
                 ffmpeg_next::software::scaling::flag::Flags::LANCZOS
             }
         }
@@ -124,6 +128,8 @@ impl std::fmt::Display for ScalerFilter {
             ScalerFilter::BuNNy => "BuNNy (CNN Fast)",
             ScalerFilter::BuNNyMedium => "BuNNy (CNN Medium)",
             ScalerFilter::BuNNyHigh => "BuNNy (CNN High)",
+            ScalerFilter::BuNNyNeutral => "BuNNy (CNN 4x12 Neutral)",
+            ScalerFilter::BuNNyNVL => "BuNNy (CNN 3x12 NVL)",
         };
         write!(f, "{}", text)
     }
@@ -176,6 +182,8 @@ mod tests {
         assert_eq!(ScalerFilter::from_u8(5), ScalerFilter::BuNNy);
         assert_eq!(ScalerFilter::from_u8(6), ScalerFilter::BuNNyMedium);
         assert_eq!(ScalerFilter::from_u8(7), ScalerFilter::BuNNyHigh);
+        assert_eq!(ScalerFilter::from_u8(8), ScalerFilter::BuNNyNeutral);
+        assert_eq!(ScalerFilter::from_u8(9), ScalerFilter::BuNNyNVL);
         assert_eq!(ScalerFilter::from_u8(10), ScalerFilter::FastBilinear); // Default
     }
 
@@ -189,6 +197,8 @@ mod tests {
         assert_eq!(ScalerFilter::BuNNy.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::LANCZOS);
         assert_eq!(ScalerFilter::BuNNyMedium.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::LANCZOS);
         assert_eq!(ScalerFilter::BuNNyHigh.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::LANCZOS);
+        assert_eq!(ScalerFilter::BuNNyNeutral.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::LANCZOS);
+        assert_eq!(ScalerFilter::BuNNyNVL.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::LANCZOS);
     }
 
     #[test]
