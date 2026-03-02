@@ -53,3 +53,20 @@ pub unsafe fn compile_program(gl: &glow::Context, vs_src: &str, fs_src: &str) ->
 
     program
 }
+pub unsafe fn compile_compute_program(gl: &glow::Context, shader_source: &str) -> glow::Program {
+    let program = gl.create_program().expect("Cannot create program");
+    let shader = gl.create_shader(glow::COMPUTE_SHADER).expect("Cannot create shader");
+    gl.shader_source(shader, shader_source);
+    gl.compile_shader(shader);
+    if !gl.get_shader_compile_status(shader) {
+        panic!("{}", gl.get_shader_info_log(shader));
+    }
+    gl.attach_shader(program, shader);
+    gl.link_program(program);
+    if !gl.get_program_link_status(program) {
+        panic!("{}", gl.get_program_info_log(program));
+    }
+    gl.detach_shader(program, shader);
+    gl.delete_shader(shader);
+    program
+}

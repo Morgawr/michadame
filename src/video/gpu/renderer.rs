@@ -1,11 +1,12 @@
 use eframe::glow::{self, HasContext};
-use crate::video::types::RawFrame;
+use crate::video::types::{RawFrame, ScalerFilter};
 use ffmpeg_next::format::Pixel;
 use std::num::NonZero;
 use std::sync::{Arc, Mutex};
 use super::params::ShaderParams;
 use super::programs::*;
 use super::fft_filter::FftFilter;
+use super::bunny::BunnyUpscaler;
 
 pub struct CrtFilterRenderer {
     passthrough_prog: glow::Program,
@@ -23,6 +24,7 @@ pub struct CrtFilterRenderer {
     yuv_overscan_loc: glow::UniformLocation,
     yuyv_overscan_loc: glow::UniformLocation,
     median_mix_loc: glow::UniformLocation,
+    bunny: BunnyUpscaler,
 
     fbos: [glow::Framebuffer; 7],
     pass_textures: [glow::Texture; 7],
@@ -31,7 +33,6 @@ pub struct CrtFilterRenderer {
     vertex_array: glow::VertexArray,
     vbo: glow::Buffer,
 
-    p_passthrough_video_res_loc: glow::UniformLocation,
     p_passthrough_output_res_loc: glow::UniformLocation,
     p_pixelate_target_res_loc: glow::UniformLocation,
     p0_hard_bloom_pix_loc: glow::UniformLocation,
@@ -40,7 +41,6 @@ pub struct CrtFilterRenderer {
     p3_hard_scan_loc: glow::UniformLocation,
     p3_shape_loc: glow::UniformLocation,
 
-    final_video_res_loc: glow::UniformLocation,
     final_output_res_loc: glow::UniformLocation,
     final_warp_x_loc: glow::UniformLocation,
     final_warp_y_loc: glow::UniformLocation,
@@ -57,6 +57,7 @@ pub struct CrtFilterRenderer {
 
     last_size: (u32, u32),
     last_scaler_filter: Option<u8>,
+    last_pass_res: (u32, u32),
     last_frame_size: (u32, u32),
     last_frame_format: Option<Pixel>,
 }
@@ -75,7 +76,6 @@ impl CrtFilterRenderer {
             let yuv_planar_prog = compile_program(gl, VS_SRC, FS_YUV_PLANAR);
             let yuyv_packed_prog = compile_program(gl, VS_SRC, FS_YUYV_PACKED);
 
-            let p_passthrough_video_res_loc = gl.get_uniform_location(passthrough_prog, "videoResolution").unwrap();
             let p_passthrough_output_res_loc = gl.get_uniform_location(passthrough_prog, "outputResolution").unwrap();
             let passthrough_scaler_filter_loc = gl.get_uniform_location(passthrough_prog, "scaler_filter").unwrap();
             let p_pixelate_target_res_loc = gl.get_uniform_location(pixelate_prog, "target_resolution").unwrap();
@@ -90,7 +90,6 @@ impl CrtFilterRenderer {
             gl.uniform_1_i32(Some(&gl.get_uniform_location(median_prog, "video_texture").unwrap()), 0);
             gl.use_program(None);
 
-            let final_video_res_loc = gl.get_uniform_location(final_prog, "videoResolution").unwrap();
             let final_output_res_loc = gl.get_uniform_location(final_prog, "outputResolution").unwrap();
             let final_warp_x_loc = gl.get_uniform_location(final_prog, "warpX").unwrap();
             let final_warp_y_loc = gl.get_uniform_location(final_prog, "warpY").unwrap();
@@ -179,15 +178,21 @@ impl CrtFilterRenderer {
                 passthrough_prog, pixelate_prog, pass0_prog, pass1_prog, pass2_prog, pass3_prog,
                 final_prog, yuv_planar_prog, yuyv_packed_prog, yuv_range_loc, yuyv_range_loc,
                 yuv_overscan_loc, yuyv_overscan_loc, fbos, pass_textures, yuv_planes, pbos,
-                vertex_array, vbo, p_passthrough_video_res_loc, p_passthrough_output_res_loc,
+                vertex_array, vbo,
+                p_passthrough_output_res_loc,
                 p_pixelate_target_res_loc, p0_hard_bloom_pix_loc, p1_hard_bloom_scan_loc,
-                p2_hard_pix_loc, p3_hard_scan_loc, p3_shape_loc, final_video_res_loc,
+                p2_hard_pix_loc, p3_hard_scan_loc, p3_shape_loc,
                 final_output_res_loc, final_warp_x_loc, final_warp_y_loc, final_shadow_mask_loc,
                 final_brightboost_loc, final_bloom_amount_loc, final_background_color_loc,
                 passthrough_background_color_loc, final_horizontal_stretch_loc,
                 passthrough_horizontal_stretch_loc, final_vibrance_loc, passthrough_vibrance_loc,
-                passthrough_scaler_filter_loc, median_prog, median_mix_loc, last_size: (0, 0),
-                last_scaler_filter: None, last_frame_size: (0, 0), last_frame_format: None,
+                passthrough_scaler_filter_loc, median_prog, median_mix_loc, 
+                bunny: BunnyUpscaler::new(gl),
+                last_size: (0, 0),
+                last_scaler_filter: None,
+                last_pass_res: (0, 0),
+                last_frame_size: (0, 0),
+                last_frame_format: None,
             }
         }
     }
@@ -198,6 +203,8 @@ impl CrtFilterRenderer {
         &mut self,
         gl: &glow::Context,
         frame: &RawFrame,
+        target_width: u32,
+        target_height: u32,
         overscan_x: f32,
         overscan_y: f32,
         fft_filter: Option<&Arc<Mutex<FftFilter>>>,
@@ -205,7 +212,7 @@ impl CrtFilterRenderer {
         fft_black_threshold: f32,
     ) -> glow::Texture {
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[6]));
-        gl.viewport(0, 0, frame.width as i32, frame.height as i32);
+        gl.viewport(0, 0, target_width as i32, target_height as i32);
         gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
         gl.clear(glow::COLOR_BUFFER_BIT);
 
@@ -307,49 +314,76 @@ impl CrtFilterRenderer {
     ) {
         let mut video_texture = fallback_texture;
 
-        if self.last_size != resolution || self.last_scaler_filter != Some(params.scaler_filter) {
-            self.setup_framebuffers(gl, resolution.0, resolution.1, params.scaler_filter);
+        let scaler = ScalerFilter::from_u8(params.scaler_filter);
+        let is_bunny = matches!(scaler, ScalerFilter::BuNNy | ScalerFilter::BuNNyMedium | ScalerFilter::BuNNyHigh);
+
+        let effective_res = if is_bunny {
+            self.bunny.get_upscaled_size(resolution.0, resolution.1, output_size.0 as u32, output_size.1 as u32)
+        } else {
+            resolution
+        };
+
+        if self.last_size != resolution || self.last_scaler_filter != Some(params.scaler_filter) || self.last_pass_res != effective_res {
+            self.setup_framebuffers(gl, resolution.0, resolution.1, output_size.0 as u32, output_size.1 as u32, params.scaler_filter);
             self.last_size = resolution;
             self.last_scaler_filter = Some(params.scaler_filter);
+            self.last_pass_res = effective_res;
         }
 
         unsafe {
             let old_vbo = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
+            let scissor_enabled = gl.is_enabled(glow::SCISSOR_TEST);
+            gl.disable(glow::SCISSOR_TEST);
             gl.bind_vertex_array(Some(self.vertex_array));
             gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
 
             if let Some(frame) = raw_frame {
-                video_texture = Some(self.prepare_input_texture(gl, frame, params.overscan_x, params.overscan_y, fft_filter, fft_mask_threshold, fft_black_threshold));
+                video_texture = Some(self.prepare_input_texture(gl, frame, resolution.0, resolution.1, params.overscan_x, params.overscan_y, fft_filter, fft_mask_threshold, fft_black_threshold));
                 gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
             }
 
             let input_texture = video_texture.expect("No video texture available");
-            let mut lottes_input_texture = input_texture;
+            let mut current_video_texture = input_texture;
+            let mut current_res = resolution;
 
+            // Apply Median filter before upscaling
             if params.median_filter_enabled {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[5]));
+                gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
                 gl.use_program(Some(self.median_prog));
                 gl.uniform_1_f32(Some(&self.median_mix_loc), params.median_mix);
                 gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, video_texture);
+                gl.bind_texture(glow::TEXTURE_2D, Some(current_video_texture));
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                lottes_input_texture = self.pass_textures[5];
+                current_video_texture = self.pass_textures[5];
+                // current_res remains (width, height)
             }
 
-            let mut final_input_texture = lottes_input_texture;
+            let scaler = ScalerFilter::from_u8(params.scaler_filter);
+            let is_bunny = matches!(scaler, ScalerFilter::BuNNy | ScalerFilter::BuNNyMedium | ScalerFilter::BuNNyHigh);
+
+            if is_bunny {
+                let upscaled = self.bunny.upscale(gl, current_video_texture, current_res.0, current_res.1, output_size.0 as u32, output_size.1 as u32, scaler);
+                current_video_texture = upscaled.0;
+                current_res = (upscaled.1, upscaled.2);
+            }
+
+            let mut final_input_texture = current_video_texture;
 
             if run_pixelate {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[4]));
+                gl.viewport(0, 0, current_res.0 as i32, current_res.1 as i32);
                 gl.use_program(Some(self.pixelate_prog));
                 gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(lottes_input_texture));
-                gl.uniform_2_f32(Some(&self.p_pixelate_target_res_loc), 854.0, 480.0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(current_video_texture));
+                gl.uniform_2_f32(Some(&self.p_pixelate_target_res_loc), current_res.0 as f32, current_res.1 as f32);
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 final_input_texture = self.pass_textures[4];
             }
 
             if run_lottes {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[0]));
+                gl.viewport(0, 0, current_res.0 as i32, current_res.1 as i32);
                 gl.use_program(Some(self.pass0_prog));
                 gl.active_texture(glow::TEXTURE0);
                 gl.bind_texture(glow::TEXTURE_2D, Some(final_input_texture));
@@ -357,6 +391,7 @@ impl CrtFilterRenderer {
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[1]));
+                gl.viewport(0, 0, current_res.0 as i32, current_res.1 as i32);
                 gl.use_program(Some(self.pass1_prog));
                 gl.active_texture(glow::TEXTURE0);
                 gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[0]));
@@ -364,6 +399,7 @@ impl CrtFilterRenderer {
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[2]));
+                gl.viewport(0, 0, current_res.0 as i32, current_res.1 as i32);
                 gl.use_program(Some(self.pass2_prog));
                 gl.active_texture(glow::TEXTURE0);
                 gl.bind_texture(glow::TEXTURE_2D, Some(final_input_texture));
@@ -371,6 +407,7 @@ impl CrtFilterRenderer {
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[3]));
+                gl.viewport(0, 0, current_res.0 as i32, current_res.1 as i32);
                 gl.use_program(Some(self.pass3_prog));
                 gl.active_texture(glow::TEXTURE0);
                 gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[2]));
@@ -386,7 +423,6 @@ impl CrtFilterRenderer {
                 gl.active_texture(glow::TEXTURE1);
                 gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[3]));
 
-                gl.uniform_2_f32(Some(&self.final_video_res_loc), resolution.0 as f32, resolution.1 as f32);
                 gl.uniform_2_f32(Some(&self.final_output_res_loc), output_size.0, output_size.1);
                 gl.uniform_1_f32(Some(&self.final_warp_x_loc), params.warp_x);
                 gl.uniform_1_f32(Some(&self.final_warp_y_loc), params.warp_y);
@@ -396,6 +432,7 @@ impl CrtFilterRenderer {
                 gl.uniform_3_f32(Some(&self.final_background_color_loc), params.background_color[0], params.background_color[1], params.background_color[2]);
                 gl.uniform_1_f32(Some(&self.final_horizontal_stretch_loc), params.horizontal_stretch);
                 gl.uniform_1_f32(Some(&self.final_vibrance_loc), params.vibrance);
+                if scissor_enabled { gl.enable(glow::SCISSOR_TEST); }
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             } else if run_pixelate {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, None);
@@ -403,15 +440,16 @@ impl CrtFilterRenderer {
                 gl.use_program(Some(self.passthrough_prog));
                 gl.active_texture(glow::TEXTURE0);
                 gl.bind_texture(glow::TEXTURE_2D, Some(final_input_texture));
-                gl.uniform_2_f32(Some(&self.p_passthrough_video_res_loc), resolution.0 as f32, resolution.1 as f32);
                 gl.uniform_2_f32(Some(&self.p_passthrough_output_res_loc), output_size.0, output_size.1);
                 gl.uniform_3_f32(Some(&self.passthrough_background_color_loc), params.background_color[0], params.background_color[1], params.background_color[2]);
                 gl.uniform_1_f32(Some(&self.passthrough_horizontal_stretch_loc), params.horizontal_stretch);
                 gl.uniform_1_f32(Some(&self.passthrough_vibrance_loc), params.vibrance);
                 gl.uniform_1_i32(Some(&self.passthrough_scaler_filter_loc), params.scaler_filter as i32);
+                if scissor_enabled { gl.enable(glow::SCISSOR_TEST); }
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             } else {
-                self.draw_passthrough(gl, None, Some(lottes_input_texture), resolution, output_size, params.background_color, params.horizontal_stretch, params.median_filter_enabled, params.median_mix, params.vibrance, params.scaler_filter, params.overscan_x, params.overscan_y, None, 0.0, 0.0);
+                gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+                self.draw_passthrough_internal(gl, current_video_texture, current_res, output_size, params.background_color, params.horizontal_stretch, params.vibrance, params.scaler_filter);
             }
 
             gl.bind_vertex_array(None);
@@ -423,7 +461,6 @@ impl CrtFilterRenderer {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn draw_passthrough(
         &mut self,
         gl: &glow::Context,
@@ -446,51 +483,80 @@ impl CrtFilterRenderer {
         let mut video_texture = fallback_texture;
 
         if self.last_size != resolution || self.last_scaler_filter != Some(scaler_filter) {
-            self.setup_framebuffers(gl, resolution.0, resolution.1, scaler_filter);
+            self.setup_framebuffers(gl, resolution.0, resolution.1, output_size.0 as u32, output_size.1 as u32, scaler_filter);
             self.last_size = resolution;
             self.last_scaler_filter = Some(scaler_filter);
         }
 
         unsafe {
             let old_vbo = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
+            let scissor_enabled = gl.is_enabled(glow::SCISSOR_TEST);
+            gl.disable(glow::SCISSOR_TEST);
             gl.bind_vertex_array(Some(self.vertex_array));
 
             if let Some(frame) = raw_frame {
-                video_texture = Some(self.prepare_input_texture(gl, frame, overscan_x, overscan_y, fft_filter, fft_mask_threshold, fft_black_threshold));
+                video_texture = Some(self.prepare_input_texture(gl, frame, resolution.0, resolution.1, overscan_x, overscan_y, fft_filter, fft_mask_threshold, fft_black_threshold));
                 gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
             }
 
             let input_texture = video_texture.expect("No video texture available");
-            let mut final_input_texture = input_texture;
+            let mut current_video_texture = input_texture;
+            let mut current_res = resolution;
 
+            // Apply Median filter before upscaling
             if median_filter_enabled {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[5]));
-                gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
+                gl.viewport(0, 0, current_res.0 as i32, current_res.1 as i32);
                 gl.use_program(Some(self.median_prog));
                 gl.uniform_1_f32(Some(&self.median_mix_loc), median_mix);
                 gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(input_texture));
+                gl.bind_texture(glow::TEXTURE_2D, Some(current_video_texture));
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                final_input_texture = self.pass_textures[5];
+                current_video_texture = self.pass_textures[5];
             }
 
-            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
-            gl.use_program(Some(self.passthrough_prog));
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(final_input_texture));
+            let scaler = ScalerFilter::from_u8(scaler_filter);
+            let is_bunny = matches!(scaler, ScalerFilter::BuNNy | ScalerFilter::BuNNyMedium | ScalerFilter::BuNNyHigh);
 
-            gl.uniform_2_f32(Some(&self.p_passthrough_video_res_loc), resolution.0 as f32, resolution.1 as f32);
-            gl.uniform_2_f32(Some(&self.p_passthrough_output_res_loc), output_size.0, output_size.1);
-            gl.uniform_3_f32(Some(&self.passthrough_background_color_loc), background_color[0], background_color[1], background_color[2]);
-            gl.uniform_1_f32(Some(&self.passthrough_horizontal_stretch_loc), horizontal_stretch);
-            gl.uniform_1_f32(Some(&self.passthrough_vibrance_loc), vibrance);
-            gl.uniform_1_i32(Some(&self.passthrough_scaler_filter_loc), scaler_filter as i32);
+            if is_bunny {
+                let upscaled = self.bunny.upscale(gl, current_video_texture, current_res.0, current_res.1, output_size.0 as u32, output_size.1 as u32, scaler);
+                current_video_texture = upscaled.0;
+                current_res = (upscaled.1, upscaled.2);
+            }
 
-            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            if scissor_enabled { gl.enable(glow::SCISSOR_TEST); }
+            self.draw_passthrough_internal(gl, current_video_texture, current_res, output_size, background_color, horizontal_stretch, vibrance, scaler_filter);
 
             gl.bind_vertex_array(Some(glow::VertexArray::from(glow::NativeVertexArray(NonZero::new(old_vbo as u32).unwrap()))));
         }
+    }
+
+    unsafe fn draw_passthrough_internal(
+        &self,
+        gl: &glow::Context,
+        video_texture: glow::Texture,
+        _resolution: (u32, u32),
+        output_size: (f32, f32),
+        background_color: [f32; 3],
+        horizontal_stretch: f32,
+        vibrance: f32,
+        scaler_filter: u8,
+    ) {
+        let final_input_texture = video_texture;
+
+        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+        gl.use_program(Some(self.passthrough_prog));
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(glow::TEXTURE_2D, Some(final_input_texture));
+
+        gl.uniform_2_f32(Some(&self.p_passthrough_output_res_loc), output_size.0, output_size.1);
+        gl.uniform_3_f32(Some(&self.passthrough_background_color_loc), background_color[0], background_color[1], background_color[2]);
+        gl.uniform_1_f32(Some(&self.passthrough_horizontal_stretch_loc), horizontal_stretch);
+        gl.uniform_1_f32(Some(&self.passthrough_vibrance_loc), vibrance);
+        gl.uniform_1_i32(Some(&self.passthrough_scaler_filter_loc), scaler_filter as i32);
+
+        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
     }
 
     pub fn destroy(&self, gl: &glow::Context) {
@@ -501,8 +567,11 @@ impl CrtFilterRenderer {
             gl.delete_program(self.pass1_prog);
             gl.delete_program(self.pass2_prog);
             gl.delete_program(self.pass3_prog);
+            gl.delete_program(self.median_prog);
+            gl.delete_program(self.final_prog);
             gl.delete_program(self.yuv_planar_prog);
             gl.delete_program(self.yuyv_packed_prog);
+            self.bunny.destroy(gl);
             gl.delete_vertex_array(self.vertex_array);
             gl.delete_buffer(self.vbo);
             for fbo in self.fbos { gl.delete_framebuffer(fbo); }
@@ -512,7 +581,15 @@ impl CrtFilterRenderer {
         }
     }
 
-    fn setup_framebuffers(&mut self, gl: &glow::Context, width: u32, height: u32, scaler_filter: u8) {
+    fn setup_framebuffers(&mut self, gl: &glow::Context, width: u32, height: u32, target_width: u32, target_height: u32, scaler_filter: u8) {
+        let scaler = ScalerFilter::from_u8(scaler_filter);
+        let is_bunny = matches!(scaler, ScalerFilter::BuNNy | ScalerFilter::BuNNyMedium | ScalerFilter::BuNNyHigh);
+        let (effective_width, effective_height) = if is_bunny {
+            self.bunny.get_upscaled_size(width, height, target_width, target_height)
+        } else {
+            (width, height)
+        };
+
         let filter_mode = if scaler_filter == crate::video::types::ScalerFilter::Point as u8 {
             glow::NEAREST as i32
         } else {
@@ -522,7 +599,10 @@ impl CrtFilterRenderer {
         unsafe {
             for i in 0..self.pass_textures.len() {
                 gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[i]));
-                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA as i32, width as i32, height as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, None);
+                // Pass 5 (Median) and Pass 6 (YUV Conversion) should ALWAYS keep original resolution
+                // because they happen BEFORE any upscaling.
+                let (w, h) = if i == 6 || i == 5 { (width, height) } else { (effective_width, effective_height) };
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, w as i32, h as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, None);
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, filter_mode);
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter_mode);
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);

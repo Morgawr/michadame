@@ -5,7 +5,6 @@
     uniform sampler2D pass1_texture; // bloom
     uniform sampler2D pass3_texture; // scanlines
 
-    uniform vec2 videoResolution;
     uniform vec2 outputResolution;
 
     uniform float warpX;
@@ -72,7 +71,8 @@
         vec2 corrected_tc = vec2(v_tc.x, 1.0 - v_tc.y);
 
         // Calculate aspect ratios
-        float video_aspect = (videoResolution.x * horizontal_stretch) / videoResolution.y;
+        vec2 video_res = vec2(textureSize(pass1_texture, 0));
+        float video_aspect = (video_res.x * horizontal_stretch) / video_res.y;
         float output_aspect = outputResolution.x / outputResolution.y;
 
         // Determine scale and offset to letterbox/pillarbox the video

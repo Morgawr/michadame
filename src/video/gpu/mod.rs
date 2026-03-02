@@ -2,6 +2,7 @@ pub mod params;
 pub mod programs;
 pub mod renderer;
 pub mod fft_filter;
+pub mod bunny;
 
 pub use params::ShaderParams;
 pub use renderer::CrtFilterRenderer;

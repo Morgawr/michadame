@@ -312,6 +312,7 @@ impl FftFilter {
         unsafe {
             // Disable scissor test — egui sets a scissor rect for paint callbacks
             // that would clip our FBO renders to the visible widget area
+            let scissor_enabled = gl.is_enabled(glow::SCISSOR_TEST);
             gl.disable(glow::SCISSOR_TEST);
             gl.disable(glow::BLEND);
             gl.bind_vertex_array(Some(self.vertex_array));
@@ -430,8 +431,8 @@ impl FftFilter {
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, None);
-            // Re-enable scissor test for egui
-            gl.enable(glow::SCISSOR_TEST);
+            // Re-enable scissor test for egui if it was enabled
+            if scissor_enabled { gl.enable(glow::SCISSOR_TEST); }
         }
 
         self.output_tex

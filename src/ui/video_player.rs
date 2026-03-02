@@ -36,12 +36,13 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 let fft_threshold = state.fft_mask_threshold;
                 let fft_black = state.fft_black_threshold;
 
+                let ppp = ctx.pixels_per_point();
                 let callback = egui::PaintCallback {
                     rect: response.rect,
                     callback: std::sync::Arc::new(egui_glow::CallbackFn::new(
                         move |_info, painter| {
                             let mut renderer = renderer_clone.lock().unwrap();
-                            let output_size = (rect.width(), rect.height());
+                            let output_size = (rect.width() * ppp, rect.height() * ppp);
                             let fallback_tex = video_texture_id.and_then(|id| painter.texture(id));
 
                             let res = latest_frame
@@ -88,6 +89,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             let fft_threshold = state.fft_mask_threshold;
             let fft_black = state.fft_black_threshold;
 
+            let ppp = ctx.pixels_per_point();
             let callback = egui::PaintCallback {
                 rect,
                 callback: std::sync::Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
@@ -101,7 +103,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         latest_frame.as_deref(),
                         fallback_tex,
                         res,
-                        (rect.width(), rect.height()),
+                        (rect.width() * ppp, rect.height() * ppp),
                         background_color,
                         horizontal_stretch,
                         median_filter_enabled,

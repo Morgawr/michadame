@@ -2,7 +2,6 @@
     in vec2 v_tc;
     out vec4 out_color;
     uniform sampler2D video_texture;
-    uniform vec2 videoResolution;
     uniform vec2 outputResolution;
     uniform vec3 background_color;
     uniform float horizontal_stretch;
@@ -102,7 +101,8 @@
 
     void main() {
         vec2 corrected_tc = vec2(v_tc.x, 1.0 - v_tc.y);
-        float video_aspect = (videoResolution.x * horizontal_stretch) / videoResolution.y;
+        vec2 video_res = vec2(textureSize(video_texture, 0)); // Calculate aspect ratios
+        float video_aspect = (video_res.x * horizontal_stretch) / video_res.y;
         float output_aspect = outputResolution.x / outputResolution.y;
 
         vec2 scale = vec2(1.0, 1.0);
@@ -117,9 +117,9 @@
         if (centered_tc.x < 0.0 || centered_tc.x > 1.0 || centered_tc.y < 0.0 || centered_tc.y > 1.0) {
             out_color = vec4(ToSrgb(background_color), 1.0);
         } else {
-            vec3 linear_color = SampleVideo(video_texture, centered_tc, videoResolution, scaler_filter);
+            vec3 linear_color = SampleVideo(video_texture, centered_tc, video_res, scaler_filter);
             // Apply vibrance (saturation boost in linear space)
-            float luminance = dot(linear_color, vec3(0.299, 0.587, 0.114));
+            float luminance = dot(linear_color, vec3(0.2126, 0.7152, 0.0722));
             linear_color = mix(vec3(luminance), linear_color, vibrance);
             out_color = vec4(ToSrgb(linear_color), 1.0);
         }
