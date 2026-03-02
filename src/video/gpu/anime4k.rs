@@ -1,6 +1,5 @@
 use eframe::glow::{self, HasContext};
 use super::programs::VS_SRC;
-use std::sync::OnceLock;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Anime4kVariant {
@@ -9,7 +8,7 @@ pub enum Anime4kVariant {
     Large,
 }
 
-static SHADER_INIT: OnceLock<()> = OnceLock::new();
+
 
 struct CascadeData {
     fbos: [glow::Framebuffer; 12],
@@ -87,8 +86,6 @@ pub struct Anime4kUpscaler {
     variant: Anime4kVariant,
     programs: Vec<glow::Program>,
     passes: usize,
-    input_size: (u32, u32),
-    output_size: (u32, u32),
     
     // Tracking intermediate sub-layers per recursion cycle independently 
     cascades: Vec<CascadeData>,
@@ -167,8 +164,6 @@ impl Anime4kUpscaler {
                 variant,
                 passes: programs.len(),
                 programs,
-                input_size: (0, 0),
-                output_size: (0, 0),
                 cascades: Vec::new(),
                 vao,
                 vbo,
