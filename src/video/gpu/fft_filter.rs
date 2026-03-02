@@ -231,9 +231,9 @@ impl FftFilter {
 
             // Output texture (RGBA8, original resolution)
             gl.bind_texture(glow::TEXTURE_2D, Some(self.output_tex));
-            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA as i32, orig_w as i32, orig_h as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, None);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, orig_w as i32, orig_h as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, None);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.output_fbo));

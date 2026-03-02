@@ -75,32 +75,30 @@ impl BunnyUpscaler {
             // FAST Variant
             variants.insert(ScalerFilter::BuNNy, BunnyVariant {
                 stages: vec![
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_soft_fast_in.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_soft_fast_conv1.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_soft_fast_conv2.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_soft_fast_out.glsl"), true),
+                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_veryfast_in.glsl"), false),
+                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_veryfast_conv1.glsl"), false),
+                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_veryfast_conv2.glsl"), false),
+                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_veryfast_out.glsl"), true),
                 ]
             });
 
             // MEDIUM Variant
             variants.insert(ScalerFilter::BuNNyMedium, BunnyVariant {
                 stages: vec![
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_fast_2x_in.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_fast_2x_conv1.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_fast_2x_conv2.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_fast_2x_out.glsl"), true),
+                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_faster_in.glsl"), false),
+                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_faster_conv1.glsl"), false),
+                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_faster_conv2.glsl"), false),
+                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_faster_out.glsl"), true),
                 ]
             });
 
             // HIGH Variant
             variants.insert(ScalerFilter::BuNNyHigh, BunnyVariant {
                 stages: vec![
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_soft_high_in.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_soft_high_conv1.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_soft_high_conv2.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_soft_high_conv3.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_soft_high_conv4.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_soft_high_out.glsl"), true),
+                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_fast_in.glsl"), false),
+                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_fast_conv1.glsl"), false),
+                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_fast_conv2.glsl"), false),
+                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_fast_out.glsl"), true),
                 ]
             });
 
