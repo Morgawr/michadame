@@ -308,34 +308,42 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             });
             ui.horizontal_wrapped(|ui| {
                 if ui
-                    .add(egui::Slider::new(&mut mask, 0.0..=4.0).text("ShadowMask"))
-                    .on_hover_text("0=None, 1=Compressed TV, 2=Aperture, 3=VGA, 4=VGA (lighter)")
+                    .add(
+                        egui::Slider::new(&mut mask, 0.0..=4.0)
+                            .text("ShadowMask")
+                            .step_by(1.0),
+                    )
+                    .on_hover_text("0=None, 1=Compressed TV, 2=Aperture-grille, 3=Stretched VGA, 4=VGA")
                     .changed()
                 {
-                    state.crt.shadow_mask = mask.round(); // Assuming integer values desired for enum
+                    state.crt.shadow_mask = mask.round();
                     changed = true;
                 }
             });
             ui.horizontal_wrapped(|ui| {
                 if ui
-                    .add(egui::Slider::new(&mut shape, 0.0..=4.0).text("Shape"))
-                    .on_hover_text("0=Linear, 1=Gaussian, 2=Sinc, etc.")
+                    .add(
+                        egui::Slider::new(&mut shape, 0.0..=10.0)
+                            .text("Shape")
+                            .step_by(0.05),
+                    )
+                    .on_hover_text("Kernel exponent. The original Lottes default is 2.0.")
                     .changed()
                 {
-                    state.crt.shape = shape.round();
+                    state.crt.shape = shape;
                     changed = true;
                 }
             });
             ui.horizontal_wrapped(|ui| {
                 if ui
-                    .add(egui::Slider::new(&mut bloom_pix, -2.0..=2.0).text("BloomPix"))
+                    .add(egui::Slider::new(&mut bloom_pix, -2.0..=-0.5).text("BloomPix"))
                     .changed()
                 {
                     state.crt.hard_bloom_pix = bloom_pix;
                     changed = true;
                 }
                 if ui
-                    .add(egui::Slider::new(&mut bloom_scan, -2.0..=2.0).text("BloomScan"))
+                    .add(egui::Slider::new(&mut bloom_scan, -4.0..=-1.0).text("BloomScan"))
                     .changed()
                 {
                     state.crt.hard_bloom_scan = bloom_scan;
@@ -348,7 +356,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 state.crt.brightboost = 1.0;
                 state.crt.warp_x = 0.031;
                 state.crt.warp_y = 0.041;
-                state.crt.shadow_mask = 1.0;
+                state.crt.shadow_mask = 3.0;
                 state.crt.hard_bloom_pix = -1.5;
                 state.crt.hard_bloom_scan = -2.0;
                 state.crt.bloom_amount = 0.15;

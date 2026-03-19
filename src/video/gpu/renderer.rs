@@ -12,10 +12,6 @@ use super::anime4k::{Anime4kUpscaler, Anime4kVariant};
 pub struct CrtFilterRenderer {
     passthrough_prog: glow::Program,
     pixelate_prog: glow::Program,
-    pass0_prog: glow::Program,
-    pass1_prog: glow::Program,
-    pass2_prog: glow::Program,
-    pass3_prog: glow::Program,
     median_prog: glow::Program,
     final_prog: glow::Program,
     yuv_planar_prog: glow::Program,
@@ -39,18 +35,18 @@ pub struct CrtFilterRenderer {
 
     p_passthrough_output_res_loc: glow::UniformLocation,
     p_pixelate_target_res_loc: glow::UniformLocation,
-    p0_hard_bloom_pix_loc: glow::UniformLocation,
-    p1_hard_bloom_scan_loc: glow::UniformLocation,
-    p2_hard_pix_loc: glow::UniformLocation,
-    p3_hard_scan_loc: glow::UniformLocation,
-    p3_shape_loc: glow::UniformLocation,
 
     final_output_res_loc: glow::UniformLocation,
+    final_hard_scan_loc: glow::UniformLocation,
+    final_hard_pix_loc: glow::UniformLocation,
     final_warp_x_loc: glow::UniformLocation,
     final_warp_y_loc: glow::UniformLocation,
     final_shadow_mask_loc: glow::UniformLocation,
     final_brightboost_loc: glow::UniformLocation,
+    final_hard_bloom_pix_loc: glow::UniformLocation,
+    final_hard_bloom_scan_loc: glow::UniformLocation,
     final_bloom_amount_loc: glow::UniformLocation,
+    final_shape_loc: glow::UniformLocation,
     final_background_color_loc: glow::UniformLocation,
     passthrough_background_color_loc: glow::UniformLocation,
     final_horizontal_stretch_loc: glow::UniformLocation,
@@ -71,10 +67,6 @@ impl CrtFilterRenderer {
         unsafe {
             let passthrough_prog = compile_program(gl, VS_SRC, FS_PASSTHROUGH);
             let pixelate_prog = compile_program(gl, VS_SRC, FS_PIXELATE);
-            let pass0_prog = compile_program(gl, VS_SRC, FS_PASS0);
-            let pass1_prog = compile_program(gl, VS_SRC, FS_PASS1);
-            let pass2_prog = compile_program(gl, VS_SRC, FS_PASS2);
-            let pass3_prog = compile_program(gl, VS_SRC, FS_PASS3);
             let median_prog = compile_program(gl, VS_SRC, FS_MEDIAN_3X1);
             let final_prog = compile_program(gl, VS_SRC, FS_FINAL);
             let yuv_planar_prog = compile_program(gl, VS_SRC, FS_YUV_PLANAR);
@@ -83,11 +75,6 @@ impl CrtFilterRenderer {
             let p_passthrough_output_res_loc = gl.get_uniform_location(passthrough_prog, "outputResolution").unwrap();
             let passthrough_scaler_filter_loc = gl.get_uniform_location(passthrough_prog, "scaler_filter").unwrap();
             let p_pixelate_target_res_loc = gl.get_uniform_location(pixelate_prog, "target_resolution").unwrap();
-            let p0_hard_bloom_pix_loc = gl.get_uniform_location(pass0_prog, "hardBloomPix").unwrap();
-            let p1_hard_bloom_scan_loc = gl.get_uniform_location(pass1_prog, "hardBloomScan").unwrap();
-            let p2_hard_pix_loc = gl.get_uniform_location(pass2_prog, "hardPix").unwrap();
-            let p3_hard_scan_loc = gl.get_uniform_location(pass3_prog, "hardScan").unwrap();
-            let p3_shape_loc = gl.get_uniform_location(pass3_prog, "shape").unwrap();
             let median_mix_loc = gl.get_uniform_location(median_prog, "mix_amount").unwrap();
 
             gl.use_program(Some(median_prog));
@@ -95,11 +82,16 @@ impl CrtFilterRenderer {
             gl.use_program(None);
 
             let final_output_res_loc = gl.get_uniform_location(final_prog, "outputResolution").unwrap();
+            let final_hard_scan_loc = gl.get_uniform_location(final_prog, "hardScan").unwrap();
+            let final_hard_pix_loc = gl.get_uniform_location(final_prog, "hardPix").unwrap();
             let final_warp_x_loc = gl.get_uniform_location(final_prog, "warpX").unwrap();
             let final_warp_y_loc = gl.get_uniform_location(final_prog, "warpY").unwrap();
             let final_shadow_mask_loc = gl.get_uniform_location(final_prog, "shadowMask").unwrap();
             let final_brightboost_loc = gl.get_uniform_location(final_prog, "brightboost").unwrap();
+            let final_hard_bloom_pix_loc = gl.get_uniform_location(final_prog, "hardBloomPix").unwrap();
+            let final_hard_bloom_scan_loc = gl.get_uniform_location(final_prog, "hardBloomScan").unwrap();
             let final_bloom_amount_loc = gl.get_uniform_location(final_prog, "bloomAmount").unwrap();
+            let final_shape_loc = gl.get_uniform_location(final_prog, "shape").unwrap();
             let final_background_color_loc = gl.get_uniform_location(final_prog, "background_color").unwrap();
             let passthrough_background_color_loc = gl.get_uniform_location(passthrough_prog, "background_color").unwrap();
             let final_horizontal_stretch_loc = gl.get_uniform_location(final_prog, "horizontal_stretch").unwrap();
@@ -111,19 +103,10 @@ impl CrtFilterRenderer {
             gl.uniform_1_i32(Some(&gl.get_uniform_location(passthrough_prog, "video_texture").unwrap()), 0);
             gl.use_program(Some(pixelate_prog));
             gl.uniform_1_i32(Some(&gl.get_uniform_location(pixelate_prog, "video_texture").unwrap()), 0);
-            gl.use_program(Some(pass0_prog));
-            gl.uniform_1_i32(Some(&gl.get_uniform_location(pass0_prog, "video_texture").unwrap()), 0);
-            gl.use_program(Some(pass1_prog));
-            gl.uniform_1_i32(Some(&gl.get_uniform_location(pass1_prog, "pass0_texture").unwrap()), 0);
-            gl.use_program(Some(pass2_prog));
-            gl.uniform_1_i32(Some(&gl.get_uniform_location(pass2_prog, "video_texture").unwrap()), 0);
-            gl.use_program(Some(pass3_prog));
-            gl.uniform_1_i32(Some(&gl.get_uniform_location(pass3_prog, "pass2_texture").unwrap()), 0);
             gl.use_program(Some(median_prog));
             gl.uniform_1_i32(Some(&gl.get_uniform_location(median_prog, "video_texture").unwrap()), 0);
             gl.use_program(Some(final_prog));
-            gl.uniform_1_i32(Some(&gl.get_uniform_location(final_prog, "pass1_texture").unwrap()), 0);
-            gl.uniform_1_i32(Some(&gl.get_uniform_location(final_prog, "pass3_texture").unwrap()), 1);
+            gl.uniform_1_i32(Some(&gl.get_uniform_location(final_prog, "video_texture").unwrap()), 0);
 
             gl.use_program(Some(yuv_planar_prog));
             gl.uniform_1_i32(Some(&gl.get_uniform_location(yuv_planar_prog, "y_tex").unwrap()), 0);
@@ -181,15 +164,16 @@ impl CrtFilterRenderer {
             gl.bind_vertex_array(None);
 
             Self {
-                passthrough_prog, pixelate_prog, pass0_prog, pass1_prog, pass2_prog, pass3_prog,
+                passthrough_prog, pixelate_prog,
                 final_prog, yuv_planar_prog, yuyv_packed_prog, yuv_range_loc, yuyv_range_loc,
                 yuv_overscan_loc, yuyv_overscan_loc, fbos, pass_textures, yuv_planes, pbos,
                 vertex_array, vbo,
                 p_passthrough_output_res_loc,
-                p_pixelate_target_res_loc, p0_hard_bloom_pix_loc, p1_hard_bloom_scan_loc,
-                p2_hard_pix_loc, p3_hard_scan_loc, p3_shape_loc,
-                final_output_res_loc, final_warp_x_loc, final_warp_y_loc, final_shadow_mask_loc,
-                final_brightboost_loc, final_bloom_amount_loc, final_background_color_loc,
+                p_pixelate_target_res_loc,
+                final_output_res_loc, final_hard_scan_loc, final_hard_pix_loc,
+                final_warp_x_loc, final_warp_y_loc, final_shadow_mask_loc,
+                final_brightboost_loc, final_hard_bloom_pix_loc, final_hard_bloom_scan_loc,
+                final_bloom_amount_loc, final_shape_loc, final_background_color_loc,
                 passthrough_background_color_loc, final_horizontal_stretch_loc,
                 passthrough_horizontal_stretch_loc, final_vibrance_loc, passthrough_vibrance_loc,
                 passthrough_scaler_filter_loc, median_prog, median_mix_loc, 
@@ -423,53 +407,23 @@ impl CrtFilterRenderer {
             }
 
             if run_lottes {
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[0]));
-                gl.viewport(0, 0, current_res.0 as i32, current_res.1 as i32);
-                gl.use_program(Some(self.pass0_prog));
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(final_input_texture));
-                gl.uniform_1_f32(Some(&self.p0_hard_bloom_pix_loc), params.hard_bloom_pix);
-                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[1]));
-                gl.viewport(0, 0, current_res.0 as i32, current_res.1 as i32);
-                gl.use_program(Some(self.pass1_prog));
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[0]));
-                gl.uniform_1_f32(Some(&self.p1_hard_bloom_scan_loc), params.hard_bloom_scan);
-                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[2]));
-                gl.viewport(0, 0, current_res.0 as i32, current_res.1 as i32);
-                gl.use_program(Some(self.pass2_prog));
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(final_input_texture));
-                gl.uniform_1_f32(Some(&self.p2_hard_pix_loc), params.hard_pix);
-                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[3]));
-                gl.viewport(0, 0, current_res.0 as i32, current_res.1 as i32);
-                gl.use_program(Some(self.pass3_prog));
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[2]));
-                gl.uniform_1_f32(Some(&self.p3_hard_scan_loc), params.hard_scan);
-                gl.uniform_1_f32(Some(&self.p3_shape_loc), params.shape);
-                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-
                 gl.bind_framebuffer(glow::FRAMEBUFFER, None);
                 gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
                 gl.use_program(Some(self.final_prog));
                 gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[1]));
-                gl.active_texture(glow::TEXTURE1);
-                gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[3]));
+                gl.bind_texture(glow::TEXTURE_2D, Some(final_input_texture));
 
                 gl.uniform_2_f32(Some(&self.final_output_res_loc), output_size.0, output_size.1);
+                gl.uniform_1_f32(Some(&self.final_hard_scan_loc), params.hard_scan);
+                gl.uniform_1_f32(Some(&self.final_hard_pix_loc), params.hard_pix);
                 gl.uniform_1_f32(Some(&self.final_warp_x_loc), params.warp_x);
                 gl.uniform_1_f32(Some(&self.final_warp_y_loc), params.warp_y);
                 gl.uniform_1_f32(Some(&self.final_shadow_mask_loc), params.shadow_mask);
                 gl.uniform_1_f32(Some(&self.final_brightboost_loc), params.brightboost);
+                gl.uniform_1_f32(Some(&self.final_hard_bloom_pix_loc), params.hard_bloom_pix);
+                gl.uniform_1_f32(Some(&self.final_hard_bloom_scan_loc), params.hard_bloom_scan);
                 gl.uniform_1_f32(Some(&self.final_bloom_amount_loc), params.bloom_amount);
+                gl.uniform_1_f32(Some(&self.final_shape_loc), params.shape);
                 gl.uniform_3_f32(Some(&self.final_background_color_loc), params.background_color[0], params.background_color[1], params.background_color[2]);
                 gl.uniform_1_f32(Some(&self.final_horizontal_stretch_loc), params.horizontal_stretch);
                 gl.uniform_1_f32(Some(&self.final_vibrance_loc), params.vibrance);
@@ -641,10 +595,6 @@ impl CrtFilterRenderer {
         unsafe {
             gl.delete_program(self.passthrough_prog);
             gl.delete_program(self.pixelate_prog);
-            gl.delete_program(self.pass0_prog);
-            gl.delete_program(self.pass1_prog);
-            gl.delete_program(self.pass2_prog);
-            gl.delete_program(self.pass3_prog);
             gl.delete_program(self.median_prog);
             gl.delete_program(self.final_prog);
             gl.delete_program(self.yuv_planar_prog);
