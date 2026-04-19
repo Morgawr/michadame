@@ -49,7 +49,7 @@ pub struct FftFilter {
     tex: [glow::Texture; 2],
     fbo: [glow::Framebuffer; 2],
 
-    // Output texture and FBO (RGBA8, original resolution)
+    // Output texture and FBO (linear RGB, original resolution)
     output_tex: glow::Texture,
     output_fbo: glow::Framebuffer,
 
@@ -67,6 +67,10 @@ pub struct FftFilter {
     // State tracking
     last_fft_size: (u32, u32),
     last_orig_size: (u32, u32),
+}
+
+fn fft_output_texture_internal_format() -> u32 {
+    glow::RGBA16F
 }
 
 fn next_power_of_2(n: u32) -> u32 {
@@ -229,9 +233,10 @@ impl FftFilter {
                 gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(self.tex[i]), 0);
             }
 
-            // Output texture (RGBA8, original resolution)
+            // Output texture: extracted linear RGB that is later presented by the
+            // main pipeline, so keep it in half-float to avoid reintroducing banding.
             gl.bind_texture(glow::TEXTURE_2D, Some(self.output_tex));
-            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, orig_w as i32, orig_h as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, None);
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, fft_output_texture_internal_format() as i32, orig_w as i32, orig_h as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, None);
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
@@ -512,6 +517,11 @@ mod tests {
         assert_eq!(log2_u32(256), 8);
         assert_eq!(log2_u32(1024), 10);
         assert_eq!(log2_u32(2048), 11);
+    }
+
+    #[test]
+    fn test_fft_output_uses_high_precision_texture() {
+        assert_eq!(fft_output_texture_internal_format(), glow::RGBA16F);
     }
 
     #[test]

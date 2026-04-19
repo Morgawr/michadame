@@ -62,6 +62,16 @@ pub struct CrtFilterRenderer {
     last_frame_format: Option<Pixel>,
 }
 
+fn intermediate_texture_internal_format(pass_index: usize) -> u32 {
+    match pass_index {
+        // These passes store linear RGB that is later sampled by another shader before
+        // the final linear->sRGB presentation step, so RGBA8 causes visible
+        // dark-area quantization. Keep them in half-float instead.
+        4 | 5 | 6 => glow::RGBA16F,
+        _ => glow::RGBA8,
+    }
+}
+
 impl CrtFilterRenderer {
     pub fn new(gl: &glow::Context) -> Self {
         unsafe {
@@ -176,7 +186,7 @@ impl CrtFilterRenderer {
                 final_bloom_amount_loc, final_shape_loc, final_background_color_loc,
                 passthrough_background_color_loc, final_horizontal_stretch_loc,
                 passthrough_horizontal_stretch_loc, final_vibrance_loc, passthrough_vibrance_loc,
-                passthrough_scaler_filter_loc, median_prog, median_mix_loc, 
+                passthrough_scaler_filter_loc, median_prog, median_mix_loc,
                 bunny: BunnyUpscaler::new(gl),
                 anime4k_small: Anime4kUpscaler::new(gl, Anime4kVariant::Small),
                 anime4k_medium: Anime4kUpscaler::new(gl, Anime4kVariant::Medium),
@@ -283,7 +293,7 @@ impl CrtFilterRenderer {
         if let Some(fft_arc) = fft_filter {
             let mut fft = fft_arc.lock().unwrap();
             tex = fft.apply(gl, tex, frame.width, frame.height, fft_mask_threshold, fft_black_threshold);
-            
+
             // Set filtering mode dynamically based on current params.scaler_filter
             let current_filter = if self.last_scaler_filter == Some(crate::video::types::ScalerFilter::Point as u8) {
                 glow::NEAREST as i32
@@ -446,7 +456,7 @@ impl CrtFilterRenderer {
                 gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
                 self.draw_passthrough_internal(gl, current_video_texture, current_res, output_size, params.background_color, params.horizontal_stretch, params.vibrance, params.scaler_filter);
             }
-            
+
             if blend_enabled {
                 gl.enable(glow::BLEND);
             }
@@ -616,7 +626,7 @@ impl CrtFilterRenderer {
         let scaler = ScalerFilter::from_u8(scaler_filter);
         let is_bunny = matches!(scaler, ScalerFilter::BuNNy | ScalerFilter::BuNNyMedium | ScalerFilter::BuNNyHigh | ScalerFilter::BuNNyNeutral | ScalerFilter::BuNNyNVL);
         let is_anime4k = matches!(scaler, ScalerFilter::Anime4kSmall | ScalerFilter::Anime4kMedium | ScalerFilter::Anime4kLarge);
-        
+
         let (effective_width, effective_height) = if is_bunny {
             self.bunny.get_upscaled_size(width, height, target_width, target_height)
         } else if is_anime4k {
@@ -642,7 +652,7 @@ impl CrtFilterRenderer {
                 // Pass 5 (Median) and Pass 6 (YUV Conversion) should ALWAYS keep original resolution
                 // because they happen BEFORE any upscaling.
                 let (w, h) = if i == 6 || i == 5 { (width, height) } else { (effective_width, effective_height) };
-                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, w as i32, h as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, None);
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, intermediate_texture_internal_format(i) as i32, w as i32, h as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, None);
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, filter_mode);
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter_mode);
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
@@ -659,6 +669,25 @@ impl CrtFilterRenderer {
             }
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linear_prepasses_use_high_precision_targets() {
+        assert_eq!(intermediate_texture_internal_format(4), glow::RGBA16F);
+        assert_eq!(intermediate_texture_internal_format(5), glow::RGBA16F);
+        assert_eq!(intermediate_texture_internal_format(6), glow::RGBA16F);
+    }
+
+    #[test]
+    fn other_intermediate_passes_keep_existing_format() {
+        for pass_index in 0..4 {
+            assert_eq!(intermediate_texture_internal_format(pass_index), glow::RGBA8);
         }
     }
 }
