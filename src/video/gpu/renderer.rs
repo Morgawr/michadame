@@ -9,6 +9,8 @@ use ffmpeg_next::format::Pixel;
 use std::num::NonZero;
 use std::sync::{Arc, Mutex};
 
+const PIXELATE_TARGET_HEIGHT: u32 = 480;
+
 pub struct CrtFilterRenderer {
     passthrough_prog: glow::Program,
     pixelate_prog: glow::Program,
@@ -69,6 +71,33 @@ fn intermediate_texture_internal_format(pass_index: usize) -> u32 {
         // dark-area quantization. Keep them in half-float instead.
         4..=6 => glow::RGBA16F,
         _ => glow::RGBA8,
+    }
+}
+
+fn pixelate_subrender_size(width: u32, height: u32) -> (u32, u32) {
+    if width == 0 || height == 0 {
+        return (1, 1);
+    }
+
+    let target_height = height.clamp(1, PIXELATE_TARGET_HEIGHT);
+    let target_width = (width as u64 * target_height as u64)
+        .div_ceil(height as u64)
+        .max(1) as u32;
+    (target_width, target_height)
+}
+
+fn pass_texture_dimensions(
+    pass_index: usize,
+    source_size: (u32, u32),
+    effective_size: (u32, u32),
+) -> (u32, u32) {
+    match pass_index {
+        // Pass 4 is the low-scale pixelate subrender. The final pass samples it
+        // back to the output surface, preserving the existing shader order.
+        4 => pixelate_subrender_size(effective_size.0, effective_size.1),
+        // Median and YUV conversion happen before any upscaling.
+        5 | 6 => source_size,
+        _ => effective_size,
     }
 }
 
@@ -782,15 +811,16 @@ impl CrtFilterRenderer {
             let mut final_input_texture = current_video_texture;
 
             if run_pixelate {
+                let pixelate_res = pixelate_subrender_size(current_res.0, current_res.1);
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[4]));
-                gl.viewport(0, 0, current_res.0 as i32, current_res.1 as i32);
+                gl.viewport(0, 0, pixelate_res.0 as i32, pixelate_res.1 as i32);
                 gl.use_program(Some(self.pixelate_prog));
                 gl.active_texture(glow::TEXTURE0);
                 gl.bind_texture(glow::TEXTURE_2D, Some(current_video_texture));
                 gl.uniform_2_f32(
                     Some(&self.p_pixelate_target_res_loc),
-                    current_res.0 as f32,
-                    current_res.1 as f32,
+                    pixelate_res.0 as f32,
+                    pixelate_res.1 as f32,
                 );
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 final_input_texture = self.pass_textures[4];
@@ -1237,13 +1267,11 @@ impl CrtFilterRenderer {
         unsafe {
             for i in 0..self.pass_textures.len() {
                 gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[i]));
-                // Pass 5 (Median) and Pass 6 (YUV Conversion) should ALWAYS keep original resolution
-                // because they happen BEFORE any upscaling.
-                let (w, h) = if i == 6 || i == 5 {
-                    (width, height)
-                } else {
-                    (effective_width, effective_height)
-                };
+                let (w, h) = pass_texture_dimensions(
+                    i,
+                    (width, height),
+                    (effective_width, effective_height),
+                );
                 gl.tex_image_2d(
                     glow::TEXTURE_2D,
                     0,
@@ -1255,8 +1283,13 @@ impl CrtFilterRenderer {
                     glow::UNSIGNED_BYTE,
                     None,
                 );
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, filter_mode);
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter_mode);
+                let pass_filter_mode = if i == 4 {
+                    glow::NEAREST as i32
+                } else {
+                    filter_mode
+                };
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, pass_filter_mode);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, pass_filter_mode);
                 gl.tex_parameter_i32(
                     glow::TEXTURE_2D,
                     glow::TEXTURE_WRAP_S,
@@ -1306,6 +1339,37 @@ mod tests {
         assert_eq!(intermediate_texture_internal_format(4), glow::RGBA16F);
         assert_eq!(intermediate_texture_internal_format(5), glow::RGBA16F);
         assert_eq!(intermediate_texture_internal_format(6), glow::RGBA16F);
+    }
+
+    #[test]
+    fn pixelate_pass_uses_low_scale_surface() {
+        assert_eq!(pixelate_subrender_size(1920, 1080), (854, 480));
+        assert_eq!(pixelate_subrender_size(1280, 720), (854, 480));
+        assert_eq!(pixelate_subrender_size(640, 480), (640, 480));
+        assert_eq!(pixelate_subrender_size(320, 240), (320, 240));
+    }
+
+    #[test]
+    fn pass_dimensions_preserve_pipeline_surfaces() {
+        let source_size = (720, 480);
+        let effective_size = (1440, 960);
+
+        assert_eq!(
+            pass_texture_dimensions(4, source_size, effective_size),
+            (720, 480)
+        );
+        assert_eq!(
+            pass_texture_dimensions(5, source_size, effective_size),
+            source_size
+        );
+        assert_eq!(
+            pass_texture_dimensions(6, source_size, effective_size),
+            source_size
+        );
+        assert_eq!(
+            pass_texture_dimensions(0, source_size, effective_size),
+            effective_size
+        );
     }
 
     #[test]
