@@ -1,11 +1,14 @@
-use std::process::Command;
 use std::path::PathBuf;
+use std::process::Command;
 
 #[test]
 fn test_glsl_shaders_compile() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let shaders_dir = PathBuf::from(manifest_dir).join("src").join("video").join("shaders");
-    
+    let shaders_dir = PathBuf::from(manifest_dir)
+        .join("src")
+        .join("video")
+        .join("shaders");
+
     // Attempt to check if glslangValidator is installed
     let probe = Command::new("glslangValidator").arg("--version").output();
     if probe.is_err() {
@@ -21,7 +24,7 @@ fn test_glsl_shaders_compile() {
     for entry in entries {
         let entry = entry.unwrap();
         let path = entry.path();
-        
+
         if path.extension().and_then(|s| s.to_str()) != Some("glsl") {
             continue;
         }
@@ -34,7 +37,10 @@ fn test_glsl_shaders_compile() {
         } else if file_name.starts_with("vs_") {
             "vert"
         } else {
-            println!("Warning: Unknown shader stage for file {}, skipping.", file_name);
+            println!(
+                "Warning: Unknown shader stage for file {}, skipping.",
+                file_name
+            );
             continue;
         };
 
@@ -50,13 +56,23 @@ fn test_glsl_shaders_compile() {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
-            failed_shaders.push(format!("Shader {} failed to compile:\n{}\n{}", file_name, stdout, stderr));
+            failed_shaders.push(format!(
+                "Shader {} failed to compile:\n{}\n{}",
+                file_name, stdout, stderr
+            ));
         }
     }
 
-    println!("glslangValidator successfully validated {} shaders.", total_count);
+    println!(
+        "glslangValidator successfully validated {} shaders.",
+        total_count
+    );
 
     if !failed_shaders.is_empty() {
-        panic!("{} shaders failed to compile:\n\n{}", failed_shaders.len(), failed_shaders.join("\n\n"));
+        panic!(
+            "{} shaders failed to compile:\n\n{}",
+            failed_shaders.len(),
+            failed_shaders.join("\n\n")
+        );
     }
 }

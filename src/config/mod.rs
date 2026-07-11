@@ -1,6 +1,6 @@
+pub mod fft_masks;
 pub mod models;
 pub mod persistence;
-pub mod fft_masks;
 
 pub use models::*;
 pub use persistence::*;
@@ -114,10 +114,13 @@ mod tests {
     #[test]
     fn test_legacy_config_with_existing_profiles() {
         let mut profiles = BTreeMap::new();
-        profiles.insert("Custom".to_string(), Profile {
-            crt_hard_scan: Some(-10.0),
-            ..Default::default()
-        });
+        profiles.insert(
+            "Custom".to_string(),
+            Profile {
+                crt_hard_scan: Some(-10.0),
+                ..Default::default()
+            },
+        );
 
         let legacy = LegacyConfig {
             active_profile: "Custom".to_string(),
@@ -159,6 +162,9 @@ mod tests {
         let config: MichadameConfig = MichadameConfig::from(legacy);
         assert_eq!(config.active_profile, "Custom");
         assert_eq!(config.profiles.len(), 1);
-        assert_eq!(config.profiles.get("Custom").unwrap().crt_hard_scan, Some(-10.0));
+        assert_eq!(
+            config.profiles.get("Custom").unwrap().crt_hard_scan,
+            Some(-10.0)
+        );
     }
 }

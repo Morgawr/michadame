@@ -1,10 +1,71 @@
 use crate::video::types::{RawFrame, VideoFormat};
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     Arc,
 };
 use std::thread;
+
+fn renderable_pixel_format(format: ffmpeg_next::format::Pixel) -> ffmpeg_next::format::Pixel {
+    use ffmpeg_next::format::Pixel;
+
+    match format {
+        Pixel::YUV422P | Pixel::YUV420P | Pixel::YUVJ422P | Pixel::YUVJ420P | Pixel::YUYV422 => {
+            format
+        }
+        _ => Pixel::YUV420P,
+    }
+}
+
+fn plane_tight_row_bytes(frame: &ffmpeg_next::frame::Video, plane: usize) -> Result<usize> {
+    use ffmpeg_next::format::Pixel;
+
+    match frame.format() {
+        Pixel::YUYV422 if plane == 0 => Ok(frame.width() as usize * 2),
+        Pixel::YUV422P | Pixel::YUV420P | Pixel::YUVJ422P | Pixel::YUVJ420P => {
+            Ok(frame.plane_width(plane) as usize)
+        }
+        other => Err(anyhow!("Unsupported normalized pixel format: {:?}", other)),
+    }
+}
+
+fn copy_frame_tightly(frame: &ffmpeg_next::frame::Video) -> Result<Vec<u8>> {
+    let mut data = Vec::new();
+    for plane in 0..frame.planes() {
+        let row_bytes = plane_tight_row_bytes(frame, plane)?;
+        let row_count = frame.plane_height(plane) as usize;
+        let stride = frame.stride(plane);
+        let plane_data = frame.data(plane);
+
+        if row_bytes > stride {
+            return Err(anyhow!(
+                "Plane {} row width {} exceeds stride {}",
+                plane,
+                row_bytes,
+                stride
+            ));
+        }
+
+        data.reserve(row_bytes * row_count);
+        for row in 0..row_count {
+            let start = row * stride;
+            let end = start + row_bytes;
+            let row_data = plane_data.get(start..end).ok_or_else(|| {
+                anyhow!(
+                    "Plane {} row {} is out of bounds: {}..{} of {}",
+                    plane,
+                    row,
+                    start,
+                    end,
+                    plane_data.len()
+                )
+            })?;
+            data.extend_from_slice(row_data);
+        }
+    }
+    Ok(data)
+}
+
 fn setup_ffmpeg_options(
     format: &VideoFormat,
     resolution: (u32, u32),
@@ -38,7 +99,7 @@ pub fn video_thread_main(
 ) -> Result<()> {
     ffmpeg_next::init().context("Failed to initialize FFmpeg")?;
     let (_pixel_format, mut ffmpeg_options) = setup_ffmpeg_options(&format, resolution, framerate);
-    
+
     // Initial color range setup
     let initial_range = color_range.load(Ordering::Relaxed);
     if initial_range == 1 {
@@ -46,7 +107,7 @@ pub fn video_thread_main(
     } else {
         ffmpeg_options.set("color_range", "pc");
     }
-    
+
     tracing::info!(device = %device, options = ?ffmpeg_options, "Starting FFmpeg with options");
     let ictx = ffmpeg_next::format::input_with_dictionary(&device, ffmpeg_options)
         .context("Failed to open input device with ffmpeg")?;
@@ -67,7 +128,9 @@ pub fn video_thread_main(
         let mut ictx = ictx;
         for (stream, packet) in ictx.packets() {
             if stream.index() == video_stream_index {
-                if let Err(crossbeam_channel::TrySendError::Disconnected(_)) = packet_tx.try_send(packet) {
+                if let Err(crossbeam_channel::TrySendError::Disconnected(_)) =
+                    packet_tx.try_send(packet)
+                {
                     break;
                 }
             }
@@ -76,11 +139,12 @@ pub fn video_thread_main(
     });
 
     let mut current_scaler_val = scaler_filter.load(Ordering::Relaxed);
+    let output_format = renderable_pixel_format(decoder.format());
     let mut scaler = ffmpeg_next::software::scaling::context::Context::get(
         decoder.format(),
         decoder.width(),
         decoder.height(),
-        decoder.format(),
+        output_format,
         decoder.width(),
         decoder.height(),
         crate::video::types::ScalerFilter::from_u8(current_scaler_val).into_ffmpeg_flag(),
@@ -95,7 +159,7 @@ pub fn video_thread_main(
                 decoder.format(),
                 decoder.width(),
                 decoder.height(),
-                decoder.format(),
+                output_format,
                 decoder.width(),
                 decoder.height(),
                 crate::video::types::ScalerFilter::from_u8(current_scaler_val).into_ffmpeg_flag(),
@@ -109,23 +173,19 @@ pub fn video_thread_main(
                 .context("Failed to send packet to decoder")?;
             let mut decoded = ffmpeg_next::frame::Video::empty();
             while decoder.receive_frame(&mut decoded).is_ok() {
-                let width = decoded.width();
-                let height = decoded.height();
-                let format = decoded.format();
-
                 // Use the scaler to normalize the frame (removes strides and ensures consistent plane layout)
                 let mut normalized = ffmpeg_next::frame::Video::empty();
-                
+
                 let range_val = color_range.load(Ordering::Relaxed);
 
                 scaler
                     .run(&decoded, &mut normalized)
                     .context("Failed to normalize video frame")?;
 
-                let mut data = Vec::new();
-                for i in 0..normalized.planes() {
-                    data.extend_from_slice(normalized.data(i));
-                }
+                let width = normalized.width();
+                let height = normalized.height();
+                let format = normalized.format();
+                let data = copy_frame_tightly(&normalized)?;
 
                 let raw_frame = Arc::new(RawFrame {
                     width,
@@ -135,7 +195,9 @@ pub fn video_thread_main(
                     color_range: crate::video::types::ColorRange::from_u8(range_val),
                 });
 
-                if let Err(crossbeam_channel::TrySendError::Disconnected(_)) = frame_sender.try_send(raw_frame) {
+                if let Err(crossbeam_channel::TrySendError::Disconnected(_)) =
+                    frame_sender.try_send(raw_frame)
+                {
                     return Ok(());
                 }
             }

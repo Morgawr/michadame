@@ -1,5 +1,5 @@
-use eframe::glow::{self, HasContext};
 use super::programs::*;
+use eframe::glow::{self, HasContext};
 
 /// GPU-based 2D FFT filter with interactive mask editing.
 /// Operates on decoded RGB textures: forward FFT → apply mask → inverse FFT.
@@ -74,7 +74,9 @@ fn fft_output_texture_internal_format() -> u32 {
 }
 
 fn next_power_of_2(n: u32) -> u32 {
-    if n == 0 { return 1; }
+    if n == 0 {
+        return 1;
+    }
     let mut v = n - 1;
     v |= v >> 1;
     v |= v >> 2;
@@ -145,7 +147,8 @@ impl FftFilter {
             let extract_orig_loc = gl.get_uniform_location(extract_prog, "original_texture");
             let extract_fft_size_loc = gl.get_uniform_location(extract_prog, "fft_size");
             let extract_orig_size_loc = gl.get_uniform_location(extract_prog, "orig_size");
-            let extract_black_threshold_loc = gl.get_uniform_location(extract_prog, "black_threshold");
+            let extract_black_threshold_loc =
+                gl.get_uniform_location(extract_prog, "black_threshold");
             gl.use_program(Some(extract_prog));
             gl.uniform_1_i32(extract_ifft_loc.as_ref(), 0);
             gl.uniform_1_i32(extract_orig_loc.as_ref(), 1);
@@ -161,7 +164,10 @@ impl FftFilter {
 
             // Create textures and FBOs
             let tex = [gl.create_texture().unwrap(), gl.create_texture().unwrap()];
-            let fbo = [gl.create_framebuffer().unwrap(), gl.create_framebuffer().unwrap()];
+            let fbo = [
+                gl.create_framebuffer().unwrap(),
+                gl.create_framebuffer().unwrap(),
+            ];
             let output_tex = gl.create_texture().unwrap();
             let output_fbo = gl.create_framebuffer().unwrap();
             let spectrum_tex = gl.create_texture().unwrap();
@@ -171,38 +177,78 @@ impl FftFilter {
             // Setup VAO + VBO (full-screen quad)
             let vertex_array = gl.create_vertex_array().unwrap();
             let vertices: [f32; 16] = [
-                -1.0, -1.0, 0.0, 0.0,
-                 1.0, -1.0, 1.0, 0.0,
-                -1.0,  1.0, 0.0, 1.0,
-                 1.0,  1.0, 1.0, 1.0,
+                -1.0, -1.0, 0.0, 0.0, 1.0, -1.0, 1.0, 0.0, -1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0,
             ];
             let vbo = gl.create_buffer().unwrap();
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytemuck::cast_slice(&vertices), glow::STATIC_DRAW);
+            gl.buffer_data_u8_slice(
+                glow::ARRAY_BUFFER,
+                bytemuck::cast_slice(&vertices),
+                glow::STATIC_DRAW,
+            );
 
             gl.bind_vertex_array(Some(vertex_array));
-            gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 4 * std::mem::size_of::<f32>() as i32, 0);
+            gl.vertex_attrib_pointer_f32(
+                0,
+                2,
+                glow::FLOAT,
+                false,
+                4 * std::mem::size_of::<f32>() as i32,
+                0,
+            );
             gl.enable_vertex_attrib_array(0);
-            gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, 4 * std::mem::size_of::<f32>() as i32, (2 * std::mem::size_of::<f32>()) as i32);
+            gl.vertex_attrib_pointer_f32(
+                1,
+                2,
+                glow::FLOAT,
+                false,
+                4 * std::mem::size_of::<f32>() as i32,
+                (2 * std::mem::size_of::<f32>()) as i32,
+            );
             gl.enable_vertex_attrib_array(1);
 
             gl.bind_buffer(glow::ARRAY_BUFFER, None);
             gl.bind_vertex_array(None);
 
             Self {
-                init_prog, butterfly_prog, mask_prog, extract_prog, spectrum_prog, blit_prog, bitrev_prog,
-                init_input_loc, init_fft_size_loc, init_orig_size_loc,
-                butterfly_input_loc, butterfly_axis_loc, butterfly_stage_loc,
-                butterfly_direction_loc, butterfly_fft_size_loc,
-                mask_fft_loc, mask_mask_loc, mask_fft_size_loc, mask_threshold_loc,
-                extract_ifft_loc, extract_orig_loc, extract_fft_size_loc, extract_orig_size_loc, extract_black_threshold_loc,
-                spectrum_fft_loc, spectrum_mask_loc, spectrum_fft_size_loc,
-                bitrev_input_loc, bitrev_fft_size_loc,
-                tex, fbo,
-                output_tex, output_fbo,
-                spectrum_tex, spectrum_fbo,
+                init_prog,
+                butterfly_prog,
+                mask_prog,
+                extract_prog,
+                spectrum_prog,
+                blit_prog,
+                bitrev_prog,
+                init_input_loc,
+                init_fft_size_loc,
+                init_orig_size_loc,
+                butterfly_input_loc,
+                butterfly_axis_loc,
+                butterfly_stage_loc,
+                butterfly_direction_loc,
+                butterfly_fft_size_loc,
+                mask_fft_loc,
+                mask_mask_loc,
+                mask_fft_size_loc,
+                mask_threshold_loc,
+                extract_ifft_loc,
+                extract_orig_loc,
+                extract_fft_size_loc,
+                extract_orig_size_loc,
+                extract_black_threshold_loc,
+                spectrum_fft_loc,
+                spectrum_mask_loc,
+                spectrum_fft_size_loc,
+                bitrev_input_loc,
+                bitrev_fft_size_loc,
+                tex,
+                fbo,
+                output_tex,
+                output_fbo,
+                spectrum_tex,
+                spectrum_fbo,
                 mask_tex,
-                vertex_array, vbo,
+                vertex_array,
+                vbo,
                 last_fft_size: (0, 0),
                 last_orig_size: (0, 0),
             }
@@ -215,7 +261,14 @@ impl FftFilter {
     }
 
     /// Setup or resize internal textures/FBOs for the given dimensions.
-    fn setup_resources(&mut self, gl: &glow::Context, fft_w: u32, fft_h: u32, orig_w: u32, orig_h: u32) {
+    fn setup_resources(
+        &mut self,
+        gl: &glow::Context,
+        fft_w: u32,
+        fft_h: u32,
+        orig_w: u32,
+        orig_h: u32,
+    ) {
         if self.last_fft_size == (fft_w, fft_h) && self.last_orig_size == (orig_w, orig_h) {
             return;
         }
@@ -224,46 +277,167 @@ impl FftFilter {
             // Ping-pong textures (RGBA32F for complex data)
             for i in 0..2 {
                 gl.bind_texture(glow::TEXTURE_2D, Some(self.tex[i]));
-                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA32F as i32, fft_w as i32, fft_h as i32, 0, glow::RGBA, glow::FLOAT, None);
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+                gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGBA32F as i32,
+                    fft_w as i32,
+                    fft_h as i32,
+                    0,
+                    glow::RGBA,
+                    glow::FLOAT,
+                    None,
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MIN_FILTER,
+                    glow::NEAREST as i32,
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MAG_FILTER,
+                    glow::NEAREST as i32,
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_WRAP_S,
+                    glow::CLAMP_TO_EDGE as i32,
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_WRAP_T,
+                    glow::CLAMP_TO_EDGE as i32,
+                );
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo[i]));
-                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(self.tex[i]), 0);
+                gl.framebuffer_texture_2d(
+                    glow::FRAMEBUFFER,
+                    glow::COLOR_ATTACHMENT0,
+                    glow::TEXTURE_2D,
+                    Some(self.tex[i]),
+                    0,
+                );
             }
 
             // Output texture: extracted linear RGB that is later presented by the
             // main pipeline, so keep it in half-float to avoid reintroducing banding.
             gl.bind_texture(glow::TEXTURE_2D, Some(self.output_tex));
-            gl.tex_image_2d(glow::TEXTURE_2D, 0, fft_output_texture_internal_format() as i32, orig_w as i32, orig_h as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, None);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                fft_output_texture_internal_format() as i32,
+                orig_w as i32,
+                orig_h as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                None,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::NEAREST as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::NEAREST as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE as i32,
+            );
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.output_fbo));
-            gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(self.output_tex), 0);
+            gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(self.output_tex),
+                0,
+            );
 
             // Spectrum visualization texture (RGBA8, FFT resolution)
             gl.bind_texture(glow::TEXTURE_2D, Some(self.spectrum_tex));
-            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA as i32, fft_w as i32, fft_h as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, None);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA as i32,
+                fft_w as i32,
+                fft_h as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                None,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE as i32,
+            );
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.spectrum_fbo));
-            gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(self.spectrum_tex), 0);
+            gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(self.spectrum_tex),
+                0,
+            );
 
             // Mask texture (R8, FFT resolution) - initialize to all 255 (pass all)
             let mask_data = vec![255u8; (fft_w * fft_h) as usize];
             gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.mask_tex));
-            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R8 as i32, fft_w as i32, fft_h as i32, 0, glow::RED, glow::UNSIGNED_BYTE,
-                Some(&mask_data));
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::R8 as i32,
+                fft_w as i32,
+                fft_h as i32,
+                0,
+                glow::RED,
+                glow::UNSIGNED_BYTE,
+                Some(&mask_data),
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::NEAREST as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::NEAREST as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE as i32,
+            );
 
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
@@ -279,9 +453,14 @@ impl FftFilter {
             gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.mask_tex));
             gl.tex_sub_image_2d(
-                glow::TEXTURE_2D, 0, 0, 0,
-                width as i32, height as i32,
-                glow::RED, glow::UNSIGNED_BYTE,
+                glow::TEXTURE_2D,
+                0,
+                0,
+                0,
+                width as i32,
+                height as i32,
+                glow::RED,
+                glow::UNSIGNED_BYTE,
                 glow::PixelUnpackData::Slice(mask_data),
             );
             gl.bind_texture(glow::TEXTURE_2D, None);
@@ -290,7 +469,13 @@ impl FftFilter {
 
     /// Perform a single butterfly pass: read from tex[read_idx], write to tex[write_idx].
     /// Returns nothing — the caller tracks the current read index.
-    unsafe fn butterfly_pass(&self, gl: &glow::Context, read_idx: usize, write_idx: usize, stage: u32) {
+    unsafe fn butterfly_pass(
+        &self,
+        gl: &glow::Context,
+        read_idx: usize,
+        write_idx: usize,
+        stage: u32,
+    ) {
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo[write_idx]));
         gl.active_texture(glow::TEXTURE0);
         gl.bind_texture(glow::TEXTURE_2D, Some(self.tex[read_idx]));
@@ -329,7 +514,11 @@ impl FftFilter {
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(input_texture));
             gl.uniform_2_i32(self.init_fft_size_loc.as_ref(), fft_w as i32, fft_h as i32);
-            gl.uniform_2_i32(self.init_orig_size_loc.as_ref(), orig_width as i32, orig_height as i32);
+            gl.uniform_2_i32(
+                self.init_orig_size_loc.as_ref(),
+                orig_width as i32,
+                orig_height as i32,
+            );
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
             // Current data is in tex[0]
@@ -337,7 +526,11 @@ impl FftFilter {
 
             // === Step 2: Forward FFT — horizontal butterfly passes ===
             gl.use_program(Some(self.butterfly_prog));
-            gl.uniform_2_i32(self.butterfly_fft_size_loc.as_ref(), fft_w as i32, fft_h as i32);
+            gl.uniform_2_i32(
+                self.butterfly_fft_size_loc.as_ref(),
+                fft_w as i32,
+                fft_h as i32,
+            );
             gl.uniform_1_i32(self.butterfly_direction_loc.as_ref(), 0); // forward
             gl.uniform_1_i32(self.butterfly_axis_loc.as_ref(), 0); // horizontal
 
@@ -365,7 +558,11 @@ impl FftFilter {
             gl.bind_texture(glow::TEXTURE_2D, Some(self.tex[cur]));
             gl.active_texture(glow::TEXTURE1);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.mask_tex));
-            gl.uniform_2_i32(self.spectrum_fft_size_loc.as_ref(), fft_w as i32, fft_h as i32);
+            gl.uniform_2_i32(
+                self.spectrum_fft_size_loc.as_ref(),
+                fft_w as i32,
+                fft_h as i32,
+            );
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
             // === Step 4: Apply mask ===
@@ -389,13 +586,21 @@ impl FftFilter {
             gl.use_program(Some(self.bitrev_prog));
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.tex[cur]));
-            gl.uniform_2_i32(self.bitrev_fft_size_loc.as_ref(), fft_w as i32, fft_h as i32);
+            gl.uniform_2_i32(
+                self.bitrev_fft_size_loc.as_ref(),
+                fft_w as i32,
+                fft_h as i32,
+            );
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             cur = bitrev_dst;
 
             // === Step 5: Inverse FFT — horizontal butterfly passes ===
             gl.use_program(Some(self.butterfly_prog));
-            gl.uniform_2_i32(self.butterfly_fft_size_loc.as_ref(), fft_w as i32, fft_h as i32);
+            gl.uniform_2_i32(
+                self.butterfly_fft_size_loc.as_ref(),
+                fft_w as i32,
+                fft_h as i32,
+            );
             gl.uniform_1_i32(self.butterfly_direction_loc.as_ref(), 1); // inverse
             gl.uniform_1_i32(self.butterfly_axis_loc.as_ref(), 0); // horizontal
 
@@ -424,8 +629,16 @@ impl FftFilter {
             gl.bind_texture(glow::TEXTURE_2D, Some(self.tex[cur]));
             gl.active_texture(glow::TEXTURE1);
             gl.bind_texture(glow::TEXTURE_2D, Some(input_texture));
-            gl.uniform_2_i32(self.extract_fft_size_loc.as_ref(), fft_w as i32, fft_h as i32);
-            gl.uniform_2_i32(self.extract_orig_size_loc.as_ref(), orig_width as i32, orig_height as i32);
+            gl.uniform_2_i32(
+                self.extract_fft_size_loc.as_ref(),
+                fft_w as i32,
+                fft_h as i32,
+            );
+            gl.uniform_2_i32(
+                self.extract_orig_size_loc.as_ref(),
+                orig_width as i32,
+                orig_height as i32,
+            );
             gl.uniform_1_f32(self.extract_black_threshold_loc.as_ref(), black_threshold);
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
@@ -437,7 +650,9 @@ impl FftFilter {
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, None);
             // Re-enable scissor test for egui if it was enabled
-            if scissor_enabled { gl.enable(glow::SCISSOR_TEST); }
+            if scissor_enabled {
+                gl.enable(glow::SCISSOR_TEST);
+            }
         }
 
         self.output_tex

@@ -4,11 +4,11 @@ use eframe::egui;
 pub mod controls;
 pub mod devices;
 pub mod dialogs;
-pub mod filters;
-pub mod profiles;
-pub mod networking;
-pub mod video_player;
 pub mod fft_mask;
+pub mod filters;
+pub mod networking;
+pub mod profiles;
+pub mod video_player;
 
 pub use networking::send_ws_command;
 pub use video_player::draw_video_player;

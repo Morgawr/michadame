@@ -1,8 +1,8 @@
 use crate::video::types::{Resolution, VideoFormat};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use v4l::framesize::FrameSizeEnum;
 use v4l::frameinterval::FrameIntervalEnum;
+use v4l::framesize::FrameSizeEnum;
 use v4l::video::Capture;
 
 pub fn find_video_devices() -> Result<Vec<String>> {
@@ -30,11 +30,13 @@ pub fn find_video_formats(device_path: &str) -> Result<Vec<VideoFormat>> {
 
         let desc = fmt.description.clone();
 
-        let entry = formats_map.entry(fourcc.clone()).or_insert_with(|| VideoFormat {
-            fourcc: fourcc.clone(),
-            description: desc,
-            resolutions: Vec::new(),
-        });
+        let entry = formats_map
+            .entry(fourcc.clone())
+            .or_insert_with(|| VideoFormat {
+                fourcc: fourcc.clone(),
+                description: desc,
+                resolutions: Vec::new(),
+            });
 
         if let Ok(sizes) = dev.enum_framesizes(fmt.fourcc) {
             for sz in sizes {
@@ -59,7 +61,9 @@ pub fn find_video_formats(device_path: &str) -> Result<Vec<VideoFormat>> {
                             match ival.interval {
                                 FrameIntervalEnum::Discrete(frac) => {
                                     if frac.numerator > 0 {
-                                        let fps = (frac.denominator as f64 / frac.numerator as f64).round() as u32;
+                                        let fps = (frac.denominator as f64 / frac.numerator as f64)
+                                            .round()
+                                            as u32;
                                         if !framerates.contains(&fps) {
                                             framerates.push(fps);
                                         }
@@ -67,7 +71,10 @@ pub fn find_video_formats(device_path: &str) -> Result<Vec<VideoFormat>> {
                                 }
                                 FrameIntervalEnum::Stepwise(frac) => {
                                     if frac.max.numerator > 0 {
-                                        let fps = (frac.max.denominator as f64 / frac.max.numerator as f64).round() as u32;
+                                        let fps = (frac.max.denominator as f64
+                                            / frac.max.numerator as f64)
+                                            .round()
+                                            as u32;
                                         if !framerates.contains(&fps) {
                                             framerates.push(fps);
                                         }
@@ -79,7 +86,11 @@ pub fn find_video_formats(device_path: &str) -> Result<Vec<VideoFormat>> {
 
                     framerates.sort_unstable_by(|a, b| b.cmp(a));
 
-                    if !entry.resolutions.iter().any(|r| r.width == width && r.height == height) {
+                    if !entry
+                        .resolutions
+                        .iter()
+                        .any(|r| r.width == width && r.height == height)
+                    {
                         entry.resolutions.push(Resolution {
                             width,
                             height,
@@ -90,9 +101,9 @@ pub fn find_video_formats(device_path: &str) -> Result<Vec<VideoFormat>> {
             }
         }
 
-        entry.resolutions.sort_unstable_by(|a, b| {
-            b.width.cmp(&a.width).then_with(|| b.height.cmp(&a.height))
-        });
+        entry
+            .resolutions
+            .sort_unstable_by(|a, b| b.width.cmp(&a.width).then_with(|| b.height.cmp(&a.height)));
     }
 
     let mut result: Vec<VideoFormat> = formats_map.into_values().collect();

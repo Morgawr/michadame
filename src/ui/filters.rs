@@ -58,7 +58,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         }
                     }
                 });
-            
+
             ui.label("Range:");
             let current_range = state.color_range.load(std::sync::atomic::Ordering::Relaxed);
             let range_text = crate::video::types::ColorRange::from_u8(current_range).to_string();
@@ -89,17 +89,16 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             {
                 changed = true;
             }
-            if state.video.median_filter_enabled {
-                if ui
+            if state.video.median_filter_enabled
+                && ui
                     .add(
                         egui::Slider::new(&mut state.video.median_mix, 0.0..=1.0)
                             .text("Intensity")
                             .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
                     )
                     .changed()
-                {
-                    changed = true;
-                }
+            {
+                changed = true;
             }
         });
         ui.horizontal_wrapped(|ui| {
@@ -109,10 +108,8 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             {
                 changed = true;
             }
-            if state.video.fft_filter_enabled {
-                if ui.button("Edit Mask…").clicked() {
-                    state.video.fft_mask_window_open = true;
-                }
+            if state.video.fft_filter_enabled && ui.button("Edit Mask…").clicked() {
+                state.video.fft_mask_window_open = true;
             }
         });
         if state.video.fft_filter_enabled {
@@ -185,10 +182,11 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         ui.label("Visual Tweaks:");
 
         if ui
-            .checkbox(&mut state.video.use_magenta_background, "Magenta Background")
-            .on_hover_text(
-                "Uses a magenta background around the video stream instead of black.",
+            .checkbox(
+                &mut state.video.use_magenta_background,
+                "Magenta Background",
             )
+            .on_hover_text("Uses a magenta background around the video stream instead of black.")
             .changed()
         {
             changed = true;
@@ -247,14 +245,14 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         ui.group(|ui| {
             ui.label("Lottes CRT Parameters:");
 
-            let mut scan = state.crt.hard_scan as f32;
-            let mut pix = state.crt.hard_pix as f32;
-            let mut bright = state.crt.brightboost as f32;
-            let mut warp_x = state.crt.warp_x as f32;
-            let mut warp_y = state.crt.warp_y as f32;
-            let mut mask = state.crt.shadow_mask as f32;
-            let mut bloom_pix = state.crt.hard_bloom_pix as f32;
-            let mut bloom_scan = state.crt.hard_bloom_scan as f32;
+            let mut scan = state.crt.hard_scan;
+            let mut pix = state.crt.hard_pix;
+            let mut bright = state.crt.brightboost;
+            let mut warp_x = state.crt.warp_x;
+            let mut warp_y = state.crt.warp_y;
+            let mut mask = state.crt.shadow_mask;
+            let mut bloom_pix = state.crt.hard_bloom_pix;
+            let mut bloom_scan = state.crt.hard_bloom_scan;
             let mut bloom_amount = state.crt.bloom_amount;
             let mut shape = state.crt.shape;
 
@@ -313,7 +311,9 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             .text("ShadowMask")
                             .step_by(1.0),
                     )
-                    .on_hover_text("0=None, 1=Compressed TV, 2=Aperture-grille, 3=Stretched VGA, 4=VGA")
+                    .on_hover_text(
+                        "0=None, 1=Compressed TV, 2=Aperture-grille, 3=Stretched VGA, 4=VGA",
+                    )
                     .changed()
                 {
                     state.crt.shadow_mask = mask.round();

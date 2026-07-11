@@ -21,7 +21,6 @@ pub fn draw_profile_management(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                     }
                 });
 
-
             if combo_changed && pre_selected != state.active_profile {
                 let profile_to_apply = state.profiles.get(&state.active_profile).cloned();
                 if let Some(profile) = profile_to_apply {
@@ -38,7 +37,10 @@ pub fn draw_profile_management(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                     .profiles
                     .insert(state.active_profile.clone(), current_profile_data);
                 config::save_config(state);
-                state.info(format!("Saved configuration to profile: {}", state.active_profile));
+                state.info(format!(
+                    "Saved configuration to profile: {}",
+                    state.active_profile
+                ));
                 changed = true;
             }
 
@@ -63,7 +65,10 @@ pub fn draw_profile_management(ui: &mut egui::Ui, state: &mut AppState) -> bool 
 
                 config::save_config(state); // Save immediately on profile creation
                 changed = true;
-                state.info(format!("Created and switched to profile: {}", state.active_profile));
+                state.info(format!(
+                    "Created and switched to profile: {}",
+                    state.active_profile
+                ));
             }
 
             if ui
@@ -86,7 +91,10 @@ pub fn draw_profile_management(ui: &mut egui::Ui, state: &mut AppState) -> bool 
 
                 config::save_config(state); // Save immediately on profile deletion
                 changed = true;
-                state.info(format!("Deleted profile. Switched to: {}", state.active_profile));
+                state.info(format!(
+                    "Deleted profile. Switched to: {}",
+                    state.active_profile
+                ));
             }
         });
     });

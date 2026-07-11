@@ -80,7 +80,8 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     state.hardware.selected_format_index = 0;
                     state.hardware.selected_resolution = (0, 0);
 
-                    match devices::video::find_video_formats(&state.hardware.selected_video_device) {
+                    match devices::video::find_video_formats(&state.hardware.selected_video_device)
+                    {
                         Ok(formats) => {
                             state.info(format!(
                                 "Found {} formats for {}.",
@@ -89,7 +90,8 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             ));
                             state.hardware.supported_formats = formats;
                             if let Some(res) = state
-                                .hardware.supported_formats
+                                .hardware
+                                .supported_formats
                                 .first()
                                 .and_then(|f| f.resolutions.first())
                             {
@@ -117,10 +119,12 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     // --- Video Format / Resolution ---
     if !state.hardware.supported_formats.is_empty() {
         ui.horizontal_wrapped(|ui| {
-            let selected_format_description = state.hardware.supported_formats[state.hardware.selected_format_index]
+            let selected_format_description = state.hardware.supported_formats
+                [state.hardware.selected_format_index]
                 .description
                 .clone();
-            let resolutions = state.hardware.supported_formats[state.hardware.selected_format_index]
+            let resolutions = state.hardware.supported_formats
+                [state.hardware.selected_format_index]
                 .resolutions
                 .clone();
 
@@ -137,7 +141,9 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             )
                             .changed()
                         {
-                            if let Some(res) = state.hardware.supported_formats[i].resolutions.first() {
+                            if let Some(res) =
+                                state.hardware.supported_formats[i].resolutions.first()
+                            {
                                 state.hardware.selected_resolution = (res.width, res.height);
                                 state.hardware.selected_framerate =
                                     res.framerates.first().cloned().unwrap_or(0);
@@ -164,7 +170,8 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             )
                             .changed()
                         {
-                            state.hardware.selected_framerate = res.framerates.first().cloned().unwrap_or(0);
+                            state.hardware.selected_framerate =
+                                res.framerates.first().cloned().unwrap_or(0);
                             crate::config::save_global_hardware_config(state);
                             changed = true;
                         }
@@ -172,7 +179,8 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 });
 
             if let Some(res_info) = resolutions.iter().find(|r| {
-                r.width == state.hardware.selected_resolution.0 && r.height == state.hardware.selected_resolution.1
+                r.width == state.hardware.selected_resolution.0
+                    && r.height == state.hardware.selected_resolution.1
             }) {
                 if !res_info.framerates.is_empty() {
                     ui.label("Framerate:");
@@ -211,7 +219,8 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         });
 
         let selected_source_desc = state
-            .hardware.audio_sources
+            .hardware
+            .audio_sources
             .iter()
             .find(|(_, name)| Some(name) == state.hardware.selected_audio_source_name.as_ref())
             .map(|(desc, _)| desc.as_str())
@@ -243,13 +252,19 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             ui.label("Buffer Size (Samples):");
             let buffer_sizes = [32, 64, 128, 256, 512, 1024, 2048, 4096];
             let current_size = state.hardware.audio_buffer_size;
-            
+
             egui::ComboBox::from_id_source("audio_buffer_size")
                 .selected_text(format!("{}", current_size))
                 .show_ui(ui, |ui| {
                     let mut combo_changed = false;
                     for &size in &buffer_sizes {
-                        combo_changed |= ui.selectable_value(&mut state.hardware.audio_buffer_size, size, format!("{}", size)).changed();
+                        combo_changed |= ui
+                            .selectable_value(
+                                &mut state.hardware.audio_buffer_size,
+                                size,
+                                format!("{}", size),
+                            )
+                            .changed();
                     }
                     if combo_changed {
                         crate::config::save_global_hardware_config(state);
@@ -263,13 +278,19 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             ui.label("Sample Rate:");
             let sample_rates = [44100, 48000];
             let current_rate = state.hardware.audio_sample_rate;
-            
+
             egui::ComboBox::from_id_source("audio_sample_rate")
                 .selected_text(format!("{} Hz", current_rate))
                 .show_ui(ui, |ui| {
                     let mut combo_changed = false;
                     for &rate in &sample_rates {
-                        combo_changed |= ui.selectable_value(&mut state.hardware.audio_sample_rate, rate, format!("{} Hz", rate)).changed();
+                        combo_changed |= ui
+                            .selectable_value(
+                                &mut state.hardware.audio_sample_rate,
+                                rate,
+                                format!("{} Hz", rate),
+                            )
+                            .changed();
                     }
                     if combo_changed {
                         crate::config::save_global_hardware_config(state);
@@ -279,17 +300,23 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         changed = true;
                     }
                 });
-            
+
             ui.label("Format:");
             let formats = ["S16LE", "S32LE", "F32LE"];
             let current_format = &state.hardware.audio_sample_format;
-            
+
             egui::ComboBox::from_id_source("audio_sample_format")
                 .selected_text(current_format)
                 .show_ui(ui, |ui| {
                     let mut combo_changed = false;
                     for &fmt in &formats {
-                        combo_changed |= ui.selectable_value(&mut state.hardware.audio_sample_format, fmt.to_string(), fmt).changed();
+                        combo_changed |= ui
+                            .selectable_value(
+                                &mut state.hardware.audio_sample_format,
+                                fmt.to_string(),
+                                fmt,
+                            )
+                            .changed();
                     }
                     if combo_changed {
                         crate::config::save_global_hardware_config(state);

@@ -1,9 +1,9 @@
+use super::networking::send_ws_command;
 use crate::app::AppState;
 use crate::devices::filter_type::CrtFilter;
 use crate::video;
 use eframe::egui;
 use eframe::egui_glow;
-use super::networking::send_ws_command;
 
 pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) {
     if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
@@ -13,10 +13,14 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
     if state.ui.video_window_open {
         let response = ui.allocate_response(ui.available_size(), egui::Sense::click());
-        let video_texture = state.video_texture.as_ref().expect("Video texture not initialized");
+        let video_texture = state
+            .video_texture
+            .as_ref()
+            .expect("Video texture not initialized");
         let texture_size = video_texture.size_vec2();
 
-        let filter = CrtFilter::from_u8(state.crt_filter.load(std::sync::atomic::Ordering::Relaxed));
+        let filter =
+            CrtFilter::from_u8(state.crt_filter.load(std::sync::atomic::Ordering::Relaxed));
         let fft_filter_ref = if state.video.fft_filter_enabled {
             state.fft_filter.clone()
         } else {
@@ -69,7 +73,11 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 ui.painter().add(callback);
             }
         } else {
-            let renderer_clone = state.crt_renderer.as_ref().expect("Renderer not initialized").clone();
+            let renderer_clone = state
+                .crt_renderer
+                .as_ref()
+                .expect("Renderer not initialized")
+                .clone();
             let rect = response.rect;
             let background_color = if state.video.use_magenta_background {
                 [1.0, 0.0, 1.0]
@@ -82,7 +90,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             let vibrance = state.video.vibrance;
             let overscan_x = state.video.overscan_x;
             let overscan_y = state.video.overscan_y;
-            let scaler_filter = state.scaler_filter.load(std::sync::atomic::Ordering::Relaxed);
+            let scaler_filter = state
+                .scaler_filter
+                .load(std::sync::atomic::Ordering::Relaxed);
             let latest_frame = state.latest_frame.clone();
             let video_texture_id = state.video_texture.as_ref().map(|t| t.id());
             let fft_clone = fft_filter_ref.clone();

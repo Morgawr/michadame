@@ -1,9 +1,12 @@
-use crate::video::{VideoFormat, types::RawFrame};
-use crate::devices::{self};
 use crate::config;
+use crate::devices::{self};
+use crate::video::{types::RawFrame, VideoFormat};
 use eframe::egui;
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, atomic::{AtomicU64, AtomicU8}};
+use std::sync::{
+    atomic::{AtomicU64, AtomicU8},
+    Arc, Mutex,
+};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -131,8 +134,17 @@ mod tests {
     #[test]
     fn test_atomic_defaults() {
         let state = AppState::default();
-        assert_eq!(state.crt_filter.load(Ordering::Relaxed), crate::devices::filter_type::CrtFilter::Off as u8);
-        assert_eq!(state.scaler_filter.load(Ordering::Relaxed), crate::video::types::ScalerFilter::Bicubic as u8);
-        assert_eq!(state.color_range.load(Ordering::Relaxed), crate::video::types::ColorRange::Full as u8);
+        assert_eq!(
+            state.crt_filter.load(Ordering::Relaxed),
+            crate::devices::filter_type::CrtFilter::Off as u8
+        );
+        assert_eq!(
+            state.scaler_filter.load(Ordering::Relaxed),
+            crate::video::types::ScalerFilter::Bicubic as u8
+        );
+        assert_eq!(
+            state.color_range.load(Ordering::Relaxed),
+            crate::video::types::ColorRange::Full as u8
+        );
     }
 }

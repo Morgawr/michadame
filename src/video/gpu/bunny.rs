@@ -1,6 +1,6 @@
-use eframe::glow::{self, HasContext};
 use super::programs::compile_compute_program;
 use crate::video::types::ScalerFilter;
+use eframe::glow::{self, HasContext};
 use std::collections::HashMap;
 
 struct Stage {
@@ -21,12 +21,9 @@ struct PassData {
 
 impl PassData {
     unsafe fn new(gl: &glow::Context, width: u32, height: u32) -> Self {
-        let intermediate_textures = [
-            gl.create_texture().unwrap(),
-            gl.create_texture().unwrap(),
-        ];
+        let intermediate_textures = [gl.create_texture().unwrap(), gl.create_texture().unwrap()];
         let output_texture = gl.create_texture().unwrap();
-        
+
         let data = Self {
             intermediate_textures,
             output_texture,
@@ -40,16 +37,52 @@ impl PassData {
         // Intermediate textures: Always 3x width to handle up to 12 channels (3 vec4s)
         for tex in self.intermediate_textures {
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, (width * 3) as i32, height as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, None);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA8 as i32,
+                (width * 3) as i32,
+                height as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                None,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::NEAREST as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::NEAREST as i32,
+            );
         }
 
         // Output: 2x width, 2x height
         gl.bind_texture(glow::TEXTURE_2D, Some(self.output_texture));
-        gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, (width * 2) as i32, (height * 2) as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, None);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA8 as i32,
+            (width * 2) as i32,
+            (height * 2) as i32,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            None,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::LINEAR as i32,
+        );
 
         gl.bind_texture(glow::TEXTURE_2D, None);
     }
@@ -73,57 +106,164 @@ impl BunnyUpscaler {
             let mut variants = HashMap::new();
 
             // FAST Variant
-            variants.insert(ScalerFilter::BuNNy, BunnyVariant {
-                stages: vec![
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_veryfast_in.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_veryfast_conv1.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_veryfast_conv2.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_veryfast_out.glsl"), true),
-                ]
-            });
+            variants.insert(
+                ScalerFilter::BuNNy,
+                BunnyVariant {
+                    stages: vec![
+                        Self::create_stage(
+                            gl,
+                            include_str!("../shaders/cs_bunny_veryfast_in.glsl"),
+                            false,
+                        ),
+                        Self::create_stage(
+                            gl,
+                            include_str!("../shaders/cs_bunny_veryfast_conv1.glsl"),
+                            false,
+                        ),
+                        Self::create_stage(
+                            gl,
+                            include_str!("../shaders/cs_bunny_veryfast_conv2.glsl"),
+                            false,
+                        ),
+                        Self::create_stage(
+                            gl,
+                            include_str!("../shaders/cs_bunny_veryfast_out.glsl"),
+                            true,
+                        ),
+                    ],
+                },
+            );
 
             // MEDIUM Variant
-            variants.insert(ScalerFilter::BuNNyMedium, BunnyVariant {
-                stages: vec![
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_faster_in.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_faster_conv1.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_faster_conv2.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_faster_out.glsl"), true),
-                ]
-            });
+            variants.insert(
+                ScalerFilter::BuNNyMedium,
+                BunnyVariant {
+                    stages: vec![
+                        Self::create_stage(
+                            gl,
+                            include_str!("../shaders/cs_bunny_faster_in.glsl"),
+                            false,
+                        ),
+                        Self::create_stage(
+                            gl,
+                            include_str!("../shaders/cs_bunny_faster_conv1.glsl"),
+                            false,
+                        ),
+                        Self::create_stage(
+                            gl,
+                            include_str!("../shaders/cs_bunny_faster_conv2.glsl"),
+                            false,
+                        ),
+                        Self::create_stage(
+                            gl,
+                            include_str!("../shaders/cs_bunny_faster_out.glsl"),
+                            true,
+                        ),
+                    ],
+                },
+            );
 
             // HIGH Variant
-            variants.insert(ScalerFilter::BuNNyHigh, BunnyVariant {
-                stages: vec![
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_fast_in.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_fast_conv1.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_fast_conv2.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_fast_out.glsl"), true),
-                ]
-            });
+            variants.insert(
+                ScalerFilter::BuNNyHigh,
+                BunnyVariant {
+                    stages: vec![
+                        Self::create_stage(
+                            gl,
+                            include_str!("../shaders/cs_bunny_fast_in.glsl"),
+                            false,
+                        ),
+                        Self::create_stage(
+                            gl,
+                            include_str!("../shaders/cs_bunny_fast_conv1.glsl"),
+                            false,
+                        ),
+                        Self::create_stage(
+                            gl,
+                            include_str!("../shaders/cs_bunny_fast_conv2.glsl"),
+                            false,
+                        ),
+                        Self::create_stage(
+                            gl,
+                            include_str!("../shaders/cs_bunny_fast_out.glsl"),
+                            true,
+                        ),
+                    ],
+                },
+            );
 
             // NEUTRAL 4x12 Variant
-            variants.insert(ScalerFilter::BuNNyNeutral, BunnyVariant {
-                stages: vec![
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_neutral_4x12_in.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_neutral_4x12_conv1.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_neutral_4x12_conv2.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_neutral_4x12_conv3.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_neutral_4x12_conv4.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_neutral_4x12_out.glsl"), true),
-                ]
-            });
+            variants.insert(
+                ScalerFilter::BuNNyNeutral,
+                BunnyVariant {
+                    stages: vec![
+                        Self::create_stage(
+                            gl,
+                            include_str!("../shaders/cs_bunny_neutral_4x12_in.glsl"),
+                            false,
+                        ),
+                        Self::create_stage(
+                            gl,
+                            include_str!("../shaders/cs_bunny_neutral_4x12_conv1.glsl"),
+                            false,
+                        ),
+                        Self::create_stage(
+                            gl,
+                            include_str!("../shaders/cs_bunny_neutral_4x12_conv2.glsl"),
+                            false,
+                        ),
+                        Self::create_stage(
+                            gl,
+                            include_str!("../shaders/cs_bunny_neutral_4x12_conv3.glsl"),
+                            false,
+                        ),
+                        Self::create_stage(
+                            gl,
+                            include_str!("../shaders/cs_bunny_neutral_4x12_conv4.glsl"),
+                            false,
+                        ),
+                        Self::create_stage(
+                            gl,
+                            include_str!("../shaders/cs_bunny_neutral_4x12_out.glsl"),
+                            true,
+                        ),
+                    ],
+                },
+            );
 
             // NVL 3x12 Variant
-            variants.insert(ScalerFilter::BuNNyNVL, BunnyVariant {
-                stages: vec![
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_3x12_in.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_3x12_conv1.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_3x12_conv2.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_3x12_conv3.glsl"), false),
-                    Self::create_stage(gl, include_str!("../shaders/cs_bunny_3x12_out.glsl"), true),
-                ]
-            });
+            variants.insert(
+                ScalerFilter::BuNNyNVL,
+                BunnyVariant {
+                    stages: vec![
+                        Self::create_stage(
+                            gl,
+                            include_str!("../shaders/cs_bunny_3x12_in.glsl"),
+                            false,
+                        ),
+                        Self::create_stage(
+                            gl,
+                            include_str!("../shaders/cs_bunny_3x12_conv1.glsl"),
+                            false,
+                        ),
+                        Self::create_stage(
+                            gl,
+                            include_str!("../shaders/cs_bunny_3x12_conv2.glsl"),
+                            false,
+                        ),
+                        Self::create_stage(
+                            gl,
+                            include_str!("../shaders/cs_bunny_3x12_conv3.glsl"),
+                            false,
+                        ),
+                        Self::create_stage(
+                            gl,
+                            include_str!("../shaders/cs_bunny_3x12_out.glsl"),
+                            true,
+                        ),
+                    ],
+                },
+            );
 
             Self {
                 variants,
@@ -142,6 +282,7 @@ impl BunnyUpscaler {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn upscale(
         &mut self,
         gl: &glow::Context,
@@ -163,7 +304,7 @@ impl BunnyUpscaler {
         let mut curr_width = width;
         let mut curr_height = height;
         let mut curr_tex = input_tex;
-        
+
         let mut pass_idx = 0;
 
         // Apply hysteresis to only upscale if target is noticeably larger (at least 1.2x)
@@ -175,16 +316,16 @@ impl BunnyUpscaler {
                 self.passes[pass_idx].setup_textures(gl, curr_width, curr_height);
                 self.passes[pass_idx].input_size = (curr_width, curr_height);
             }
-            
+
             let pass = &self.passes[pass_idx];
             let mut last_tex = curr_tex;
 
             for (s_idx, stage) in variant.stages.iter().enumerate() {
                 gl.use_program(Some(stage.program));
-                
+
                 // Bind input
                 gl.bind_image_texture(0, last_tex, 0, false, 0, glow::READ_ONLY, glow::RGBA8);
-                
+
                 // Bind output
                 let output_tex = if stage.is_shuffle {
                     pass.output_texture
@@ -208,7 +349,7 @@ impl BunnyUpscaler {
                 }
 
                 // Dispatch
-                gl.dispatch_compute((curr_width + 7) / 8, (curr_height + 7) / 8, 1);
+                gl.dispatch_compute(curr_width.div_ceil(8), curr_height.div_ceil(8), 1);
                 gl.memory_barrier(glow::SHADER_IMAGE_ACCESS_BARRIER_BIT);
 
                 last_tex = output_tex;
@@ -224,7 +365,13 @@ impl BunnyUpscaler {
         (curr_tex, curr_width, curr_height)
     }
 
-    pub fn get_upscaled_size(&self, width: u32, height: u32, target_width: u32, target_height: u32) -> (u32, u32) {
+    pub fn get_upscaled_size(
+        &self,
+        width: u32,
+        height: u32,
+        target_width: u32,
+        target_height: u32,
+    ) -> (u32, u32) {
         let mut curr_width = width;
         let mut curr_height = height;
         // Apply hysteresis to only upscale if target is noticeably larger (at least 1.2x)

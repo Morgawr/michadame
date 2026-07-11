@@ -33,7 +33,9 @@ impl Default for VideoFormat {
 }
 
 pub fn apply_saved_format_config(state: &mut AppState, cfg: &MichadameConfig) {
-    if let Ok(formats) = crate::devices::video::find_video_formats(&state.hardware.selected_video_device) {
+    if let Ok(formats) =
+        crate::devices::video::find_video_formats(&state.hardware.selected_video_device)
+    {
         state.hardware.supported_formats = formats;
 
         let saved_fourcc = cfg
@@ -43,7 +45,8 @@ pub fn apply_saved_format_config(state: &mut AppState, cfg: &MichadameConfig) {
 
         if let Some(saved_fourcc) = saved_fourcc {
             if let Some(idx) = state
-                .hardware.supported_formats
+                .hardware
+                .supported_formats
                 .iter()
                 .position(|f| f.fourcc == *saved_fourcc)
             {
@@ -111,15 +114,21 @@ impl ScalerFilter {
 
     pub fn into_ffmpeg_flag(self) -> ffmpeg_next::software::scaling::flag::Flags {
         match self {
-            ScalerFilter::FastBilinear => ffmpeg_next::software::scaling::flag::Flags::FAST_BILINEAR,
+            ScalerFilter::FastBilinear => {
+                ffmpeg_next::software::scaling::flag::Flags::FAST_BILINEAR
+            }
             ScalerFilter::Bilinear => ffmpeg_next::software::scaling::flag::Flags::BILINEAR,
             ScalerFilter::Bicubic => ffmpeg_next::software::scaling::flag::Flags::BICUBIC,
             ScalerFilter::Point => ffmpeg_next::software::scaling::flag::Flags::POINT,
             ScalerFilter::Lanczos => ffmpeg_next::software::scaling::flag::Flags::LANCZOS,
-            ScalerFilter::BuNNy | ScalerFilter::BuNNyMedium | ScalerFilter::BuNNyHigh | ScalerFilter::BuNNyNeutral | ScalerFilter::BuNNyNVL |
-            ScalerFilter::Anime4kSmall | ScalerFilter::Anime4kMedium | ScalerFilter::Anime4kLarge => {
-                ffmpeg_next::software::scaling::flag::Flags::LANCZOS
-            }
+            ScalerFilter::BuNNy
+            | ScalerFilter::BuNNyMedium
+            | ScalerFilter::BuNNyHigh
+            | ScalerFilter::BuNNyNeutral
+            | ScalerFilter::BuNNyNVL
+            | ScalerFilter::Anime4kSmall
+            | ScalerFilter::Anime4kMedium
+            | ScalerFilter::Anime4kLarge => ffmpeg_next::software::scaling::flag::Flags::LANCZOS,
         }
     }
 }
@@ -202,19 +211,58 @@ mod tests {
 
     #[test]
     fn test_scaler_filter_into_ffmpeg_flag() {
-        assert_eq!(ScalerFilter::FastBilinear.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::FAST_BILINEAR);
-        assert_eq!(ScalerFilter::Bilinear.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::BILINEAR);
-        assert_eq!(ScalerFilter::Bicubic.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::BICUBIC);
-        assert_eq!(ScalerFilter::Point.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::POINT);
-        assert_eq!(ScalerFilter::Lanczos.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::LANCZOS);
-        assert_eq!(ScalerFilter::BuNNy.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::LANCZOS);
-        assert_eq!(ScalerFilter::BuNNyMedium.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::LANCZOS);
-        assert_eq!(ScalerFilter::BuNNyHigh.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::LANCZOS);
-        assert_eq!(ScalerFilter::BuNNyNeutral.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::LANCZOS);
-        assert_eq!(ScalerFilter::BuNNyNVL.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::LANCZOS);
-        assert_eq!(ScalerFilter::Anime4kSmall.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::LANCZOS);
-        assert_eq!(ScalerFilter::Anime4kMedium.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::LANCZOS);
-        assert_eq!(ScalerFilter::Anime4kLarge.into_ffmpeg_flag(), ffmpeg_next::software::scaling::flag::Flags::LANCZOS);
+        assert_eq!(
+            ScalerFilter::FastBilinear.into_ffmpeg_flag(),
+            ffmpeg_next::software::scaling::flag::Flags::FAST_BILINEAR
+        );
+        assert_eq!(
+            ScalerFilter::Bilinear.into_ffmpeg_flag(),
+            ffmpeg_next::software::scaling::flag::Flags::BILINEAR
+        );
+        assert_eq!(
+            ScalerFilter::Bicubic.into_ffmpeg_flag(),
+            ffmpeg_next::software::scaling::flag::Flags::BICUBIC
+        );
+        assert_eq!(
+            ScalerFilter::Point.into_ffmpeg_flag(),
+            ffmpeg_next::software::scaling::flag::Flags::POINT
+        );
+        assert_eq!(
+            ScalerFilter::Lanczos.into_ffmpeg_flag(),
+            ffmpeg_next::software::scaling::flag::Flags::LANCZOS
+        );
+        assert_eq!(
+            ScalerFilter::BuNNy.into_ffmpeg_flag(),
+            ffmpeg_next::software::scaling::flag::Flags::LANCZOS
+        );
+        assert_eq!(
+            ScalerFilter::BuNNyMedium.into_ffmpeg_flag(),
+            ffmpeg_next::software::scaling::flag::Flags::LANCZOS
+        );
+        assert_eq!(
+            ScalerFilter::BuNNyHigh.into_ffmpeg_flag(),
+            ffmpeg_next::software::scaling::flag::Flags::LANCZOS
+        );
+        assert_eq!(
+            ScalerFilter::BuNNyNeutral.into_ffmpeg_flag(),
+            ffmpeg_next::software::scaling::flag::Flags::LANCZOS
+        );
+        assert_eq!(
+            ScalerFilter::BuNNyNVL.into_ffmpeg_flag(),
+            ffmpeg_next::software::scaling::flag::Flags::LANCZOS
+        );
+        assert_eq!(
+            ScalerFilter::Anime4kSmall.into_ffmpeg_flag(),
+            ffmpeg_next::software::scaling::flag::Flags::LANCZOS
+        );
+        assert_eq!(
+            ScalerFilter::Anime4kMedium.into_ffmpeg_flag(),
+            ffmpeg_next::software::scaling::flag::Flags::LANCZOS
+        );
+        assert_eq!(
+            ScalerFilter::Anime4kLarge.into_ffmpeg_flag(),
+            ffmpeg_next::software::scaling::flag::Flags::LANCZOS
+        );
     }
 
     #[test]

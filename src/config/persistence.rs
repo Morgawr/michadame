@@ -1,10 +1,11 @@
-use crate::app::models::AppState;
 use super::models::{MichadameConfig, Profile};
+use crate::app::models::AppState;
 use std::sync::atomic::Ordering;
 
 pub fn build_profile_from_state(state: &AppState) -> Profile {
     Profile {
-        video_format_fourcc: state.hardware
+        video_format_fourcc: state
+            .hardware
             .supported_formats
             .get(state.hardware.selected_format_index)
             .map(|f| f.fourcc.clone()),
@@ -34,10 +35,7 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
 }
 
 pub fn save_config(state: &AppState) {
-    let mut cfg = match confy::load::<MichadameConfig>("michadame", None) {
-        Ok(c) => c,
-        Err(_) => MichadameConfig::default(),
-    };
+    let mut cfg = confy::load::<MichadameConfig>("michadame", None).unwrap_or_default();
 
     cfg.video_device = Some(state.hardware.selected_video_device.clone());
     cfg.usb_device = state.hardware.selected_usb_device.clone();
@@ -62,7 +60,8 @@ pub fn save_config(state: &AppState) {
     cfg.profiles = state.profiles.clone();
 
     let current_profile_data = build_profile_from_state(state);
-    cfg.profiles.insert(state.active_profile.clone(), current_profile_data);
+    cfg.profiles
+        .insert(state.active_profile.clone(), current_profile_data);
 
     if let Err(e) = confy::store("michadame", None, cfg) {
         tracing::error!("Failed to save configuration: {}", e);
@@ -175,18 +174,31 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
         }
     }
     if let Some(saved_usb) = &cfg.usb_device {
-        if state.hardware.usb_devices.iter().any(|(id, _)| id == saved_usb) {
+        if state
+            .hardware
+            .usb_devices
+            .iter()
+            .any(|(id, _)| id == saved_usb)
+        {
             state.hardware.selected_usb_device = Some(saved_usb.clone());
         }
     }
     if let Some(saved_source) = &cfg.audio_source {
-        if state.hardware.audio_sources.iter().any(|(_, name)| name == saved_source) {
+        if state
+            .hardware
+            .audio_sources
+            .iter()
+            .any(|(_, name)| name == saved_source)
+        {
             state.hardware.selected_audio_source_name = Some(saved_source.clone());
         }
     }
     state.hardware.audio_buffer_size = cfg.audio_buffer_size.unwrap_or(1024);
     state.hardware.audio_sample_rate = cfg.audio_sample_rate.unwrap_or(48000);
-    state.hardware.audio_sample_format = cfg.audio_sample_format.clone().unwrap_or_else(|| "S16LE".to_string());
+    state.hardware.audio_sample_format = cfg
+        .audio_sample_format
+        .clone()
+        .unwrap_or_else(|| "S16LE".to_string());
 
     if !state.hardware.selected_video_device.is_empty() {
         crate::video::types::apply_saved_format_config(state, cfg);
@@ -225,26 +237,37 @@ mod tests {
         let mut state = AppState::default();
         state.crt.hard_scan = -12.0;
         state.video.pixelate_filter_enabled = true;
-        state.crt_filter.store(crate::devices::filter_type::CrtFilter::Lottes as u8, Ordering::Relaxed);
+        state.crt_filter.store(
+            crate::devices::filter_type::CrtFilter::Lottes as u8,
+            Ordering::Relaxed,
+        );
 
         let profile = build_profile_from_state(&state);
         assert_eq!(profile.crt_hard_scan, Some(-12.0));
         assert_eq!(profile.pixelate_filter_enabled, Some(true));
-        assert_eq!(profile.crt_filter, Some(crate::devices::filter_type::CrtFilter::Lottes as u8));
+        assert_eq!(
+            profile.crt_filter,
+            Some(crate::devices::filter_type::CrtFilter::Lottes as u8)
+        );
     }
 
     #[test]
     fn test_apply_profile_to_state() {
         let mut state = AppState::default();
-        let mut profile = Profile::default();
-        profile.crt_hard_scan = Some(-15.0);
-        profile.pixelate_filter_enabled = Some(true);
-        profile.crt_filter = Some(crate::devices::filter_type::CrtFilter::Lottes as u8);
+        let profile = Profile {
+            crt_hard_scan: Some(-15.0),
+            pixelate_filter_enabled: Some(true),
+            crt_filter: Some(crate::devices::filter_type::CrtFilter::Lottes as u8),
+            ..Default::default()
+        };
 
         apply_profile_to_state(&mut state, &profile);
         assert_eq!(state.crt.hard_scan, -15.0);
-        assert_eq!(state.video.pixelate_filter_enabled, true);
-        assert_eq!(state.crt_filter.load(Ordering::Relaxed), crate::devices::filter_type::CrtFilter::Lottes as u8);
+        assert!(state.video.pixelate_filter_enabled);
+        assert_eq!(
+            state.crt_filter.load(Ordering::Relaxed),
+            crate::devices::filter_type::CrtFilter::Lottes as u8
+        );
     }
 
     #[test]
@@ -253,14 +276,19 @@ mod tests {
         state.hardware.video_devices = vec!["/dev/video0".to_string()];
         state.hardware.audio_sources = vec![("id".to_string(), "Mic".to_string())];
 
-        let mut cfg = MichadameConfig::default();
-        cfg.video_device = Some("/dev/video0".to_string());
-        cfg.audio_source = Some("Mic".to_string());
-        cfg.audio_buffer_size = Some(2048);
+        let cfg = MichadameConfig {
+            video_device: Some("/dev/video0".to_string()),
+            audio_source: Some("Mic".to_string()),
+            audio_buffer_size: Some(2048),
+            ..Default::default()
+        };
 
         apply_config(&mut state, &cfg);
         assert_eq!(state.hardware.selected_video_device, "/dev/video0");
-        assert_eq!(state.hardware.selected_audio_source_name, Some("Mic".to_string()));
+        assert_eq!(
+            state.hardware.selected_audio_source_name,
+            Some("Mic".to_string())
+        );
         assert_eq!(state.hardware.audio_buffer_size, 2048);
     }
 
@@ -269,8 +297,10 @@ mod tests {
         let mut state = AppState::default();
         state.hardware.video_devices = vec![]; // No devices found during scan
 
-        let mut cfg = MichadameConfig::default();
-        cfg.video_device = Some("/dev/video0".to_string()); // Saved device not present
+        let cfg = MichadameConfig {
+            video_device: Some("/dev/video0".to_string()), // Saved device not present
+            ..Default::default()
+        };
 
         apply_config(&mut state, &cfg);
         // Should NOT update if not in list

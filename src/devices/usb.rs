@@ -37,18 +37,22 @@ pub fn find_usb_devices() -> Result<Vec<(String, String)>> {
             let vid = desc.vendor_id();
             let pid = desc.product_id();
             let id = format!("{:04x}:{:04x}", vid, pid);
-            
+
             // Try to pull the human readable product descriptor string. This requires system bus permissions.
             let name = match device.open() {
-                Ok(timeout_handle) => {
-                    match timeout_handle.read_product_string_ascii(&desc) {
-                        Ok(n) => n,
-                        Err(_) => fallback_names.get(&id).cloned().unwrap_or_else(|| "Generic Device".to_string()),
-                    }
-                }
-                Err(_) => fallback_names.get(&id).cloned().unwrap_or_else(|| "Restricted System Device".to_string()),
+                Ok(timeout_handle) => match timeout_handle.read_product_string_ascii(&desc) {
+                    Ok(n) => n,
+                    Err(_) => fallback_names
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| "Generic Device".to_string()),
+                },
+                Err(_) => fallback_names
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| "Restricted System Device".to_string()),
             };
-            
+
             // deduplicate IDs incase of multi-interfaces etc.
             if !result.iter().any(|(existing_id, _)| existing_id == &id) {
                 result.push((id, name));
@@ -64,10 +68,10 @@ pub fn reset_usb_device(device_id: &str) -> Result<()> {
     if parts.len() != 2 {
         return Err(anyhow!("Invalid device ID format. Expected VID:PID"));
     }
-    
+
     let vid: u16 = u16::from_str_radix(parts[0], 16)?;
     let pid: u16 = u16::from_str_radix(parts[1], 16)?;
-    
+
     let devices = rusb::devices()?;
     for device in devices.iter() {
         if let Ok(desc) = device.device_descriptor() {
@@ -77,20 +81,26 @@ pub fn reset_usb_device(device_id: &str) -> Result<()> {
                         if let Err(e) = handle.reset() {
                             tracing::warn!("Native reset failed: {}. Falling back to pkexec.", e);
                         } else {
-                            tracing::info!("Successfully sent IOCTL port reset to USB bus {:04x}:{:04x}", vid, pid);
+                            tracing::info!(
+                                "Successfully sent IOCTL port reset to USB bus {:04x}:{:04x}",
+                                vid,
+                                pid
+                            );
                             return Ok(());
                         }
-                    },
+                    }
                     Err(e) => {
                         tracing::warn!("Insufficient privileges to open bus natively: {}. Falling back to pkexec.", e);
                     }
                 }
-                
+
                 let status = std::process::Command::new("pkexec")
                     .arg("usbreset")
                     .arg(device_id)
                     .status()
-                    .context("Failed to execute 'pkexec usbreset'. Is pkexec and usbreset installed?")?;
+                    .context(
+                        "Failed to execute 'pkexec usbreset'. Is pkexec and usbreset installed?",
+                    )?;
 
                 if status.success() {
                     return Ok(());
@@ -100,7 +110,7 @@ pub fn reset_usb_device(device_id: &str) -> Result<()> {
             }
         }
     }
-    
+
     Err(anyhow!("Device not currently connected to the bus."))
 }
 
@@ -118,9 +128,18 @@ Bus 004 Device 002: ID 345f:2131 MACROSILICON UGREEN 25773\n";
 
         let names = parse_lsusb_output(sample_output);
 
-        assert_eq!(names.get("1d6b:0002").unwrap(), "Linux Foundation 2.0 root hub");
-        assert_eq!(names.get("054c:0ce6").unwrap(), "Sony Corp. DualSense wireless controller (PS5)");
-        assert_eq!(names.get("1397:00d4").unwrap(), "BEHRINGER International GmbH X18/XR18");
+        assert_eq!(
+            names.get("1d6b:0002").unwrap(),
+            "Linux Foundation 2.0 root hub"
+        );
+        assert_eq!(
+            names.get("054c:0ce6").unwrap(),
+            "Sony Corp. DualSense wireless controller (PS5)"
+        );
+        assert_eq!(
+            names.get("1397:00d4").unwrap(),
+            "BEHRINGER International GmbH X18/XR18"
+        );
         assert_eq!(names.get("345f:2131").unwrap(), "MACROSILICON UGREEN 25773");
         assert_eq!(names.len(), 4);
     }

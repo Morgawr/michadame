@@ -1,14 +1,17 @@
+pub mod init;
 pub mod models;
 pub mod stream;
-pub mod init;
 
-pub use models::*;
-pub use init::init_app_state;
-use crate::{config, devices, video, ui};
 use crate::devices::filter_type::CrtFilter;
+use crate::{config, devices, ui, video};
 use eframe::egui;
+pub use init::init_app_state;
+pub use models::*;
 use std::collections::BTreeMap;
-use std::sync::{Arc, atomic::{AtomicU64, AtomicU8, Ordering}};
+use std::sync::{
+    atomic::{AtomicU64, AtomicU8, Ordering},
+    Arc,
+};
 use std::time::Instant;
 
 impl Default for AppState {
@@ -65,7 +68,9 @@ impl Default for AppState {
                 fft_filter_enabled: false,
                 fft_mask_window_open: false,
             },
-            toasts: egui_toast::Toasts::new().anchor(egui::Align2::LEFT_TOP, (10.0, 10.0)).direction(egui::Direction::TopDown),
+            toasts: egui_toast::Toasts::new()
+                .anchor(egui::Align2::LEFT_TOP, (10.0, 10.0))
+                .direction(egui::Direction::TopDown),
             video_thread: None,
             video_texture: None,
             frame_receiver: None,
@@ -106,8 +111,12 @@ impl AppState {
         let scan_successful = match result {
             Ok((video_devices, audio_sources, usb_devices)) => {
                 self.hardware.video_devices = video_devices;
-                self.hardware.selected_video_device =
-                    self.hardware.video_devices.first().cloned().unwrap_or_default();
+                self.hardware.selected_video_device = self
+                    .hardware
+                    .video_devices
+                    .first()
+                    .cloned()
+                    .unwrap_or_default();
                 self.hardware.audio_sources = audio_sources;
                 self.hardware.usb_devices = usb_devices;
 
@@ -164,7 +173,8 @@ impl AppState {
     pub fn info(&mut self, text: impl Into<String>) {
         self.toasts.add(egui_toast::Toast {
             kind: egui_toast::ToastKind::Info,
-            options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)),
+            options: egui_toast::ToastOptions::default()
+                .duration(std::time::Duration::from_secs(3)),
             text: text.into().into(),
         });
     }
@@ -172,7 +182,8 @@ impl AppState {
     pub fn error(&mut self, text: impl Into<String>) {
         self.toasts.add(egui_toast::Toast {
             kind: egui_toast::ToastKind::Error,
-            options: egui_toast::ToastOptions::default().duration(std::time::Duration::from_secs(3)),
+            options: egui_toast::ToastOptions::default()
+                .duration(std::time::Duration::from_secs(3)),
             text: text.into().into(),
         });
     }
@@ -256,7 +267,7 @@ impl eframe::App for AppState {
             let next_filter = current_filter.next();
             self.crt_filter.store(next_filter as u8, Ordering::Relaxed);
             config::save_config(self);
-            self.info(format!("CRT filter set to: {}", next_filter.to_string()));
+            self.info(format!("CRT filter set to: {}", next_filter));
         }
         if ctx.input(|i| i.key_pressed(egui::Key::G)) {
             self.video.pixelate_filter_enabled = !self.video.pixelate_filter_enabled;
@@ -271,10 +282,11 @@ impl eframe::App for AppState {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Q)) {
-            if self.ui.video_window_open && !self.ui.show_stop_stream_dialog {
-                self.ui.show_stop_stream_dialog = true;
-            }
+        if ctx.input(|i| i.key_pressed(egui::Key::Q))
+            && self.ui.video_window_open
+            && !self.ui.show_stop_stream_dialog
+        {
+            self.ui.show_stop_stream_dialog = true;
         }
         if ctx.input(|i| i.key_pressed(egui::Key::M)) {
             self.ui.control_window_open = !self.ui.control_window_open;
@@ -300,7 +312,8 @@ impl eframe::App for AppState {
             if let Ok(frame) = rx.try_recv() {
                 // Initialize or resize FFT mask when frame dimensions change
                 if self.video.fft_filter_enabled {
-                    let (fft_w, fft_h) = crate::video::gpu::FftFilter::fft_dimensions(frame.width, frame.height);
+                    let (fft_w, fft_h) =
+                        crate::video::gpu::FftFilter::fft_dimensions(frame.width, frame.height);
                     if self.fft_mask_resolution != (fft_w, fft_h) {
                         self.fft_mask_resolution = (fft_w, fft_h);
                         self.fft_mask_data = vec![255u8; (fft_w * fft_h) as usize];
@@ -362,7 +375,7 @@ mod tests {
             vec![("default".to_string(), "Default Audio".to_string())],
             vec![("1234:5678".to_string(), "Test USB".to_string())],
         ));
-        
+
         let success = state.handle_device_scan_result(result);
         assert!(success);
         assert_eq!(state.hardware.video_devices.len(), 1);
@@ -375,7 +388,7 @@ mod tests {
     fn test_handle_device_scan_result_error() {
         let mut state = AppState::default();
         let error = anyhow::anyhow!("Test failure");
-        
+
         let success = state.handle_device_scan_result(Err(error));
         assert!(!success);
         assert_eq!(state.hardware.video_devices.len(), 0);

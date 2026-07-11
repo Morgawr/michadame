@@ -1,7 +1,7 @@
 use crate::app::models::AppState;
 use crate::{devices, video};
 use eframe::egui;
-use std::sync::{Arc};
+use std::sync::Arc;
 use std::thread;
 
 impl AppState {
@@ -11,9 +11,39 @@ impl AppState {
             return;
         }
 
-        if let Some(mic) = &self.hardware.selected_audio_source_name {
+        let mic = if let Some(mic) = &self.hardware.selected_audio_source_name {
+            mic.clone()
+        } else {
+            self.error("Cannot start: Missing audio input device.");
+            return;
+        };
+
+        let format = if let Some(f) = self
+            .hardware
+            .supported_formats
+            .get(self.hardware.selected_format_index)
+        {
+            f.clone()
+        } else {
+            self.error("Cannot start: No video format selected.");
+            return;
+        };
+
+        let resolution = self.hardware.selected_resolution;
+        if resolution.0 == 0 || resolution.1 == 0 {
+            self.error("Cannot start: No video resolution selected.");
+            return;
+        }
+
+        let framerate = self.hardware.selected_framerate;
+        if framerate == 0 {
+            self.error("Cannot start: No video framerate selected.");
+            return;
+        }
+
+        {
             match devices::audio::start_audio_stream(
-                mic, 
+                &mic,
                 Arc::clone(&self.hardware.audio_peak_amplitude),
                 Arc::clone(&self.hardware.audio_latency_ms),
                 self.hardware.audio_buffer_size,
@@ -29,19 +59,7 @@ impl AppState {
                     return;
                 }
             }
-        } else {
-            self.error("Cannot start: Missing audio input device.");
-            return;
         }
-
-        let format = if let Some(f) = self.hardware.supported_formats.get(self.hardware.selected_format_index) {
-            f
-        } else {
-            self.error("Cannot start: No video format selected.");
-            return;
-        };
-
-        let resolution = self.hardware.selected_resolution;
 
         let new_size = egui::vec2(resolution.0 as f32, resolution.1 as f32);
         ctx.send_viewport_cmd_to(
@@ -51,8 +69,6 @@ impl AppState {
         ctx.request_repaint();
 
         let device = self.hardware.selected_video_device.clone();
-        let format = format.clone();
-        let framerate = self.hardware.selected_framerate;
         let (tx, rx) = crossbeam_channel::bounded(1);
         self.frame_receiver = Some(rx);
 
@@ -115,10 +131,10 @@ impl AppState {
 
     pub fn restart_audio_stream(&mut self) {
         self.hardware.active_audio_stream = None;
-        
+
         if let Some(mic) = &self.hardware.selected_audio_source_name {
             match devices::audio::start_audio_stream(
-                mic, 
+                mic,
                 Arc::clone(&self.hardware.audio_peak_amplitude),
                 Arc::clone(&self.hardware.audio_latency_ms),
                 self.hardware.audio_buffer_size,

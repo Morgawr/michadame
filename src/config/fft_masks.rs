@@ -2,6 +2,8 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
+pub type LoadedMask = (Vec<u8>, (u32, u32), f32, f32);
+
 /// Get the directory where FFT masks are stored.
 fn mask_dir() -> PathBuf {
     // Derive from confy's config path: ~/.config/michadame/default-config.toml → ~/.config/michadame/fft_masks/
@@ -36,39 +38,48 @@ pub fn save_mask(
         return Err("Mask name cannot be empty".to_string());
     }
     // Sanitize name — only allow alphanumeric, underscore, hyphen
-    let sanitized: String = name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
 
     let filename = mask_filename(resolution, &sanitized);
     let path = mask_dir().join(&filename);
 
-    let mut file = fs::File::create(&path)
-        .map_err(|e| format!("Failed to create mask file: {}", e))?;
+    let mut file =
+        fs::File::create(&path).map_err(|e| format!("Failed to create mask file: {}", e))?;
 
     // Write header
-    file.write_all(MAGIC).map_err(|e| format!("Write error: {}", e))?;
-    file.write_all(&fft_resolution.0.to_le_bytes()).map_err(|e| format!("Write error: {}", e))?;
-    file.write_all(&fft_resolution.1.to_le_bytes()).map_err(|e| format!("Write error: {}", e))?;
-    file.write_all(&mask_threshold.to_le_bytes()).map_err(|e| format!("Write error: {}", e))?;
-    file.write_all(&black_threshold.to_le_bytes()).map_err(|e| format!("Write error: {}", e))?;
+    file.write_all(MAGIC)
+        .map_err(|e| format!("Write error: {}", e))?;
+    file.write_all(&fft_resolution.0.to_le_bytes())
+        .map_err(|e| format!("Write error: {}", e))?;
+    file.write_all(&fft_resolution.1.to_le_bytes())
+        .map_err(|e| format!("Write error: {}", e))?;
+    file.write_all(&mask_threshold.to_le_bytes())
+        .map_err(|e| format!("Write error: {}", e))?;
+    file.write_all(&black_threshold.to_le_bytes())
+        .map_err(|e| format!("Write error: {}", e))?;
     // Write mask data
-    file.write_all(mask_data).map_err(|e| format!("Write error: {}", e))?;
+    file.write_all(mask_data)
+        .map_err(|e| format!("Write error: {}", e))?;
 
     tracing::info!("Saved FFT mask '{}' to {:?}", sanitized, path);
     Ok(())
 }
 
 /// Load an FFT mask from disk. Returns (mask_data, fft_resolution, mask_threshold, black_threshold).
-pub fn load_mask(
-    name: &str,
-    resolution: (u32, u32),
-) -> Result<(Vec<u8>, (u32, u32), f32, f32), String> {
+pub fn load_mask(name: &str, resolution: (u32, u32)) -> Result<LoadedMask, String> {
     let filename = mask_filename(resolution, name);
     let path = mask_dir().join(&filename);
 
-    let mut file = fs::File::open(&path)
-        .map_err(|e| format!("Failed to open mask file: {}", e))?;
+    let mut file = fs::File::open(&path).map_err(|e| format!("Failed to open mask file: {}", e))?;
 
     let mut buf = Vec::new();
     file.read_to_end(&mut buf)
@@ -93,7 +104,10 @@ pub fn load_mask(
     if mask_data.len() != expected_len {
         return Err(format!(
             "Mask data size mismatch: expected {} bytes for {}x{}, got {}",
-            expected_len, fft_w, fft_h, mask_data.len()
+            expected_len,
+            fft_w,
+            fft_h,
+            mask_data.len()
         ));
     }
 
@@ -128,6 +142,7 @@ pub fn list_masks_for_resolution(resolution: (u32, u32)) -> Vec<String> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::Path;
     use std::sync::Mutex;
 
     // Use a mutex to ensure tests that modify the directory don't run in parallel
@@ -141,18 +156,37 @@ mod tests {
     }
 
     /// A version of save_mask that uses a custom directory for testing
-    fn save_mask_test(dir: &PathBuf, name: &str, resolution: (u32, u32), fft_resolution: (u32, u32), mask_data: &[u8], mask_threshold: f32, black_threshold: f32) -> Result<(), String> {
-        let sanitized: String = name.chars()
-            .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+    fn save_mask_test(
+        dir: &Path,
+        name: &str,
+        resolution: (u32, u32),
+        fft_resolution: (u32, u32),
+        mask_data: &[u8],
+        mask_threshold: f32,
+        black_threshold: f32,
+    ) -> Result<(), String> {
+        let sanitized: String = name
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         let filename = format!("{}x{}_{}.bin", resolution.0, resolution.1, sanitized);
         let path = dir.join(&filename);
         let mut file = fs::File::create(&path).map_err(|e| e.to_string())?;
         file.write_all(MAGIC).map_err(|e| e.to_string())?;
-        file.write_all(&fft_resolution.0.to_le_bytes()).map_err(|e| e.to_string())?;
-        file.write_all(&fft_resolution.1.to_le_bytes()).map_err(|e| e.to_string())?;
-        file.write_all(&mask_threshold.to_le_bytes()).map_err(|e| e.to_string())?;
-        file.write_all(&black_threshold.to_le_bytes()).map_err(|e| e.to_string())?;
+        file.write_all(&fft_resolution.0.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        file.write_all(&fft_resolution.1.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        file.write_all(&mask_threshold.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        file.write_all(&black_threshold.to_le_bytes())
+            .map_err(|e| e.to_string())?;
         file.write_all(mask_data).map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -170,28 +204,34 @@ mod tests {
         let name = "roundtrip";
         let res = (100, 100);
         let fft_res = (4, 4);
-        
+
         // We test the internal logic by using our test saver/loader
         save_mask_test(&dir, name, res, fft_res, &mask_data, 0.5, 0.2).unwrap();
-        
+
         let filename = format!("{}x{}_{}.bin", res.0, res.1, name);
         let path = dir.join(&filename);
         let buf = fs::read(path).unwrap();
-        
+
         assert_eq!(&buf[0..4], MAGIC);
         let fft_w = u32::from_le_bytes(buf[4..8].try_into().unwrap());
         assert_eq!(fft_w, 4);
-        
+
         fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn test_name_sanitization_logic() {
         let name = "my mask/test!";
-        let sanitized: String = name.chars()
-            .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        let sanitized: String = name
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         assert_eq!(sanitized, "my_mask_test_");
     }
 }
-

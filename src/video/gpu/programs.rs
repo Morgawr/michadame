@@ -51,7 +51,9 @@ pub unsafe fn compile_program(gl: &glow::Context, vs_src: &str, fs_src: &str) ->
 }
 pub unsafe fn compile_compute_program(gl: &glow::Context, shader_source: &str) -> glow::Program {
     let program = gl.create_program().expect("Cannot create program");
-    let shader = gl.create_shader(glow::COMPUTE_SHADER).expect("Cannot create shader");
+    let shader = gl
+        .create_shader(glow::COMPUTE_SHADER)
+        .expect("Cannot create shader");
     gl.shader_source(shader, shader_source);
     gl.compile_shader(shader);
     if !gl.get_shader_compile_status(shader) {
