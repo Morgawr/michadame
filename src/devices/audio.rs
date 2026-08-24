@@ -9,6 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const AUDIO_UNDERRUN_SILENCE: Duration = Duration::from_millis(1);
+const AUDIO_DECLICK_DURATION: Duration = Duration::from_millis(1);
 const ALSA_CAPTURE_POLL_TIMEOUT_MS: u32 = 10;
 const ALSA_RECONNECT_DELAY: Duration = Duration::from_millis(50);
 const ALSA_STALL_TIMEOUT: Duration = Duration::from_secs(2);
@@ -42,6 +43,8 @@ struct LiveSource {
     local_buf: Vec<f32>,
     local_idx: usize,
     valid_len: usize,
+    last_output_frame: Vec<f32>,
+    declick_next_audio: bool,
 }
 
 impl Iterator for LiveSource {
@@ -71,6 +74,7 @@ impl Iterator for LiveSource {
 
             // Keep latency bounded (clock drift compensation).
             // We use the ring buffer occupancy for this, as it's what we can control.
+            let mut skipped_audio = false;
             if ring_buffer_ms > 100 {
                 let target_samples =
                     (self.sample_rate as f64 * self.channels as f64 * 0.08) as usize; // 80ms
@@ -79,6 +83,7 @@ impl Iterator for LiveSource {
                     let drop_frames = (to_drop / self.channels as usize) * self.channels as usize;
                     if let Ok(chunk) = self.consumer.read_chunk(drop_frames) {
                         chunk.commit_all();
+                        skipped_audio = true;
                     }
                 }
             }
@@ -100,6 +105,10 @@ impl Iterator for LiveSource {
                     chunk.commit_all();
                     self.valid_len = to_read;
                     self.local_idx = 0;
+                    if self.declick_next_audio || skipped_audio {
+                        self.declick_audio_start();
+                        self.declick_next_audio = false;
+                    }
                     refilled = true;
                 }
             }
@@ -115,15 +124,58 @@ impl Iterator for LiveSource {
                     * self.channels as usize)
                     .max(self.channels as usize);
 
-                self.local_buf[..safe_silence].fill(0.0);
                 self.valid_len = safe_silence;
                 self.local_idx = 0;
+                self.fade_to_silence();
+                self.declick_next_audio = true;
             }
         }
 
         let sample = self.local_buf[self.local_idx];
+        let channel = self.local_idx % self.channels as usize;
+        self.last_output_frame[channel] = sample;
         self.local_idx += 1;
         Some(sample)
+    }
+}
+
+impl LiveSource {
+    fn declick_frame_count(&self) -> usize {
+        ((self.sample_rate as f64 * AUDIO_DECLICK_DURATION.as_secs_f64()) as usize).max(1)
+    }
+
+    /// Smooth a discontinuity without buffering or looking ahead. This runs in the output
+    /// callback, so it deliberately operates only on the already allocated local buffer.
+    fn declick_audio_start(&mut self) {
+        let channels = self.channels as usize;
+        let available_frames = self.valid_len / channels;
+        let fade_frames = self.declick_frame_count().min(available_frames);
+
+        for frame in 0..fade_frames {
+            let new_audio_weight = (frame + 1) as f32 / fade_frames as f32;
+            let previous_audio_weight = 1.0 - new_audio_weight;
+            for channel in 0..channels {
+                let index = frame * channels + channel;
+                self.local_buf[index] = self.last_output_frame[channel] * previous_audio_weight
+                    + self.local_buf[index] * new_audio_weight;
+            }
+        }
+    }
+
+    fn fade_to_silence(&mut self) {
+        let channels = self.channels as usize;
+        let available_frames = self.valid_len / channels;
+        let fade_frames = self.declick_frame_count().min(available_frames);
+
+        for frame in 0..fade_frames {
+            let weight = 1.0 - (frame + 1) as f32 / fade_frames as f32;
+            for channel in 0..channels {
+                self.local_buf[frame * channels + channel] =
+                    self.last_output_frame[channel] * weight;
+            }
+        }
+
+        self.local_buf[fade_frames * channels..self.valid_len].fill(0.0);
     }
 }
 
@@ -269,6 +321,8 @@ pub fn start_audio_stream(
         ],
         local_idx: 0,
         valid_len: 0,
+        last_output_frame: vec![0.0; input_channels as usize],
+        declick_next_audio: true,
     };
     sink.append(live_source);
 
@@ -590,6 +644,8 @@ mod tests {
             local_buf: vec![0.0; 256],
             local_idx: 0,
             valid_len: 0,
+            last_output_frame: vec![0.0; 2],
+            declick_next_audio: true,
         };
 
         assert_eq!(source.next(), Some(0.0));
@@ -603,5 +659,84 @@ mod tests {
 
         assert_eq!(source.next(), Some(0.25));
         assert_eq!(source.next(), Some(-0.25));
+    }
+
+    #[test]
+    fn underrun_and_resume_are_declicked_without_extra_buffering() {
+        let (mut producer, consumer) = RingBuffer::<f32>::new(512);
+        for _ in 0..48 {
+            producer.push(1.0).unwrap();
+            producer.push(-1.0).unwrap();
+        }
+
+        let mut source = LiveSource {
+            consumer,
+            channels: 2,
+            sample_rate: 48_000,
+            audio_latency_ms: Arc::new(AtomicU64::new(0)),
+            capture_delay_ms: Arc::new(AtomicU64::new(0)),
+            local_buf: vec![0.0; 96],
+            local_idx: 0,
+            valid_len: 0,
+            last_output_frame: vec![0.0; 2],
+            declick_next_audio: true,
+        };
+
+        // The initial transition from silence reaches the live waveform over exactly 1 ms.
+        assert!((source.next().unwrap() - (1.0 / 48.0)).abs() < f32::EPSILON);
+        assert!((source.next().unwrap() - (-1.0 / 48.0)).abs() < f32::EPSILON);
+        for _ in 1..48 {
+            source.next();
+            source.next();
+        }
+
+        // An underrun fades from the last live frame to silence instead of jumping to zero.
+        let first_fade_left = source.next().unwrap();
+        let first_fade_right = source.next().unwrap();
+        assert!(first_fade_left > 0.0 && first_fade_left < 1.0);
+        assert!(first_fade_right < 0.0 && first_fade_right > -1.0);
+        for _ in 1..48 {
+            source.next();
+            source.next();
+        }
+        assert_eq!(source.last_output_frame, vec![0.0, -0.0]);
+
+        // Fresh audio is consumed immediately and faded in-place; no latency buffer is added.
+        for _ in 0..48 {
+            producer.push(0.5).unwrap();
+            producer.push(-0.5).unwrap();
+        }
+        assert!((source.next().unwrap() - (0.5 / 48.0)).abs() < f32::EPSILON);
+        assert!((source.next().unwrap() - (-0.5 / 48.0)).abs() < f32::EPSILON);
+        assert_eq!(source.consumer.slots(), 0);
+    }
+
+    #[test]
+    fn clock_drift_skip_is_declicked() {
+        let (mut producer, consumer) = RingBuffer::<f32>::new(12_000);
+        for _ in 0..5_000 {
+            producer.push(0.25).unwrap();
+            producer.push(-0.25).unwrap();
+        }
+
+        let mut source = LiveSource {
+            consumer,
+            channels: 2,
+            sample_rate: 48_000,
+            audio_latency_ms: Arc::new(AtomicU64::new(0)),
+            capture_delay_ms: Arc::new(AtomicU64::new(0)),
+            local_buf: vec![0.0; 96],
+            local_idx: 0,
+            valid_len: 0,
+            last_output_frame: vec![1.0, -1.0],
+            declick_next_audio: false,
+        };
+
+        let first_left = source.next().unwrap();
+        let first_right = source.next().unwrap();
+
+        assert!(first_left < 1.0 && first_left > 0.25);
+        assert!(first_right > -1.0 && first_right < -0.25);
+        assert_eq!(source.consumer.slots(), 7_584);
     }
 }
