@@ -1,14 +1,18 @@
 use crate::video::types::{RawFrame, VideoFormat};
 use anyhow::{anyhow, Context, Result};
+use std::ffi::{c_void, CString};
 use std::sync::{
-    atomic::{AtomicU8, Ordering},
-    Arc,
+    atomic::{AtomicBool, AtomicU8, Ordering},
+    Arc, Mutex,
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const VIDEO_OPEN_ATTEMPTS: u8 = 3;
 const VIDEO_OPEN_RETRY_DELAY: Duration = Duration::from_millis(250);
+const VIDEO_RECONNECT_DELAY: Duration = Duration::from_millis(100);
+const VIDEO_READ_RETRY_DELAY: Duration = Duration::from_millis(1);
+const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
 pub enum VideoThreadEvent {
@@ -24,6 +28,40 @@ pub struct VideoThreadConfig {
     pub framerate: u32,
     pub scaler_filter: Arc<AtomicU8>,
     pub color_range: Arc<AtomicU8>,
+    pub stop_requested: Arc<AtomicBool>,
+    pub request_repaint: Arc<dyn Fn() + Send + Sync>,
+}
+
+struct VideoInterruptState {
+    stop_requested: Arc<AtomicBool>,
+    last_progress: Mutex<Instant>,
+}
+
+impl VideoInterruptState {
+    fn new(stop_requested: Arc<AtomicBool>) -> Self {
+        Self {
+            stop_requested,
+            last_progress: Mutex::new(Instant::now()),
+        }
+    }
+
+    fn mark_progress(&self) {
+        if let Ok(mut last_progress) = self.last_progress.lock() {
+            *last_progress = Instant::now();
+        }
+    }
+
+    fn timed_out(&self) -> bool {
+        self.last_progress
+            .lock()
+            .map(|last_progress| last_progress.elapsed() >= VIDEO_STALL_TIMEOUT)
+            .unwrap_or(true)
+    }
+}
+
+unsafe extern "C" fn video_interrupt_callback(opaque: *mut c_void) -> libc::c_int {
+    let state = unsafe { &*(opaque as *const VideoInterruptState) };
+    (state.stop_requested.load(Ordering::Relaxed) || state.timed_out()) as libc::c_int
 }
 
 fn renderable_pixel_format(format: ffmpeg_next::format::Pixel) -> ffmpeg_next::format::Pixel {
@@ -108,6 +146,56 @@ fn setup_ffmpeg_options(
     ffmpeg_options.set("color_range", "pc");
     (pixel_format_str, ffmpeg_options)
 }
+
+fn open_video_input(
+    device: &str,
+    options: ffmpeg_next::Dictionary<'_>,
+    interrupt_state: &mut VideoInterruptState,
+) -> Result<ffmpeg_next::format::context::Input> {
+    use ffmpeg_next::sys::{
+        avformat_alloc_context, avformat_close_input, avformat_find_stream_info,
+        avformat_open_input, AVIOInterruptCB,
+    };
+
+    let device = CString::new(device).context("Video device path contains a NUL byte")?;
+
+    unsafe {
+        let mut context = avformat_alloc_context();
+        if context.is_null() {
+            return Err(anyhow!("FFmpeg could not allocate an input context"));
+        }
+
+        (*context).interrupt_callback = AVIOInterruptCB {
+            callback: Some(video_interrupt_callback),
+            opaque: interrupt_state as *mut VideoInterruptState as *mut c_void,
+        };
+
+        let mut options_ptr = options.disown();
+        let open_result = avformat_open_input(
+            &mut context,
+            device.as_ptr(),
+            std::ptr::null_mut(),
+            &mut options_ptr,
+        );
+        drop(ffmpeg_next::Dictionary::own(options_ptr));
+
+        if open_result < 0 {
+            avformat_close_input(&mut context);
+            return Err(ffmpeg_next::Error::from(open_result))
+                .context("FFmpeg could not open the video input");
+        }
+
+        let stream_info_result = avformat_find_stream_info(context, std::ptr::null_mut());
+        if stream_info_result < 0 {
+            avformat_close_input(&mut context);
+            return Err(ffmpeg_next::Error::from(stream_info_result))
+                .context("FFmpeg could not read video stream information");
+        }
+
+        Ok(ffmpeg_next::format::context::Input::wrap(context))
+    }
+}
+
 pub fn video_thread_main(
     frame_sender: crossbeam_channel::Sender<Arc<RawFrame>>,
     status_sender: crossbeam_channel::Sender<VideoThreadEvent>,
@@ -120,13 +208,66 @@ pub fn video_thread_main(
         framerate,
         scaler_filter,
         color_range,
+        stop_requested,
+        request_repaint,
     } = config;
     ffmpeg_next::init().context("Failed to initialize FFmpeg")?;
+
+    let mut started = false;
+    loop {
+        let result = run_video_capture_session(
+            &frame_sender,
+            &status_sender,
+            &device,
+            &format,
+            resolution,
+            framerate,
+            &scaler_filter,
+            &color_range,
+            &stop_requested,
+            &request_repaint,
+            &mut started,
+        );
+
+        if stop_requested.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) if !started => return Err(error),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "Video capture stalled; reopening the device"
+                );
+                sleep_until_video_reconnect(&stop_requested);
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_video_capture_session(
+    frame_sender: &crossbeam_channel::Sender<Arc<RawFrame>>,
+    status_sender: &crossbeam_channel::Sender<VideoThreadEvent>,
+    device: &str,
+    format: &VideoFormat,
+    resolution: (u32, u32),
+    framerate: u32,
+    scaler_filter: &Arc<AtomicU8>,
+    color_range: &Arc<AtomicU8>,
+    stop_requested: &Arc<AtomicBool>,
+    request_repaint: &Arc<dyn Fn() + Send + Sync>,
+    started: &mut bool,
+) -> Result<()> {
     let initial_range = color_range.load(Ordering::Relaxed);
     let mut open_attempt = 1;
-    let ictx = loop {
+    let mut interrupt_state = Box::new(VideoInterruptState::new(Arc::clone(stop_requested)));
+    let mut ictx = loop {
+        interrupt_state.mark_progress();
         let (_pixel_format, mut ffmpeg_options) =
-            setup_ffmpeg_options(&format, resolution, framerate);
+            setup_ffmpeg_options(format, resolution, framerate);
         ffmpeg_options.set("color_range", if initial_range == 1 { "tv" } else { "pc" });
 
         tracing::info!(
@@ -135,8 +276,9 @@ pub fn video_thread_main(
             options = ?ffmpeg_options,
             "Starting FFmpeg with options"
         );
-        match ffmpeg_next::format::input_with_dictionary(&device, ffmpeg_options) {
+        match open_video_input(device, ffmpeg_options, &mut interrupt_state) {
             Ok(input) => break input,
+            Err(_) if stop_requested.load(Ordering::Relaxed) => return Ok(()),
             Err(error) if open_attempt < VIDEO_OPEN_ATTEMPTS => {
                 tracing::warn!(
                     device = %device,
@@ -164,23 +306,7 @@ pub fn video_thread_main(
         .context("Failed to create software video decoder")?;
 
     decoder.set_threading(ffmpeg_next::codec::threading::Config::default());
-    let (packet_tx, packet_rx) = crossbeam_channel::bounded(1);
-    let _reader_thread = thread::spawn(move || {
-        let mut ictx = ictx;
-        for (stream, packet) in ictx.packets() {
-            if stream.index() == video_stream_index {
-                if let Err(crossbeam_channel::TrySendError::Disconnected(_)) =
-                    packet_tx.try_send(packet)
-                {
-                    break;
-                }
-            }
-        }
-        tracing::debug!("Packet reader thread finished.");
-    });
-
     let mut current_scaler_val = scaler_filter.load(Ordering::Relaxed);
-    let mut started = false;
     let output_format = renderable_pixel_format(decoder.format());
     let mut scaler = ffmpeg_next::software::scaling::context::Context::get(
         decoder.format(),
@@ -192,6 +318,7 @@ pub fn video_thread_main(
         crate::video::types::ScalerFilter::from_u8(current_scaler_val).into_ffmpeg_flag(),
     )
     .context("Failed to create software scaler for normalization")?;
+    let mut last_packet_at = Instant::now();
 
     loop {
         let new_scaler_val = scaler_filter.load(Ordering::Relaxed);
@@ -209,57 +336,115 @@ pub fn video_thread_main(
             .context("Failed to re-create software scaler")?;
         }
 
-        if let Ok(packet) = packet_rx.recv() {
-            decoder
-                .send_packet(&packet)
-                .context("Failed to send packet to decoder")?;
-            let mut decoded = ffmpeg_next::frame::Video::empty();
-            while decoder.receive_frame(&mut decoded).is_ok() {
-                // Use the scaler to normalize the frame (removes strides and ensures consistent plane layout)
-                let mut normalized = ffmpeg_next::frame::Video::empty();
+        if stop_requested.load(Ordering::Relaxed) {
+            return Ok(());
+        }
 
-                let range_val = color_range.load(Ordering::Relaxed);
-
-                scaler
-                    .run(&decoded, &mut normalized)
-                    .context("Failed to normalize video frame")?;
-
-                let width = normalized.width();
-                let height = normalized.height();
-                let format = normalized.format();
-                let data = copy_frame_tightly(&normalized)?;
-
-                let raw_frame = Arc::new(RawFrame {
-                    width,
-                    height,
-                    data,
-                    format,
-                    color_range: crate::video::types::ColorRange::from_u8(range_val),
-                });
-
-                if let Err(crossbeam_channel::TrySendError::Disconnected(_)) =
-                    frame_sender.try_send(raw_frame)
-                {
-                    return Ok(());
-                }
-
-                if !started {
-                    let _ = status_sender.send(VideoThreadEvent::Started);
-                    started = true;
-                }
+        interrupt_state.mark_progress();
+        let mut packet = ffmpeg_next::Packet::empty();
+        match packet.read(&mut ictx) {
+            Ok(()) => last_packet_at = Instant::now(),
+            Err(ffmpeg_next::Error::Eof) => {
+                return Err(anyhow!("Video input reached end of stream"));
             }
-        } else {
-            // packet_rx disconnected
-            break;
+            Err(_) if stop_requested.load(Ordering::Relaxed) => return Ok(()),
+            Err(ffmpeg_next::Error::Other { errno }) if errno == libc::EAGAIN => {
+                if last_packet_at.elapsed() >= VIDEO_STALL_TIMEOUT {
+                    return Err(anyhow!(
+                        "Video input produced no packets for {:?}",
+                        VIDEO_STALL_TIMEOUT
+                    ));
+                }
+                thread::sleep(VIDEO_READ_RETRY_DELAY);
+                continue;
+            }
+            Err(error) => return Err(error).context("Failed to read a video packet"),
+        }
+
+        if packet.stream() != video_stream_index {
+            continue;
+        }
+
+        decoder
+            .send_packet(&packet)
+            .context("Failed to send packet to decoder")?;
+        let mut decoded = ffmpeg_next::frame::Video::empty();
+        while decoder.receive_frame(&mut decoded).is_ok() {
+            // Use the scaler to normalize the frame (removes strides and ensures consistent plane layout)
+            let mut normalized = ffmpeg_next::frame::Video::empty();
+
+            let range_val = color_range.load(Ordering::Relaxed);
+
+            scaler
+                .run(&decoded, &mut normalized)
+                .context("Failed to normalize video frame")?;
+
+            let width = normalized.width();
+            let height = normalized.height();
+            let format = normalized.format();
+            let data = copy_frame_tightly(&normalized)?;
+
+            let raw_frame = Arc::new(RawFrame {
+                width,
+                height,
+                data,
+                format,
+                color_range: crate::video::types::ColorRange::from_u8(range_val),
+            });
+
+            match frame_sender.try_send(raw_frame) {
+                Ok(()) => request_repaint(),
+                Err(crossbeam_channel::TrySendError::Full(_)) => {}
+                Err(crossbeam_channel::TrySendError::Disconnected(_)) => return Ok(()),
+            }
+
+            if !*started {
+                let _ = status_sender.send(VideoThreadEvent::Started);
+                request_repaint();
+                *started = true;
+            }
         }
     }
-    tracing::debug!("Video thread finished.");
-    Ok(())
+}
+
+fn sleep_until_video_reconnect(stop_requested: &AtomicBool) {
+    let retry_count = (VIDEO_RECONNECT_DELAY.as_millis() / 10).max(1);
+    for _ in 0..retry_count {
+        if stop_requested.load(Ordering::Relaxed) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_interrupt_honors_stop_requests_and_stall_timeout() {
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let state = VideoInterruptState::new(Arc::clone(&stop_requested));
+
+        assert_eq!(
+            unsafe {
+                video_interrupt_callback(&state as *const VideoInterruptState as *mut c_void)
+            },
+            0
+        );
+
+        *state.last_progress.lock().unwrap() = Instant::now() - VIDEO_STALL_TIMEOUT;
+        assert!(state.timed_out());
+
+        state.mark_progress();
+        stop_requested.store(true, Ordering::Relaxed);
+        assert_eq!(
+            unsafe {
+                video_interrupt_callback(&state as *const VideoInterruptState as *mut c_void)
+            },
+            1
+        );
+    }
 
     #[test]
     fn test_setup_ffmpeg_options_mjpg() {

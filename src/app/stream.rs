@@ -1,7 +1,10 @@
 use crate::app::models::{AppState, PendingAudioStream};
 use crate::{devices, video};
 use eframe::egui;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::thread;
 
 use video::decoder::VideoThreadEvent;
@@ -66,6 +69,12 @@ impl AppState {
 
         let scaler_filter = self.scaler_filter.clone();
         let color_range = self.color_range.clone();
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        self.video_stop_requested = Some(Arc::clone(&stop_requested));
+        let repaint_context = ctx.clone();
+        let request_repaint: Arc<dyn Fn() + Send + Sync> =
+            Arc::new(move || repaint_context.request_repaint());
+        let notify_video_event = Arc::clone(&request_repaint);
 
         let video_config = video::decoder::VideoThreadConfig {
             device,
@@ -74,6 +83,8 @@ impl AppState {
             framerate,
             scaler_filter,
             color_range,
+            stop_requested,
+            request_repaint,
         };
         let handle = thread::spawn(move || {
             let result = video::decoder::video_thread_main(tx, status_tx.clone(), video_config);
@@ -88,6 +99,7 @@ impl AppState {
                     let _ = status_tx.send(VideoThreadEvent::Failed(error));
                 }
             }
+            notify_video_event();
         });
         self.video_thread = Some(handle);
         self.ui.video_window_open = true;
@@ -155,6 +167,9 @@ impl AppState {
     }
 
     fn fail_stream_start(&mut self, ctx: &egui::Context, error: String) {
+        if let Some(stop_requested) = self.video_stop_requested.take() {
+            stop_requested.store(true, Ordering::Relaxed);
+        }
         self.frame_receiver = None;
         self.video_status_receiver = None;
         self.pending_audio_stream = None;
@@ -192,6 +207,9 @@ impl AppState {
     }
 
     pub fn stop_stream_resources(&mut self) {
+        if let Some(stop_requested) = self.video_stop_requested.take() {
+            stop_requested.store(true, Ordering::Relaxed);
+        }
         self.frame_receiver = None;
         self.video_status_receiver = None;
         self.pending_audio_stream = None;
@@ -254,8 +272,10 @@ mod tests {
         let mut state = AppState::default();
         let (status_tx, status_rx) = crossbeam_channel::unbounded();
         let (_frame_tx, frame_rx) = crossbeam_channel::bounded(1);
+        let stop_requested = Arc::new(AtomicBool::new(false));
         state.video_status_receiver = Some(status_rx);
         state.frame_receiver = Some(frame_rx);
+        state.video_stop_requested = Some(Arc::clone(&stop_requested));
         state.pending_audio_stream = Some(pending_audio());
         state.fullscreen_toggle_frame_count = Some(1);
         state.ui.video_window_open = true;
@@ -271,6 +291,8 @@ mod tests {
         assert!(state.pending_audio_stream.is_none());
         assert!(state.hardware.active_audio_stream.is_none());
         assert!(state.video_thread.is_none());
+        assert!(state.video_stop_requested.is_none());
+        assert!(stop_requested.load(Ordering::Relaxed));
         assert!(state.fullscreen_toggle_frame_count.is_none());
         assert!(!state.ui.video_window_open);
         assert!(state.ui.control_window_open);

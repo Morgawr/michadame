@@ -4,7 +4,7 @@ use crate::video::{types::RawFrame, VideoFormat};
 use eframe::egui;
 use std::collections::BTreeMap;
 use std::sync::{
-    atomic::{AtomicU64, AtomicU8},
+    atomic::{AtomicBool, AtomicU64, AtomicU8},
     Arc, Mutex,
 };
 use std::thread::JoinHandle;
@@ -80,6 +80,7 @@ pub struct AppState {
     pub toasts: egui_toast::Toasts,
 
     pub video_thread: Option<JoinHandle<()>>,
+    pub video_stop_requested: Option<Arc<AtomicBool>>,
     pub video_texture: Option<egui::TextureHandle>,
     pub latest_frame: Option<Arc<RawFrame>>,
     pub frame_receiver: Option<crossbeam_channel::Receiver<Arc<RawFrame>>>,

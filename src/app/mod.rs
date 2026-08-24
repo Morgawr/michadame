@@ -72,6 +72,7 @@ impl Default for AppState {
                 .anchor(egui::Align2::LEFT_TOP, (10.0, 10.0))
                 .direction(egui::Direction::TopDown),
             video_thread: None,
+            video_stop_requested: None,
             video_texture: None,
             frame_receiver: None,
             video_status_receiver: None,
@@ -325,8 +326,8 @@ impl eframe::App for AppState {
                 }
                 self.latest_frame = Some(frame);
                 self.video_frames_since_last_check += 1;
+                repaint_requested = true;
             }
-            repaint_requested = true;
         }
 
         // Draw FFT mask editor window and handle mask upload
