@@ -5,6 +5,26 @@ use std::sync::{
     Arc,
 };
 use std::thread;
+use std::time::Duration;
+
+const VIDEO_OPEN_ATTEMPTS: u8 = 3;
+const VIDEO_OPEN_RETRY_DELAY: Duration = Duration::from_millis(250);
+
+#[derive(Debug)]
+pub enum VideoThreadEvent {
+    Started,
+    Failed(String),
+    Stopped,
+}
+
+pub struct VideoThreadConfig {
+    pub device: String,
+    pub format: VideoFormat,
+    pub resolution: (u32, u32),
+    pub framerate: u32,
+    pub scaler_filter: Arc<AtomicU8>,
+    pub color_range: Arc<AtomicU8>,
+}
 
 fn renderable_pixel_format(format: ffmpeg_next::format::Pixel) -> ffmpeg_next::format::Pixel {
     use ffmpeg_next::format::Pixel;
@@ -90,27 +110,48 @@ fn setup_ffmpeg_options(
 }
 pub fn video_thread_main(
     frame_sender: crossbeam_channel::Sender<Arc<RawFrame>>,
-    device: String,
-    format: VideoFormat,
-    resolution: (u32, u32),
-    framerate: u32,
-    scaler_filter: Arc<AtomicU8>,
-    color_range: Arc<AtomicU8>,
+    status_sender: crossbeam_channel::Sender<VideoThreadEvent>,
+    config: VideoThreadConfig,
 ) -> Result<()> {
+    let VideoThreadConfig {
+        device,
+        format,
+        resolution,
+        framerate,
+        scaler_filter,
+        color_range,
+    } = config;
     ffmpeg_next::init().context("Failed to initialize FFmpeg")?;
-    let (_pixel_format, mut ffmpeg_options) = setup_ffmpeg_options(&format, resolution, framerate);
-
-    // Initial color range setup
     let initial_range = color_range.load(Ordering::Relaxed);
-    if initial_range == 1 {
-        ffmpeg_options.set("color_range", "tv");
-    } else {
-        ffmpeg_options.set("color_range", "pc");
-    }
+    let mut open_attempt = 1;
+    let ictx = loop {
+        let (_pixel_format, mut ffmpeg_options) =
+            setup_ffmpeg_options(&format, resolution, framerate);
+        ffmpeg_options.set("color_range", if initial_range == 1 { "tv" } else { "pc" });
 
-    tracing::info!(device = %device, options = ?ffmpeg_options, "Starting FFmpeg with options");
-    let ictx = ffmpeg_next::format::input_with_dictionary(&device, ffmpeg_options)
-        .context("Failed to open input device with ffmpeg")?;
+        tracing::info!(
+            device = %device,
+            attempt = open_attempt,
+            options = ?ffmpeg_options,
+            "Starting FFmpeg with options"
+        );
+        match ffmpeg_next::format::input_with_dictionary(&device, ffmpeg_options) {
+            Ok(input) => break input,
+            Err(error) if open_attempt < VIDEO_OPEN_ATTEMPTS => {
+                tracing::warn!(
+                    device = %device,
+                    attempt = open_attempt,
+                    error = %error,
+                    "Failed to open video device; retrying"
+                );
+                open_attempt += 1;
+                thread::sleep(VIDEO_OPEN_RETRY_DELAY);
+            }
+            Err(error) => {
+                return Err(error).context("Failed to open input device with ffmpeg");
+            }
+        }
+    };
 
     let input = ictx
         .streams()
@@ -139,6 +180,7 @@ pub fn video_thread_main(
     });
 
     let mut current_scaler_val = scaler_filter.load(Ordering::Relaxed);
+    let mut started = false;
     let output_format = renderable_pixel_format(decoder.format());
     let mut scaler = ffmpeg_next::software::scaling::context::Context::get(
         decoder.format(),
@@ -199,6 +241,11 @@ pub fn video_thread_main(
                     frame_sender.try_send(raw_frame)
                 {
                     return Ok(());
+                }
+
+                if !started {
+                    let _ = status_sender.send(VideoThreadEvent::Started);
+                    started = true;
                 }
             }
         } else {

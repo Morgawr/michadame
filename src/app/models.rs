@@ -65,6 +65,13 @@ pub struct VideoSettings {
     pub fft_mask_window_open: bool,
 }
 
+pub struct PendingAudioStream {
+    pub source_name: String,
+    pub buffer_size: u32,
+    pub sample_rate: u32,
+    pub sample_format: String,
+}
+
 pub struct AppState {
     pub hardware: HardwareState,
     pub ui: UiState,
@@ -76,6 +83,9 @@ pub struct AppState {
     pub video_texture: Option<egui::TextureHandle>,
     pub latest_frame: Option<Arc<RawFrame>>,
     pub frame_receiver: Option<crossbeam_channel::Receiver<Arc<RawFrame>>>,
+    pub video_status_receiver:
+        Option<crossbeam_channel::Receiver<crate::video::decoder::VideoThreadEvent>>,
+    pub pending_audio_stream: Option<PendingAudioStream>,
     pub device_scan_receiver: Option<crossbeam_channel::Receiver<devices::DeviceScanResult>>,
     pub logo_texture: Option<egui::TextureHandle>,
     pub last_fps_check: Instant,
@@ -118,6 +128,8 @@ mod tests {
         assert!(!state.ui.is_fullscreen);
         assert!(state.ui.control_window_open);
         assert!(!state.ui.video_window_open);
+        assert!(state.video_status_receiver.is_none());
+        assert!(state.pending_audio_stream.is_none());
         assert_eq!(state.crt.hard_scan, -8.0);
         assert_eq!(state.video.horizontal_stretch, 1.0);
     }

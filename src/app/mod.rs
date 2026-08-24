@@ -74,6 +74,8 @@ impl Default for AppState {
             video_thread: None,
             video_texture: None,
             frame_receiver: None,
+            video_status_receiver: None,
+            pending_audio_stream: None,
             device_scan_receiver: None,
             logo_texture: None,
             last_fps_check: Instant::now(),
@@ -307,6 +309,8 @@ impl eframe::App for AppState {
                 repaint_requested = true;
             }
         }
+
+        repaint_requested |= self.handle_video_thread_events(ctx);
 
         if let Some(rx) = &self.frame_receiver {
             if let Ok(frame) = rx.try_recv() {
