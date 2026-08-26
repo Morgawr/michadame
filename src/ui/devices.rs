@@ -242,7 +242,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 if combo_changed {
                     crate::config::save_global_hardware_config(state);
                     if state.hardware.active_audio_stream.is_some() {
-                        state.restart_audio_stream();
+                        state.restart_audio_stream(ui.ctx());
                     }
                     changed = true;
                 }
@@ -269,7 +269,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     if combo_changed {
                         crate::config::save_global_hardware_config(state);
                         if state.hardware.active_audio_stream.is_some() {
-                            state.restart_audio_stream();
+                            state.restart_audio_stream(ui.ctx());
                         }
                         changed = true;
                     }
@@ -295,7 +295,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     if combo_changed {
                         crate::config::save_global_hardware_config(state);
                         if state.hardware.active_audio_stream.is_some() {
-                            state.restart_audio_stream();
+                            state.restart_audio_stream(ui.ctx());
                         }
                         changed = true;
                     }
@@ -321,7 +321,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     if combo_changed {
                         crate::config::save_global_hardware_config(state);
                         if state.hardware.active_audio_stream.is_some() {
-                            state.restart_audio_stream();
+                            state.restart_audio_stream(ui.ctx());
                         }
                         changed = true;
                     }

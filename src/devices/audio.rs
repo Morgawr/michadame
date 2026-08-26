@@ -13,9 +13,11 @@ const AUDIO_DECLICK_DURATION: Duration = Duration::from_millis(1);
 const ALSA_CAPTURE_POLL_TIMEOUT_MS: u32 = 10;
 const ALSA_RECONNECT_DELAY: Duration = Duration::from_millis(50);
 const ALSA_STALL_TIMEOUT: Duration = Duration::from_secs(2);
+const ALSA_RECOVERY_TIMEOUT: Duration = Duration::from_secs(6);
 
 pub struct AudioStreamHandle {
     alsa_capture_thread: Option<thread::JoinHandle<()>>,
+    capture_failure_receiver: crossbeam_channel::Receiver<String>,
     stop_capture: Arc<AtomicBool>,
     _output_stream_guard: OutputStream,
     _output_stream_handle: rodio::OutputStreamHandle,
@@ -27,10 +29,63 @@ impl Drop for AudioStreamHandle {
         self.stop_capture.store(true, Ordering::Relaxed);
         self.sink.stop();
         if let Some(handle) = self.alsa_capture_thread.take() {
-            if let Err(e) = handle.join() {
-                tracing::warn!("ALSA capture thread join failed: {:?}", e);
-            }
+            reap_alsa_capture_thread(handle);
         }
+    }
+}
+
+impl AudioStreamHandle {
+    pub fn take_capture_failure(&self) -> Option<String> {
+        self.capture_failure_receiver.try_recv().ok()
+    }
+}
+
+fn reap_alsa_capture_thread(handle: thread::JoinHandle<()>) {
+    if handle.is_finished() {
+        if let Err(error) = handle.join() {
+            tracing::warn!("ALSA capture thread join failed: {:?}", error);
+        }
+        return;
+    }
+
+    // ALSA and USB driver calls are outside Rust's control and can occasionally fail to return.
+    // Never make the GUI or process shutdown wait on such a call.
+    if let Err(error) = thread::Builder::new()
+        .name("alsa-capture-reaper".to_string())
+        .spawn(move || {
+            if let Err(error) = handle.join() {
+                tracing::warn!("ALSA capture thread join failed: {:?}", error);
+            }
+        })
+    {
+        tracing::warn!("Could not start ALSA capture reaper: {}", error);
+    }
+}
+
+struct AudioCaptureProgress {
+    last_sample_at: Instant,
+}
+
+struct AlsaCapture {
+    thread: thread::JoinHandle<()>,
+    failure_receiver: crossbeam_channel::Receiver<String>,
+    channels: u16,
+    sample_rate: u32,
+}
+
+impl AudioCaptureProgress {
+    fn new() -> Self {
+        Self {
+            last_sample_at: Instant::now(),
+        }
+    }
+
+    fn mark_samples(&mut self) {
+        self.last_sample_at = Instant::now();
+    }
+
+    fn stalled_for(&self, timeout: Duration) -> bool {
+        self.last_sample_at.elapsed() >= timeout
     }
 }
 
@@ -264,6 +319,7 @@ pub fn start_audio_stream(
     buffer_size: u32,
     sample_rate: u32,
     sample_format: String,
+    request_repaint: Arc<dyn Fn() + Send + Sync>,
 ) -> Result<AudioStreamHandle> {
     // Shared ring buffer for capture-to-playback bridge.
     // Increased to ~1.0s of audio to provide complete buffer safety. We manage ideal latency from the consumer side.
@@ -273,7 +329,12 @@ pub fn start_audio_stream(
     let capture_delay_ms = Arc::new(AtomicU64::new(0));
     let stop_capture = Arc::new(AtomicBool::new(false));
 
-    let (alsa_thread, input_channels, input_sample_rate) = start_alsa_capture(
+    let AlsaCapture {
+        thread: alsa_thread,
+        failure_receiver: capture_failure_receiver,
+        channels: input_channels,
+        sample_rate: input_sample_rate,
+    } = start_alsa_capture(
         source_name,
         producer,
         peak_amplitude_shared.clone(),
@@ -282,15 +343,17 @@ pub fn start_audio_stream(
         buffer_size,
         sample_rate,
         sample_format,
+        request_repaint,
     )?;
+    let mut alsa_thread = Some(alsa_thread);
 
     // Playback via Rodio
     let (output_stream_guard, stream_handle) = match initialize_rodio_playback() {
         Ok(stream) => stream,
         Err(e) => {
             stop_capture.store(true, Ordering::Relaxed);
-            if let Some(handle) = alsa_thread {
-                let _ = handle.join();
+            if let Some(handle) = alsa_thread.take() {
+                reap_alsa_capture_thread(handle);
             }
             return Err(e);
         }
@@ -300,8 +363,8 @@ pub fn start_audio_stream(
         Ok(sink) => sink,
         Err(e) => {
             stop_capture.store(true, Ordering::Relaxed);
-            if let Some(handle) = alsa_thread {
-                let _ = handle.join();
+            if let Some(handle) = alsa_thread.take() {
+                reap_alsa_capture_thread(handle);
             }
             return Err(e);
         }
@@ -328,6 +391,7 @@ pub fn start_audio_stream(
 
     Ok(AudioStreamHandle {
         alsa_capture_thread: alsa_thread,
+        capture_failure_receiver,
         stop_capture,
         _output_stream_guard: output_stream_guard,
         _output_stream_handle: stream_handle,
@@ -345,7 +409,8 @@ fn start_alsa_capture(
     buffer_size: u32,
     sample_rate: u32,
     sample_format: String,
-) -> Result<(Option<thread::JoinHandle<()>>, u16, u32)> {
+    request_repaint: Arc<dyn Fn() + Send + Sync>,
+) -> Result<AlsaCapture> {
     use alsa::pcm::{Format, HwParams, PCM};
     use alsa::Direction;
 
@@ -373,8 +438,10 @@ fn start_alsa_capture(
 
     let samples_captured = Arc::new(AtomicU64::new(0));
     let source_name_owned = source_name.to_string();
+    let (capture_failure_sender, capture_failure_receiver) = crossbeam_channel::bounded(1);
 
     let handle = thread::spawn(move || {
+        let mut capture_progress = AudioCaptureProgress::new();
         while !stop_capture.load(Ordering::Relaxed) {
             let result = run_alsa_capture_session(
                 &source_name_owned,
@@ -388,6 +455,7 @@ fn start_alsa_capture(
                 pcm_format,
                 &sample_format,
                 &samples_captured,
+                &mut capture_progress,
             );
 
             if stop_capture.load(Ordering::Relaxed) {
@@ -396,13 +464,28 @@ fn start_alsa_capture(
 
             if let Err(error) = result {
                 tracing::warn!("ALSA capture stopped ({}); reopening the device", error);
+                if capture_progress.stalled_for(ALSA_RECOVERY_TIMEOUT) {
+                    let message = format!(
+                        "ALSA capture produced no samples for {:?}",
+                        ALSA_RECOVERY_TIMEOUT
+                    );
+                    tracing::error!("{}; stopping the stream", message);
+                    let _ = capture_failure_sender.try_send(message);
+                    request_repaint();
+                    break;
+                }
             }
             sleep_until_reconnect(&stop_capture);
         }
         tracing::debug!("ALSA capture thread stopped.");
     });
 
-    Ok((Some(handle), channels, rate))
+    Ok(AlsaCapture {
+        thread: handle,
+        failure_receiver: capture_failure_receiver,
+        channels,
+        sample_rate: rate,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -418,6 +501,7 @@ fn run_alsa_capture_session(
     pcm_format: alsa::pcm::Format,
     sample_format: &str,
     samples_captured: &Arc<AtomicU64>,
+    capture_progress: &mut AudioCaptureProgress,
 ) -> Result<()> {
     use alsa::pcm::{Access, HwParams, PCM};
     use alsa::Direction;
@@ -445,6 +529,7 @@ fn run_alsa_capture_session(
             rate,
             channels,
             samples_captured,
+            capture_progress,
             |sample| (sample as f64 / 2_147_483_648.0) as f32,
         ),
         "F32LE" => run_alsa_capture_loop(
@@ -458,6 +543,7 @@ fn run_alsa_capture_session(
             rate,
             channels,
             samples_captured,
+            capture_progress,
             |sample| sample,
         ),
         _ => run_alsa_capture_loop(
@@ -471,6 +557,7 @@ fn run_alsa_capture_session(
             rate,
             channels,
             samples_captured,
+            capture_progress,
             i16_to_f32,
         ),
     }
@@ -488,6 +575,7 @@ fn run_alsa_capture_loop<S, F>(
     rate: u32,
     channels: u16,
     samples_captured: &Arc<AtomicU64>,
+    capture_progress: &mut AudioCaptureProgress,
     convert: F,
 ) -> Result<()>
 where
@@ -497,8 +585,6 @@ where
     let buffer_samples = buffer_size as usize * channels as usize;
     let mut input_buf = vec![S::default(); buffer_samples];
     let mut converted_buf = vec![0.0f32; buffer_samples];
-    let mut last_capture_progress = Instant::now();
-
     while !stop_capture.load(Ordering::Relaxed) {
         if let Ok(delay_frames) = pcm.delay() {
             let delay_ms = (delay_frames.max(0) as f64 / rate as f64 * 1000.0) as u64;
@@ -509,9 +595,19 @@ where
             Ok(frames) => {
                 let sample_count = frames * channels as usize;
                 if sample_count == 0 {
+                    if capture_progress.stalled_for(ALSA_STALL_TIMEOUT) {
+                        return Err(anyhow!(
+                            "ALSA capture produced no samples for {:?}",
+                            ALSA_STALL_TIMEOUT
+                        ));
+                    }
+                    match pcm.wait(Some(ALSA_CAPTURE_POLL_TIMEOUT_MS)) {
+                        Ok(_) => {}
+                        Err(wait_error) => recover_alsa_capture(pcm, wait_error)?,
+                    }
                     continue;
                 }
-                last_capture_progress = Instant::now();
+                capture_progress.mark_samples();
                 let mut local_max = 0.0f32;
                 for (output, input) in converted_buf
                     .iter_mut()
@@ -533,7 +629,7 @@ where
                 );
             }
             Err(error) if error.errno() == alsa::nix::errno::Errno::EAGAIN => {
-                if last_capture_progress.elapsed() >= ALSA_STALL_TIMEOUT {
+                if capture_progress.stalled_for(ALSA_STALL_TIMEOUT) {
                     return Err(anyhow!(
                         "ALSA capture produced no samples for {:?}",
                         ALSA_STALL_TIMEOUT
@@ -631,6 +727,27 @@ fn initialize_rodio_playback() -> Result<(OutputStream, rodio::OutputStreamHandl
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_capture_progress_expires_and_recovers_on_real_samples() {
+        let mut progress = AudioCaptureProgress {
+            last_sample_at: Instant::now() - ALSA_RECOVERY_TIMEOUT,
+        };
+        assert!(progress.stalled_for(ALSA_RECOVERY_TIMEOUT));
+
+        progress.mark_samples();
+        assert!(!progress.stalled_for(ALSA_RECOVERY_TIMEOUT));
+    }
+
+    #[test]
+    fn reaping_a_stuck_audio_worker_does_not_block_the_caller() {
+        let handle = thread::spawn(|| thread::sleep(Duration::from_secs(1)));
+        let started = Instant::now();
+
+        reap_alsa_capture_thread(handle);
+
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
 
     #[test]
     fn underrun_uses_short_silence_and_accepts_new_audio_without_waiting() {

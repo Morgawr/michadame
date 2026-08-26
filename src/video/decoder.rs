@@ -13,6 +13,7 @@ const VIDEO_OPEN_RETRY_DELAY: Duration = Duration::from_millis(250);
 const VIDEO_RECONNECT_DELAY: Duration = Duration::from_millis(100);
 const VIDEO_READ_RETRY_DELAY: Duration = Duration::from_millis(1);
 const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(2);
+const VIDEO_RECOVERY_TIMEOUT: Duration = Duration::from_secs(6);
 
 #[derive(Debug)]
 pub enum VideoThreadEvent {
@@ -35,6 +36,26 @@ pub struct VideoThreadConfig {
 struct VideoInterruptState {
     stop_requested: Arc<AtomicBool>,
     last_progress: Mutex<Instant>,
+}
+
+struct VideoFrameProgress {
+    last_frame_at: Instant,
+}
+
+impl VideoFrameProgress {
+    fn new() -> Self {
+        Self {
+            last_frame_at: Instant::now(),
+        }
+    }
+
+    fn mark_frame(&mut self) {
+        self.last_frame_at = Instant::now();
+    }
+
+    fn stalled_for(&self, timeout: Duration) -> bool {
+        self.last_frame_at.elapsed() >= timeout
+    }
 }
 
 impl VideoInterruptState {
@@ -214,6 +235,7 @@ pub fn video_thread_main(
     ffmpeg_next::init().context("Failed to initialize FFmpeg")?;
 
     let mut started = false;
+    let mut frame_progress = VideoFrameProgress::new();
     loop {
         let result = run_video_capture_session(
             &frame_sender,
@@ -227,6 +249,7 @@ pub fn video_thread_main(
             &stop_requested,
             &request_repaint,
             &mut started,
+            &mut frame_progress,
         );
 
         if stop_requested.load(Ordering::Relaxed) {
@@ -236,12 +259,18 @@ pub fn video_thread_main(
         match result {
             Ok(()) => return Ok(()),
             Err(error) if !started => return Err(error),
-            Err(error) => {
+            Err(error) if !frame_progress.stalled_for(VIDEO_RECOVERY_TIMEOUT) => {
                 tracing::warn!(
                     error = %error,
                     "Video capture stalled; reopening the device"
                 );
                 sleep_until_video_reconnect(&stop_requested);
+            }
+            Err(error) => {
+                return Err(error).context(format!(
+                    "Video capture did not recover for {:?}",
+                    VIDEO_RECOVERY_TIMEOUT
+                ));
             }
         }
     }
@@ -260,6 +289,7 @@ fn run_video_capture_session(
     stop_requested: &Arc<AtomicBool>,
     request_repaint: &Arc<dyn Fn() + Send + Sync>,
     started: &mut bool,
+    frame_progress: &mut VideoFrameProgress,
 ) -> Result<()> {
     let initial_range = color_range.load(Ordering::Relaxed);
     let mut open_attempt = 1;
@@ -318,8 +348,6 @@ fn run_video_capture_session(
         crate::video::types::ScalerFilter::from_u8(current_scaler_val).into_ffmpeg_flag(),
     )
     .context("Failed to create software scaler for normalization")?;
-    let mut last_packet_at = Instant::now();
-
     loop {
         let new_scaler_val = scaler_filter.load(Ordering::Relaxed);
         if new_scaler_val != current_scaler_val {
@@ -343,15 +371,15 @@ fn run_video_capture_session(
         interrupt_state.mark_progress();
         let mut packet = ffmpeg_next::Packet::empty();
         match packet.read(&mut ictx) {
-            Ok(()) => last_packet_at = Instant::now(),
+            Ok(()) => {}
             Err(ffmpeg_next::Error::Eof) => {
                 return Err(anyhow!("Video input reached end of stream"));
             }
             Err(_) if stop_requested.load(Ordering::Relaxed) => return Ok(()),
             Err(ffmpeg_next::Error::Other { errno }) if errno == libc::EAGAIN => {
-                if last_packet_at.elapsed() >= VIDEO_STALL_TIMEOUT {
+                if frame_progress.stalled_for(VIDEO_STALL_TIMEOUT) {
                     return Err(anyhow!(
-                        "Video input produced no packets for {:?}",
+                        "Video input produced no decoded frames for {:?}",
                         VIDEO_STALL_TIMEOUT
                     ));
                 }
@@ -392,6 +420,8 @@ fn run_video_capture_session(
                 color_range: crate::video::types::ColorRange::from_u8(range_val),
             });
 
+            frame_progress.mark_frame();
+
             match frame_sender.try_send(raw_frame) {
                 Ok(()) => request_repaint(),
                 Err(crossbeam_channel::TrySendError::Full(_)) => {}
@@ -403,6 +433,15 @@ fn run_video_capture_session(
                 request_repaint();
                 *started = true;
             }
+        }
+
+        // Some failed capture devices continue dequeuing corrupt or empty packets. Packet I/O
+        // is not useful progress: only a decoded frame proves that the stream is still alive.
+        if frame_progress.stalled_for(VIDEO_STALL_TIMEOUT) {
+            return Err(anyhow!(
+                "Video input produced no decoded frames for {:?}",
+                VIDEO_STALL_TIMEOUT
+            ));
         }
     }
 }
@@ -444,6 +483,19 @@ mod tests {
             },
             1
         );
+    }
+
+    #[test]
+    fn decoded_frames_are_the_video_watchdog_progress_signal() {
+        let mut progress = VideoFrameProgress {
+            last_frame_at: Instant::now() - VIDEO_STALL_TIMEOUT,
+        };
+        assert!(progress.stalled_for(VIDEO_STALL_TIMEOUT));
+
+        // Reading another packet must not reset this timestamp. Only successfully decoding a
+        // frame does, which prevents corrupt packet traffic from hiding a dead capture stream.
+        progress.mark_frame();
+        assert!(!progress.stalled_for(VIDEO_STALL_TIMEOUT));
     }
 
     #[test]

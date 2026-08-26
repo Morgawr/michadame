@@ -127,7 +127,7 @@ impl AppState {
             match event {
                 VideoThreadEvent::Started => self.finish_stream_start(ctx),
                 VideoThreadEvent::Failed(error) => {
-                    self.fail_stream_start(ctx, format!("Failed to start video stream: {error}"));
+                    self.fail_stream_start(ctx, format!("Video stream failed: {error}"));
                 }
                 VideoThreadEvent::Stopped => {
                     self.fail_stream_start(ctx, "Video stream stopped unexpectedly.".to_string());
@@ -154,6 +154,7 @@ impl AppState {
             audio.buffer_size,
             audio.sample_rate,
             audio.sample_format,
+            repaint_request(ctx),
         ) {
             Ok(handle) => {
                 self.hardware.active_audio_stream = Some(handle);
@@ -163,6 +164,21 @@ impl AppState {
             Err(e) => {
                 self.fail_stream_start(ctx, format!("Failed to start audio stream: {e}"));
             }
+        }
+    }
+
+    pub fn handle_audio_thread_events(&mut self, ctx: &egui::Context) -> bool {
+        let failure = self
+            .hardware
+            .active_audio_stream
+            .as_ref()
+            .and_then(devices::audio::AudioStreamHandle::take_capture_failure);
+
+        if let Some(error) = failure {
+            self.fail_stream_start(ctx, format!("Audio stream stopped: {error}"));
+            true
+        } else {
+            false
         }
     }
 
@@ -176,7 +192,7 @@ impl AppState {
         self.hardware.active_audio_stream = None;
 
         if let Some(handle) = self.video_thread.take() {
-            let _ = handle.join();
+            reap_video_thread(handle);
         }
 
         self.latest_frame = None;
@@ -214,11 +230,13 @@ impl AppState {
         self.video_status_receiver = None;
         self.pending_audio_stream = None;
 
+        let audio_was_active = self.hardware.active_audio_stream.take().is_some();
+
         if let Some(handle) = self.video_thread.take() {
-            let _ = handle.join();
+            reap_video_thread(handle);
         }
 
-        if self.hardware.active_audio_stream.take().is_some() {
+        if audio_was_active {
             self.info("Stream stopped and audio stream dropped.");
         } else {
             self.info("Stream stopped.");
@@ -230,7 +248,7 @@ impl AppState {
         self.ui.video_window_open = false;
     }
 
-    pub fn restart_audio_stream(&mut self) {
+    pub fn restart_audio_stream(&mut self, ctx: &egui::Context) {
         self.hardware.active_audio_stream = None;
 
         if let Some(mic) = &self.hardware.selected_audio_source_name {
@@ -241,6 +259,7 @@ impl AppState {
                 self.hardware.audio_buffer_size,
                 self.hardware.audio_sample_rate,
                 self.hardware.audio_sample_format.clone(),
+                repaint_request(ctx),
             ) {
                 Ok(handle) => {
                     self.hardware.active_audio_stream = Some(handle);
@@ -251,6 +270,33 @@ impl AppState {
                 }
             }
         }
+    }
+}
+
+fn repaint_request(ctx: &egui::Context) -> Arc<dyn Fn() + Send + Sync> {
+    let ctx = ctx.clone();
+    Arc::new(move || ctx.request_repaint())
+}
+
+fn reap_video_thread(handle: thread::JoinHandle<()>) {
+    if handle.is_finished() {
+        if let Err(error) = handle.join() {
+            tracing::warn!("Video thread join failed: {:?}", error);
+        }
+        return;
+    }
+
+    // A capture driver can remain stuck after the stop flag is set. Joining it on the UI thread
+    // made the application itself unclosable during the exact failure we are trying to recover.
+    if let Err(error) = thread::Builder::new()
+        .name("video-capture-reaper".to_string())
+        .spawn(move || {
+            if let Err(error) = handle.join() {
+                tracing::warn!("Video thread join failed: {:?}", error);
+            }
+        })
+    {
+        tracing::warn!("Could not start video capture reaper: {}", error);
     }
 }
 
@@ -265,6 +311,16 @@ mod tests {
             sample_rate: 48_000,
             sample_format: "S16LE".to_string(),
         }
+    }
+
+    #[test]
+    fn reaping_a_stuck_video_worker_does_not_block_the_caller() {
+        let handle = thread::spawn(|| thread::sleep(std::time::Duration::from_secs(1)));
+        let started = std::time::Instant::now();
+
+        reap_video_thread(handle);
+
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
     }
 
     #[test]

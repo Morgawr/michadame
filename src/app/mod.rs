@@ -312,6 +312,7 @@ impl eframe::App for AppState {
         }
 
         repaint_requested |= self.handle_video_thread_events(ctx);
+        repaint_requested |= self.handle_audio_thread_events(ctx);
 
         if let Some(rx) = &self.frame_receiver {
             if let Ok(frame) = rx.try_recv() {
