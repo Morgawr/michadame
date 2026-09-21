@@ -424,7 +424,7 @@ fn save_file(
     let time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
-    let path = dir.join(format!("replay-{time}.mkv"));
+    let path = dir.join(format!("replay-{time}.mp4"));
     let temporary = dir.join(format!(".replay-{time}.partial"));
     // Exclusive reservation; never overwrite an existing recording.
     std::fs::OpenOptions::new()

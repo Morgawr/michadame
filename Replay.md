@@ -4,7 +4,7 @@ Replay is opt-in and starts **disabled** on every launch. Start the capture stre
 open Controls (`M`), expand **Live replay buffer**, then enable it. Defaults:
 
 - 5-minute maximum history and a 1024 MiB CPU memory budget.
-- Hardware AV1 through VAAPI, quantizer 20, stereo Opus at 192 kbit/s, Matroska files.
+- Hardware AV1 through VAAPI, quantizer 20, stereo Opus at 192 kbit/s, MP4 files.
 - F5 / F6 / F7 / F8 / F9 save approximately 30 / 60 / 180 / 300 / 600 seconds.
 - F10 saves the customizable duration (initially 120 seconds).
 - Files go to `$HOME/Videos/Michadame`; folder and bindings are configurable.
@@ -80,8 +80,8 @@ to be disabled first.
 Window size/DPI/fullscreen changes invalidate history immediately. Recording
 resumes after 300 ms of stable dimensions. The visible image remains at the
 rendered surface size. Encoder surfaces are padded to 64×16 alignment and
-Matroska pixel-crop metadata removes the padding, including odd window sizes.
-Players must honor Matroska crop metadata. The pixels are not stretched.
+MP4 clean-aperture metadata removes the padding, including odd window sizes.
+Players must honor MP4 clean-aperture metadata. The pixels are not stretched.
 
 Missing rendered-frame intervals (including minimized windows) pause video progress
 without clearing history or cancelling saves. On resumption the preceding picture
@@ -96,7 +96,7 @@ transfer tagged. Hardware 4:2:0 AV1/HEVC/H.264 is lossy; colored CRT masks and f
 text need quality evaluation. Lower quantizers improve fidelity at larger sizes.
 
 Files are first written as hidden `.partial` files. Success publishes a unique
-`.mkv` name only after its trailer is written; existing recordings are not
+`.mp4` name only after its trailer is written; existing recordings are not
 replaced. The output folder must support hard links (normal Linux filesystems do).
 An interrupted process can leave a partial file; it is not reported as a saved clip.
 
@@ -110,9 +110,9 @@ cargo build --release --locked
 ```
 
 The two skipped legacy tests can traverse configuration paths that open
-`/dev/video0`. The synthetic media test uses software FFV1 fixtures and Opus,
-exports through the real muxer, demuxes and decodes the result, and checks duration,
-A/V start alignment, content and Matroska cropping. Other tests cover byte/time
+`/dev/video0`. The synthetic media test uses software H.264, HEVC and AV1 fixtures
+with Opus, exports through the real muxer, demuxes and decodes the result, and checks duration,
+A/V start alignment, content and MP4 cropping. Other tests cover byte/time
 limits, keyframe dependencies, truncated clips, fractional FPS, audio drift/gaps,
 configuration compatibility, nonblocking audio taps, and recovery after isolated
 missing frames, bursts, >1-second stalls and queue saturation. The dropped-frame

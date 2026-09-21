@@ -257,7 +257,7 @@ pub fn export(
         .min()
         .context("No replay keyframe")?;
     packets.sort_by_key(|p| (p.packet.dts().unwrap_or(p.start), !p.video));
-    let mut output = format::output_as(path, "matroska")?;
+    let mut output = format::output_as(path, "mp4")?;
     for parameters in [video, audio] {
         let mut stream = output.add_stream(encoder::find(parameters.id()))?;
         if parameters.medium() == ff::media::Type::Video {
@@ -351,7 +351,7 @@ fn convert_rgba(
         );
         ensure!(rows == height as i32, "RGB conversion failed");
     }
-    // Extend edge pixels into coded padding. Matroska crop metadata removes it
+    // Extend edge pixels into coded padding. MP4 clean-aperture metadata removes it
     // on presentation, including odd window dimensions; content is never resized.
     let coded_height = sw.height() as usize;
     let coded_width = sw.width() as usize;
@@ -421,19 +421,25 @@ mod tests {
         assert_eq!(luma[(h as usize - 1) * stride], luma[h as usize * stride]);
     }
 
-    /// A fully local media test: software-generated FFV1 fixtures exercise the
+    /// A fully local media test: software-generated video fixtures exercise the
     /// actual history/export/Opus path without a display, GPU or capture device.
     #[test]
     fn exported_replay_demuxes_decodes_and_preserves_timing_and_crop() {
-        export_fixture(false);
+        for codec in ["libx264", "libx265", "libaom-av1"] {
+            export_fixture(false, codec);
+        }
     }
     #[test]
     fn exported_replay_keeps_audio_and_video_before_and_after_dropped_frame_bursts() {
-        export_fixture(true);
+        for codec in ["libx264", "libx265", "libaom-av1"] {
+            export_fixture(true, codec);
+        }
     }
-    fn export_fixture(drop_frames: bool) {
+    fn export_fixture(drop_frames: bool, codec_name: &str) {
         ff::init().unwrap();
-        let codec = encoder::find(codec::Id::FFV1).unwrap();
+        let codec = encoder::find_by_name(codec_name)
+            .expect("Synthetic MP4 fixtures need software H.264/HEVC/AV1 encoders");
+        let expected_codec = codec.id();
         let mut video = codec::context::Context::new_with_codec(codec)
             .encoder()
             .video()
@@ -445,7 +451,35 @@ mod tests {
         video.set_frame_rate(Some(Rational(30, 1)));
         video.set_gop(15);
         video.set_flags(codec::Flags::GLOBAL_HEADER);
-        let mut video = video.open().unwrap();
+        video.set_max_b_frames(0);
+        video.set_threading(codec::threading::Config {
+            count: 1,
+            ..Default::default()
+        });
+        let mut options = ff::Dictionary::new();
+        match codec_name {
+            "libx264" => {
+                options.set("preset", "ultrafast");
+                options.set("tune", "zerolatency");
+                options.set("qp", "0");
+            }
+            "libx265" => {
+                options.set("preset", "ultrafast");
+                options.set("tune", "zerolatency");
+                options.set(
+                    "x265-params",
+                    "lossless=1:pools=none:frame-threads=1:log-level=error",
+                );
+            }
+            "libaom-av1" => {
+                options.set("cpu-used", "8");
+                options.set("usage", "realtime");
+                options.set("lag-in-frames", "0");
+                options.set("crf", "0");
+            }
+            _ => unreachable!(),
+        }
+        let mut video = video.open_with(options).unwrap();
         let mut audio = AudioEncoder::new().unwrap();
         let mut history = super::super::ring::History::new(10);
         let epoch = 4_000_000i64;
@@ -521,18 +555,27 @@ mod tests {
         set_display_crop(&mut vp, 63, 47).unwrap();
         let expected_start = clip[0].start;
         let expected_duration = clip.iter().map(|p| p.end).max().unwrap() - expected_start;
+        // Production saves use a temporary suffix before publishing .mp4.
+        // The explicit muxer must work independently of the filename extension.
         let path = std::env::temp_dir().join(format!(
-            "michadame-replay-test-{}-{}.mkv",
+            "michadame-replay-test-{}-{}.partial",
             std::process::id(),
             super::super::now_us()
         ));
         export(&path, vp, audio.parameters(), clip).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(
+            &bytes[4..8],
+            b"ftyp",
+            "Must write an MP4 container, not just rename Matroska"
+        );
         let mut input = format::input(&path).unwrap();
         assert_eq!(input.nb_streams(), 2);
         let vs = input.streams().best(ff::media::Type::Video).unwrap();
         let vi = vs.index();
         let vtb = vs.time_base();
         let parameters = vs.parameters();
+        assert_eq!(parameters.id(), expected_codec);
         unsafe {
             let p = parameters.as_ptr();
             let crop = ffi::av_packet_side_data_get(
@@ -540,7 +583,7 @@ mod tests {
                 (*p).nb_coded_side_data,
                 ffi::AVPacketSideDataType::AV_PKT_DATA_FRAME_CROPPING,
             );
-            assert!(!crop.is_null(), "Matroska must preserve crop metadata");
+            assert!(!crop.is_null(), "MP4 must preserve crop metadata");
             let crop = std::slice::from_raw_parts((*crop).data, 16);
             assert_eq!(&crop[4..8], &1u32.to_le_bytes());
             assert_eq!(&crop[12..16], &1u32.to_le_bytes());
