@@ -45,6 +45,9 @@ pub fn draw(replay: &mut Replay, ui: &mut egui::Ui, streaming: bool) -> bool {
             }
         }
         let status = replay.status();
+        ui.label(format!("History resets: {}", status.resets));
+        if status.resets > 0 { ui.label(format!("Last reset: {}", status.last_reset)); }
+        if status.history_exhaustions > 0 { ui.label(format!("History emptied by limits: {} · {}", status.history_exhaustions, status.last_exhaustion)); }
         ui.label(format!("Retained: {:.1}s / {}s · packets and active save: {}",status.seconds,replay.config.history_seconds,gib(status.bytes)));
         ui.label(format!("Work queues + staging/encoder allowance: {}",gib(status.overhead)));
         if status.queue_slots > 0 {

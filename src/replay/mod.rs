@@ -146,6 +146,10 @@ impl AudioTap {
 #[derive(Default, Clone)]
 pub struct Status {
     pub message: String,
+    pub resets: u64,
+    pub last_reset: String,
+    pub history_exhaustions: u64,
+    pub last_exhaustion: String,
     pub seconds: f64,
     pub bytes: usize,
     pub overhead: usize,
@@ -176,6 +180,13 @@ pub struct Shared {
     pub saving_bytes: std::sync::atomic::AtomicUsize,
 }
 impl Shared {
+    /// Worker only: keep the reason visible after ordinary progress messages.
+    fn record_reset(&self, reason: String) {
+        tracing::warn!(%reason, "Replay history reset");
+        let mut status = self.status.lock().unwrap();
+        status.resets += 1;
+        status.last_reset = reason;
+    }
     fn message(&self, text: impl Into<String>) {
         if let Ok(mut status) = self.status.try_lock() {
             status.message = text.into();

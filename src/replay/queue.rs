@@ -54,6 +54,17 @@ impl WorkQueue {
         current: &AtomicU64,
         stop: &AtomicBool,
     ) -> anyhow::Result<bool> {
+        if stop.load(Ordering::Acquire) {
+            self.clear();
+            return Ok(false);
+        }
+        if current.load(Ordering::Acquire) != request.generation {
+            return Ok(false);
+        }
+        if self.generation.load(Ordering::Acquire) == request.generation {
+            // Retried allocation notifications must never discard queued work.
+            return Ok(true);
+        }
         self.generation.store(u64::MAX, Ordering::Release);
         while self.ready.try_recv().is_ok() {}
         while self.free.try_recv().is_ok() {}
@@ -193,6 +204,30 @@ mod tests {
             let frame = queue.receive(Duration::ZERO).unwrap();
             assert_eq!(frame.rgba[0], tick);
         }
+    }
+
+    #[test]
+    fn allocation_retry_and_stale_request_preserve_queued_frames() {
+        let (queue, request, generation) = setup();
+        queue.submit(frame(&queue, 1, 1)).unwrap();
+        let held = frame(&queue, 1, 2);
+        let stop = AtomicBool::new(false);
+        assert!(queue.prepare(request, &generation, &stop).unwrap());
+        assert_eq!(queue.len(), 1, "A repeated request discarded pending work");
+        let stale = PoolRequest {
+            generation: 0,
+            ..request
+        };
+        assert!(!queue.prepare(stale, &generation, &stop).unwrap());
+        assert_eq!(queue.len(), 1, "A stale request discarded current work");
+        let oldest = queue.receive(Duration::ZERO).unwrap();
+        assert_eq!(oldest.rgba[0], 1);
+        queue.recycle(1, oldest.rgba);
+        queue.recycle(1, held.rgba);
+        for _ in 0..request.plan.slots {
+            assert!(queue.buffer(1).is_some());
+        }
+        assert!(queue.buffer(1).is_none(), "Retry allocated a second pool");
     }
 
     #[test]

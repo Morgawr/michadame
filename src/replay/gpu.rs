@@ -13,18 +13,56 @@ struct Slot {
 // SAFETY: fence handles are opaque. Slots are only accessed by egui paint/on_exit
 // with the owning GL context current; no GL operation happens in Drop or a worker.
 unsafe impl Send for Slot {}
+/// A transient/minimized viewport is not a new recording format. Commit only
+/// valid dimensions that remain stable for 300 ms, retaining history meanwhile.
+#[derive(Default)]
+struct SurfaceState {
+    size: (u32, u32),
+    candidate: Option<((u32, u32), i64)>,
+}
+impl SurfaceState {
+    /// None pauses readback; Some(true) commits a new recording size.
+    fn observe(&mut self, size: (u32, u32), now: i64) -> Option<bool> {
+        if size.0 == 0 || size.1 == 0 {
+            self.candidate = None;
+            return None;
+        }
+        if size == self.size {
+            self.candidate = None;
+            return Some(false);
+        }
+        let since = match self.candidate {
+            Some((candidate, since)) if candidate == size => since,
+            _ => {
+                self.candidate = Some((size, now));
+                return None;
+            }
+        };
+        if now - since < 300_000 {
+            return None;
+        }
+        self.size = size;
+        self.candidate = None;
+        Some(true)
+    }
+}
 #[derive(Default)]
 pub struct Readback {
     pending: VecDeque<Slot>,
     free: Vec<glow::Buffer>,
-    size: (u32, u32),
-    changed_at: i64,
+    surface: SurfaceState,
     last_at: i64,
     active: Option<std::sync::Weak<super::Shared>>,
     requested: Option<u64>,
 }
 impl Readback {
-    pub fn destroy(&mut self, gl: &glow::Context) {
+    fn observe_surface(&mut self, size: (u32, u32), at: i64, now: i64) -> Option<bool> {
+        if at <= 0 {
+            return None;
+        }
+        self.surface.observe(size, now)
+    }
+    fn release_buffers(&mut self, gl: &glow::Context) {
         if let Some(shared) = self.active.as_ref().and_then(|w| w.upgrade()) {
             shared.gpu_pending.store(0, Ordering::Relaxed);
         }
@@ -37,10 +75,13 @@ impl Readback {
                 gl.delete_buffer(buffer);
             }
         }
-        self.size = (0, 0);
         self.last_at = 0;
-        self.active = None;
         self.requested = None;
+    }
+    pub fn destroy(&mut self, gl: &glow::Context) {
+        self.release_buffers(gl);
+        self.surface = SurfaceState::default();
+        self.active = None;
     }
     pub fn capture(
         &mut self,
@@ -69,15 +110,15 @@ impl Readback {
             self.destroy(gl);
             self.active = Some(std::sync::Arc::downgrade(&runtime.shared));
         }
-        if self.size != (width, height) || at < self.last_at - 250_000 {
-            self.destroy(gl);
-            self.active = Some(std::sync::Arc::downgrade(&runtime.shared));
-            runtime.shared.generation.fetch_add(1, Ordering::AcqRel);
-            self.size = (width, height);
-            self.changed_at = super::now_us();
-        }
-        if width == 0 || height == 0 || super::now_us() - self.changed_at < 300_000 {
+        // Missing/stale capture timestamps cannot establish a new recording
+        // epoch. Real stream restarts already disable replay. In particular,
+        // never confuse an out-of-order frame with a backwards system clock.
+        let Some(resized) = self.observe_surface((width, height), at, super::now_us()) else {
             return;
+        };
+        if resized {
+            self.release_buffers(gl);
+            runtime.shared.generation.fetch_add(1, Ordering::AcqRel);
         }
         let Some(plan) = runtime.config.queue_plan(width, height) else {
             runtime.shared.message(
@@ -246,5 +287,185 @@ impl RuntimeView {
             shared: runtime.shared.clone(),
             config: runtime.config.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn started() -> Readback {
+        let mut readback = Readback::default();
+        assert_eq!(readback.observe_surface((1920, 1080), 10_000_000, 0), None);
+        assert_eq!(
+            readback.observe_surface((1920, 1080), 10_300_000, 300_000),
+            Some(true)
+        );
+        readback.last_at = 10_300_000;
+        readback
+    }
+
+    #[test]
+    fn late_frames_and_missing_timestamps_do_not_invalidate_recording() {
+        let mut readback = started();
+        // A late frame used to trip the 250 ms clock-reset heuristic before
+        // the existing duplicate/out-of-order timestamp check could reject it.
+        for at in [10_316_667, 9_000_000, 10_300_000, 0, 10_350_000] {
+            assert_eq!(
+                readback.observe_surface((1920, 1080), at, 400_000),
+                if at > 0 { Some(false) } else { None }
+            );
+        }
+        assert_eq!(readback.last_at, 10_300_000);
+    }
+
+    #[test]
+    fn minimized_and_transient_sizes_preserve_committed_surface() {
+        let mut readback = started();
+        for size in [(0, 0), (1920, 0), (0, 1080), (1919, 1080)] {
+            assert_eq!(readback.observe_surface(size, 11_000_000, 1_000_000), None);
+            assert_eq!(readback.surface.size, (1920, 1080));
+            assert_eq!(
+                readback.observe_surface((1920, 1080), 11_010_000, 1_010_000),
+                Some(false)
+            );
+        }
+        assert_eq!(
+            readback.observe_surface((0, 0), 12_000_000, 2_000_000),
+            None
+        );
+        assert_eq!(
+            readback.observe_surface((1920, 1080), 20_000_000, 10_000_000),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn actual_resize_commits_once_after_stable_dimensions() {
+        let mut readback = started();
+        assert_eq!(
+            readback.observe_surface((1280, 720), 11_000_000, 1_000_000),
+            None
+        );
+        assert_eq!(
+            readback.observe_surface((1281, 720), 11_200_000, 1_200_000),
+            None
+        );
+        assert_eq!(
+            readback.observe_surface((1280, 720), 11_400_000, 1_400_000),
+            None
+        );
+        assert_eq!(
+            readback.observe_surface((1280, 720), 11_699_999, 1_699_999),
+            None
+        );
+        assert_eq!(readback.surface.size, (1920, 1080));
+        assert_eq!(
+            readback.observe_surface((1280, 720), 11_700_000, 1_700_000),
+            Some(true)
+        );
+        assert_eq!(
+            readback.observe_surface((1280, 720), 11_720_000, 1_720_000),
+            Some(false)
+        );
+        assert_eq!(readback.surface.size, (1280, 720));
+    }
+
+    #[test]
+    fn ten_minutes_of_stalls_and_transient_inputs_retain_a_full_history() {
+        use crate::replay::{
+            config::{QueuePlan, Rate},
+            queue::{PoolRequest, WorkQueue},
+            ring::{Encoded, History},
+            worker::VideoSchedule,
+        };
+        use std::sync::atomic::{AtomicBool, AtomicU64};
+        use std::time::Duration;
+
+        let mut readback = started();
+        let epoch = 11_000_000;
+        let rate = Rate::new(60, 1);
+        let generation = AtomicU64::new(1);
+        let queue = WorkQueue::new();
+        let request = PoolRequest {
+            generation: 1,
+            // Tiny stand-in image storage; exercise the real FIFO and history
+            // without a GL context, VAAPI encoder, display or capture device.
+            plan: QueuePlan {
+                slots: 4,
+                frame_bytes: 16,
+                queue_bytes: 128,
+                overhead: 128,
+            },
+        };
+        assert!(queue
+            .prepare(request, &generation, &AtomicBool::new(false))
+            .unwrap());
+        let mut history = History::new(300);
+        let mut schedule = VideoSchedule::new(epoch, rate);
+        let mut dropped = 0;
+        for tick in 0..36_000 {
+            let now = epoch + rate.us(tick);
+            let size = match tick % 600 {
+                1 => (0, 0),
+                2 => (1919, 1080),
+                _ => (1920, 1080),
+            };
+            let at = if tick % 600 == 3 {
+                now - 1_000_000
+            } else {
+                now
+            };
+            let observed = readback.observe_surface(size, at, now);
+            assert_ne!(
+                observed,
+                Some(true),
+                "Transient input reset recording at tick {tick}"
+            );
+            if observed == Some(false) && at > readback.last_at {
+                readback.last_at = at;
+                if let Some(rgba) = queue.buffer(1) {
+                    queue
+                        .submit(VideoFrame {
+                            rgba,
+                            width: 2,
+                            height: 2,
+                            at,
+                            rate,
+                            generation: 1,
+                        })
+                        .unwrap();
+                } else {
+                    dropped += 1;
+                }
+            }
+            // A one-second encoder stall every two seconds exceeds this tiny
+            // pool. It must drop only new arrivals, never already saved history.
+            if tick % 120 < 60 {
+                continue;
+            }
+            while let Some(frame) = queue.receive(Duration::ZERO) {
+                let (pts, key) = schedule.accept(frame.at).unwrap();
+                for video in [true, false] {
+                    let mut packet = ffmpeg_next::Packet::copy(&[0; 16]);
+                    packet.set_pts(Some(pts));
+                    packet.set_dts(Some(pts));
+                    packet.set_duration(rate.us(1));
+                    if video && key {
+                        packet.set_flags(ffmpeg_next::packet::Flags::KEY);
+                    }
+                    history.push(Encoded::new(packet, video), 64 * 1024 * 1024);
+                }
+                queue.recycle(1, frame.rgba);
+            }
+        }
+        assert!(
+            dropped > 10_000,
+            "The fixture did not stress queue saturation"
+        );
+        assert!(history.duration() > 297. && history.duration() <= 300.);
+        let clip = history.clip(300, epoch + 600_000_000).unwrap();
+        assert!(clip[0].key);
+        assert!(clip.last().unwrap().end - clip[0].start > 297_000_000);
     }
 }

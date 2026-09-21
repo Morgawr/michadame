@@ -90,6 +90,10 @@ occupancy, recording lag, separate video/audio drop counts, actual retained dura
 512 MiB of system headroom. Recording stops if available RAM falls below that
 reserve. Swap is not counted as replay capacity. Fixed-quality compression has
 variable bitrate, so a fixed RAM budget cannot guarantee a fixed history length.
+Persistent **History resets / Last reset** fields distinguish format resets from
+frame drops. **History emptied by limits** separately reports loss of the final
+decodable group to the RAM or age cap; ordinary rolling eviction does not count.
+Format resets also log their reason on the recording worker.
 
 Disabling releases the recording worker, history and GPU readback resources;
 encoder teardown never joins on the UI thread. An export already in progress can
@@ -102,8 +106,10 @@ to be disabled first.
 ## Surface changes and files
 
 Changes to the recorded image dimensions (including window size, DPI, fullscreen
-or horizontal stretch) invalidate history immediately. Recording resumes after
-300 ms of stable dimensions. Changes only to image position or outer padding
+or horizontal stretch) invalidate history only after 300 ms of stable, nonzero
+dimensions. During resizing, readback pauses while the existing history remains
+savable; returning to the original dimensions resumes without resetting. Temporary
+zero-sized/minimized surfaces do not invalidate history. Changes only to image position or outer padding
 preserve history when the recorded dimensions stay the same. The visible image
 remains at the rendered surface size. Encoder surfaces are padded to 64×16 alignment and
 MP4 clean-aperture metadata removes the padding, including odd window sizes.
@@ -113,8 +119,10 @@ Missing rendered-frame intervals (including minimized windows) pause video progr
 without clearing history or cancelling saves. On resumption the preceding picture
 holds over the gap and recording continues on the same timeline. Normal history
 age/RAM eviction still applies; an indefinite outage cannot preserve history beyond
-those limits. Actual size/rate changes, a backwards clock reset, and explicit audio
-restart still reset recording. Disabling or stopping the
+those limits. Late/out-of-order or missing video timestamps do not reset history:
+old pictures are skipped until increasing timestamps resume, while queued work can
+still drain. Repeated/stale work-pool allocation requests cannot clear queued frames
+or encoded history. Committed size/rate changes reset recording. Disabling or stopping the
 stream cancels pending save requests; already-started exports finish independently.
 Recordings contain capture-card audio, not system output or output-volume changes.
 SDR RGB is converted to limited-range BT.709 matrix YUV with the rendered sRGB
@@ -149,6 +157,12 @@ audio sync and save snapshots. Audio regressions feed 1 ms stereo reads through
 the real tap, resampler and Opus encoder/decoder with 100 ms servicing delays and
 8 ms timestamp jitter, checking waveform continuity, channel energy and drift.
 Configuration tests use actual TOML files and reload settings into fresh state.
+Reset regressions cover backwards timestamps, missing timestamps, minimized or
+transient dimensions, one committed reset after resizing settles, and repeated
+allocation requests. A ten-minute simulated 60 fps capture repeatedly saturates
+the FIFO and injects transient inputs while retaining five minutes of packet
+history. It exercises the capture policy, queue, video scheduler and packet ring
+with synthetic packets; actual codec/muxing behavior has separate media tests.
 None of these replay
 tests opens a capture device, a display or a hardware encoder.
 

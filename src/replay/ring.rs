@@ -35,6 +35,8 @@ pub struct History {
     audio_end: i64,
     video_count: usize,
     audio_count: usize,
+    pub exhaustions: u64,
+    pub last_exhaustion: &'static str,
 }
 impl History {
     pub fn new(seconds: u32) -> Self {
@@ -46,6 +48,8 @@ impl History {
             audio_end: 0,
             video_count: 0,
             audio_count: 0,
+            exhaustions: 0,
+            last_exhaustion: "",
         }
     }
     pub fn push(&mut self, packet: Encoded, limit: usize) {
@@ -80,10 +84,15 @@ impl History {
     }
     pub fn trim(&mut self, limit: usize) {
         let newest = self.video_end.max(self.audio_end);
+        let mut eviction_reason = None;
         // Drop entire dependency groups; an oversized group leaves no savable history.
         loop {
             let first_key = self.packets.iter().position(|p| p.key);
             let Some(first) = first_key else {
+                if let Some(reason) = eviction_reason {
+                    self.exhaustions += 1;
+                    self.last_exhaustion = reason;
+                }
                 self.clear();
                 break;
             };
@@ -94,6 +103,11 @@ impl History {
             if self.bytes <= limit && !too_old {
                 break;
             }
+            eviction_reason = Some(if self.bytes > limit {
+                "Encoded packet RAM limit (including active saves)"
+            } else {
+                "Maximum history age reached without a newer video keyframe"
+            });
             self.pop();
         }
     }
@@ -175,14 +189,21 @@ mod tests {
         }
         assert!(h.packets.front().unwrap().key);
         assert!(h.duration() <= 3.);
+        assert_eq!(h.exhaustions, 0, "Normal rolling eviction is not a reset");
     }
     #[test]
     fn byte_limit_includes_overhead_and_discards_oversized_gop() {
         let mut h = History::new(600);
         h.push(packet(0, true, true, 1024), 100);
         assert_eq!(h.bytes, 0);
+        assert_eq!(h.exhaustions, 1);
+        assert!(h.last_exhaustion.contains("RAM limit"));
         h.push(packet(1, false, true, 10), 10000);
         assert_eq!(h.bytes, 0);
+        assert_eq!(
+            h.exhaustions, 1,
+            "Dependent frames must not inflate the counter"
+        );
     }
     #[test]
     fn clip_is_decodable_and_does_not_exceed_requested_interval() {

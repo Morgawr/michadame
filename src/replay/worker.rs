@@ -19,6 +19,25 @@ struct Session {
     audio_clock: AudioClock,
     generation: u64,
 }
+fn invalidate_changed_surface(
+    session: &mut Option<Session>,
+    history: &mut History,
+    pending_save: &mut Option<(Save, Instant)>,
+    shared: &Shared,
+) {
+    if let Some(s) = session
+        .as_ref()
+        .filter(|s| s.generation != shared.generation.load(Ordering::Acquire))
+    {
+        shared.record_reset(format!(
+            "Rendered image dimensions changed (previously {} × {})",
+            s.width, s.height
+        ));
+        *session = None;
+        history.clear();
+        *pending_save = None;
+    }
+}
 /// One encode per accepted picture, regardless of how many capture ticks were
 /// missed. Packet durations hold the previous picture across the missing ticks.
 /// Keyframes follow elapsed media time, not the reduced count of encoded frames.
@@ -179,24 +198,22 @@ pub(super) fn run(
     let mut last_input = Instant::now();
     let mut waiting_for_video = false;
     let mut pending_audio: Option<AudioBlock> = None;
+    let mut prepared_generation = None;
     while !shared.stop.load(Ordering::Acquire) {
-        if shared.generation.load(Ordering::Acquire) != session.as_ref().map_or(0, |s| s.generation)
-        {
-            session = None;
-            history.clear();
-            pending_save = None;
-        }
+        invalidate_changed_surface(&mut session, &mut history, &mut pending_save, shared);
         if let Some(thread) = export_thread.as_ref() {
             if thread.is_finished() {
                 let _ = export_thread.take().unwrap().join();
             }
         }
         if let Some(request) = queue.allocation_request() {
-            if request.generation == shared.generation.load(Ordering::Acquire) {
-                session = None;
-                history.clear();
-                pending_save = None;
+            if request.generation == shared.generation.load(Ordering::Acquire)
+                && prepared_generation != Some(request.generation)
+            {
+                // Pool allocation is not a recording discontinuity. Only the
+                // committed surface generation above can invalidate history.
                 if queue.prepare(request, &shared.generation, &shared.stop)? {
+                    prepared_generation = Some(request.generation);
                     shared
                         .staging_bytes
                         .store(request.plan.overhead, Ordering::Release);
@@ -219,6 +236,19 @@ pub(super) fn run(
             if session.as_ref().is_none_or(|s| {
                 (s.width, s.height, s.video.rate) != (frame.width, frame.height, frame.rate)
             }) {
+                if let Some(s) = &session {
+                    shared.record_reset(format!(
+                        "Video format changed: {} × {} at {}/{} fps → {} × {} at {}/{} fps",
+                        s.width,
+                        s.height,
+                        s.video.rate.num,
+                        s.video.rate.den,
+                        frame.width,
+                        frame.height,
+                        frame.rate.num,
+                        frame.rate.den
+                    ));
+                }
                 history.clear();
                 pending_save = None;
                 shared.message("Starting hardware replay encoder…");
@@ -304,14 +334,7 @@ pub(super) fn run(
             waiting_for_video = true;
             shared.message("Waiting for rendered frames; earlier replay history preserved");
         }
-        if session
-            .as_ref()
-            .is_some_and(|s| s.generation != shared.generation.load(Ordering::Acquire))
-        {
-            session = None;
-            history.clear();
-            pending_save = None;
-        }
+        invalidate_changed_surface(&mut session, &mut history, &mut pending_save, shared);
         if let Ok(save) = saves.try_recv() {
             if export_thread.is_some() || pending_save.is_some() {
                 shared.message("A replay save is already pending");
@@ -387,6 +410,8 @@ pub(super) fn run(
             }
             let mut status = shared.status.lock().unwrap();
             status.seconds = history.duration();
+            status.history_exhaustions = history.exhaustions;
+            status.last_exhaustion = history.last_exhaustion.into();
             status.bytes = history.bytes + shared.saving_bytes.load(Ordering::Acquire);
             status.overhead = shared.staging_bytes.load(Ordering::Acquire);
             status.available = available;
