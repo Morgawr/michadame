@@ -15,12 +15,63 @@ struct Session {
     width: u32,
     height: u32,
     epoch: i64,
-    last_tick: i64,
-    last_rgba: Vec<u8>,
+    schedule: VideoSchedule,
     audio_clock: AudioClock,
     overhead: usize,
     generation: u64,
 }
+/// One encode per accepted picture, regardless of how many capture ticks were
+/// missed. Packet durations hold the previous picture across the missing ticks.
+/// Keyframes follow elapsed media time, not the reduced count of encoded frames.
+pub(super) struct VideoSchedule {
+    epoch: i64,
+    rate: config::Rate,
+    last_tick: i64,
+    last_key_at: Option<i64>,
+}
+impl VideoSchedule {
+    pub(super) fn new(epoch: i64, rate: config::Rate) -> Self {
+        Self {
+            epoch,
+            rate,
+            last_tick: -1,
+            last_key_at: None,
+        }
+    }
+    pub(super) fn accept(&mut self, at: i64) -> Option<(i64, bool)> {
+        let tick = self.rate.tick(at - self.epoch);
+        if tick <= self.last_tick {
+            return None;
+        }
+        let pts = self.epoch + self.rate.us(tick);
+        let key = self.last_key_at.is_none_or(|last| pts - last >= 1_000_000);
+        self.last_tick = tick;
+        if key {
+            self.last_key_at = Some(pts);
+        }
+        Some((pts, key))
+    }
+}
+
+/// Drain only the queue snapshot, so producers cannot keep this worker here
+/// indefinitely. The bounded queue holds at most two pictures.
+fn newest_frame(
+    mut frame: VideoFrame,
+    queued: &Receiver<VideoFrame>,
+    recycled: &Sender<Vec<u8>>,
+    dropped: &AtomicU64,
+) -> VideoFrame {
+    for _ in 0..queued.len() {
+        let Ok(newer) = queued.try_recv() else {
+            break;
+        };
+        let _ = recycled.try_send(frame.rgba);
+        dropped.fetch_add(1, Ordering::Relaxed);
+        frame = newer;
+    }
+    frame
+}
+
 /// Maps timestamped capture samples to a fixed 48 kHz timeline. Resampling and gap
 /// repair affect only the recording, never the playback source.
 struct AudioClock {
@@ -75,10 +126,7 @@ impl AudioClock {
                 if at <= previous_at {
                     continue;
                 }
-                ensure!(
-                    at - previous_at < 12000.,
-                    "Audio capture gap; replay history reset"
-                );
+                ensure!(at - previous_at < 12000., "Audio capture gap");
                 while (self.next as f64) <= at {
                     let fraction = ((self.next as f64 - previous_at) / (at - previous_at))
                         .clamp(0., 1.) as f32;
@@ -98,6 +146,16 @@ impl AudioClock {
             self.previous = Some((at, sample));
         }
         Ok(())
+    }
+    fn append_recovering(&mut self, block: &AudioBlock, epoch: i64) -> Result<bool> {
+        if self.append(block, epoch).is_ok() {
+            return Ok(false);
+        }
+        // Re-anchor only the recording resampler. The existing encoder and A/V
+        // history remain valid; PTS preserves the gap instead of moving audio early.
+        *self = Self::new();
+        self.append(block, epoch)?;
+        Ok(true)
     }
     fn take(&mut self) -> Option<(i64, Vec<[f32; 2]>)> {
         if self.pending.len() < 960 {
@@ -133,7 +191,7 @@ pub(super) fn run(
     let mut export_thread: Option<std::thread::JoinHandle<()>> = None;
     let mut monitor = Instant::now();
     let mut last_input = Instant::now();
-    let mut force_key = true;
+    let mut waiting_for_video = false;
     while !shared.stop.load(Ordering::Acquire) {
         if shared.generation.load(Ordering::Acquire) != session.as_ref().map_or(0, |s| s.generation)
         {
@@ -153,13 +211,9 @@ pub(super) fn run(
             .saturating_sub(shared.saving_bytes.load(Ordering::Acquire));
         history.trim(limit);
         if let Ok(frame) = video_rx.recv_timeout(Duration::from_millis(5)) {
+            let frame = newest_frame(frame, &video_rx, &recycled, &shared.dropped);
             if frame.generation != shared.generation.load(Ordering::Acquire) {
                 let _ = recycled.try_send(frame.rgba);
-                continue;
-            }
-            if now_us() - frame.at > 1_000_000 {
-                let _ = recycled.try_send(frame.rgba);
-                shared.dropped.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
             if session.as_ref().is_none_or(|s| {
@@ -182,8 +236,7 @@ pub(super) fn run(
                     width: frame.width,
                     height: frame.height,
                     epoch: frame.at,
-                    last_tick: -1,
-                    last_rgba: Vec::new(),
+                    schedule: VideoSchedule::new(frame.at, frame.rate),
                     audio_clock: AudioClock::new(),
                     overhead,
                     generation: frame.generation,
@@ -192,51 +245,24 @@ pub(super) fn run(
                     .budget()
                     .saturating_sub(overhead)
                     .saturating_sub(shared.saving_bytes.load(Ordering::Acquire));
-                force_key = true;
                 shared.message("Buffering replay");
             }
             let s = session.as_mut().unwrap();
-            let mut tick = s.video.rate.tick(frame.at - s.epoch);
-            if s.last_tick >= 0 && s.video.rate.us(tick - s.last_tick) > 250_000 {
-                // Keep the hardware session, but start a fresh independently decodable history.
-                history.clear();
-                pending_save = None;
-                s.epoch = frame.at;
-                s.last_tick = -1;
-                s.audio = AudioEncoder::new()?;
-                s.audio_clock = AudioClock::new();
-                tick = 0;
-                force_key = true;
-                // Encoder PTS must remain monotonic even across capture gaps; use absolute timestamps below.
-                shared.message("Replay history reset after a video gap");
-            }
-            if tick > s.last_tick {
-                for missing in (s.last_tick + 1)..tick {
-                    if !s.last_rgba.is_empty() {
-                        let pts = s.epoch + s.video.rate.us(missing);
-                        for packet in s.video.encode(&s.last_rgba, pts, force_key)? {
-                            if packet.start >= s.epoch {
-                                history.push(packet, limit);
-                            }
-                        }
-                        force_key = false;
-                    }
-                }
-                let pts = s.epoch + s.video.rate.us(tick);
-                for packet in s.video.encode(&frame.rgba, pts, force_key)? {
+            if let Some((pts, key)) = s.schedule.accept(frame.at) {
+                for packet in s.video.encode(&frame.rgba, pts, key)? {
                     if packet.start >= s.epoch {
                         history.push(packet, limit);
                     }
                 }
-                force_key = false;
-                s.last_tick = tick;
-                let old = std::mem::replace(&mut s.last_rgba, frame.rgba);
-                let _ = recycled.try_send(old);
                 last_input = Instant::now();
-            } else {
-                let _ = recycled.try_send(frame.rgba);
+                if waiting_for_video {
+                    shared.message("Replay resumed; earlier history preserved");
+                }
+                waiting_for_video = false;
             }
+            let _ = recycled.try_send(frame.rgba);
         }
+
         // A fixed bound also prevents capture bursts from starving the video branch.
         for _ in 0..32 {
             let Ok(block) = audio_rx.try_recv() else {
@@ -244,42 +270,37 @@ pub(super) fn run(
             };
             if let Some(s) = session.as_mut() {
                 if block.at >= s.epoch - 200_000 && block.at <= now_us() {
-                    match s.audio_clock.append(&block, s.epoch) {
-                        Ok(()) => {
-                            while let Some((at, samples)) = s.audio_clock.take() {
-                                for mut packet in s.audio.encode(&samples, at)? {
-                                    // Opus lookahead is reflected in encoder PTS; preserve the offset.
-                                    packet
-                                        .packet
-                                        .set_pts(packet.packet.pts().map(|t| t + s.epoch));
-                                    packet
-                                        .packet
-                                        .set_dts(packet.packet.dts().map(|t| t + s.epoch));
-                                    packet.start += s.epoch;
-                                    packet.end += s.epoch;
-                                    if packet.start >= s.epoch {
-                                        history.push(packet, limit);
-                                    }
-                                }
+                    if s.audio_clock.append_recovering(&block, s.epoch)? {
+                        shared.message(
+                            "Audio capture gap; continuing with earlier history preserved",
+                        );
+                    }
+                    while let Some((at, samples)) = s.audio_clock.take() {
+                        for mut packet in s.audio.encode(&samples, at)? {
+                            // Preserve the encoder's Opus lookahead offset.
+                            packet
+                                .packet
+                                .set_pts(packet.packet.pts().map(|t| t + s.epoch));
+                            packet
+                                .packet
+                                .set_dts(packet.packet.dts().map(|t| t + s.epoch));
+                            packet.start += s.epoch;
+                            packet.end += s.epoch;
+                            if packet.start >= s.epoch {
+                                history.push(packet, limit);
                             }
-                        }
-                        Err(e) => {
-                            history.clear();
-                            session = None;
-                            pending_save = None;
-                            force_key = true;
-                            shared.message(e.to_string());
                         }
                     }
                 }
             }
             let _ = audio_free.try_send(block);
         }
-        if last_input.elapsed() > Duration::from_secs(1) && session.is_some() {
-            session = None;
-            history.clear();
-            pending_save = None;
-            shared.message("Replay paused: waiting for rendered frames");
+        if last_input.elapsed() > Duration::from_secs(1) && session.is_some() && !waiting_for_video
+        {
+            // No new frames is a pause, not a new recording epoch. Saved history
+            // and pending requests remain usable, within normal age/byte limits.
+            waiting_for_video = true;
+            shared.message("Waiting for rendered frames; earlier replay history preserved");
         }
         if session
             .as_ref()
@@ -464,5 +485,62 @@ mod tests {
             (clock.next - expected).abs() < 48,
             "Recording clock drift exceeded 1ms"
         );
+    }
+    #[test]
+    fn dropped_frames_and_long_pauses_do_not_restart_video_time_or_create_catchup_work() {
+        let rate = config::Rate::new(60000, 1001);
+        let epoch = 10_000_000;
+        let mut schedule = VideoSchedule::new(epoch, rate);
+        let ticks = [0, 1, 3, 7, 31, 160, 161]; // isolated, burst, >250ms, >1s
+        let accepted: Vec<_> = ticks
+            .into_iter()
+            .map(|t| schedule.accept(epoch + rate.us(t)).unwrap())
+            .collect();
+        assert_eq!(accepted.len(), ticks.len());
+        for ((pts, _), tick) in accepted.iter().zip(ticks) {
+            assert_eq!(*pts, epoch + rate.us(tick));
+        }
+        assert!(accepted[5].1, "Recovered frame needs a time-based keyframe");
+        assert!(!accepted[6].1);
+        assert!(
+            schedule.accept(epoch + rate.us(160)).is_none(),
+            "Late pictures cannot move timestamps backward"
+        );
+    }
+    #[test]
+    fn saturated_queue_recovers_with_newest_picture_and_recycles_old_buffers() {
+        let frame = |at| VideoFrame {
+            rgba: vec![at as u8],
+            width: 1,
+            height: 1,
+            at,
+            rate: config::Rate::new(60, 1),
+            generation: 1,
+        };
+        let (tx, rx) = crossbeam_channel::bounded(2);
+        let (recycle, returned) = crossbeam_channel::bounded(3);
+        let dropped = AtomicU64::new(0);
+        tx.send(frame(2)).unwrap();
+        tx.send(frame(3)).unwrap();
+        let latest = newest_frame(frame(1), &rx, &recycle, &dropped);
+        assert_eq!(latest.at, 3);
+        assert_eq!(latest.rgba, [3]);
+        assert_eq!(dropped.load(Ordering::Relaxed), 2);
+        assert_eq!(returned.try_recv().unwrap(), [1]);
+        assert_eq!(returned.try_recv().unwrap(), [2]);
+        assert!(rx.is_empty());
+    }
+    #[test]
+    fn audio_recovery_keeps_the_original_epoch_without_allocating_a_long_silence() {
+        let mut clock = AudioClock::new();
+        assert!(!clock.append_recovering(&block(0, 48000, 1920), 0).unwrap());
+        let (before, _) = clock.take().unwrap();
+        assert_eq!(before, 0);
+        assert!(clock
+            .append_recovering(&block(60_000_000, 48000, 1920), 0)
+            .unwrap());
+        let (after, _) = clock.take().unwrap();
+        assert_eq!(after, 60 * 48000);
+        assert!(clock.pending.len() < 1920);
     }
 }

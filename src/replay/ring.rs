@@ -1,6 +1,7 @@
 use ffmpeg_next::Packet;
 use std::{collections::VecDeque, sync::Arc};
 
+#[derive(Clone)]
 pub struct Encoded {
     pub packet: Packet,
     pub video: bool,
@@ -49,6 +50,16 @@ impl History {
     }
     pub fn push(&mut self, packet: Encoded, limit: usize) {
         if packet.video {
+            // With B-frames disabled, packets arrive in presentation order. Hold
+            // the previous picture until this one, without re-encoding duplicates.
+            // Copy-on-write leaves snapshots already owned by a save unchanged.
+            if let Some(previous) = self.packets.iter_mut().rev().find(|p| p.video) {
+                if packet.start > previous.start {
+                    let previous = Arc::make_mut(previous);
+                    previous.end = packet.start;
+                    previous.packet.set_duration(previous.end - previous.start);
+                }
+            }
             self.video_end = self.video_end.max(packet.end);
             self.video_count += 1;
         } else {
@@ -121,8 +132,19 @@ impl History {
         let packets: Vec<_> = self
             .packets
             .iter()
-            .filter(|p| p.start >= start && p.end <= end)
-            .cloned()
+            .filter(|p| p.start >= start && p.start < end && (p.video || p.end <= end))
+            .map(|p| {
+                if p.video && p.end > end {
+                    // A keypress can occur within a held picture. Retain its
+                    // dependencies and shorten only this export's last duration.
+                    let mut clipped = p.as_ref().clone();
+                    clipped.end = end;
+                    clipped.packet.set_duration(end - clipped.start);
+                    Arc::new(clipped)
+                } else {
+                    p.clone()
+                }
+            })
             .collect();
         if !packets.iter().any(|p| !p.video) || !packets.iter().any(|p| p.key) {
             return None;
@@ -179,5 +201,37 @@ mod tests {
         let mut h = History::new(10);
         h.push(packet(0, true, true, 10), 10000);
         assert!(h.clip(10, 1_000_000).is_none());
+    }
+    #[test]
+    fn gap_holds_previous_picture_and_preserves_history_and_existing_save() {
+        let mut history = History::new(30);
+        history.push(packet(0, true, true, 10), 100000);
+        history.push(packet(0, false, false, 10), 100000);
+        let prior_save = history.clip(10, 1_000_000).unwrap();
+        for t in 1..5 {
+            history.push(packet(t, false, false, 10), 100000);
+        }
+        // No video at t=1..3, much longer than both former reset thresholds.
+        history.push(packet(4, true, true, 10), 100000);
+        let recovered = history.clip(10, 5_000_000).unwrap();
+        assert_eq!(recovered[0].start, 0, "Pre-gap history was lost");
+        assert_eq!(recovered[0].end, 4_000_000);
+        assert_eq!(recovered[0].packet.duration(), 4_000_000);
+        assert_eq!(
+            recovered.iter().filter(|p| p.video).count(),
+            2,
+            "Recovery must not synthesize encoded frames"
+        );
+        assert_eq!(
+            prior_save[0].packet.duration(),
+            1_000_000,
+            "An in-flight save was mutated"
+        );
+        // Save request made inside the missing interval still produces a valid clip.
+        let during_gap = history.clip(10, 2_500_000).unwrap();
+        assert!(during_gap[0].key);
+        assert_eq!(during_gap[0].packet.duration(), 2_500_000);
+        assert!(during_gap.iter().all(|p| p.end <= 2_500_000));
+        assert_eq!(history.duration(), 5.);
     }
 }

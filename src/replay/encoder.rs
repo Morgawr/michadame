@@ -425,6 +425,13 @@ mod tests {
     /// actual history/export/Opus path without a display, GPU or capture device.
     #[test]
     fn exported_replay_demuxes_decodes_and_preserves_timing_and_crop() {
+        export_fixture(false);
+    }
+    #[test]
+    fn exported_replay_keeps_audio_and_video_before_and_after_dropped_frame_bursts() {
+        export_fixture(true);
+    }
+    fn export_fixture(drop_frames: bool) {
         ff::init().unwrap();
         let codec = encoder::find(codec::Id::FFV1).unwrap();
         let mut video = codec::context::Context::new_with_codec(codec)
@@ -442,18 +449,33 @@ mod tests {
         let mut audio = AudioEncoder::new().unwrap();
         let mut history = super::super::ring::History::new(10);
         let epoch = 4_000_000i64;
+        let mut schedule =
+            super::super::worker::VideoSchedule::new(epoch, super::super::config::Rate::new(30, 1));
         for tick in 0..90 {
-            let mut f = frame::Video::new(format::Pixel::YUV420P, 64, 48);
-            f.data_mut(0).fill(if tick < 45 { 40 } else { 180 });
-            f.data_mut(1).fill(128);
-            f.data_mut(2).fill(128);
-            f.set_pts(Some(epoch + tick * 1_000_000 / 30));
-            video.send_frame(&f).unwrap();
-            let mut p = Packet::empty();
-            while video.receive_packet(&mut p).is_ok() {
-                p.set_duration(1_000_000 / 30);
-                history.push(Encoded::new(p, true), 10_000_000);
-                p = Packet::empty();
+            let missing = drop_frames
+                && (tick == 6
+                    || (13..16).contains(&tick)
+                    || (19..28).contains(&tick)
+                    || (30..70).contains(&tick));
+            if !missing {
+                let (pts, key) = schedule.accept(epoch + tick * 1_000_000 / 30).unwrap();
+                let mut f = frame::Video::new(format::Pixel::YUV420P, 64, 48);
+                f.data_mut(0).fill(if tick < 45 { 40 } else { 180 });
+                f.data_mut(1).fill(128);
+                f.data_mut(2).fill(128);
+                f.set_pts(Some(pts));
+                f.set_kind(if key {
+                    ff::picture::Type::I
+                } else {
+                    ff::picture::Type::None
+                });
+                video.send_frame(&f).unwrap();
+                let mut p = Packet::empty();
+                while video.receive_packet(&mut p).is_ok() {
+                    p.set_duration(1_000_000 / 30);
+                    history.push(Encoded::new(p, true), 10_000_000);
+                    p = Packet::empty();
+                }
             }
             if tick % 3 == 0 {
                 for j in 0..5 {
@@ -476,7 +498,25 @@ mod tests {
                 }
             }
         }
-        let clip = history.clip(2, epoch + 2_900_000).unwrap();
+        let clip = history
+            .clip(if drop_frames { 3 } else { 2 }, epoch + 2_900_000)
+            .unwrap();
+        let expected_frames = clip.iter().filter(|p| p.video).count();
+        if drop_frames {
+            assert_eq!(
+                clip[0].start, epoch,
+                "Earlier history must survive multiple gaps"
+            );
+            assert!(clip
+                .iter()
+                .filter(|p| p.video)
+                .any(|p| p.packet.duration() > 1_000_000));
+            assert_eq!(
+                clip.iter().filter(|p| p.video).count(),
+                34,
+                "Encode only received frames before the cutoff"
+            );
+        }
         let mut vp = codec::Parameters::from(&video);
         set_display_crop(&mut vp, 63, 47).unwrap();
         let expected_start = clip[0].start;
@@ -526,14 +566,28 @@ mod tests {
         let mut audio_samples = 0;
         let mut first_v = None;
         let mut first_a = None;
+        let mut intervals = Vec::new();
+        let mut audio_end = 0f64;
         for (stream, packet) in input.packets() {
             if stream.index() == vi {
+                intervals.push((
+                    packet.pts().unwrap() as f64 * f64::from(vtb),
+                    packet.duration() as f64 * f64::from(vtb),
+                ));
                 vd.send_packet(&packet).unwrap();
                 let mut f = frame::Video::empty();
                 while vd.receive_frame(&mut f).is_ok() {
                     video_frames += 1;
                     first_v.get_or_insert(f.timestamp().unwrap_or(0) as f64 * f64::from(vtb));
                     assert!(f.data(0)[0] < 60 || f.data(0)[0] > 160);
+                    if drop_frames {
+                        let elapsed = f.timestamp().unwrap() as f64 * f64::from(vtb);
+                        assert_eq!(
+                            f.data(0)[0],
+                            if elapsed < 2.3 { 40 } else { 180 },
+                            "Recovered picture appeared at the wrong time"
+                        );
+                    }
                 }
             } else if stream.index() == ai {
                 ad.send_packet(&packet).unwrap();
@@ -541,11 +595,35 @@ mod tests {
                 while ad.receive_frame(&mut f).is_ok() {
                     first_a.get_or_insert(f.timestamp().unwrap_or(0) as f64 * f64::from(atb));
                     audio_samples += f.samples();
+                    audio_end = f.timestamp().unwrap_or(0) as f64 * f64::from(atb)
+                        + f.samples() as f64 / f.rate() as f64;
                 }
             }
         }
-        assert!(video_frames >= 40);
+        assert_eq!(video_frames, expected_frames);
+        if drop_frames {
+            assert!(
+                intervals.iter().any(|(_, duration)| *duration > 1.),
+                "Held-frame duration lost during muxing"
+            );
+            for pair in intervals.windows(2) {
+                assert!(
+                    (pair[0].0 + pair[0].1 - pair[1].0).abs() < 0.002,
+                    "Gap or overlap in recovered video timeline"
+                );
+            }
+            assert!(intervals[0].0 < 0.01);
+            assert!(
+                intervals.last().unwrap().0 > 2.8,
+                "Did not resume after the video stall"
+            );
+        }
         assert!(audio_samples > 48000);
+        let last_video = intervals.last().unwrap();
+        assert!(
+            (last_video.0 + last_video.1 - audio_end).abs() < 0.03,
+            "Audio/video ends drifted after recovery"
+        );
         assert!(
             (first_v.unwrap() - first_a.unwrap()).abs() < 0.03,
             "Audio/video start differs by >30ms"

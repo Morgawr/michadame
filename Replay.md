@@ -34,8 +34,14 @@ The Rodio/CPAL playback callback is unchanged. Recording never reads from the
 playback ring. When disabled, the audio tap performs no additional ALSA query.
 Capture timestamps use the monotonic clock; negotiated fractional video rates are
 kept in replay metadata. Audio timestamps account for ALSA queued samples.
-A recording-only resampler filters arrival jitter and corrects drift. Short gaps
-become silence/repeated video frames; long gaps reset history. USB/device latency
+A recording-only resampler filters arrival jitter and corrects drift. Dropped video
+frames hold the preceding picture until the next received frame, using packet
+duration and presentation timestamps instead of re-encoding duplicates. The
+capture rate remains the nominal rate; gaps use variable frame durations. Recovery
+encodes at most one picture per accepted input and prefers the newest queued frame,
+so missed frames cannot create a catch-up encoding backlog. Audio keeps its own
+capture timeline: short audio gaps become silence, and long gaps re-anchor only
+the recording resampler without clearing the A/V history. USB/device latency
 that the driver does not expose still needs empirical validation.
 
 Encoded packet memory is capped after a conservative CPU staging/encoder
@@ -68,8 +74,12 @@ rendered surface size. Encoder surfaces are padded to 64×16 alignment and
 Matroska pixel-crop metadata removes the padding, including odd window sizes.
 Players must honor Matroska crop metadata. The pixels are not stretched.
 
-Capture interruptions, long missing rendered-frame intervals (including minimized
-windows) and restarting audio reset/suspend recording. Disabling or stopping the
+Missing rendered-frame intervals (including minimized windows) pause video progress
+without clearing history or cancelling saves. On resumption the preceding picture
+holds over the gap and recording continues on the same timeline. Normal history
+age/RAM eviction still applies; an indefinite outage cannot preserve history beyond
+those limits. Actual size/rate changes, a backwards clock reset, and explicit audio
+restart still reset recording. Disabling or stopping the
 stream cancels pending save requests; already-started exports finish independently.
 Recordings contain capture-card audio, not system output or output-volume changes.
 SDR RGB is converted to limited-range BT.709 matrix YUV with the rendered sRGB
@@ -95,7 +105,10 @@ The two skipped legacy tests can traverse configuration paths that open
 exports through the real muxer, demuxes and decodes the result, and checks duration,
 A/V start alignment, content and Matroska cropping. Other tests cover byte/time
 limits, keyframe dependencies, truncated clips, fractional FPS, audio drift/gaps,
-configuration compatibility, and nonblocking audio taps. None of these replay
+configuration compatibility, nonblocking audio taps, and recovery after isolated
+missing frames, bursts, >1-second stalls and queue saturation. The dropped-frame
+media fixture checks retained pre-gap content, held-frame timing, resumed video,
+audio sync and save snapshots. None of these replay
 tests opens a capture device, a display or a hardware encoder.
 
 ## Manual validation by the user
