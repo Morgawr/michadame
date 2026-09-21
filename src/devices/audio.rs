@@ -592,6 +592,7 @@ where
     S: Copy + Default,
     F: Fn(S) -> f32,
 {
+    replay.mark_discontinuity();
     let buffer_samples = buffer_size as usize * channels as usize;
     let mut input_buf = vec![S::default(); buffer_samples];
     let mut converted_buf = vec![0.0f32; buffer_samples];
@@ -613,7 +614,10 @@ where
                     }
                     match pcm.wait(Some(ALSA_CAPTURE_POLL_TIMEOUT_MS)) {
                         Ok(_) => {}
-                        Err(wait_error) => recover_alsa_capture(pcm, wait_error)?,
+                        Err(wait_error) => {
+                            replay.mark_discontinuity();
+                            recover_alsa_capture(pcm, wait_error)?;
+                        }
                     }
                     continue;
                 }
@@ -654,10 +658,16 @@ where
                 }
                 match pcm.wait(Some(ALSA_CAPTURE_POLL_TIMEOUT_MS)) {
                     Ok(_) => {}
-                    Err(wait_error) => recover_alsa_capture(pcm, wait_error)?,
+                    Err(wait_error) => {
+                        replay.mark_discontinuity();
+                        recover_alsa_capture(pcm, wait_error)?;
+                    }
                 }
             }
-            Err(error) => recover_alsa_capture(pcm, error)?,
+            Err(error) => {
+                replay.mark_discontinuity();
+                recover_alsa_capture(pcm, error)?;
+            }
         }
     }
 

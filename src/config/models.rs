@@ -80,7 +80,6 @@ pub fn default_active_profile() -> String {
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(from = "LegacyConfig")]
 pub struct MichadameConfig {
-    pub replay: crate::replay::config::ReplayConfig,
     pub video_device: Option<String>,
     pub usb_device: Option<String>,
     pub video_resolution: Option<(u32, u32)>,
@@ -92,6 +91,8 @@ pub struct MichadameConfig {
     pub audio_sample_rate: Option<u32>,
     pub audio_sample_format: Option<String>,
     pub active_profile: String,
+    // confy's TOML serializer requires scalar fields before nested tables.
+    pub replay: crate::replay::config::ReplayConfig,
     pub profiles: BTreeMap<String, Profile>,
 }
 

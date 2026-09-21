@@ -2,6 +2,24 @@ use super::models::{MichadameConfig, Profile};
 use crate::app::models::AppState;
 use std::sync::atomic::Ordering;
 
+pub fn save_replay_config(
+    replay: &crate::replay::config::ReplayConfig,
+) -> Result<(), confy::ConfyError> {
+    let path = confy::get_configuration_file_path("michadame", None)?;
+    save_replay_config_at(&path, replay)
+}
+
+fn save_replay_config_at(
+    path: &std::path::Path,
+    replay: &crate::replay::config::ReplayConfig,
+) -> Result<(), confy::ConfyError> {
+    // Preserve hardware/profile settings and report read failures rather than
+    // replacing an unreadable configuration with defaults.
+    let mut cfg: MichadameConfig = confy::load_path(path)?;
+    cfg.replay = replay.clone();
+    confy::store_path(path, cfg)
+}
+
 pub fn build_profile_from_state(state: &AppState) -> Profile {
     Profile {
         video_format_fourcc: state
@@ -234,6 +252,59 @@ mod tests {
     use super::*;
     use crate::app::models::AppState;
     use crate::config::models::{MichadameConfig, Profile};
+
+    #[test]
+    fn replay_settings_survive_disk_reload_without_changing_hardware_or_profiles() {
+        let path = std::env::temp_dir().join(format!(
+            "michadame-replay-config-{}-{}.toml",
+            std::process::id(),
+            crate::replay::now_us()
+        ));
+        let mut existing = MichadameConfig {
+            audio_buffer_size: Some(4096),
+            audio_sample_rate: Some(44100),
+            ..Default::default()
+        };
+        existing.profiles.insert(
+            "Saved CRT".into(),
+            Profile {
+                crt_hard_scan: Some(-12.),
+                ..Default::default()
+            },
+        );
+        confy::store_path(&path, &existing).unwrap();
+        let settings = crate::replay::config::ReplayConfig {
+            history_seconds: 600,
+            memory_mib: 2048,
+            custom_seconds: 45,
+            quality: 18,
+            codec: crate::replay::config::Codec::Hevc,
+            keys: [1, 2, 3, 4, 5, 10],
+            directory: "/tmp/my replays".into(),
+            render_device: "/dev/dri/renderD129".into(),
+        };
+        save_replay_config_at(&path, &settings).unwrap();
+        let loaded: MichadameConfig = confy::load_path(&path).unwrap();
+        existing.replay = settings.clone();
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap(),
+            serde_json::to_value(&existing).unwrap()
+        );
+        // Applying settings with no enumerated devices cannot access hardware.
+        let mut restarted = AppState::default();
+        apply_config(&mut restarted, &loaded);
+        assert_eq!(
+            serde_json::to_value(&restarted.replay.config).unwrap(),
+            serde_json::to_value(&settings).unwrap()
+        );
+        assert!(restarted.replay.runtime.is_none());
+
+        // A malformed existing file must be reported, not overwritten with defaults.
+        std::fs::write(&path, "invalid = [").unwrap();
+        assert!(save_replay_config_at(&path, &settings).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "invalid = [");
+        std::fs::remove_file(&path).unwrap();
+    }
 
     #[test]
     fn test_build_profile_from_state() {

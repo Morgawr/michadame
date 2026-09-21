@@ -9,6 +9,10 @@ open Controls (`M`), expand **Live replay buffer**, then enable it. Defaults:
 - F10 saves the customizable duration (initially 120 seconds).
 - Files go to `$HOME/Videos/Michadame`; folder and bindings are configurable.
 
+Replay preferences (including RAM budget, history, codec, quality, folder and
+shortcuts) are saved when edited and restored on restart. Enabling replay remains
+an explicit per-launch choice.
+
 Shortcuts work in either focused Michadame window, outside text editing. They are
 not desktop-global shortcuts. Save buttons are also available in Controls.
 All durations share one buffer and clamp to the retained decodable A/V history.
@@ -30,6 +34,11 @@ Hardware performance is unvalidated; no zero-overhead guarantee is made.
 
 The ALSA capture thread delivers playback samples first, then copies into a
 separate pool of 32 preallocated recording blocks with `try_lock`/`try_send`.
+Short reads are combined into approximately 40 ms blocks, providing 1.28 seconds
+of queue capacity at 48 kHz stereo while the video encoder is busy. This batching
+only delays recording work, never live playback. Actual capture recovery, format
+changes and queue exhaustion explicitly mark discontinuities; timestamp jitter
+alone cannot splice samples or insert silence into continuous captured sound.
 The Rodio/CPAL playback callback is unchanged. Recording never reads from the
 playback ring. When disabled, the audio tap performs no additional ALSA query.
 Capture timestamps use the monotonic clock; negotiated fractional video rates are
@@ -108,7 +117,11 @@ limits, keyframe dependencies, truncated clips, fractional FPS, audio drift/gaps
 configuration compatibility, nonblocking audio taps, and recovery after isolated
 missing frames, bursts, >1-second stalls and queue saturation. The dropped-frame
 media fixture checks retained pre-gap content, held-frame timing, resumed video,
-audio sync and save snapshots. None of these replay
+audio sync and save snapshots. Audio regressions feed 1 ms stereo reads through
+the real tap, resampler and Opus encoder/decoder with 100 ms servicing delays and
+8 ms timestamp jitter, checking waveform continuity, channel energy and drift.
+Configuration tests use actual TOML files and reload settings into fresh state.
+None of these replay
 tests opens a capture device, a display or a hardware encoder.
 
 ## Manual validation by the user

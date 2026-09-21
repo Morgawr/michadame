@@ -79,6 +79,7 @@ struct AudioClock {
     next: i64,
     frame_start: i64,
     previous: Option<(f64, [f32; 2])>,
+    clock_error: f64,
 }
 impl AudioClock {
     fn new() -> Self {
@@ -87,6 +88,7 @@ impl AudioClock {
             next: 0,
             frame_start: 0,
             previous: None,
+            clock_error: 0.,
         }
     }
     fn append(&mut self, block: &AudioBlock, epoch: i64) -> Result<()> {
@@ -99,12 +101,17 @@ impl AudioClock {
         if let Some((previous, _)) = self.previous {
             let expected_start = previous + nominal_step;
             let error = observed_start - expected_start;
-            // Filter block-arrival jitter, but track clock drift through a small
-            // rate correction. Real missing blocks (>5ms) retain their gap.
-            if error.abs() < 240. {
+            // ALSA read timestamps can jump while the PCM samples are perfectly
+            // continuous. Only explicit capture/queue loss may insert silence or
+            // discard overlapping samples. Smooth clock drift without splicing
+            // the waveform at each read boundary.
+            if block.continuous {
                 start = expected_start;
+                self.clock_error += (error - self.clock_error) * 0.02;
                 let count = (block.len / channels).max(1) as f64;
-                step *= 1. + (error / count * 0.05).clamp(-0.005, 0.005);
+                step *= 1. + (self.clock_error / count * 0.02).clamp(-0.001, 0.001);
+            } else {
+                self.clock_error = 0.;
             }
         }
         // The first block may arrive after video starts. Leave the real startup offset intact.
@@ -444,6 +451,7 @@ mod tests {
             rate,
             channels: 2,
             at,
+            continuous: false,
         };
         b.samples[..b.len].fill(0.5);
         b
@@ -466,9 +474,16 @@ mod tests {
     #[test]
     fn short_missing_audio_has_silence_and_preserves_timeline() {
         let mut clock = AudioClock::new();
-        clock.append(&block(0, 48000, 960), 0).unwrap();
-        clock.append(&block(40_000, 48000, 960), 0).unwrap();
-        assert!(clock.pending.iter().filter(|s| s[0] == 0.).count() >= 960);
+        for gap_us in [1000, 20_000] {
+            clock.append(&block(0, 48000, 960), 0).unwrap();
+            clock
+                .append(&block(20_000 + gap_us, 48000, 960), 0)
+                .unwrap();
+            assert!(
+                clock.pending.iter().filter(|s| s[0] == 0.).count() >= gap_us as usize * 48 / 1000
+            );
+            clock = AudioClock::new();
+        }
     }
     #[test]
     fn jitter_and_clock_drift_do_not_accumulate_audio_desync() {
@@ -477,7 +492,9 @@ mod tests {
         for i in 0..1000 {
             let jitter = if i % 2 == 0 { 100. } else { -100. };
             let at = (i as f64 * 960. / actual_rate * 1e6 + jitter).max(0.) as i64;
-            clock.append(&block(at, 48000, 960), 0).unwrap();
+            let mut input = block(at, 48000, 960);
+            input.continuous = i > 0;
+            clock.append(&input, 0).unwrap();
             while clock.take().is_some() {}
         }
         let expected = (960000. / actual_rate * 48000.) as i64;
@@ -485,6 +502,103 @@ mod tests {
             (clock.next - expected).abs() < 48,
             "Recording clock drift exceeded 1ms"
         );
+    }
+    #[test]
+    fn short_reads_and_timestamp_jitter_keep_the_recorded_waveform_continuous() {
+        use ffmpeg_next as ff;
+        ff::init().unwrap();
+        let (tap, rx, free, dropped) = super::super::tests::test_tap(32);
+        let mut clock = AudioClock::new();
+        let mut encoder = AudioEncoder::new().unwrap();
+        let mut decoder = ff::codec::context::Context::from_parameters(encoder.parameters())
+            .unwrap()
+            .decoder()
+            .audio()
+            .unwrap();
+        unsafe {
+            (*decoder.as_mut_ptr()).pkt_timebase = ff::Rational(1, 1_000_000).into();
+        }
+        let mut recorded = Vec::<[f32; 2]>::new();
+        let mut decoded = Vec::<[f32; 2]>::new();
+        let epoch = 1_000_000;
+        let mut next_pts = 0;
+        for read in 0..2000 {
+            let mut samples = [0.; 96];
+            for (i, pair) in samples.chunks_exact_mut(2).enumerate() {
+                let time = (read * 48 + i) as f64 / 48000.;
+                pair[0] = (time * 440. * std::f64::consts::TAU).sin() as f32 * 0.4;
+                pair[1] = (time * 997. * std::f64::consts::TAU).sin() as f32 * 0.3;
+            }
+            // Delayed/early timestamp observations must never be interpreted as
+            // missing PCM. Model video work blocking audio service for 100ms.
+            let jitter = if read == 0 {
+                0
+            } else if read / 40 % 2 == 0 {
+                -8000
+            } else {
+                8000
+            };
+            tap.submit(&samples, 48000, 2, epoch + read as i64 * 1000 + jitter);
+            if read % 100 != 99 {
+                continue;
+            }
+            while let Ok(input) = rx.try_recv() {
+                assert!(!clock.append_recovering(&input, epoch).unwrap());
+                while let Some((at, samples)) = clock.take() {
+                    assert_eq!(at, next_pts);
+                    next_pts += 960;
+                    recorded.extend_from_slice(&samples);
+                    for packet in encoder.encode(&samples, at).unwrap() {
+                        decoder.send_packet(&packet.packet).unwrap();
+                        let mut frame = ff::frame::Audio::empty();
+                        while decoder.receive_frame(&mut frame).is_ok() {
+                            match frame.format() {
+                                ff::format::Sample::F32(ff::format::sample::Type::Planar) => {
+                                    decoded.extend(
+                                        frame
+                                            .plane::<f32>(0)
+                                            .iter()
+                                            .zip(frame.plane::<f32>(1))
+                                            .map(|(l, r)| [*l, *r]),
+                                    );
+                                }
+                                ff::format::Sample::F32(ff::format::sample::Type::Packed) => {
+                                    decoded.extend(
+                                        frame.plane::<(f32, f32)>(0).iter().map(|(l, r)| [*l, *r]),
+                                    );
+                                }
+                                other => panic!("Unexpected decoder format {other:?}"),
+                            }
+                        }
+                    }
+                }
+                free.send(input).unwrap();
+            }
+        }
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        assert!(decoded.len() > 94000);
+        for waveform in [&recorded, &decoded] {
+            // Skip Opus startup lookahead. Check every 5ms for holes and each
+            // sample boundary for splices, in both independently generated channels.
+            for window in waveform[960..].chunks_exact(240) {
+                for (channel, minimum) in [(0, 0.20), (1, 0.15)] {
+                    let rms =
+                        (window.iter().map(|v| v[channel].powi(2)).sum::<f32>() / 240.).sqrt();
+                    assert!(rms > minimum, "Silent/skipped recording interval: {rms}");
+                }
+            }
+            for pair in waveform[960..].windows(2) {
+                assert!(
+                    (pair[1][0] - pair[0][0]).abs() < 0.04,
+                    "Left channel splice"
+                );
+                assert!(
+                    (pair[1][1] - pair[0][1]).abs() < 0.06,
+                    "Right channel splice"
+                );
+            }
+        }
+        assert!((clock.next - 96000).abs() < 48, "Audio drift exceeded 1ms");
     }
     #[test]
     fn dropped_frames_and_long_pauses_do_not_restart_video_time_or_create_catchup_work() {
