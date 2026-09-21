@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub struct ReplayConfig {
     pub history_seconds: u32,
     pub memory_mib: u32,
+    /// Raw GPU/CPU work buffers, within the total RAM budget (capped at half).
+    pub work_queue_mib: u32,
     pub quality: u32,
     pub codec: Codec,
     pub render_device: String,
@@ -34,6 +36,7 @@ impl Default for ReplayConfig {
         Self {
             history_seconds: 300,
             memory_mib: 1024,
+            work_queue_mib: 512,
             quality: 20,
             codec: Codec::Av1,
             render_device: "/dev/dri/renderD128".into(),
@@ -57,6 +60,10 @@ impl ReplayConfig {
         anyhow::ensure!(
             (256..=32768).contains(&self.memory_mib),
             "RAM budget must be 256–32768 MiB"
+        );
+        anyhow::ensure!(
+            (32..=8192).contains(&self.work_queue_mib),
+            "Work queue budget must be 32–8192 MiB"
         );
         anyhow::ensure!(
             (1..=51).contains(&self.quality),
@@ -116,12 +123,40 @@ fn parse_available(text: &str) -> Option<usize> {
     })
 }
 pub const SAFETY_RESERVE: usize = 512 * 1024 * 1024;
-/// Conservative CPU staging/codec allowance, separate from driver-owned VRAM.
-pub fn overhead(width: u32, height: u32) -> Option<usize> {
-    (width as usize)
-        .checked_mul(height as usize)?
-        .checked_mul(4 * 10)?
-        .checked_add(64 * 1024 * 1024)
+pub const MAX_WORK_FRAMES: usize = 120;
+#[derive(Clone, Copy, Debug)]
+pub struct QueuePlan {
+    pub frame_bytes: usize,
+    pub slots: usize,
+    pub queue_bytes: usize,
+    pub overhead: usize,
+}
+impl ReplayConfig {
+    pub fn queue_plan(&self, width: u32, height: u32) -> Option<QueuePlan> {
+        let frame_bytes = (width as usize)
+            .checked_mul(height as usize)?
+            .checked_mul(4)?;
+        if frame_bytes == 0 || frame_bytes > 256 * 1024 * 1024 {
+            return None;
+        }
+        let allowance = (self.work_queue_mib as usize * 1024 * 1024).min(self.budget() / 2);
+        // Equal bounded pools for pending GPU transfers and reusable CPU frames.
+        // The CPU pool includes the frame currently being encoded.
+        let slots = (allowance / (2 * frame_bytes)).min(MAX_WORK_FRAMES);
+        if slots < 2 {
+            return None;
+        }
+        let queue_bytes = slots * 2 * frame_bytes;
+        let overhead = queue_bytes
+            .checked_add(frame_bytes.checked_mul(4)?)?
+            .checked_add(64 * 1024 * 1024)?;
+        (overhead < self.budget()).then_some(QueuePlan {
+            frame_bytes,
+            slots,
+            queue_bytes,
+            overhead,
+        })
+    }
 }
 
 #[cfg(test)]

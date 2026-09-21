@@ -276,6 +276,7 @@ mod tests {
         let settings = crate::replay::config::ReplayConfig {
             history_seconds: 600,
             memory_mib: 2048,
+            work_queue_mib: 768,
             custom_seconds: 45,
             quality: 18,
             codec: crate::replay::config::Codec::Hevc,

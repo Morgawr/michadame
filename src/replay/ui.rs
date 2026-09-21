@@ -46,7 +46,11 @@ pub fn draw(replay: &mut Replay, ui: &mut egui::Ui, streaming: bool) -> bool {
         }
         let status = replay.status();
         ui.label(format!("Retained: {:.1}s / {}s · packets and active save: {}",status.seconds,replay.config.history_seconds,gib(status.bytes)));
-        ui.label(format!("CPU staging/encoder allowance: {} · skipped recording work: {}",gib(status.overhead),status.dropped));
+        ui.label(format!("Work queues + staging/encoder allowance: {}",gib(status.overhead)));
+        if status.queue_slots > 0 {
+            ui.label(format!("Work queue: {} GPU + {} CPU frames waiting · {} slots per stage · {} reserved", status.gpu_pending, status.cpu_pending, status.queue_slots, gib(status.queue_bytes)));
+            ui.label(format!("Recording behind live: {:.2}s · dropped video: {} · audio drop events: {}", status.backlog_ms as f64 / 1000., status.video_dropped, status.audio_dropped));
+        }
         if let Some((w,h)) = status.surface { ui.label(format!("Recording surface: {w} × {h} · {}",status.codec)); }
         if !status.message.is_empty() { ui.label(&status.message); }
         if replay.runtime.is_none() && !replay.last_status.message.is_empty() && replay.last_status.message != status.message { ui.label(&replay.last_status.message); }
@@ -58,6 +62,10 @@ pub fn draw(replay: &mut Replay, ui: &mut egui::Ui, streaming: bool) -> bool {
             ui.horizontal(|ui| {
                 ui.label("RAM budget (MiB)"); changed |= ui.add(egui::DragValue::new(&mut replay.config.memory_mib).clamp_range(256..=32768)).changed();
             });
+            ui.horizontal(|ui| {
+                ui.label("Work queue RAM (MiB)"); changed |= ui.add(egui::DragValue::new(&mut replay.config.work_queue_mib).clamp_range(32..=8192)).changed();
+            });
+            ui.label("Work queues share the total RAM budget (up to half). More queue memory absorbs longer stalls but leaves less encoded history.");
             ui.horizontal(|ui| {
                 ui.label("Video codec");
                 egui::ComboBox::from_id_source("replay-codec").selected_text(format!("{:?}",replay.config.codec)).show_ui(ui,|ui| {

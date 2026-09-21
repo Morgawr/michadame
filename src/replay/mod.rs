@@ -1,6 +1,7 @@
 pub mod config;
 mod encoder;
 pub mod gpu;
+mod queue;
 mod ring;
 pub mod ui;
 mod worker;
@@ -8,7 +9,7 @@ mod worker;
 use config::{Rate, ReplayConfig};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering},
     Arc, Mutex,
 };
 
@@ -33,6 +34,7 @@ pub struct VideoFrame {
     pub generation: u64,
 }
 const AUDIO_SAMPLES: usize = 8192;
+const AUDIO_BLOCKS: usize = 256;
 struct AudioBlock {
     samples: Box<[f32; AUDIO_SAMPLES]>,
     len: usize,
@@ -150,13 +152,26 @@ pub struct Status {
     pub available: Option<usize>,
     pub surface: Option<(u32, u32)>,
     pub codec: String,
-    pub dropped: u64,
+    pub video_dropped: u64,
+    pub audio_dropped: u64,
+    pub gpu_pending: usize,
+    pub cpu_pending: usize,
+    pub queue_slots: usize,
+    pub queue_bytes: usize,
+    pub backlog_ms: i64,
     pub saving: bool,
 }
 pub struct Shared {
     pub generation: AtomicU64,
     pub stop: Arc<AtomicBool>,
-    pub dropped: Arc<AtomicU64>,
+    pub audio_dropped: Arc<AtomicU64>,
+    pub video_dropped: AtomicU64,
+    pub gpu_pending: AtomicUsize,
+    pub queue_slots: AtomicUsize,
+    pub queue_bytes: AtomicUsize,
+    pub staging_bytes: AtomicUsize,
+    pub captured_at: AtomicI64,
+    pub processed_at: AtomicI64,
     pub status: Mutex<Status>,
     pub saving_bytes: std::sync::atomic::AtomicUsize,
 }
@@ -172,8 +187,8 @@ pub struct Save {
     at: i64,
 }
 pub struct Runtime {
-    pub video: Sender<VideoFrame>,
-    pub recycled: Receiver<Vec<u8>>,
+    pub queue: Arc<queue::WorkQueue>,
+    pub config: Arc<ReplayConfig>,
     pub shared: Arc<Shared>,
     save: Sender<Save>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -224,7 +239,14 @@ impl Replay {
         let shared = Arc::new(Shared {
             generation: AtomicU64::new(0),
             stop: Arc::new(AtomicBool::new(false)),
-            dropped: Arc::new(AtomicU64::new(0)),
+            audio_dropped: Arc::new(AtomicU64::new(0)),
+            video_dropped: Default::default(),
+            gpu_pending: Default::default(),
+            queue_slots: Default::default(),
+            queue_bytes: Default::default(),
+            staging_bytes: AtomicUsize::new(64 * 1024 * 1024),
+            captured_at: Default::default(),
+            processed_at: Default::default(),
             status: Mutex::new(Status {
                 message: "Waiting for rendered video and audio…".into(),
                 available: Some(available),
@@ -232,11 +254,11 @@ impl Replay {
             }),
             saving_bytes: Default::default(),
         });
-        let (vtx, vrx) = bounded(2);
-        let (recycle_tx, recycled) = bounded(3);
-        let (atx, arx) = bounded(32);
-        let (free_tx, free_rx) = bounded(32);
-        for _ in 0..32 {
+        let queue = Arc::new(queue::WorkQueue::new());
+        let worker_queue = queue.clone();
+        let (atx, arx) = bounded(AUDIO_BLOCKS);
+        let (free_tx, free_rx) = bounded(AUDIO_BLOCKS);
+        for _ in 0..AUDIO_BLOCKS {
             free_tx.send(AudioBlock {
                 samples: Box::new([0.; AUDIO_SAMPLES]),
                 len: 0,
@@ -253,7 +275,7 @@ impl Replay {
             .name("replay-encode".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    worker::run(config, vrx, recycle_tx, arx, free_tx, saves, &worker_shared)
+                    worker::run(config, &worker_queue, arx, free_tx, saves, &worker_shared)
                 }))
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("Recording worker panicked")));
                 if let Err(e) = result {
@@ -267,12 +289,13 @@ impl Replay {
                     status.surface = None;
                 }
                 worker_shared.stop.store(true, Ordering::Release);
+                worker_queue.clear();
             })?;
         *self.audio.route.lock().unwrap() = Some(AudioRoute {
             ready: atx,
             free: free_rx,
             stop: shared.stop.clone(),
-            dropped: shared.dropped.clone(),
+            dropped: shared.audio_dropped.clone(),
             partial: None,
             next_continuous: false,
             format: None,
@@ -280,8 +303,8 @@ impl Replay {
         self.audio.enabled.store(true, Ordering::Release);
         self.available_before = Some(available);
         self.runtime = Some(Runtime {
-            video: vtx,
-            recycled,
+            queue,
+            config: Arc::new(self.config.clone()),
             shared,
             save,
             thread: Some(thread),
@@ -339,7 +362,25 @@ impl Replay {
     pub fn status(&self) -> Status {
         self.runtime
             .as_ref()
-            .map(|r| r.shared.status.lock().unwrap().clone())
+            .map(|r| {
+                let mut status = r.shared.status.lock().unwrap().clone();
+                status.video_dropped = r.shared.video_dropped.load(Ordering::Relaxed);
+                status.audio_dropped = r.shared.audio_dropped.load(Ordering::Relaxed);
+                status.gpu_pending = r.shared.gpu_pending.load(Ordering::Relaxed);
+                status.cpu_pending = r.queue.len();
+                status.queue_slots = r.shared.queue_slots.load(Ordering::Relaxed);
+                status.queue_bytes = r.shared.queue_bytes.load(Ordering::Relaxed);
+                if !r.shared.stop.load(Ordering::Acquire) {
+                    status.overhead = r.shared.staging_bytes.load(Ordering::Acquire);
+                }
+                let processed = r.shared.processed_at.load(Ordering::Relaxed);
+                status.backlog_ms = if processed > 0 {
+                    (r.shared.captured_at.load(Ordering::Relaxed) - processed).max(0) / 1000
+                } else {
+                    0
+                };
+                status
+            })
             .or_else(|| {
                 self.retired
                     .as_ref()
@@ -508,6 +549,7 @@ mod tests {
     fn replay_settings_roundtrip_and_old_config_defaults() {
         let old: crate::config::MichadameConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(old.replay.history_seconds, 300);
+        assert_eq!(old.replay.work_queue_mib, 512);
         let mut updated = old;
         updated.replay.history_seconds = 600;
         updated.replay.keys = [1, 2, 3, 4, 5, 6];

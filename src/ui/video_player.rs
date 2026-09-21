@@ -50,10 +50,11 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 let fft_black = state.fft_black_threshold;
 
                 let replay_gpu = state.replay.gpu.clone();
-                let replay =
-                    state.replay.runtime.as_ref().map(|r| {
-                        crate::replay::gpu::RuntimeView::new(r, state.replay.config.budget())
-                    });
+                let replay = state
+                    .replay
+                    .runtime
+                    .as_ref()
+                    .map(crate::replay::gpu::RuntimeView::new);
                 let ppp = ctx.pixels_per_point();
                 let callback = egui::PaintCallback {
                     rect: response.rect,
@@ -129,7 +130,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 .replay
                 .runtime
                 .as_ref()
-                .map(|r| crate::replay::gpu::RuntimeView::new(r, state.replay.config.budget()));
+                .map(crate::replay::gpu::RuntimeView::new);
             let ppp = ctx.pixels_per_point();
             let callback = egui::PaintCallback {
                 rect,

@@ -17,7 +17,6 @@ struct Session {
     epoch: i64,
     schedule: VideoSchedule,
     audio_clock: AudioClock,
-    overhead: usize,
     generation: u64,
 }
 /// One encode per accepted picture, regardless of how many capture ticks were
@@ -51,25 +50,6 @@ impl VideoSchedule {
         }
         Some((pts, key))
     }
-}
-
-/// Drain only the queue snapshot, so producers cannot keep this worker here
-/// indefinitely. The bounded queue holds at most two pictures.
-fn newest_frame(
-    mut frame: VideoFrame,
-    queued: &Receiver<VideoFrame>,
-    recycled: &Sender<Vec<u8>>,
-    dropped: &AtomicU64,
-) -> VideoFrame {
-    for _ in 0..queued.len() {
-        let Ok(newer) = queued.try_recv() else {
-            break;
-        };
-        let _ = recycled.try_send(frame.rgba);
-        dropped.fetch_add(1, Ordering::Relaxed);
-        frame = newer;
-    }
-    frame
 }
 
 /// Maps timestamped capture samples to a fixed 48 kHz timeline. Resampling and gap
@@ -177,8 +157,7 @@ impl AudioClock {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run(
     config: ReplayConfig,
-    video_rx: Receiver<VideoFrame>,
-    recycled: Sender<Vec<u8>>,
+    queue: &queue::WorkQueue,
     audio_rx: Receiver<AudioBlock>,
     audio_free: Sender<AudioBlock>,
     saves: Receiver<Save>,
@@ -199,6 +178,7 @@ pub(super) fn run(
     let mut monitor = Instant::now();
     let mut last_input = Instant::now();
     let mut waiting_for_video = false;
+    let mut pending_audio: Option<AudioBlock> = None;
     while !shared.stop.load(Ordering::Acquire) {
         if shared.generation.load(Ordering::Acquire) != session.as_ref().map_or(0, |s| s.generation)
         {
@@ -211,16 +191,29 @@ pub(super) fn run(
                 let _ = export_thread.take().unwrap().join();
             }
         }
-        let surface_overhead = session.as_ref().map_or(64 * 1024 * 1024, |s| s.overhead);
+        if let Some(request) = queue.allocation_request() {
+            if request.generation == shared.generation.load(Ordering::Acquire) {
+                session = None;
+                history.clear();
+                pending_save = None;
+                if queue.prepare(request, &shared.generation, &shared.stop)? {
+                    shared
+                        .staging_bytes
+                        .store(request.plan.overhead, Ordering::Release);
+                    shared.processed_at.store(0, Ordering::Relaxed);
+                }
+            }
+        }
+        let surface_overhead = shared.staging_bytes.load(Ordering::Acquire);
         let mut limit = config
             .budget()
             .saturating_sub(surface_overhead)
             .saturating_sub(shared.saving_bytes.load(Ordering::Acquire));
         history.trim(limit);
-        if let Ok(frame) = video_rx.recv_timeout(Duration::from_millis(5)) {
-            let frame = newest_frame(frame, &video_rx, &recycled, &shared.dropped);
+        // FIFO: temporary encoder delays must not throw away queued pictures.
+        if let Some(frame) = queue.receive(Duration::from_millis(5)) {
             if frame.generation != shared.generation.load(Ordering::Acquire) {
-                let _ = recycled.try_send(frame.rgba);
+                queue.recycle(frame.generation, frame.rgba);
                 continue;
             }
             if session.as_ref().is_none_or(|s| {
@@ -228,12 +221,6 @@ pub(super) fn run(
             }) {
                 history.clear();
                 pending_save = None;
-                let overhead = config::overhead(frame.width, frame.height)
-                    .ok_or_else(|| anyhow::anyhow!("Surface too large"))?;
-                ensure!(
-                    overhead < config.budget() / 2,
-                    "Replay budget is too small for surface staging"
-                );
                 shared.message("Starting hardware replay encoder…");
                 let video = VideoEncoder::new(&config, frame.width, frame.height, frame.rate)?;
                 let audio = AudioEncoder::new()?;
@@ -245,12 +232,11 @@ pub(super) fn run(
                     epoch: frame.at,
                     schedule: VideoSchedule::new(frame.at, frame.rate),
                     audio_clock: AudioClock::new(),
-                    overhead,
                     generation: frame.generation,
                 });
                 limit = config
                     .budget()
-                    .saturating_sub(overhead)
+                    .saturating_sub(surface_overhead)
                     .saturating_sub(shared.saving_bytes.load(Ordering::Acquire));
                 shared.message("Buffering replay");
             }
@@ -267,12 +253,21 @@ pub(super) fn run(
                 }
                 waiting_for_video = false;
             }
-            let _ = recycled.try_send(frame.rgba);
+            shared.processed_at.store(frame.at, Ordering::Release);
+            queue.recycle(frame.generation, frame.rgba);
         }
 
         // A fixed bound also prevents capture bursts from starving the video branch.
         for _ in 0..32 {
-            let Ok(block) = audio_rx.try_recv() else {
+            if session.is_none() {
+                break;
+            }
+            let Some(block) = next_audio_block(
+                &mut pending_audio,
+                &audio_rx,
+                shared.processed_at.load(Ordering::Acquire),
+                queue.len() > 0 || shared.gpu_pending.load(Ordering::Relaxed) > 0,
+            ) else {
                 break;
             };
             if let Some(s) = session.as_mut() {
@@ -322,13 +317,20 @@ pub(super) fn run(
                 shared.message("A replay save is already pending");
             } else {
                 pending_save = Some((save, Instant::now()));
+                shared.message("Waiting for queued frames before saving replay…");
             }
         }
         if let Some((save, requested)) = &pending_save {
             // Wait for asynchronously read-back/encoded packets through the keypress. A
             // stalled source gets a bounded timeout and a truthful shorter clip.
             if history.end().is_some_and(|end| end >= save.at)
-                || requested.elapsed() > Duration::from_secs(2)
+                || save_wait_expired(
+                    requested.elapsed(),
+                    save.at,
+                    shared.processed_at.load(Ordering::Acquire),
+                    queue.len(),
+                    shared.gpu_pending.load(Ordering::Relaxed),
+                )
             {
                 let packets = history.clip(save.seconds, save.at);
                 if let (Some(packets), Some(s)) = (packets, session.as_ref()) {
@@ -386,11 +388,13 @@ pub(super) fn run(
             let mut status = shared.status.lock().unwrap();
             status.seconds = history.duration();
             status.bytes = history.bytes + shared.saving_bytes.load(Ordering::Acquire);
-            status.overhead = session.as_ref().map_or(0, |s| s.overhead);
+            status.overhead = shared.staging_bytes.load(Ordering::Acquire);
             status.available = available;
             status.surface = session.as_ref().map(|s| (s.width, s.height));
             status.codec = config.codec.encoder().into();
-            status.dropped = shared.dropped.load(Ordering::Relaxed);
+            status.video_dropped = shared.video_dropped.load(Ordering::Relaxed);
+            status.audio_dropped = shared.audio_dropped.load(Ordering::Relaxed);
+
             monitor = Instant::now();
         }
     }
@@ -404,6 +408,35 @@ pub(super) fn run(
     status.bytes = shared.saving_bytes.load(Ordering::Acquire);
     status.overhead = 0;
     Ok(())
+}
+fn next_audio_block(
+    pending: &mut Option<AudioBlock>,
+    audio: &Receiver<AudioBlock>,
+    video_at: i64,
+    backlogged: bool,
+) -> Option<AudioBlock> {
+    let block = pending.take().or_else(|| audio.try_recv().ok())?;
+    // Keep A/V history near the same media time while video catches up;
+    // newer audio must not evict queued older video from short histories.
+    if backlogged && block.at > video_at + 50_000 {
+        *pending = Some(block);
+        None
+    } else {
+        Some(block)
+    }
+}
+fn save_wait_expired(
+    elapsed: Duration,
+    requested_at: i64,
+    processed_at: i64,
+    cpu_pending: usize,
+    gpu_pending: usize,
+) -> bool {
+    // A busy queue may still contain the button-time picture. Allow catch-up,
+    // while bounding waits if a driver/stream never makes further progress.
+    elapsed > Duration::from_secs(30)
+        || (elapsed > Duration::from_secs(2)
+            && (processed_at >= requested_at || (cpu_pending == 0 && gpu_pending == 0)))
 }
 fn save_file(
     directory: &str,
@@ -622,27 +655,40 @@ mod tests {
         );
     }
     #[test]
-    fn saturated_queue_recovers_with_newest_picture_and_recycles_old_buffers() {
-        let frame = |at| VideoFrame {
-            rgba: vec![at as u8],
-            width: 1,
-            height: 1,
-            at,
-            rate: config::Rate::new(60, 1),
-            generation: 1,
-        };
-        let (tx, rx) = crossbeam_channel::bounded(2);
-        let (recycle, returned) = crossbeam_channel::bounded(3);
-        let dropped = AtomicU64::new(0);
-        tx.send(frame(2)).unwrap();
-        tx.send(frame(3)).unwrap();
-        let latest = newest_frame(frame(1), &rx, &recycle, &dropped);
-        assert_eq!(latest.at, 3);
-        assert_eq!(latest.rgba, [3]);
-        assert_eq!(dropped.load(Ordering::Relaxed), 2);
-        assert_eq!(returned.try_recv().unwrap(), [1]);
-        assert_eq!(returned.try_recv().unwrap(), [2]);
-        assert!(rx.is_empty());
+    fn audio_waiting_for_video_catchup_keeps_all_samples_and_the_original_timeline() {
+        let (tx, rx) = crossbeam_channel::bounded(128);
+        for i in 0..100 {
+            let mut input = block(i * 40_000, 48000, 1920);
+            input.continuous = i > 0;
+            tx.send(input).unwrap();
+        }
+        let mut pending = None;
+        let mut clock = AudioClock::new();
+        let mut received = 0;
+        for video_tick in 0..240 {
+            let video_at = video_tick * 1_000_000 / 60;
+            while let Some(input) = next_audio_block(&mut pending, &rx, video_at, true) {
+                assert_eq!(input.at, received * 40_000);
+                assert!(input.at <= video_at + 50_000);
+                assert!(!clock.append_recovering(&input, 0).unwrap());
+                while let Some((_, samples)) = clock.take() {
+                    assert!(samples.iter().all(|s| *s == [0.5, 0.5]));
+                }
+                received += 1;
+            }
+        }
+        assert_eq!(received, 100);
+        assert!(pending.is_none() && rx.is_empty());
+        assert_eq!(clock.next, 4 * 48000);
+    }
+    #[test]
+    fn save_waits_for_queued_button_time_frames_but_cannot_wait_forever() {
+        let elapsed = Duration::from_secs(3);
+        assert!(!save_wait_expired(elapsed, 1000, 900, 8, 0));
+        assert!(!save_wait_expired(elapsed, 1000, 900, 0, 8));
+        assert!(save_wait_expired(elapsed, 1000, 1001, 8, 8));
+        assert!(save_wait_expired(elapsed, 1000, 900, 0, 0));
+        assert!(save_wait_expired(Duration::from_secs(31), 1000, 900, 8, 8));
     }
     #[test]
     fn audio_recovery_keeps_the_original_epoch_without_allocating_a_long_silence() {

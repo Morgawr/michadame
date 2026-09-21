@@ -3,7 +3,8 @@
 Replay is opt-in and starts **disabled** on every launch. Start the capture stream,
 open Controls (`M`), expand **Live replay buffer**, then enable it. Defaults:
 
-- 5-minute maximum history and a 1024 MiB CPU memory budget.
+- 5-minute maximum history and a 1024 MiB total replay memory budget.
+- Up to 512 MiB of that budget reserved for unencoded GPU/CPU work queues.
 - Hardware AV1 through VAAPI, quantizer 20, stereo Opus at 192 kbit/s, MP4 files.
 - F5 / F6 / F7 / F8 / F9 save approximately 30 / 60 / 180 / 300 / 600 seconds.
 - F10 saves the customizable duration (initially 120 seconds).
@@ -17,9 +18,10 @@ Shortcuts work in either focused Michadame window, outside text editing. They ar
 not desktop-global shortcuts. Save buttons are also available in Controls.
 All durations share one buffer and clamp to the retained decodable A/V history.
 The beginning rounds forward to a keyframe, so a clip can be about one second
-shorter. It never includes future gameplay after the keypress. Saving waits up to
-two seconds for pending encoding; a stalled stream produces a shorter available
-clip or an explicit insufficient-history message.
+shorter. It never includes future gameplay after the keypress. Saving waits for
+queued button-time frames to be processed. An idle/stalled source uses a two-second
+fallback; an active backlog may take up to 30 seconds before exporting the available
+shorter clip or reporting insufficient history.
 
 ## Performance and memory behavior
 
@@ -28,17 +30,34 @@ overlays, excluding outer letterbox/pillarbox padding. For example, an unstretch
 4:3 image in a 1920×1080 viewport records at 1440×1080. Bounds use the final shader
 texture and horizontal stretch, in physical pixels; odd sizes round to the nearest
 pixel. X/Y overscan offsets, CRT curvature, upscaling and other shader changes stay
-baked into the image. The existing shader chain is
-not rendered twice. Three PBOs use zero-timeout GPU fences. A bounded two-frame
-queue feeds a lower-priority recording worker. It converts bottom-up RGB to NV12,
-uploads to VAAPI, encodes, and retains compressed packets. This first version uses
+baked into the image. The existing shader chain is not rendered twice.
+A bounded GPU readback queue retains the already-shaded images; a bounded CPU
+queue feeds the dedicated, lower-priority recording worker in FIFO order. Busy
+encoders no longer cause older queued frames to be discarded. Completed GPU
+transfers stay queued if no CPU buffer is free. New recording frames are skipped
+only when capacity is exhausted; the live display never waits for queue space.
+
+The configurable **Work queue RAM (MiB)** is part of the total budget, capped at
+half of it to leave space for staging and encoded history. Equal GPU/CPU pools
+hold up to 120 frames per stage. At default settings, 1920×1080 has 32 slots per
+stage (about 506 MiB reserved, roughly one second combined at 60 fps); 3840×2160
+has 8 slots per stage. GPU-only stalls have the GPU pool's capacity; the CPU
+pool extends tolerance for encoder stalls. These are finite burst buffers, not
+an assurance that sustained overload can be recorded without loss.
+
+The worker allocates and touches reusable CPU buffers. The render callback uses
+zero-timeout fences and copies at most two completed frames per draw, checking a
+2 ms elapsed-work limit between copies so it can catch up without draining an
+unbounded backlog in one draw. Individual driver calls can exceed that limit.
+The worker converts bottom-up RGB to NV12, uploads to VAAPI, encodes, and retains
+compressed packets. This first version uses
 asynchronous GPU readback and a CPU conversion/upload path, **not zero-copy GL to
 VAAPI sharing**. GPU copies can still consume bandwidth or stall inside a driver.
 Hardware performance is unvalidated; no zero-overhead guarantee is made.
 
 The ALSA capture thread delivers playback samples first, then copies into a
-separate pool of 32 preallocated recording blocks with `try_lock`/`try_send`.
-Short reads are combined into approximately 40 ms blocks, providing 1.28 seconds
+separate pool of 256 preallocated recording blocks with `try_lock`/`try_send`.
+Short reads are combined into approximately 40 ms blocks, providing 10.24 seconds
 of queue capacity at 48 kHz stereo while the video encoder is busy. This batching
 only delays recording work, never live playback. Actual capture recovery, format
 changes and queue exhaustion explicitly mark discontinuities; timestamp jitter
@@ -51,22 +70,23 @@ A recording-only resampler filters arrival jitter and corrects drift. Dropped vi
 frames hold the preceding picture until the next received frame, using packet
 duration and presentation timestamps instead of re-encoding duplicates. The
 capture rate remains the nominal rate; gaps use variable frame durations. Recovery
-encodes at most one picture per accepted input and prefers the newest queued frame,
-so missed frames cannot create a catch-up encoding backlog. Audio keeps its own
+encodes each retained picture once, in capture order, without generating duplicate
+pictures. Audio processing stays near video media time during catch-up so newer
+audio cannot evict queued older video from short histories. Audio keeps its own
 capture timeline: short audio gaps become silence, and long gaps re-anchor only
 the recording resampler without clearing the A/V history. USB/device latency
 that the driver does not expose still needs empirical validation.
 
-Encoded packet memory is capped after a conservative CPU staging/encoder
-allowance (10 RGBA surfaces plus 64 MiB). Only one export runs at a time. Packets
+Encoded packet memory is capped after reserving both work pools and a conservative
+staging/encoder allowance (four RGBA surfaces plus 64 MiB, including audio staging). Only one export runs at a time. Packets
 retained by the writer are also charged, conservatively including shared packet
 references in both histories. Saving can shorten the live history to stay within
-the budget. Driver-owned GPU memory is additional, not a measured part of this
-CPU budget. The budget is not a promise of a precise process RSS ceiling.
+the budget. PBO storage is conservatively charged even if the driver places it in
+VRAM. Other driver-owned GPU memory is additional and not measured by this budget. The budget is not a promise of a precise process RSS ceiling.
 
 The controls show available RAM before enabling, projected remaining RAM, current
-available RAM, allocated packet bytes, staging allowance, skipped recording work,
-actual retained duration and an estimate from observed bitrate. Admission leaves
+available RAM, allocated packet bytes, queue/staging reservation, GPU and CPU queue
+occupancy, recording lag, separate video/audio drop counts, actual retained duration and an estimate from observed bitrate. Admission leaves
 512 MiB of system headroom. Recording stops if available RAM falls below that
 reserve. Swap is not counted as replay capacity. Fixed-quality compression has
 variable bitrate, so a fixed RAM budget cannot guarantee a fixed history length.
@@ -120,7 +140,9 @@ The two skipped legacy tests can traverse configuration paths that open
 with Opus, exports through the real muxer, demuxes and decodes the result, and checks duration,
 A/V start alignment, content and MP4 cropping. Other tests cover byte/time
 limits, keyframe dependencies, truncated clips, fractional FPS, audio drift/gaps,
-configuration compatibility, nonblocking audio taps, and recovery after isolated
+configuration compatibility, FIFO frame retention through simulated encoder stalls,
+full-pool backpressure, buffer reuse, resize/cancellation, budget calculations,
+backlogged save requests, nonblocking audio taps, and recovery after isolated
 missing frames, bursts, >1-second stalls and queue saturation. The dropped-frame
 media fixture checks retained pre-gap content, held-frame timing, resumed video,
 audio sync and save snapshots. Audio regressions feed 1 ms stereo reads through
@@ -136,7 +158,9 @@ This implementation is awaiting hardware validation. Suggested first pass:
 
 1. Compare normal playback with replay disabled and enabled, starting at 1080p.
    Check visible smoothness and audio latency; inspect the replay status for
-   VAAPI errors or skipped work. Confirm no playback change on codec failure.
+   VAAPI errors, queue occupancy, recording lag and video/audio drop counters.
+   Confirm no playback change on codec failure. Cause a brief load spike and check
+   that queued work drains afterward, preserving the recording's frame sequence.
 2. Save a short clip containing an obvious audiovisual event. Check lip sync or
    a button/sound event near both ends, including a longer 5–10 minute session.
 3. Toggle CRT, FFT, pixelation and upscalers while buffering. Confirm the clip
