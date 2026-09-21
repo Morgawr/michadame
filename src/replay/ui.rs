@@ -1,5 +1,5 @@
 use super::{
-    config::{Codec, SAFETY_RESERVE},
+    config::{Codec, RateControl, SAFETY_RESERVE},
     Replay,
 };
 use eframe::egui::{self, Key};
@@ -78,7 +78,19 @@ pub fn draw(replay: &mut Replay, ui: &mut egui::Ui, streaming: bool) -> bool {
                     for (codec,label) in [(Codec::Av1,"AV1"),(Codec::Hevc,"HEVC"),(Codec::H264,"H.264")] { changed |= ui.selectable_value(&mut replay.config.codec,codec,label).changed(); }
                 });
             });
-            ui.horizontal(|ui| { ui.label("Quantizer (lower = higher quality)"); changed |= ui.add(egui::DragValue::new(&mut replay.config.quality).clamp_range(1..=51)).changed(); });
+            ui.horizontal(|ui| {
+                ui.label("Compression mode");
+                changed |= ui.selectable_value(&mut replay.config.rate_control, RateControl::Bitrate, "Bitrate limited").changed();
+                changed |= ui.selectable_value(&mut replay.config.rate_control, RateControl::Quality, "Fixed quality").changed();
+            });
+            if replay.config.rate_control == RateControl::Bitrate {
+                ui.horizontal(|ui| { ui.label("Video bitrate limit (Mbit/s)"); changed |= ui.add(egui::DragValue::new(&mut replay.config.max_bitrate_mbps).clamp_range(1..=200)).changed(); });
+                ui.label(format!("VBR target {:.1} Mbit/s, limit {} Mbit/s. Higher limits retain more detail but need more memory and decoding capacity. Driver rate control allows short bursts.", replay.config.max_bitrate_mbps as f64 * 0.75, replay.config.max_bitrate_mbps));
+            } else {
+                ui.horizontal(|ui| { ui.label("Quality level (lower = larger files)"); changed |= ui.add(egui::DragValue::new(&mut replay.config.quality).clamp_range(1..=51)).changed(); });
+                ui.label(format!("Encoder quantizer: {} ({}). Quality levels are not equivalent across codecs.", replay.config.codec.quantizer(replay.config.quality), if replay.config.codec == Codec::Av1 { "AV1 scale 0–255" } else { "QP scale 0–51" }));
+                ui.colored_label(egui::Color32::YELLOW, "No bitrate limit. Very detailed filters can produce files too demanding for some players; stream level limits are not guaranteed.");
+            }
             ui.horizontal(|ui| { ui.label("GPU render device"); changed |= ui.text_edit_singleline(&mut replay.config.render_device).changed(); });
             ui.horizontal(|ui| { ui.label("Save folder"); changed |= ui.text_edit_singleline(&mut replay.config.directory).changed(); });
         });
@@ -86,7 +98,7 @@ pub fn draw(replay: &mut Replay, ui: &mut egui::Ui, streaming: bool) -> bool {
             let estimate = (status.bytes as f64 / status.seconds * replay.config.history_seconds as f64) as usize;
             ui.label(format!("At the observed bitrate: ~{} for {}s of packets + {} staging allowance",gib(estimate),replay.config.history_seconds,gib(status.overhead)));
         }
-        ui.label("Quality controls bitrate; history can be shorter than the duration limit. No software encoder fallback.");
+        ui.label("Compression settings control storage and playback cost; history can be shorter than the duration limit. Unsupported rate control stops replay instead of silently removing the limit.");
         ui.label("At 20 / 40 / 80 Mbit/s, 5 minutes uses about 722 / 1437 / 2868 MiB plus staging. Actual bitrate depends on motion, resolution, FPS and filters.");
         ui.label("GPU memory is additional and driver-dependent. Rendered image size changes reset history. Playback has priority over recording.");
         ui.horizontal(|ui| { ui.label("Custom clip seconds"); changed |= ui.add(egui::DragValue::new(&mut replay.config.custom_seconds).clamp_range(1..=3600)).changed(); });

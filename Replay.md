@@ -5,12 +5,14 @@ open Controls (`M`), expand **Live replay buffer**, then enable it. Defaults:
 
 - 5-minute maximum history and a 1024 MiB total replay memory budget.
 - Up to 512 MiB of that budget reserved for unencoded GPU/CPU work queues.
-- Hardware AV1 through VAAPI, quantizer 20, stereo Opus at 192 kbit/s, MP4 files.
+- Hardware AV1 through VAAPI, VBR target 30 Mbit/s with a 40 Mbit/s limit,
+  stereo Opus at 192 kbit/s, MP4 files.
 - F5 / F6 / F7 / F8 / F9 save approximately 30 / 60 / 180 / 300 / 600 seconds.
 - F10 saves the customizable duration (initially 120 seconds).
 - Files go to `$HOME/Videos/Michadame`; folder and bindings are configurable.
 
-Replay preferences (including RAM budget, history, codec, quality, folder and
+Replay preferences (including RAM budget, history, codec, compression mode,
+bitrate limit, quality, folder and
 shortcuts) are saved when edited and restored on restart. Enabling replay remains
 an explicit per-launch choice.
 
@@ -22,6 +24,37 @@ shorter. It never includes future gameplay after the keypress. Saving waits for
 queued button-time frames to be processed. An idle/stalled source uses a two-second
 fallback; an active backlog may take up to 30 seconds before exporting the available
 shorter clip or reporting insufficient history.
+
+## Compression and player compatibility
+
+**Bitrate limited** is the default, including when loading settings saved before
+this option existed. The configurable limit is 1–200 Mbit/s; the VBR target is
+75% of that limit, with a two-second rate-control buffer. The driver can allow
+short bursts, so this is not a per-packet size ceiling. Raising the limit retains
+more detail but increases storage, memory bandwidth and decoding cost. Lowering
+it can lose detail in complex scenes or fine CRT masks. Resolution, frame timing
+and rendered effects remain unchanged. Unsupported VBR settings stop replay;
+there is no silent fallback to unlimited bitrate or software encoding.
+
+**Fixed quality** remains available without a bitrate limit. Its UI scale is
+1–51, lower meaning higher quality. AV1 maps this to its native quantizer index
+by multiplying by five (default 20 becomes 100); H.264/HEVC use the number directly
+as QP. This is a range normalization, not equivalent quality across codecs.
+Fixed-quality output can exceed player capabilities and declared stream level
+limits. In bitrate-limited AV1, level and tier account for the configured peak,
+padded dimensions and fractional frame rate, rather than just the target bitrate.
+
+The reported 19.37-second recording contained about 951 MB, averaging 392 Mbit/s
+of video. Its AV1 quantizer was 20 on the 0–255 scale, and it declared level 5.1
+Main tier, whose bitrate allowance is 40 Mbit/s. Packet timestamps increased
+normally and audio/video packets were interleaved; software decoding found no
+bitstream errors. The previous encoder configuration treated AV1 quantizers like
+H.264/HEVC QP and allowed unlimited bitrate. See FFmpeg's
+[AV1 VAAPI quantizer handling](https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/libavcodec/vaapi_encode_av1.c)
+and [AV1 level limits](https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/libavcodec/av1_levels.c).
+These changes affect new recordings. Remuxing an existing recording cannot reduce
+its encoded bitrate. Actual hardware rate control and player compatibility still
+need validation with a newly recorded clip.
 
 ## Performance and memory behavior
 
@@ -172,7 +205,10 @@ Regression tests compare visible Y/UV bytes against the original conversion at
 1/2/4 threads, including odd dimensions and the reported recording size. MP4
 fixtures verify exact timestamp/duration preservation through H.264, HEVC and
 AV1 export with closely spaced frames. A 30-second timestamp-jitter fixture
-checks that every valid frame survives scheduling.
+checks that every valid frame survives scheduling. Encoder option tests parse
+VBR/CQP settings for all three codecs using FFmpeg codec contexts without opening
+an encoder or hardware device. Native quantizer mapping, AV1 level/tier selection
+and legacy configuration defaults have regression coverage.
 
 The two skipped legacy tests can traverse configuration paths that open
 `/dev/video0`. The synthetic media test uses software H.264, HEVC and AV1 fixtures

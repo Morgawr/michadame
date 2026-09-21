@@ -566,6 +566,12 @@ mod tests {
         let old: crate::config::MichadameConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(old.replay.history_seconds, 300);
         assert_eq!(old.replay.work_queue_mib, 512);
+        assert_eq!(old.replay.rate_control, config::RateControl::Bitrate);
+        assert_eq!(old.replay.max_bitrate_mbps, 40);
+        let legacy: ReplayConfig =
+            serde_json::from_str(r#"{"codec":"Av1","quality":20,"memory_mib":6000}"#).unwrap();
+        assert_eq!(legacy.rate_control, config::RateControl::Bitrate);
+        assert_eq!(legacy.codec.quantizer(legacy.quality), 100);
         let mut updated = old;
         updated.replay.history_seconds = 600;
         updated.replay.keys = [1, 2, 3, 4, 5, 6];

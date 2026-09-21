@@ -279,6 +279,8 @@ mod tests {
             work_queue_mib: 768,
             custom_seconds: 45,
             quality: 18,
+            rate_control: crate::replay::config::RateControl::Quality,
+            max_bitrate_mbps: 65,
             codec: crate::replay::config::Codec::Hevc,
             keys: [1, 2, 3, 4, 5, 10],
             directory: "/tmp/my replays".into(),

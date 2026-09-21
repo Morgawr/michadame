@@ -8,6 +8,8 @@ pub struct ReplayConfig {
     /// Raw GPU/CPU work buffers, within the total RAM budget (capped at half).
     pub work_queue_mib: u32,
     pub quality: u32,
+    pub rate_control: RateControl,
+    pub max_bitrate_mbps: u32,
     pub codec: Codec,
     pub render_device: String,
     pub directory: String,
@@ -22,7 +24,18 @@ pub enum Codec {
     Hevc,
     H264,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RateControl {
+    #[default]
+    Bitrate,
+    Quality,
+}
 impl Codec {
+    /// A normalized UI scale, not a promise of equivalent quality across codecs.
+    /// AV1 uses q_idx 0..255; H.264/HEVC use QP 0..51.
+    pub fn quantizer(self, quality: u32) -> u32 {
+        quality.clamp(1, 51) * if self == Self::Av1 { 5 } else { 1 }
+    }
     pub fn encoder(self) -> &'static str {
         match self {
             Self::Av1 => "av1_vaapi",
@@ -38,6 +51,8 @@ impl Default for ReplayConfig {
             memory_mib: 1024,
             work_queue_mib: 512,
             quality: 20,
+            rate_control: RateControl::Bitrate,
+            max_bitrate_mbps: 40,
             codec: Codec::Av1,
             render_device: "/dev/dri/renderD128".into(),
             directory: std::env::var_os("HOME")
@@ -53,6 +68,10 @@ impl Default for ReplayConfig {
 }
 impl ReplayConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            (1..=200).contains(&self.max_bitrate_mbps),
+            "Video bitrate limit must be 1–200 Mbit/s"
+        );
         anyhow::ensure!(
             (1..=3600).contains(&self.history_seconds),
             "History must be 1–3600 seconds"
@@ -158,6 +177,20 @@ impl ReplayConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn normalized_quality_uses_each_codecs_native_quantizer_range() {
+        assert_eq!(Codec::Av1.quantizer(20), 100);
+        assert_eq!(Codec::Av1.quantizer(51), 255);
+        for codec in [Codec::Hevc, Codec::H264] {
+            assert_eq!(codec.quantizer(20), 20);
+            assert_eq!(codec.quantizer(51), 51);
+        }
+        let mut config = ReplayConfig::default();
+        for bitrate in [0, 201, u32::MAX] {
+            config.max_bitrate_mbps = bitrate;
+            assert!(config.validate().is_err());
+        }
+    }
     #[test]
     fn fractional_rate_does_not_accumulate_drift() {
         let r = Rate::new(60000, 1001);

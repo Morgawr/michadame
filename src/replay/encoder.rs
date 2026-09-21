@@ -1,5 +1,5 @@
 use super::{
-    config::{Rate, ReplayConfig},
+    config::{Codec, Rate, RateControl, ReplayConfig},
     ring::Encoded,
 };
 use anyhow::{bail, ensure, Context, Result};
@@ -20,6 +20,76 @@ impl Drop for Buffer {
             ffi::av_buffer_unref(&mut self.0);
         }
     }
+}
+
+fn video_options(
+    config: &ReplayConfig,
+    width: u32,
+    height: u32,
+    rate: Rate,
+) -> Result<ff::Dictionary<'static>> {
+    let mut options = ff::Dictionary::new();
+    options.set("async_depth", "2");
+    match config.rate_control {
+        RateControl::Quality => {
+            options.set("rc_mode", "CQP");
+            options.set(
+                "global_quality",
+                &config.codec.quantizer(config.quality).to_string(),
+            );
+        }
+        RateControl::Bitrate => {
+            let peak = u64::from(config.max_bitrate_mbps) * 1_000_000;
+            options.set("rc_mode", "VBR");
+            options.set("b", &(peak * 3 / 4).to_string());
+            options.set("maxrate", &peak.to_string());
+            options.set("bufsize", &(peak * 2).to_string());
+            if config.codec == Codec::Av1 {
+                // FFmpeg guesses AV1 level from target bitrate, not maxrate.
+                // Account for peak bitrate and the padded VAAPI surface instead.
+                let (level, high_tier) = av1_level(width, height, rate, config.max_bitrate_mbps)
+                    .context("Replay dimensions/FPS/bitrate exceed supported AV1 levels")?;
+                options.set("level", &level.to_string());
+                options.set("tier", if high_tier { "high" } else { "main" });
+            }
+        }
+    }
+    Ok(options)
+}
+
+fn av1_level(width: u32, height: u32, rate: Rate, peak_mbps: u32) -> Option<(u8, bool)> {
+    // Limits from FFmpeg libavcodec/av1_levels.c (AV1 Annex A).
+    // Conservative rate check covers either 64- or 128-pixel VAAPI superblocks.
+    // index, max picture size, max width/height, display rate, main/high Mbit/s * 10
+    const LEVELS: &[(u8, u64, u32, u32, u64, u32, u32)] = &[
+        (0, 147456, 2048, 1152, 4423680, 15, 0),
+        (1, 278784, 2816, 1584, 8363520, 30, 0),
+        (4, 665856, 4352, 2448, 19975680, 60, 0),
+        (5, 1065024, 5504, 3096, 31950720, 100, 0),
+        (8, 2359296, 6144, 3456, 70778880, 120, 300),
+        (9, 2359296, 6144, 3456, 141557760, 200, 500),
+        (12, 8912896, 8192, 4352, 267386880, 300, 1000),
+        (13, 8912896, 8192, 4352, 534773760, 400, 1600),
+        (14, 8912896, 8192, 4352, 1069547520, 600, 2400),
+        (16, 35651584, 16384, 8704, 1069547520, 600, 2400),
+        (17, 35651584, 16384, 8704, 2139095040, 1000, 4800),
+        (18, 35651584, 16384, 8704, 4278190080, 1600, 8000),
+    ];
+    let w = u64::from(width).div_ceil(128) * 128;
+    let h = u64::from(height).div_ceil(128) * 128;
+    LEVELS
+        .iter()
+        .find(|(_, area, max_w, max_h, display, main, high)| {
+            w > 0
+                && h > 0
+                && w <= u64::from(*max_w)
+                && h <= u64::from(*max_h)
+                && w * h <= *area
+                && u128::from(w * h) * u128::from(rate.num)
+                    <= u128::from(*display) * u128::from(rate.den)
+                && u64::from(peak_mbps) * 10 <= u64::from((*main).max(*high))
+        })
+        .map(|(index, _, _, _, _, main, _)| (*index, u64::from(peak_mbps) * 10 > u64::from(*main)))
 }
 
 fn conversion_threads() -> usize {
@@ -147,12 +217,9 @@ impl VideoEncoder {
             (*encoder.as_mut_ptr()).color_trc =
                 ffi::AVColorTransferCharacteristic::AVCOL_TRC_IEC61966_2_1;
         }
-        let mut options = ff::Dictionary::new();
-        options.set("rc_mode", "CQP");
-        options.set("global_quality", &config.quality.to_string());
-        options.set("async_depth", "2");
+        let options = video_options(config, coded_width, coded_height, rate)?;
         let encoder = encoder.open_with(options).context(
-            "Hardware encoder rejected these settings; no software fallback was started",
+            "Hardware encoder rejected the selected settings/rate-control mode; no unbounded or software fallback was started",
         )?;
         let scaler = RgbaConverter::new(width, height, conversion_threads())?;
         Ok(Self {
@@ -453,6 +520,83 @@ fn convert_rgba(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn replay_rate_control_options_parse_without_opening_hardware() {
+        ff::init().unwrap();
+        for codec in [Codec::Av1, Codec::Hevc, Codec::H264] {
+            for mode in [RateControl::Bitrate, RateControl::Quality] {
+                let config = ReplayConfig {
+                    codec,
+                    rate_control: mode,
+                    ..Default::default()
+                };
+                let options = video_options(&config, 3072, 2160, Rate::new(60, 1)).unwrap();
+                let encoder = encoder::find_by_name(codec.encoder()).unwrap();
+                // Allocation and AVOption parsing only; never avcodec_open2,
+                // hwdevice creation or access to a render/capture device.
+                let mut context = codec::context::Context::new_with_codec(encoder);
+                for (key, value) in options.iter() {
+                    let key = CString::new(key).unwrap();
+                    let value = CString::new(value).unwrap();
+                    unsafe {
+                        check(ffi::av_opt_set(
+                            context.as_mut_ptr().cast(),
+                            key.as_ptr(),
+                            value.as_ptr(),
+                            ffi::AV_OPT_SEARCH_CHILDREN,
+                        ))
+                        .unwrap();
+                    }
+                }
+                unsafe {
+                    let ctx = &*context.as_ptr();
+                    assert_eq!(ctx.flags & ffi::AV_CODEC_FLAG_QSCALE as i32, 0);
+                    if mode == RateControl::Bitrate {
+                        assert_eq!(ctx.bit_rate, 30_000_000);
+                        assert_eq!(ctx.rc_max_rate, 40_000_000);
+                        assert_eq!(ctx.rc_buffer_size, 80_000_000);
+                        assert!(options.get("global_quality").is_none());
+                        if codec == Codec::Av1 {
+                            assert_eq!(options.get("level"), Some("13"));
+                            assert_eq!(options.get("tier"), Some("main"));
+                        }
+                    } else {
+                        assert_eq!(
+                            ctx.global_quality,
+                            if codec == Codec::Av1 { 100 } else { 20 }
+                        );
+                        assert_eq!(options.get("rc_mode"), Some("CQP"));
+                        assert!(options.get("b").is_none());
+                        assert!(options.get("maxrate").is_none());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn av1_level_accounts_for_peak_bitrate_tier_and_fractional_frame_rate() {
+        assert_eq!(
+            av1_level(3072, 2160, Rate::new(60, 1), 40),
+            Some((13, false))
+        );
+        // Choose tier from the 40 Mbit peak, not just the 30 Mbit target.
+        assert_eq!(
+            av1_level(1920, 1080, Rate::new(60000, 1001), 40),
+            Some((9, true))
+        );
+        assert_eq!(
+            av1_level(3072, 2160, Rate::new(60, 1), 200),
+            Some((14, true))
+        );
+        assert_eq!(
+            av1_level(3840, 2160, Rate::new(120, 1), 40),
+            Some((14, false))
+        );
+        assert_eq!(av1_level(16385, 1080, Rate::new(60, 1), 40), None);
+        assert_eq!(av1_level(u32::MAX, u32::MAX, Rate::new(60, 1), 40), None);
+        assert_eq!(av1_level(0, 1080, Rate::new(60, 1), 40), None);
+    }
     #[test]
     fn parallel_conversion_matches_original_pixels_including_chroma_and_odd_sizes() {
         for (w, h) in [(63, 47), (321, 241), (3024, 2160)] {
