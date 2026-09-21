@@ -1,6 +1,7 @@
 use super::anime4k::{Anime4kUpscaler, Anime4kVariant};
 use super::bunny::BunnyUpscaler;
 use super::fft_filter::FftFilter;
+use super::geometry::RenderedArea;
 use super::params::ShaderParams;
 use super::programs::*;
 use crate::video::types::{RawFrame, ScalerFilter};
@@ -640,7 +641,7 @@ impl CrtFilterRenderer {
         fft_filter: Option<&Arc<Mutex<FftFilter>>>,
         fft_mask_threshold: f32,
         fft_black_threshold: f32,
-    ) {
+    ) -> RenderedArea {
         let mut video_texture = fallback_texture;
 
         let scaler = ScalerFilter::from_u8(params.scaler_filter);
@@ -809,6 +810,7 @@ impl CrtFilterRenderer {
             }
 
             let mut final_input_texture = current_video_texture;
+            let mut final_input_res = current_res;
 
             if run_pixelate {
                 let pixelate_res = pixelate_subrender_size(current_res.0, current_res.1);
@@ -824,6 +826,7 @@ impl CrtFilterRenderer {
                 );
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 final_input_texture = self.pass_textures[4];
+                final_input_res = pixelate_res;
             }
 
             if run_lottes {
@@ -922,6 +925,7 @@ impl CrtFilterRenderer {
             } else {
                 gl.bind_vertex_array(None);
             }
+            RenderedArea::fit(final_input_res, output_size, params.horizontal_stretch)
         }
     }
 
@@ -944,7 +948,7 @@ impl CrtFilterRenderer {
         fft_filter: Option<&Arc<Mutex<FftFilter>>>,
         fft_mask_threshold: f32,
         fft_black_threshold: f32,
-    ) {
+    ) -> RenderedArea {
         let mut video_texture = fallback_texture;
 
         let scaler = ScalerFilter::from_u8(scaler_filter);
@@ -1113,7 +1117,7 @@ impl CrtFilterRenderer {
             if scissor_enabled {
                 gl.enable(glow::SCISSOR_TEST);
             }
-            self.draw_passthrough_internal(
+            let rendered_area = self.draw_passthrough_internal(
                 gl,
                 current_video_texture,
                 current_res,
@@ -1134,6 +1138,7 @@ impl CrtFilterRenderer {
             } else {
                 gl.bind_vertex_array(None);
             }
+            rendered_area
         }
     }
 
@@ -1142,13 +1147,13 @@ impl CrtFilterRenderer {
         &self,
         gl: &glow::Context,
         video_texture: glow::Texture,
-        _resolution: (u32, u32),
+        resolution: (u32, u32),
         output_size: (f32, f32),
         background_color: [f32; 3],
         horizontal_stretch: f32,
         vibrance: f32,
         scaler_filter: u8,
-    ) {
+    ) -> RenderedArea {
         let final_input_texture = video_texture;
 
         gl.bind_framebuffer(glow::FRAMEBUFFER, None);
@@ -1179,6 +1184,7 @@ impl CrtFilterRenderer {
         );
 
         gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        RenderedArea::fit(resolution, output_size, horizontal_stretch)
     }
 
     pub fn destroy(&self, gl: &glow::Context) {

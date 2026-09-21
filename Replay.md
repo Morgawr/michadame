@@ -23,8 +23,12 @@ clip or an explicit insufficient-history message.
 
 ## Performance and memory behavior
 
-The replay path reads the final rendered game framebuffer before egui overlays;
-shader changes are baked into each captured image. The existing shader chain is
+The replay path reads only the final aspect-fitted video rectangle before egui
+overlays, excluding outer letterbox/pillarbox padding. For example, an unstretched
+4:3 image in a 1920×1080 viewport records at 1440×1080. Bounds use the final shader
+texture and horizontal stretch, in physical pixels; odd sizes round to the nearest
+pixel. X/Y overscan offsets, CRT curvature, upscaling and other shader changes stay
+baked into the image. The existing shader chain is
 not rendered twice. Three PBOs use zero-timeout GPU fences. A bounded two-frame
 queue feeds a lower-priority recording worker. It converts bottom-up RGB to NV12,
 uploads to VAAPI, encodes, and retains compressed packets. This first version uses
@@ -77,9 +81,11 @@ to be disabled first.
 
 ## Surface changes and files
 
-Window size/DPI/fullscreen changes invalidate history immediately. Recording
-resumes after 300 ms of stable dimensions. The visible image remains at the
-rendered surface size. Encoder surfaces are padded to 64×16 alignment and
+Changes to the recorded image dimensions (including window size, DPI, fullscreen
+or horizontal stretch) invalidate history immediately. Recording resumes after
+300 ms of stable dimensions. Changes only to image position or outer padding
+preserve history when the recorded dimensions stay the same. The visible image
+remains at the rendered surface size. Encoder surfaces are padded to 64×16 alignment and
 MP4 clean-aperture metadata removes the padding, including odd window sizes.
 Players must honor MP4 clean-aperture metadata. The pixels are not stretched.
 
@@ -135,8 +141,10 @@ This implementation is awaiting hardware validation. Suggested first pass:
    a button/sound event near both ends, including a longer 5–10 minute session.
 3. Toggle CRT, FFT, pixelation and upscalers while buffering. Confirm the clip
    contains the same changes and colors, with no dialogs or toasts recorded.
-4. Resize, enter fullscreen and try an odd-sized window. Confirm history resets
-   and the player's displayed image dimensions match the video surface.
+4. Try 4:3 and widescreen video, horizontal stretch, and X/Y overscan offsets.
+   Verify exports exclude outer padding and retain the displayed adjustments.
+   Resize, enter fullscreen and try an odd-sized window. Confirm image dimension
+   changes reset history and the player displays the rendered video size.
 5. Try longer shortcuts with a partly filled or memory-limited buffer. Confirm
    a valid shorter clip and accurate saved-duration notification.
 6. Save repeatedly, disable while saving, and stop/restart capture. Confirm no

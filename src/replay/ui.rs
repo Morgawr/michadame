@@ -74,7 +74,7 @@ pub fn draw(replay: &mut Replay, ui: &mut egui::Ui, streaming: bool) -> bool {
         }
         ui.label("Quality controls bitrate; history can be shorter than the duration limit. No software encoder fallback.");
         ui.label("At 20 / 40 / 80 Mbit/s, 5 minutes uses about 722 / 1437 / 2868 MiB plus staging. Actual bitrate depends on motion, resolution, FPS and filters.");
-        ui.label("GPU memory is additional and driver-dependent. Resize resets history. Playback has priority over recording.");
+        ui.label("GPU memory is additional and driver-dependent. Rendered image size changes reset history. Playback has priority over recording.");
         ui.horizontal(|ui| { ui.label("Custom clip seconds"); changed |= ui.add(egui::DragValue::new(&mut replay.config.custom_seconds).clamp_range(1..=3600)).changed(); });
         for (index,seconds) in replay.config.durations().into_iter().enumerate() {
             ui.horizontal(|ui| {

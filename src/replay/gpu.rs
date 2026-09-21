@@ -1,6 +1,7 @@
 //! Read back the already-shaded game rectangle, before egui overlays. No second shader render.
 //! Three fenced PBOs; an unfinished transfer is skipped, never waited upon.
 use super::{config::Rate, Runtime, VideoFrame};
+use crate::video::gpu::geometry::RenderedArea;
 use eframe::glow::{self, HasContext};
 use std::{collections::VecDeque, sync::atomic::Ordering};
 struct Slot {
@@ -40,11 +41,16 @@ impl Readback {
         &mut self,
         gl: &glow::Context,
         runtime: Option<&RuntimeView>,
-        width: u32,
-        height: u32,
+        area: RenderedArea,
         at: i64,
         rate: Rate,
     ) {
+        let RenderedArea {
+            x,
+            y,
+            width,
+            height,
+        } = area;
         let Some(runtime) = runtime.filter(|r| !r.shared.stop.load(Ordering::Acquire)) else {
             self.destroy(gl);
             return;
@@ -145,8 +151,8 @@ impl Readback {
                 if let Some(buffer) = buffer {
                     gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(buffer));
                     gl.read_pixels(
-                        0,
-                        0,
+                        x as i32,
+                        y as i32,
                         width as i32,
                         height as i32,
                         glow::RGBA,

@@ -68,7 +68,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 .map(|f| (f.width, f.height))
                                 .unwrap_or((texture_size.x as u32, texture_size.y as u32));
 
-                            renderer.paint(
+                            let rendered_area = renderer.paint(
                                 painter.gl(),
                                 latest_frame.as_deref(),
                                 fallback_tex,
@@ -88,8 +88,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                             replay_gpu.lock().unwrap().capture(
                                 painter.gl(),
                                 replay.as_ref(),
-                                output_size.0 as u32,
-                                output_size.1 as u32,
+                                rendered_area,
                                 at,
                                 rate,
                             );
@@ -140,7 +139,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         .as_ref()
                         .map(|f| (f.width, f.height))
                         .unwrap_or((texture_size.x as u32, texture_size.y as u32));
-                    renderer_clone.lock().unwrap().draw_passthrough(
+                    let rendered_area = renderer_clone.lock().unwrap().draw_passthrough(
                         painter.gl(),
                         latest_frame.as_deref(),
                         fallback_tex,
@@ -165,8 +164,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     replay_gpu.lock().unwrap().capture(
                         painter.gl(),
                         replay.as_ref(),
-                        (rect.width() * ppp) as u32,
-                        (rect.height() * ppp) as u32,
+                        rendered_area,
                         at,
                         rate,
                     );
