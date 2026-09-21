@@ -99,10 +99,6 @@ impl Rate {
             den: den.max(1),
         }
     }
-    pub fn tick(self, us: i64) -> i64 {
-        ((us as i128 * self.num as i128 + 500_000 * self.den as i128)
-            / (1_000_000 * self.den as i128)) as i64
-    }
     pub fn us(self, tick: i64) -> i64 {
         (tick as i128 * 1_000_000 * self.den as i128 / self.num as i128) as i64
     }
@@ -166,7 +162,7 @@ mod tests {
     fn fractional_rate_does_not_accumulate_drift() {
         let r = Rate::new(60000, 1001);
         assert_eq!(r.us(36000), 600_600_000);
-        assert_eq!(r.tick(r.us(36000)), 36000);
+        assert_eq!(r.us(36001) - r.us(36000), 16_683);
     }
     #[test]
     fn duplicate_keys_are_rejected_but_disabled_keys_are_allowed() {

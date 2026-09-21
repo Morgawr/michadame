@@ -50,7 +50,14 @@ zero-timeout fences and copies at most two completed frames per draw, checking a
 2 ms elapsed-work limit between copies so it can catch up without draining an
 unbounded backlog in one draw. Individual driver calls can exceed that limit.
 The worker converts bottom-up RGB to NV12, uploads to VAAPI, encodes, and retains
-compressed packets. This first version uses
+compressed packets. RGB conversion uses a bounded libswscale thread pool (half
+the available CPUs, rounded down, clamped to 1–4 threads), created by the
+lower-priority recording worker. It uses the
+[frame conversion API](https://ffmpeg.org/doxygen/trunk/group__libsws.html),
+which dispatches work to the pool; the old `sws_scale` call used only one thread.
+RGBA queue storage is borrowed only during the synchronous conversion, with no
+extra full-frame copy. The conversion preserves the previous BT.709 matrix,
+range, chroma filtering, orientation and visible dimensions. This first version uses
 asynchronous GPU readback and a CPU conversion/upload path, **not zero-copy GL to
 VAAPI sharing**. GPU copies can still consume bandwidth or stall inside a driver.
 Hardware performance is unvalidated; no zero-overhead guarantee is made.
@@ -71,7 +78,10 @@ frames hold the preceding picture until the next received frame, using packet
 duration and presentation timestamps instead of re-encoding duplicates. The
 capture rate remains the nominal rate; gaps use variable frame durations. Recovery
 encodes each retained picture once, in capture order, without generating duplicate
-pictures. Audio processing stays near video media time during catch-up so newer
+pictures. Increasing video timestamps are preserved at microsecond precision:
+rounding them onto nominal FPS ticks previously discarded distinct frames when
+timestamps jittered or actual FPS differed slightly from nominal FPS. Encoding a
+queued burst cannot shorten its capture-time intervals. Audio processing stays near video media time during catch-up so newer
 audio cannot evict queued older video from short histories. Audio keeps its own
 capture timeline: short audio gaps become silence, and long gaps re-anchor only
 the recording resampler without clearing the A/V history. USB/device latency
@@ -94,6 +104,12 @@ Persistent **History resets / Last reset** fields distinguish format resets from
 frame drops. **History emptied by limits** separately reports loss of the final
 decodable group to the RAM or age cap; ordinary rolling eviction does not count.
 Format resets also log their reason on the recording worker.
+The video-drop total is cumulative for the enabled session. A separate recent
+increment shows whether drops are still occurring. Average CPU conversion and
+GPU upload/encode times per frame update alongside the nominal frame interval;
+they exclude readback, audio and other worker work. If queues remain full,
+recording throughput is insufficient: increasing queue memory only postpones
+drops, even while the encoded-history buffer is mostly empty.
 
 Disabling releases the recording worker, history and GPU readback resources;
 encoder teardown never joins on the UI thread. An export already in progress can
@@ -142,6 +158,21 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --check
 cargo build --release --locked
 ```
+
+Optional synthetic CPU-only benchmark at 3024×2160 (no display/capture/GPU access):
+
+```
+cargo test --release --locked benchmark_replay_conversion -- --ignored --nocapture
+```
+
+The local benchmark measured roughly 15.4 / 8.3 / 4.6 ms per frame at 1 / 2 / 4
+conversion threads, versus a 16.7 ms frame interval at 60 fps. These numbers
+exclude upload/encoding and do not establish hardware playback performance.
+Regression tests compare visible Y/UV bytes against the original conversion at
+1/2/4 threads, including odd dimensions and the reported recording size. MP4
+fixtures verify exact timestamp/duration preservation through H.264, HEVC and
+AV1 export with closely spaced frames. A 30-second timestamp-jitter fixture
+checks that every valid frame survives scheduling.
 
 The two skipped legacy tests can traverse configuration paths that open
 `/dev/video0`. The synthetic media test uses software H.264, HEVC and AV1 fixtures

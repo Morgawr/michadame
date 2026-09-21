@@ -163,6 +163,11 @@ pub struct Status {
     pub queue_slots: usize,
     pub queue_bytes: usize,
     pub backlog_ms: i64,
+    pub conversion_ms: f64,
+    pub hardware_ms: f64,
+    pub frame_interval_ms: f64,
+    pub conversion_threads: usize,
+    pub recent_video_drops: u64,
     pub saving: bool,
 }
 pub struct Shared {

@@ -162,7 +162,7 @@ mod tests {
             addresses.push(frame.rgba.as_ptr() as usize);
             queue.submit(frame).unwrap();
         }
-        let mut schedule = super::super::worker::VideoSchedule::new(10_000_000, Rate::new(60, 1));
+        let mut schedule = super::super::worker::VideoSchedule::new(10_000_000);
         for tick in 0..30 {
             let frame = queue.receive(Duration::ZERO).unwrap();
             assert_eq!(

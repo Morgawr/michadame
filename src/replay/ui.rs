@@ -52,7 +52,10 @@ pub fn draw(replay: &mut Replay, ui: &mut egui::Ui, streaming: bool) -> bool {
         ui.label(format!("Work queues + staging/encoder allowance: {}",gib(status.overhead)));
         if status.queue_slots > 0 {
             ui.label(format!("Work queue: {} GPU + {} CPU frames waiting · {} slots per stage · {} reserved", status.gpu_pending, status.cpu_pending, status.queue_slots, gib(status.queue_bytes)));
-            ui.label(format!("Recording behind live: {:.2}s · dropped video: {} · audio drop events: {}", status.backlog_ms as f64 / 1000., status.video_dropped, status.audio_dropped));
+            ui.label(format!("Recording behind live: {:.2}s · dropped video total: {} (+{} since last update) · audio drop events: {}", status.backlog_ms as f64 / 1000., status.video_dropped, status.recent_video_drops, status.audio_dropped));
+        }
+        if status.conversion_threads > 0 {
+            ui.label(format!("Recording work per frame: conversion {:.2} ms ({} threads) · upload/encode {:.2} ms · frame interval {:.2} ms", status.conversion_ms, status.conversion_threads, status.hardware_ms, status.frame_interval_ms));
         }
         if let Some((w,h)) = status.surface { ui.label(format!("Recording surface: {w} × {h} · {}",status.codec)); }
         if !status.message.is_empty() { ui.label(&status.message); }

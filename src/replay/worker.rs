@@ -38,36 +38,33 @@ fn invalidate_changed_surface(
         *pending_save = None;
     }
 }
-/// One encode per accepted picture, regardless of how many capture ticks were
-/// missed. Packet durations hold the previous picture across the missing ticks.
-/// Keyframes follow elapsed media time, not the reduced count of encoded frames.
+/// Preserve every increasing capture timestamp. Rounding to nominal FPS ticks
+/// can merge distinct pictures when timestamps jitter or the actual capture
+/// rate differs slightly from its advertised rate. Queue processing time never
+/// changes playback timing; keyframes follow elapsed capture time.
 pub(super) struct VideoSchedule {
     epoch: i64,
-    rate: config::Rate,
-    last_tick: i64,
+    last_at: Option<i64>,
     last_key_at: Option<i64>,
 }
 impl VideoSchedule {
-    pub(super) fn new(epoch: i64, rate: config::Rate) -> Self {
+    pub(super) fn new(epoch: i64) -> Self {
         Self {
             epoch,
-            rate,
-            last_tick: -1,
+            last_at: None,
             last_key_at: None,
         }
     }
     pub(super) fn accept(&mut self, at: i64) -> Option<(i64, bool)> {
-        let tick = self.rate.tick(at - self.epoch);
-        if tick <= self.last_tick {
+        if at < self.epoch || self.last_at.is_some_and(|last| at <= last) {
             return None;
         }
-        let pts = self.epoch + self.rate.us(tick);
-        let key = self.last_key_at.is_none_or(|last| pts - last >= 1_000_000);
-        self.last_tick = tick;
+        let key = self.last_key_at.is_none_or(|last| at - last >= 1_000_000);
+        self.last_at = Some(at);
         if key {
-            self.last_key_at = Some(pts);
+            self.last_key_at = Some(at);
         }
-        Some((pts, key))
+        Some((at, key))
     }
 }
 
@@ -199,6 +196,7 @@ pub(super) fn run(
     let mut waiting_for_video = false;
     let mut pending_audio: Option<AudioBlock> = None;
     let mut prepared_generation = None;
+    let mut previous_drops = 0;
     while !shared.stop.load(Ordering::Acquire) {
         invalidate_changed_surface(&mut session, &mut history, &mut pending_save, shared);
         if let Some(thread) = export_thread.as_ref() {
@@ -260,7 +258,7 @@ pub(super) fn run(
                     width: frame.width,
                     height: frame.height,
                     epoch: frame.at,
-                    schedule: VideoSchedule::new(frame.at, frame.rate),
+                    schedule: VideoSchedule::new(frame.at),
                     audio_clock: AudioClock::new(),
                     generation: frame.generation,
                 });
@@ -282,6 +280,8 @@ pub(super) fn run(
                     shared.message("Replay resumed; earlier history preserved");
                 }
                 waiting_for_video = false;
+            } else {
+                shared.video_dropped.fetch_add(1, Ordering::Relaxed);
             }
             shared.processed_at.store(frame.at, Ordering::Release);
             queue.recycle(frame.generation, frame.rgba);
@@ -418,7 +418,21 @@ pub(super) fn run(
             status.surface = session.as_ref().map(|s| (s.width, s.height));
             status.codec = config.codec.encoder().into();
             status.video_dropped = shared.video_dropped.load(Ordering::Relaxed);
+            status.recent_video_drops = status.video_dropped.saturating_sub(previous_drops);
+            previous_drops = status.video_dropped;
             status.audio_dropped = shared.audio_dropped.load(Ordering::Relaxed);
+            if let Some(s) = session.as_mut() {
+                let timings = s.video.take_timings();
+                if timings.frames > 0 {
+                    status.conversion_ms = timings.conversion_ms / timings.frames as f64;
+                    status.hardware_ms = timings.hardware_ms / timings.frames as f64;
+                } else {
+                    status.conversion_ms = 0.;
+                    status.hardware_ms = 0.;
+                }
+                status.conversion_threads = s.video.conversion_threads();
+                status.frame_interval_ms = s.video.rate.us(1) as f64 / 1000.;
+            }
 
             monitor = Instant::now();
         }
@@ -659,10 +673,47 @@ mod tests {
         assert!((clock.next - 96000).abs() < 48, "Audio drift exceeded 1ms");
     }
     #[test]
+    fn first_thirty_seconds_keep_every_frame_despite_timestamp_jitter() {
+        let rate = config::Rate::new(60, 1);
+        let epoch = 10_000_000;
+        let mut schedule = VideoSchedule::new(epoch);
+        let timestamps: Vec<_> = (0..1800)
+            .map(|tick| epoch + rate.us(tick) - if tick % 2 == 1 { 12_000 } else { 0 })
+            .collect();
+        assert!(timestamps.windows(2).all(|t| t[1] > t[0]));
+        let accepted: Vec<_> = timestamps
+            .iter()
+            .filter_map(|&at| schedule.accept(at))
+            .collect();
+        assert_eq!(
+            accepted.len(),
+            timestamps.len(),
+            "Unique frames were silently discarded despite an empty work queue"
+        );
+        for ((pts, _), at) in accepted.iter().zip(timestamps) {
+            assert_eq!(
+                *pts, at,
+                "Frame timing was rounded away from the capture clock"
+            );
+        }
+    }
+
+    #[test]
+    fn nominal_rate_mismatch_does_not_periodically_drop_or_retime_frames() {
+        let epoch = 10_000_000;
+        let actual_rate = config::Rate::new(60, 1);
+        let mut schedule = VideoSchedule::new(epoch);
+        for tick in 0..1800 {
+            let at = epoch + actual_rate.us(tick);
+            assert_eq!(schedule.accept(at).map(|(pts, _)| pts), Some(at));
+        }
+    }
+
+    #[test]
     fn dropped_frames_and_long_pauses_do_not_restart_video_time_or_create_catchup_work() {
         let rate = config::Rate::new(60000, 1001);
         let epoch = 10_000_000;
-        let mut schedule = VideoSchedule::new(epoch, rate);
+        let mut schedule = VideoSchedule::new(epoch);
         let ticks = [0, 1, 3, 7, 31, 160, 161]; // isolated, burst, >250ms, >1s
         let accepted: Vec<_> = ticks
             .into_iter()

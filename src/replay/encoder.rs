@@ -22,18 +22,82 @@ impl Drop for Buffer {
     }
 }
 
+fn conversion_threads() -> usize {
+    // Leave CPU capacity for capture/playback. Created on the low-priority
+    // recording worker, whose nice level the libswscale threads inherit.
+    (std::thread::available_parallelism().map_or(1, |n| n.get()) / 2).clamp(1, 4)
+}
+
+/// The legacy sws_scale entry point only uses one slice context even when
+/// threads are configured. Initialize a bounded pool and use sws_scale_frame
+/// to actually dispatch the conversion across it.
+struct RgbaConverter(*mut ffi::SwsContext);
+impl RgbaConverter {
+    fn new(width: u32, height: u32, threads: usize) -> Result<Self> {
+        unsafe {
+            let context = Self(ffi::sws_alloc_context());
+            ensure!(!context.0.is_null(), "Cannot allocate replay converter");
+            (*context.0).src_w = width as i32;
+            (*context.0).src_h = height as i32;
+            (*context.0).dst_w = width as i32;
+            (*context.0).dst_h = height as i32;
+            (*context.0).src_format = ffi::AVPixelFormat::AV_PIX_FMT_RGBA as i32;
+            (*context.0).dst_format = ffi::AVPixelFormat::AV_PIX_FMT_NV12 as i32;
+            (*context.0).flags = ff::software::scaling::flag::Flags::BILINEAR.bits() as u32;
+            (*context.0).threads = threads.clamp(1, 4) as i32;
+            check(ffi::sws_init_context(
+                context.0,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            ))?;
+            let coeff = ffi::sws_getCoefficients(ffi::SWS_CS_ITU709);
+            check(ffi::sws_setColorspaceDetails(
+                context.0,
+                coeff,
+                1,
+                coeff,
+                0,
+                0,
+                1 << 16,
+                1 << 16,
+            ))?;
+            Ok(context)
+        }
+    }
+}
+impl Drop for RgbaConverter {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::sws_freeContext(self.0);
+        }
+    }
+}
+
 pub struct VideoEncoder {
     encoder: encoder::Video,
     frames: Buffer,
     // Keep the VAAPI device alive until the encoder and frame pool are gone.
     _device: Buffer,
     sw: frame::Video,
-    scaler: ff::software::scaling::context::Context,
+    scaler: RgbaConverter,
     width: u32,
     height: u32,
     pub rate: Rate,
+    timings: EncodeTimings,
+}
+#[derive(Default)]
+pub struct EncodeTimings {
+    pub frames: u64,
+    pub conversion_ms: f64,
+    pub hardware_ms: f64,
 }
 impl VideoEncoder {
+    pub fn take_timings(&mut self) -> EncodeTimings {
+        std::mem::take(&mut self.timings)
+    }
+    pub fn conversion_threads(&self) -> usize {
+        unsafe { (*self.scaler.0).threads as usize }
+    }
     /// Runs only on the recording worker; never opens a capture device.
     pub fn new(config: &ReplayConfig, width: u32, height: u32, rate: Rate) -> Result<Self> {
         ff::init()?;
@@ -90,28 +154,7 @@ impl VideoEncoder {
         let encoder = encoder.open_with(options).context(
             "Hardware encoder rejected these settings; no software fallback was started",
         )?;
-        let mut scaler = ff::software::scaling::context::Context::get(
-            format::Pixel::RGBA,
-            width,
-            height,
-            format::Pixel::NV12,
-            width,
-            height,
-            ff::software::scaling::flag::Flags::BILINEAR,
-        )?;
-        unsafe {
-            let coeff = ffi::sws_getCoefficients(ffi::SWS_CS_ITU709);
-            check(ffi::sws_setColorspaceDetails(
-                scaler.as_mut_ptr(),
-                coeff,
-                1,
-                coeff,
-                0,
-                0,
-                1 << 16,
-                1 << 16,
-            ))?;
-        }
+        let scaler = RgbaConverter::new(width, height, conversion_threads())?;
         Ok(Self {
             encoder,
             frames,
@@ -121,6 +164,7 @@ impl VideoEncoder {
             width,
             height,
             rate,
+            timings: EncodeTimings::default(),
         })
     }
     pub fn parameters(&self) -> Result<codec::Parameters> {
@@ -134,6 +178,7 @@ impl VideoEncoder {
             "Wrong replay surface length"
         );
         let mut hardware = frame::Video::empty();
+        let conversion_started = std::time::Instant::now();
         unsafe {
             check(ffi::av_frame_make_writable(self.sw.as_mut_ptr()))?;
             convert_rgba(
@@ -143,6 +188,10 @@ impl VideoEncoder {
                 self.width,
                 self.height,
             )?;
+        }
+        self.timings.conversion_ms += conversion_started.elapsed().as_secs_f64() * 1000.;
+        let hardware_started = std::time::Instant::now();
+        unsafe {
             check(ffi::av_hwframe_get_buffer(
                 self.frames.0,
                 hardware.as_mut_ptr(),
@@ -174,6 +223,8 @@ impl VideoEncoder {
                 Err(e) => return Err(e.into()),
             }
         }
+        self.timings.hardware_ms += hardware_started.elapsed().as_secs_f64() * 1000.;
+        self.timings.frames += 1;
         Ok(packets)
     }
 }
@@ -319,7 +370,7 @@ fn set_display_crop(parameters: &mut codec::Parameters, width: u32, height: u32)
     Ok(())
 }
 fn convert_rgba(
-    scaler: &mut ff::software::scaling::context::Context,
+    scaler: &mut RgbaConverter,
     sw: &mut frame::Video,
     rgba: &[u8],
     width: u32,
@@ -330,26 +381,41 @@ fn convert_rgba(
         "Invalid RGBA surface"
     );
     unsafe {
-        // OpenGL is bottom-up; negative stride flips without a full RGBA copy.
-        let stride = width as i32 * 4;
-        let data = [
-            rgba.as_ptr().add((height as usize - 1) * stride as usize),
-            ptr::null(),
-            ptr::null(),
-            ptr::null(),
-        ];
-        let strides = [-stride, 0, 0, 0];
-        let out = sw.as_mut_ptr();
-        let rows = ffi::sws_scale(
-            scaler.as_mut_ptr(),
-            data.as_ptr(),
-            strides.as_ptr(),
-            0,
-            height as i32,
-            (*out).data.as_ptr(),
-            (*out).linesize.as_ptr(),
+        // Borrow the already-owned queue storage only for this synchronous call.
+        // Refcounted headers avoid swscale copying a non-refcounted RGBA frame.
+        // sws_frame_end below releases every internal reference before return,
+        // including error paths. The callback never frees the borrowed Vec.
+        unsafe extern "C" fn borrowed_buffer(_: *mut libc::c_void, _: *mut u8) {}
+        let mut input = frame::Video::empty();
+        input.set_format(format::Pixel::RGBA);
+        input.set_width(width);
+        input.set_height(height);
+        let source = input.as_mut_ptr();
+        (*source).buf[0] = ffi::av_buffer_create(
+            rgba.as_ptr().cast_mut(),
+            rgba.len(),
+            Some(borrowed_buffer),
+            ptr::null_mut(),
+            ffi::AV_BUFFER_FLAG_READONLY,
         );
-        ensure!(rows == height as i32, "RGB conversion failed");
+        ensure!(
+            !(*source).buf[0].is_null(),
+            "Cannot reference replay RGBA buffer"
+        );
+        // OpenGL is bottom-up; negative stride flips without a full RGBA copy.
+        (*source).data[0] = rgba
+            .as_ptr()
+            .add((height as usize - 1) * width as usize * 4)
+            .cast_mut();
+        (*source).linesize[0] = -(width as i32 * 4);
+        let mut output = frame::Video::empty();
+        check(ffi::av_frame_ref(output.as_mut_ptr(), sw.as_ptr()))?;
+        // Convert the visible rectangle into the larger, aligned allocation.
+        output.set_width(width);
+        output.set_height(height);
+        let result = ffi::sws_scale_frame(scaler.0, output.as_mut_ptr(), source);
+        ffi::sws_frame_end(scaler.0);
+        check(result).context("RGB conversion failed")?;
     }
     // Extend edge pixels into coded padding. MP4 clean-aperture metadata removes it
     // on presentation, including odd window dimensions; content is never resized.
@@ -388,6 +454,93 @@ fn convert_rgba(
 mod tests {
     use super::*;
     #[test]
+    fn parallel_conversion_matches_original_pixels_including_chroma_and_odd_sizes() {
+        for (w, h) in [(63, 47), (321, 241), (3024, 2160)] {
+            let (cw, ch) = coded_size(w, h);
+            let rgba: Vec<u8> = (0..w as usize * h as usize * 4)
+                .map(|i| ((i * 37 + i / 17) % 256) as u8)
+                .collect();
+            let mut reference = frame::Video::new(format::Pixel::NV12, cw, ch);
+            let mut original = ff::software::scaling::context::Context::get(
+                format::Pixel::RGBA,
+                w,
+                h,
+                format::Pixel::NV12,
+                w,
+                h,
+                ff::software::scaling::flag::Flags::BILINEAR,
+            )
+            .unwrap();
+            unsafe {
+                let coeff = ffi::sws_getCoefficients(ffi::SWS_CS_ITU709);
+                check(ffi::sws_setColorspaceDetails(
+                    original.as_mut_ptr(),
+                    coeff,
+                    1,
+                    coeff,
+                    0,
+                    0,
+                    1 << 16,
+                    1 << 16,
+                ))
+                .unwrap();
+                let source = [
+                    rgba.as_ptr().add((h as usize - 1) * w as usize * 4),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                ];
+                let stride = [-(w as i32 * 4), 0, 0, 0];
+                let out = reference.as_mut_ptr();
+                assert_eq!(
+                    ffi::sws_scale(
+                        original.as_mut_ptr(),
+                        source.as_ptr(),
+                        stride.as_ptr(),
+                        0,
+                        h as i32,
+                        (*out).data.as_ptr(),
+                        (*out).linesize.as_ptr()
+                    ),
+                    h as i32
+                );
+            }
+            for threads in [1, 2, 4] {
+                let mut converter = RgbaConverter::new(w, h, threads).unwrap();
+                let mut output = frame::Video::new(format::Pixel::NV12, cw, ch);
+                // Reuse the same converter and output buffer, as the worker does.
+                for _ in 0..2 {
+                    convert_rgba(&mut converter, &mut output, &rgba, w, h).unwrap();
+                    assert!(
+                        unsafe { ffi::av_frame_is_writable(output.as_mut_ptr()) } > 0,
+                        "Conversion retained output references and would force a copy next frame"
+                    );
+                    for plane in 0..2 {
+                        let width = if plane == 0 {
+                            w as usize
+                        } else {
+                            w.div_ceil(2) as usize * 2
+                        };
+                        let height = if plane == 0 {
+                            h as usize
+                        } else {
+                            h.div_ceil(2) as usize
+                        };
+                        for row in 0..height {
+                            let expected =
+                                &reference.data(plane)[row * reference.stride(plane)..][..width];
+                            let actual = &output.data(plane)[row * output.stride(plane)..][..width];
+                            assert_eq!(
+                                actual, expected,
+                                "{w}x{h}, {threads} threads, plane {plane}, row {row}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
     fn bottom_up_rgba_is_flipped_and_padded_without_scaling() {
         ff::init().unwrap();
         let (w, h) = (63, 47);
@@ -401,16 +554,7 @@ mod tests {
                     .copy_from_slice(&[value, value, value, 255]);
             }
         }
-        let mut scaler = ff::software::scaling::context::Context::get(
-            format::Pixel::RGBA,
-            w,
-            h,
-            format::Pixel::NV12,
-            w,
-            h,
-            ff::software::scaling::flag::Flags::BILINEAR,
-        )
-        .unwrap();
+        let mut scaler = RgbaConverter::new(w, h, 2).unwrap();
         let mut output = frame::Video::new(format::Pixel::NV12, cw, ch);
         convert_rgba(&mut scaler, &mut output, &rgba, w, h).unwrap();
         let stride = output.stride(0);
@@ -426,16 +570,50 @@ mod tests {
     #[test]
     fn exported_replay_demuxes_decodes_and_preserves_timing_and_crop() {
         for codec in ["libx264", "libx265", "libaom-av1"] {
-            export_fixture(false, codec);
+            export_fixture(false, codec, false);
+        }
+    }
+
+    #[test]
+    #[ignore = "Local CPU-only conversion benchmark; no GPU or capture device"]
+    fn benchmark_replay_conversion() {
+        let (w, h) = (3024, 2160);
+        let rgba: Vec<u8> = (0..w as usize * h as usize * 4)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let (cw, ch) = coded_size(w, h);
+        let mut out = frame::Video::new(format::Pixel::NV12, cw, ch);
+        for threads in [1, 2, 4] {
+            let mut scaler = RgbaConverter::new(w, h, threads).unwrap();
+            let mut times = Vec::new();
+            for i in 0..130 {
+                let start = std::time::Instant::now();
+                convert_rgba(&mut scaler, &mut out, &rgba, w, h).unwrap();
+                if i >= 10 {
+                    times.push(start.elapsed().as_secs_f64() * 1000.);
+                }
+            }
+            times.sort_by(f64::total_cmp);
+            eprintln!(
+                "Replay CPU conversion {w}x{h}, {threads} threads: mean {:.2} ms, p95 {:.2} ms",
+                times.iter().sum::<f64>() / times.len() as f64,
+                times[times.len() * 95 / 100]
+            );
         }
     }
     #[test]
     fn exported_replay_keeps_audio_and_video_before_and_after_dropped_frame_bursts() {
         for codec in ["libx264", "libx265", "libaom-av1"] {
-            export_fixture(true, codec);
+            export_fixture(true, codec, false);
         }
     }
-    fn export_fixture(drop_frames: bool, codec_name: &str) {
+    #[test]
+    fn exported_replay_preserves_subframe_timestamps_without_speeding_up_catchup() {
+        for codec in ["libx264", "libx265", "libaom-av1"] {
+            export_fixture(false, codec, true);
+        }
+    }
+    fn export_fixture(drop_frames: bool, codec_name: &str, jitter: bool) {
         ff::init().unwrap();
         let codec = encoder::find_by_name(codec_name)
             .expect("Synthetic MP4 fixtures need software H.264/HEVC/AV1 encoders");
@@ -483,8 +661,7 @@ mod tests {
         let mut audio = AudioEncoder::new().unwrap();
         let mut history = super::super::ring::History::new(10);
         let epoch = 4_000_000i64;
-        let mut schedule =
-            super::super::worker::VideoSchedule::new(epoch, super::super::config::Rate::new(30, 1));
+        let mut schedule = super::super::worker::VideoSchedule::new(epoch);
         for tick in 0..90 {
             let missing = drop_frames
                 && (tick == 6
@@ -492,7 +669,10 @@ mod tests {
                     || (19..28).contains(&tick)
                     || (30..70).contains(&tick));
             if !missing {
-                let (pts, key) = schedule.accept(epoch + tick * 1_000_000 / 30).unwrap();
+                let at = epoch + tick * 1_000_000 / 30
+                    - if jitter && tick % 2 == 1 { 24_000 } else { 0 };
+                let (pts, key) = schedule.accept(at).unwrap();
+                assert_eq!(pts, at);
                 let mut f = frame::Video::new(format::Pixel::YUV420P, 64, 48);
                 f.data_mut(0).fill(if tick < 45 { 40 } else { 180 });
                 f.data_mut(1).fill(128);
@@ -554,6 +734,16 @@ mod tests {
         let mut vp = codec::Parameters::from(&video);
         set_display_crop(&mut vp, 63, 47).unwrap();
         let expected_start = clip[0].start;
+        let expected_intervals: Vec<_> = clip
+            .iter()
+            .filter(|p| p.video)
+            .map(|p| {
+                (
+                    (p.start - expected_start) as f64 / 1e6,
+                    p.packet.duration() as f64 / 1e6,
+                )
+            })
+            .collect();
         let expected_duration = clip.iter().map(|p| p.end).max().unwrap() - expected_start;
         // Production saves use a temporary suffix before publishing .mp4.
         // The explicit muxer must work independently of the filename extension.
@@ -613,6 +803,11 @@ mod tests {
         let mut audio_end = 0f64;
         for (stream, packet) in input.packets() {
             if stream.index() == vi {
+                let expected = expected_intervals[intervals.len()];
+                assert!(
+                    (packet.pts().unwrap() as f64 * f64::from(vtb) - expected.0).abs() < 0.000002
+                );
+                assert!((packet.duration() as f64 * f64::from(vtb) - expected.1).abs() < 0.000002);
                 intervals.push((
                     packet.pts().unwrap() as f64 * f64::from(vtb),
                     packet.duration() as f64 * f64::from(vtb),

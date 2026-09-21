@@ -402,7 +402,7 @@ mod tests {
             .prepare(request, &generation, &AtomicBool::new(false))
             .unwrap());
         let mut history = History::new(300);
-        let mut schedule = VideoSchedule::new(epoch, rate);
+        let mut schedule = VideoSchedule::new(epoch);
         let mut dropped = 0;
         for tick in 0..36_000 {
             let now = epoch + rate.us(tick);
