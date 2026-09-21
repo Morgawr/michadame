@@ -1,0 +1,96 @@
+use super::{
+    config::{Codec, SAFETY_RESERVE},
+    Replay,
+};
+use eframe::egui::{self, Key};
+pub fn key(n: u8) -> Option<Key> {
+    [
+        Key::F1,
+        Key::F2,
+        Key::F3,
+        Key::F4,
+        Key::F5,
+        Key::F6,
+        Key::F7,
+        Key::F8,
+        Key::F9,
+        Key::F10,
+        Key::F11,
+        Key::F12,
+    ]
+    .get(n.wrapping_sub(1) as usize)
+    .copied()
+}
+fn gib(n: usize) -> String {
+    format!("{:.2} GiB", n as f64 / (1024. * 1024. * 1024.))
+}
+pub fn draw(replay: &mut Replay, ui: &mut egui::Ui, streaming: bool) -> bool {
+    let mut changed = false;
+    ui.collapsing("Live replay buffer", |ui| {
+        let mut enabled = replay.runtime.is_some();
+        if ui.add_enabled(streaming || enabled, egui::Checkbox::new(&mut enabled,"Enable replay buffer")).changed() {
+            if enabled { if let Err(e) = replay.enable() { replay.last_status.message = e.to_string(); } }
+            else { replay.disable(); }
+        }
+        if !streaming { ui.label("Start the stream before enabling replay. Replay starts disabled each launch."); }
+        let available = replay.available_now;
+        if let Some(before) = replay.available_before { ui.label(format!("Available RAM before enabling: {}",gib(before))); }
+        if let Some(available) = available {
+            ui.label(format!("Available RAM now: {}",gib(available)));
+            if replay.runtime.is_none() {
+                ui.label(format!("Projected available RAM at full budget: {}",gib(available.saturating_sub(replay.config.budget()))));
+            }
+            if replay.config.budget().saturating_add(SAFETY_RESERVE) >= available && replay.runtime.is_none() {
+                ui.colored_label(egui::Color32::YELLOW,"Budget exceeds available RAM with the 512 MiB safety reserve.");
+            }
+        }
+        let status = replay.status();
+        ui.label(format!("Retained: {:.1}s / {}s · packets and active save: {}",status.seconds,replay.config.history_seconds,gib(status.bytes)));
+        ui.label(format!("CPU staging/encoder allowance: {} · skipped recording work: {}",gib(status.overhead),status.dropped));
+        if let Some((w,h)) = status.surface { ui.label(format!("Recording surface: {w} × {h} · {}",status.codec)); }
+        if !status.message.is_empty() { ui.label(&status.message); }
+        if replay.runtime.is_none() && !replay.last_status.message.is_empty() && replay.last_status.message != status.message { ui.label(&replay.last_status.message); }
+        if status.saving { ui.label("Saving in background; retained packets remain allocated until finished."); }
+        ui.add_enabled_ui(replay.runtime.is_none(), |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Maximum history (seconds)"); changed |= ui.add(egui::DragValue::new(&mut replay.config.history_seconds).clamp_range(1..=3600)).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("RAM budget (MiB)"); changed |= ui.add(egui::DragValue::new(&mut replay.config.memory_mib).clamp_range(256..=32768)).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("Video codec");
+                egui::ComboBox::from_id_source("replay-codec").selected_text(format!("{:?}",replay.config.codec)).show_ui(ui,|ui| {
+                    for (codec,label) in [(Codec::Av1,"AV1"),(Codec::Hevc,"HEVC"),(Codec::H264,"H.264")] { changed |= ui.selectable_value(&mut replay.config.codec,codec,label).changed(); }
+                });
+            });
+            ui.horizontal(|ui| { ui.label("Quantizer (lower = higher quality)"); changed |= ui.add(egui::DragValue::new(&mut replay.config.quality).clamp_range(1..=51)).changed(); });
+            ui.horizontal(|ui| { ui.label("GPU render device"); changed |= ui.text_edit_singleline(&mut replay.config.render_device).changed(); });
+            ui.horizontal(|ui| { ui.label("Save folder"); changed |= ui.text_edit_singleline(&mut replay.config.directory).changed(); });
+        });
+        if status.seconds > 2. && !status.saving && status.bytes > 0 {
+            let estimate = (status.bytes as f64 / status.seconds * replay.config.history_seconds as f64) as usize;
+            ui.label(format!("At the observed bitrate: ~{} for {}s of packets + {} staging allowance",gib(estimate),replay.config.history_seconds,gib(status.overhead)));
+        }
+        ui.label("Quality controls bitrate; history can be shorter than the duration limit. No software encoder fallback.");
+        ui.label("At 20 / 40 / 80 Mbit/s, 5 minutes uses about 722 / 1437 / 2868 MiB plus staging. Actual bitrate depends on motion, resolution, FPS and filters.");
+        ui.label("GPU memory is additional and driver-dependent. Resize resets history. Playback has priority over recording.");
+        ui.horizontal(|ui| { ui.label("Custom clip seconds"); changed |= ui.add(egui::DragValue::new(&mut replay.config.custom_seconds).clamp_range(1..=3600)).changed(); });
+        for (index,seconds) in replay.config.durations().into_iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(format!("Save {seconds}s"));
+                egui::ComboBox::from_id_source(("replay-key",index)).selected_text(if replay.config.keys[index] == 0 { "Disabled".into() } else {format!("F{}",replay.config.keys[index])}).show_ui(ui,|ui| {
+                    for number in 0..=12 {
+                        let assigned = number != 0 && replay.config.keys.iter().enumerate().any(|(i,k)|i != index && *k == number);
+                        ui.add_enabled_ui(!assigned,|ui| { changed |= ui.selectable_value(&mut replay.config.keys[index],number,if number == 0 {"Disabled".into()} else {format!("F{number}")}).changed(); });
+                    }
+                });
+                if ui.add_enabled(replay.runtime.is_some() && !status.saving,egui::Button::new("Save now")).clicked() {
+                    if let Err(e) = replay.save(seconds) { replay.last_status.message = e.to_string(); if let Some(r) = &replay.runtime {r.shared.message(e.to_string());} }
+                }
+            });
+        }
+        ui.label("Shortcuts work while either Michadame window is focused, outside text editing. Clips start at a keyframe and may be slightly shorter.");
+    });
+    changed
+}

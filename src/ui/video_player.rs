@@ -11,6 +11,15 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         send_ws_command(serde_json::json!({"command": "manual_ocr"}));
     }
 
+    if !state.ui.video_window_open {
+        let gpu = state.replay.gpu.clone();
+        ui.painter().add(egui::PaintCallback {
+            rect: ui.available_rect_before_wrap(),
+            callback: std::sync::Arc::new(egui_glow::CallbackFn::new(move |_, painter| {
+                gpu.lock().unwrap().destroy(painter.gl());
+            })),
+        });
+    }
     if state.ui.video_window_open {
         let response = ui.allocate_response(ui.available_size(), egui::Sense::click());
         let video_texture = state
@@ -40,6 +49,11 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 let fft_threshold = state.fft_mask_threshold;
                 let fft_black = state.fft_black_threshold;
 
+                let replay_gpu = state.replay.gpu.clone();
+                let replay =
+                    state.replay.runtime.as_ref().map(|r| {
+                        crate::replay::gpu::RuntimeView::new(r, state.replay.config.budget())
+                    });
                 let ppp = ctx.pixels_per_point();
                 let callback = egui::PaintCallback {
                     rect: response.rect,
@@ -66,7 +80,19 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 fft_clone.as_ref(),
                                 fft_threshold,
                                 fft_black,
-                            )
+                            );
+                            let (at, rate) = latest_frame
+                                .as_ref()
+                                .map(|f| (f.captured_at, f.rate))
+                                .unwrap_or((0, crate::replay::config::Rate::new(60, 1)));
+                            replay_gpu.lock().unwrap().capture(
+                                painter.gl(),
+                                replay.as_ref(),
+                                output_size.0 as u32,
+                                output_size.1 as u32,
+                                at,
+                                rate,
+                            );
                         },
                     )),
                 };
@@ -99,6 +125,12 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             let fft_threshold = state.fft_mask_threshold;
             let fft_black = state.fft_black_threshold;
 
+            let replay_gpu = state.replay.gpu.clone();
+            let replay = state
+                .replay
+                .runtime
+                .as_ref()
+                .map(|r| crate::replay::gpu::RuntimeView::new(r, state.replay.config.budget()));
             let ppp = ctx.pixels_per_point();
             let callback = egui::PaintCallback {
                 rect,
@@ -125,6 +157,18 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         fft_clone.as_ref(),
                         fft_threshold,
                         fft_black,
+                    );
+                    let (at, rate) = latest_frame
+                        .as_ref()
+                        .map(|f| (f.captured_at, f.rate))
+                        .unwrap_or((0, crate::replay::config::Rate::new(60, 1)));
+                    replay_gpu.lock().unwrap().capture(
+                        painter.gl(),
+                        replay.as_ref(),
+                        (rect.width() * ppp) as u32,
+                        (rect.height() * ppp) as u32,
+                        at,
+                        rate,
                     );
                 })),
             };

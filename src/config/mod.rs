@@ -40,6 +40,7 @@ impl From<LegacyConfig> for MichadameConfig {
         }
 
         MichadameConfig {
+            replay: legacy.replay,
             video_device: legacy.video_device,
             usb_device: legacy.usb_device,
             video_resolution: legacy.video_resolution,
@@ -64,6 +65,7 @@ mod tests {
     #[test]
     fn test_legacy_config_conversion() {
         let legacy = LegacyConfig {
+            replay: Default::default(),
             video_device: Some("/dev/video0".to_string()),
             usb_device: None,
             video_resolution: Some((640, 480)),
@@ -123,6 +125,7 @@ mod tests {
         );
 
         let legacy = LegacyConfig {
+            replay: Default::default(),
             active_profile: "Custom".to_string(),
             profiles,
             video_device: None,

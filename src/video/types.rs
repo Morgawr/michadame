@@ -1,6 +1,8 @@
 use crate::{app::AppState, config::MichadameConfig};
 
 pub struct RawFrame {
+    pub captured_at: i64,
+    pub rate: crate::replay::config::Rate,
     pub width: u32,
     pub height: u32,
     pub data: Vec<u8>,

@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod devices;
+mod replay;
 mod ui;
 mod video;
 

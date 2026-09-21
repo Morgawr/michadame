@@ -330,6 +330,21 @@ fn run_video_capture_session(
         .best(ffmpeg_next::media::Type::Video)
         .context("Could not find best video stream")?;
     let video_stream_index = input.index();
+    let input_time_base = input.time_base();
+    let negotiated_rate = input.avg_frame_rate();
+    let negotiated_rate = if negotiated_rate.numerator() > 0 && negotiated_rate.denominator() > 0 {
+        negotiated_rate
+    } else {
+        input.rate()
+    };
+    let replay_rate = if negotiated_rate.numerator() > 0 && negotiated_rate.denominator() > 0 {
+        crate::replay::config::Rate::new(
+            negotiated_rate.numerator() as u32,
+            negotiated_rate.denominator() as u32,
+        )
+    } else {
+        crate::replay::config::Rate::new(framerate, 1)
+    };
 
     let mut decoder = ffmpeg_next::codec::context::Context::from_parameters(input.parameters())
         .and_then(|c| c.decoder().video())
@@ -412,7 +427,21 @@ fn run_video_capture_session(
             let format = normalized.format();
             let data = copy_frame_tightly(&normalized)?;
 
+            let now = crate::replay::now_us();
+            let timestamp = decoded
+                .timestamp()
+                .map(|pts| unsafe {
+                    ffmpeg_next::sys::av_rescale_q(
+                        pts,
+                        input_time_base.into(),
+                        ffmpeg_next::Rational(1, 1_000_000).into(),
+                    )
+                })
+                .filter(|pts| now.abs_diff(*pts) < 10_000_000)
+                .unwrap_or(now);
             let raw_frame = Arc::new(RawFrame {
+                captured_at: timestamp,
+                rate: replay_rate,
                 width,
                 height,
                 data,

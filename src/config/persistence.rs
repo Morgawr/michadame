@@ -37,6 +37,7 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
 pub fn save_config(state: &AppState) {
     let mut cfg = confy::load::<MichadameConfig>("michadame", None).unwrap_or_default();
 
+    cfg.replay = state.replay.config.clone();
     cfg.video_device = Some(state.hardware.selected_video_device.clone());
     cfg.usb_device = state.hardware.selected_usb_device.clone();
     cfg.video_resolution = if state.hardware.selected_resolution.0 > 0 {
@@ -71,6 +72,7 @@ pub fn save_config(state: &AppState) {
 pub fn save_global_hardware_config(state: &AppState) {
     let mut cfg = confy::load::<MichadameConfig>("michadame", None).unwrap_or_default();
 
+    cfg.replay = state.replay.config.clone();
     cfg.video_device = Some(state.hardware.selected_video_device.clone());
     cfg.usb_device = state.hardware.selected_usb_device.clone();
     cfg.video_resolution = if state.hardware.selected_resolution.0 > 0 {
@@ -165,6 +167,7 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) {
 }
 
 pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
+    state.replay.config = cfg.replay.clone();
     state.profiles = cfg.profiles.clone();
     state.active_profile = cfg.active_profile.clone();
 

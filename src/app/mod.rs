@@ -17,6 +17,7 @@ use std::time::Instant;
 impl Default for AppState {
     fn default() -> Self {
         Self {
+            replay: crate::replay::Replay::default(),
             hardware: HardwareState {
                 audio_peak_amplitude: Arc::new(AtomicU64::new(0)),
                 audio_latency_ms: Arc::new(AtomicU64::new(0)),
@@ -194,7 +195,9 @@ impl AppState {
 
 impl eframe::App for AppState {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.replay.disable();
         if let Some(gl) = _gl {
+            self.replay.gpu.lock().unwrap().destroy(gl);
             if let Some(renderer) = self.crt_renderer.as_ref() {
                 renderer.lock().unwrap().destroy(gl);
             }
@@ -206,6 +209,14 @@ impl eframe::App for AppState {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.replay.update();
+        if let Some(message) = self.replay.notification() {
+            self.info(message);
+        }
+        if self.replay.runtime.is_some() || self.replay.status().saving {
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
+        self.replay.shortcuts(ctx);
         let mut repaint_requested = false;
 
         if self.ui.control_window_open {

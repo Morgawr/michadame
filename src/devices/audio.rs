@@ -312,6 +312,7 @@ pub fn find_audio_devices() -> Result<Vec<(String, String)>> {
     Ok(sources)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn start_audio_stream(
     source_name: &str,
     peak_amplitude_shared: Arc<AtomicU64>,
@@ -320,6 +321,7 @@ pub fn start_audio_stream(
     sample_rate: u32,
     sample_format: String,
     request_repaint: Arc<dyn Fn() + Send + Sync>,
+    replay: Arc<crate::replay::AudioTap>,
 ) -> Result<AudioStreamHandle> {
     // Shared ring buffer for capture-to-playback bridge.
     // Increased to ~1.0s of audio to provide complete buffer safety. We manage ideal latency from the consumer side.
@@ -344,6 +346,7 @@ pub fn start_audio_stream(
         sample_rate,
         sample_format,
         request_repaint,
+        replay,
     )?;
     let mut alsa_thread = Some(alsa_thread);
 
@@ -410,6 +413,7 @@ fn start_alsa_capture(
     sample_rate: u32,
     sample_format: String,
     request_repaint: Arc<dyn Fn() + Send + Sync>,
+    replay: Arc<crate::replay::AudioTap>,
 ) -> Result<AlsaCapture> {
     use alsa::pcm::{Format, HwParams, PCM};
     use alsa::Direction;
@@ -456,6 +460,7 @@ fn start_alsa_capture(
                 &sample_format,
                 &samples_captured,
                 &mut capture_progress,
+                &replay,
             );
 
             if stop_capture.load(Ordering::Relaxed) {
@@ -502,6 +507,7 @@ fn run_alsa_capture_session(
     sample_format: &str,
     samples_captured: &Arc<AtomicU64>,
     capture_progress: &mut AudioCaptureProgress,
+    replay: &crate::replay::AudioTap,
 ) -> Result<()> {
     use alsa::pcm::{Access, HwParams, PCM};
     use alsa::Direction;
@@ -530,6 +536,7 @@ fn run_alsa_capture_session(
             channels,
             samples_captured,
             capture_progress,
+            replay,
             |sample| (sample as f64 / 2_147_483_648.0) as f32,
         ),
         "F32LE" => run_alsa_capture_loop(
@@ -544,6 +551,7 @@ fn run_alsa_capture_session(
             channels,
             samples_captured,
             capture_progress,
+            replay,
             |sample| sample,
         ),
         _ => run_alsa_capture_loop(
@@ -558,6 +566,7 @@ fn run_alsa_capture_session(
             channels,
             samples_captured,
             capture_progress,
+            replay,
             i16_to_f32,
         ),
     }
@@ -576,6 +585,7 @@ fn run_alsa_capture_loop<S, F>(
     channels: u16,
     samples_captured: &Arc<AtomicU64>,
     capture_progress: &mut AudioCaptureProgress,
+    replay: &crate::replay::AudioTap,
     convert: F,
 ) -> Result<()>
 where
@@ -627,6 +637,13 @@ where
                     peak_amplitude_shared,
                     samples_captured,
                 );
+                // Playback receives samples first; disabled replay performs no extra ALSA query.
+                if replay.is_enabled() {
+                    let delay = pcm.delay().unwrap_or(0).max(0);
+                    let at =
+                        crate::replay::now_us() - (delay + frames as i64) * 1_000_000 / rate as i64;
+                    replay.submit(&converted_buf[..sample_count], rate, channels, at);
+                }
             }
             Err(error) if error.errno() == alsa::nix::errno::Errno::EAGAIN => {
                 if capture_progress.stalled_for(ALSA_STALL_TIMEOUT) {

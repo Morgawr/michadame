@@ -73,6 +73,7 @@ pub struct PendingAudioStream {
 }
 
 pub struct AppState {
+    pub replay: crate::replay::Replay,
     pub hardware: HardwareState,
     pub ui: UiState,
     pub crt: CrtSettings,

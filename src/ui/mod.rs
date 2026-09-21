@@ -20,6 +20,7 @@ pub fn setup_style(ctx: &eframe::egui::Context) {
 }
 
 pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
+    state.replay.shortcuts(ctx);
     if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
         println!("Spacebar pressed, sending command...");
         send_ws_command(serde_json::json!({"command": "manual_ocr"}));

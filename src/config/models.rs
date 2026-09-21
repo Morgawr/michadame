@@ -31,6 +31,8 @@ pub struct Profile {
 
 #[derive(Deserialize, Clone)]
 pub struct LegacyConfig {
+    #[serde(default)]
+    pub replay: crate::replay::config::ReplayConfig,
     pub video_device: Option<String>,
     pub usb_device: Option<String>,
     pub video_resolution: Option<(u32, u32)>,
@@ -78,6 +80,7 @@ pub fn default_active_profile() -> String {
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(from = "LegacyConfig")]
 pub struct MichadameConfig {
+    pub replay: crate::replay::config::ReplayConfig,
     pub video_device: Option<String>,
     pub usb_device: Option<String>,
     pub video_resolution: Option<(u32, u32)>,
@@ -97,6 +100,7 @@ impl Default for MichadameConfig {
         let mut profiles = BTreeMap::new();
         profiles.insert("Default".to_string(), Profile::default());
         Self {
+            replay: Default::default(),
             video_device: None,
             usb_device: None,
             video_resolution: None,

@@ -58,6 +58,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
     ui.separator();
 
+    changed |= crate::replay::ui::draw(&mut state.replay, ui, state.ui.video_window_open);
     changed |= profiles::draw_profile_management(ui, state);
     changed |= devices::draw_device_selectors(ui, state);
     changed |= filters::draw_filters(ui, state);

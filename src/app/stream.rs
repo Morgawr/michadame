@@ -155,6 +155,7 @@ impl AppState {
             audio.sample_rate,
             audio.sample_format,
             repaint_request(ctx),
+            self.replay.audio.clone(),
         ) {
             Ok(handle) => {
                 self.hardware.active_audio_stream = Some(handle);
@@ -183,6 +184,7 @@ impl AppState {
     }
 
     fn fail_stream_start(&mut self, ctx: &egui::Context, error: String) {
+        self.replay.disable();
         if let Some(stop_requested) = self.video_stop_requested.take() {
             stop_requested.store(true, Ordering::Relaxed);
         }
@@ -223,6 +225,7 @@ impl AppState {
     }
 
     pub fn stop_stream_resources(&mut self) {
+        self.replay.disable();
         if let Some(stop_requested) = self.video_stop_requested.take() {
             stop_requested.store(true, Ordering::Relaxed);
         }
@@ -249,6 +252,7 @@ impl AppState {
     }
 
     pub fn restart_audio_stream(&mut self, ctx: &egui::Context) {
+        self.replay.disable();
         self.hardware.active_audio_stream = None;
 
         if let Some(mic) = &self.hardware.selected_audio_source_name {
@@ -260,6 +264,7 @@ impl AppState {
                 self.hardware.audio_sample_rate,
                 self.hardware.audio_sample_format.clone(),
                 repaint_request(ctx),
+                self.replay.audio.clone(),
             ) {
                 Ok(handle) => {
                     self.hardware.active_audio_stream = Some(handle);
