@@ -223,7 +223,8 @@ pub(super) fn run(
         let mut limit = config
             .budget()
             .saturating_sub(surface_overhead)
-            .saturating_sub(shared.saving_bytes.load(Ordering::Acquire));
+            .saturating_sub(shared.saving_bytes.load(Ordering::Acquire))
+            .saturating_sub(shared.clipboard.bytes());
         history.trim(limit);
         // FIFO: temporary encoder delays must not throw away queued pictures.
         if let Some(frame) = queue.receive(Duration::from_millis(5)) {
@@ -265,7 +266,8 @@ pub(super) fn run(
                 limit = config
                     .budget()
                     .saturating_sub(surface_overhead)
-                    .saturating_sub(shared.saving_bytes.load(Ordering::Acquire));
+                    .saturating_sub(shared.saving_bytes.load(Ordering::Acquire))
+                    .saturating_sub(shared.clipboard.bytes());
                 shared.message("Buffering replay");
             }
             let s = session.as_mut().unwrap();
@@ -360,17 +362,40 @@ pub(super) fn run(
                     let pinned: usize = packets.iter().map(|p| p.bytes).sum();
                     let video = s.video.parameters()?;
                     let audio = s.audio.parameters();
+                    let reservation = if save.destination == Destination::Clipboard {
+                        // Encoded packet accounting includes 256 bytes per packet; add
+                        // room for MP4 tables. The writer enforces this upper bound.
+                        let maximum = pinned.saturating_add(1024 * 1024);
+                        match shared.clipboard.reserve(
+                            maximum,
+                            config
+                                .budget()
+                                .saturating_sub(surface_overhead)
+                                .saturating_sub(pinned),
+                        ) {
+                            Ok(reservation) => Some(reservation),
+                            Err(error) => {
+                                shared.message(format!("Replay copy failed: {error}"));
+                                pending_save = None;
+                                continue;
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     shared.saving_bytes.store(pinned, Ordering::Release);
                     history.trim(
                         config
                             .budget()
                             .saturating_sub(surface_overhead)
-                            .saturating_sub(pinned),
+                            .saturating_sub(pinned)
+                            .saturating_sub(shared.clipboard.bytes()),
                     );
                     let duration = (packets.iter().map(|p| p.end).max().unwrap() - packets[0].start)
                         as f64
                         / 1e6;
                     let directory = config.directory.clone();
+                    let destination = save.destination;
                     let export_shared = shared.clone();
                     shared.status.lock().unwrap().saving = true;
                     let spawned = std::thread::Builder::new()
@@ -378,14 +403,49 @@ pub(super) fn run(
                         .spawn(move || {
                             let result =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    save_file(&directory, video, audio, packets)
+                                    match reservation {
+                                        Some(reservation) => {
+                                            ensure!(
+                                                config::available_memory().is_some_and(
+                                                    |available| available
+                                                        > reservation
+                                                            .limit
+                                                            .saturating_add(config::SAFETY_RESERVE)
+                                                ),
+                                                "Not enough available RAM for the clipboard clip"
+                                            );
+                                            let file = export_shared.clipboard.file()?;
+                                            encoder::export_clipboard(
+                                                file.as_file().try_clone()?,
+                                                reservation.limit,
+                                                video,
+                                                audio,
+                                                packets,
+                                            )?;
+                                            let size = export_shared
+                                                .clipboard
+                                                .publish(file, reservation)?;
+                                            Ok(format!(
+                                                "Copied {duration:.1}s to clipboard ({:.1} MiB)",
+                                                size as f64 / 1_048_576.0
+                                            ))
+                                        }
+                                        None => save_file(&directory, video, audio, packets).map(
+                                            |path| {
+                                                format!("Saved {duration:.1}s: {}", path.display())
+                                            },
+                                        ),
+                                    }
                                 }))
                                 .unwrap_or_else(|_| Err(anyhow::anyhow!("Replay writer panicked")));
                             export_shared.saving_bytes.store(0, Ordering::Release);
                             let mut status = export_shared.status.lock().unwrap();
                             status.saving = false;
                             status.message = match result {
-                                Ok(path) => format!("Saved {duration:.1}s: {}", path.display()),
+                                Ok(message) => message,
+                                Err(e) if destination == Destination::Clipboard => {
+                                    format!("Replay copy failed: {e:#}")
+                                }
                                 Err(e) => format!("Replay save failed: {e:#}"),
                             };
                         });

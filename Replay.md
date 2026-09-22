@@ -27,6 +27,47 @@ queued button-time frames to be processed. An idle/stalled source uses a two-sec
 fallback; an active backlog may take up to 30 seconds before exporting the available
 shorter clip or reporting insufficient history.
 
+## Copy a clip to the Linux clipboard
+
+With replay enabled, press **Ctrl+C** in the focused video window, then wait for
+the **Copied … to clipboard** notification before pasting. This copies up to the
+last ten seconds as an MP4 file attachment, with the same audio, rendered effects,
+codec, crop and timestamps as a normal replay save. The clip can be shorter when
+history is limited or its start must advance to a keyframe. It uses the existing
+background export queue; copying and saving cannot run simultaneously. Plain
+`C` still cycles CRT filters. Copying text in Controls is unaffected.
+
+Linux browsers normally expose pasted video attachments through file references,
+not arbitrary raw `video/mp4` bytes. This implementation uses arboard's native
+Wayland data-control / X11 file-list support (`text/uri-list`). See
+[Chromium's paste handling](https://raw.githubusercontent.com/chromium/chromium/main/third_party/blink/renderer/core/clipboard/data_object.cc)
+and [arboard file lists](https://docs.rs/arboard/3.6.1/arboard/struct.Set.html#method.file_list).
+No external `wl-copy` or `xclip` executable is required. A desktop without supported
+clipboard access reports a copy failure.
+
+The video is created in a private directory under `/tmp` with owner-only file
+permissions. The application verifies tmpfs before writing video and refuses a
+disk-backed `/tmp`; it does not fall back to the save folder or `$TMPDIR`.
+The current clipboard file remains available after disabling replay, until the
+next successful replay copy or normal application exit. Failed copies release
+their files and reservations and retain the previous clip's backing file.
+Do not replace the clip or exit until the receiving application has read it.
+Clipboard history entries are not durable recordings; a history-exclusion hint
+is supplied for managers that support it. Abrupt process termination can leave
+temporary files until `/tmp` is cleaned. Like other tmpfs data, pages can be
+swapped if the system permits it ([kernel documentation](https://www.kernel.org/doc/html/latest/filesystems/tmpfs.html)).
+
+Clipboard output is capped at 256 MiB and charged to the replay RAM budget,
+including the previous clipboard clip and in-flight export. A bounded seekable
+writer enforces the reservation while muxing. Debug shows clipboard memory
+separately from retained packets. Copying remuxes encoded packets without
+re-encoding or changing quality. Website file-size limits and codec/paste support
+still apply: for example, ten seconds at a 30 Mbit/s video target is about 38 MB
+with audio, above Discord's current free upload limit. See
+[Discord's attachment limits](https://support.discord.com/hc/en-us/articles/25444343291031-File-Attachments-FAQ).
+Browser/website paste, sandboxed browser access to `/tmp`, and desktop clipboard
+ownership need user validation; local tests do not access the live clipboard.
+
 ## Compression and player compatibility
 
 **Bitrate limited** is the default, including when loading settings saved before

@@ -365,6 +365,33 @@ pub fn export(
     path: &std::path::Path,
     video: codec::Parameters,
     audio: codec::Parameters,
+    packets: Vec<std::sync::Arc<Encoded>>,
+) -> Result<()> {
+    export_output(format::output_as(path, "mp4")?, video, audio, packets)
+}
+
+pub fn export_clipboard(
+    file: std::fs::File,
+    limit: usize,
+    video: codec::Parameters,
+    audio: codec::Parameters,
+    packets: Vec<std::sync::Arc<Encoded>>,
+) -> Result<()> {
+    let io = format::context::StreamIo::from_write_seek(super::clipboard::LimitedFile::new(
+        file, limit,
+    ))?;
+    export_output(
+        format::output_to_stream(io, None, Some("mp4"))?,
+        video,
+        audio,
+        packets,
+    )
+}
+
+fn export_output(
+    mut output: format::context::Output,
+    video: codec::Parameters,
+    audio: codec::Parameters,
     mut packets: Vec<std::sync::Arc<Encoded>>,
 ) -> Result<()> {
     ensure!(!packets.is_empty(), "No replay packets");
@@ -375,7 +402,6 @@ pub fn export(
         .min()
         .context("No replay keyframe")?;
     packets.sort_by_key(|p| (p.packet.dts().unwrap_or(p.start), !p.video));
-    let mut output = format::output_as(path, "mp4")?;
     for parameters in [video, audio] {
         let mut stream = output.add_stream(encoder::find(parameters.id()))?;
         if parameters.medium() == ff::media::Type::Video {
@@ -400,6 +426,12 @@ pub fn export(
         packet.write_interleaved(&mut output)?;
     }
     output.write_trailer()?;
+    // Surface custom-IO errors, including a reservation exceeded during the trailer.
+    unsafe {
+        let pb = (*output.as_mut_ptr()).pb;
+        ffi::avio_flush(pb);
+        check((*pb).error)?;
+    }
     Ok(())
 }
 
@@ -896,8 +928,33 @@ mod tests {
             std::process::id(),
             super::super::now_us()
         ));
-        export(&path, vp, audio.parameters(), clip).unwrap();
+        export(&path, vp.clone(), audio.parameters(), clip.clone()).unwrap();
         let bytes = std::fs::read(&path).unwrap();
+        // Exercise the actual bounded clipboard muxer without touching any clipboard.
+        let temporary = tempfile::NamedTempFile::new_in("/tmp").unwrap();
+        export_clipboard(
+            temporary.as_file().try_clone().unwrap(),
+            bytes.len() + 1024,
+            vp.clone(),
+            audio.parameters(),
+            clip.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(temporary.path()).unwrap(),
+            bytes,
+            "Clipboard and disk export must preserve identical A/V, timestamps and crop"
+        );
+        let too_small = tempfile::NamedTempFile::new_in("/tmp").unwrap();
+        assert!(export_clipboard(
+            too_small.as_file().try_clone().unwrap(),
+            128,
+            vp,
+            audio.parameters(),
+            clip
+        )
+        .is_err());
+        assert!(too_small.as_file().metadata().unwrap().len() <= 128);
         assert_eq!(
             &bytes[4..8],
             b"ftyp",

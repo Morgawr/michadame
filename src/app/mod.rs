@@ -271,7 +271,9 @@ impl eframe::App for AppState {
             let is_fullscreen = !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(is_fullscreen));
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::C)) {
+        if !ctx.wants_keyboard_input()
+            && ctx.input(|i| i.focused && i.modifiers.is_none() && i.key_pressed(egui::Key::C))
+        {
             let current_filter = CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed));
             let next_filter = current_filter.next();
             self.crt_filter.store(next_filter as u8, Ordering::Relaxed);

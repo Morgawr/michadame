@@ -1,3 +1,4 @@
+mod clipboard;
 pub mod config;
 mod encoder;
 pub mod gpu;
@@ -169,8 +170,10 @@ pub struct Status {
     pub conversion_threads: usize,
     pub recent_video_drops: u64,
     pub saving: bool,
+    pub clipboard_bytes: usize,
 }
 pub struct Shared {
+    clipboard: Arc<clipboard::Clipboard>,
     pub generation: AtomicU64,
     pub stop: Arc<AtomicBool>,
     pub audio_dropped: Arc<AtomicU64>,
@@ -198,7 +201,13 @@ impl Shared {
         }
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Destination {
+    File,
+    Clipboard,
+}
 pub struct Save {
+    destination: Destination,
     seconds: u32,
     at: i64,
 }
@@ -224,6 +233,7 @@ impl Drop for Runtime {
 }
 #[derive(Default)]
 pub struct Replay {
+    clipboard: Arc<clipboard::Clipboard>,
     pub config: ReplayConfig,
     pub audio: Arc<AudioTap>,
     pub gpu: Arc<Mutex<gpu::Readback>>,
@@ -253,6 +263,7 @@ impl Replay {
             "Replay budget exceeds available RAM after the 512 MiB safety reserve"
         );
         let shared = Arc::new(Shared {
+            clipboard: self.clipboard.clone(),
             generation: AtomicU64::new(0),
             stop: Arc::new(AtomicBool::new(false)),
             audio_dropped: Arc::new(AtomicU64::new(0)),
@@ -341,6 +352,9 @@ impl Replay {
         }
     }
     pub fn save(&mut self, seconds: u32) -> anyhow::Result<()> {
+        self.request_export(seconds, Destination::File)
+    }
+    fn request_export(&mut self, seconds: u32, destination: Destination) -> anyhow::Result<()> {
         let runtime = self
             .runtime
             .as_ref()
@@ -349,22 +363,27 @@ impl Replay {
             !runtime.shared.stop.load(Ordering::Acquire),
             "Replay has stopped; see its status"
         );
-        anyhow::ensure!(
-            !runtime.shared.status.lock().unwrap().saving,
-            "A replay is already being saved"
-        );
+        let mut status = runtime.shared.status.lock().unwrap();
+        anyhow::ensure!(!status.saving, "A replay is already being saved");
         runtime
             .save
             .try_send(Save {
+                destination,
                 seconds: seconds.min(self.config.history_seconds),
                 at: now_us(),
             })
-            .map_err(|_| anyhow::anyhow!("A replay save is already pending"))
+            .map_err(|_| anyhow::anyhow!("A replay save is already pending"))?;
+        status.message = "Preparing replay export…".into();
+        // Identical-size clipboard copies still need a fresh completion notice.
+        self.last_notice = status.message.clone();
+        Ok(())
     }
     pub fn notification(&mut self) -> Option<String> {
         let message = self.status().message;
         if message != self.last_notice
-            && (message.starts_with("Saved ")
+            && (message.starts_with("Copied ")
+                || message.starts_with("Replay copy failed:")
+                || message.starts_with("Saved ")
                 || message.starts_with("Replay stopped:")
                 || message.starts_with("Replay save failed:")
                 || message.starts_with("Not enough"))
@@ -376,7 +395,8 @@ impl Replay {
         }
     }
     pub fn status(&self) -> Status {
-        self.runtime
+        let mut status = self
+            .runtime
             .as_ref()
             .map(|r| {
                 let mut status = r.shared.status.lock().unwrap().clone();
@@ -402,7 +422,9 @@ impl Replay {
                     .as_ref()
                     .map(|s| s.status.lock().unwrap().clone())
             })
-            .unwrap_or_else(|| self.last_status.clone())
+            .unwrap_or_else(|| self.last_status.clone());
+        status.clipboard_bytes = self.clipboard.bytes();
+        status
     }
     pub fn update(&mut self) {
         if self
@@ -424,6 +446,15 @@ impl Replay {
         if self.runtime.is_none() || ctx.wants_keyboard_input() {
             return;
         }
+        if clipboard_shortcut(ctx) {
+            if let Err(error) = self.request_export(10, Destination::Clipboard) {
+                let message = format!("Replay copy failed: {error}");
+                self.last_status.message = message.clone();
+                if let Some(runtime) = &self.runtime {
+                    runtime.shared.message(message);
+                }
+            }
+        }
         for (key, seconds) in self.config.keys.into_iter().zip(self.config.durations()) {
             if let Some(key) = ui::key(key) {
                 let pressed = ctx.input_mut(|i| i.consume_key(eframe::egui::Modifiers::NONE, key));
@@ -442,12 +473,91 @@ impl Replay {
 impl Drop for Replay {
     fn drop(&mut self) {
         self.disable();
+        self.clipboard.close();
     }
+}
+
+// egui-winit translates Ctrl+C to Event::Copy rather than a C key event.
+fn clipboard_shortcut(ctx: &eframe::egui::Context) -> bool {
+    use eframe::egui::{Event, Key, ViewportId};
+    if ctx.viewport_id() != ViewportId::ROOT || ctx.wants_keyboard_input() {
+        return false;
+    }
+    ctx.input_mut(|input| {
+        if !input.focused { return false; }
+        let mut copy = false;
+        input.events.retain(|event| {
+            let matches = matches!(event, Event::Copy) || matches!(event, Event::Key { key: Key::C, pressed: true, repeat: false, modifiers, .. } if modifiers.ctrl && !modifiers.shift && !modifiers.alt && !modifiers.mac_cmd);
+            copy |= matches;
+            !matches
+        });
+        copy
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipboard_copy_is_only_consumed_in_focused_video_without_text_editing() {
+        use eframe::egui::{self, Event, Key, ViewportId};
+        for (viewport, focused, editing, expected) in [
+            (ViewportId::ROOT, true, false, true),
+            (ViewportId::ROOT, false, false, false),
+            (ViewportId::ROOT, true, true, false),
+            (
+                ViewportId::from_hash_of("control_window"),
+                true,
+                false,
+                false,
+            ),
+        ] {
+            for event in [
+                Event::Copy,
+                Event::Key {
+                    key: Key::C,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::CTRL,
+                },
+            ] {
+                let ctx = egui::Context::default();
+                let mut input = egui::RawInput {
+                    viewport_id: viewport,
+                    focused,
+                    events: vec![event],
+                    ..Default::default()
+                };
+                input.viewports.entry(viewport).or_default();
+                let _ = ctx.run(input, |ctx| {
+                    if editing {
+                        ctx.memory_mut(|m| m.request_focus(egui::Id::new("text")));
+                    }
+                    assert_eq!(clipboard_shortcut(ctx), expected);
+                    assert!(
+                        !clipboard_shortcut(ctx),
+                        "Consumed copy must not be exported twice"
+                    );
+                    assert_eq!(ctx.input(|i| i.events.len()), usize::from(!expected));
+                });
+            }
+        }
+        // Plain C still belongs to the CRT filter, not the clipboard.
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            events: vec![Event::Key {
+                key: Key::C,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| assert!(!clipboard_shortcut(ctx)));
+    }
     pub(super) fn test_tap(
         capacity: usize,
     ) -> (

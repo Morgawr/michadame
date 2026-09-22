@@ -243,6 +243,10 @@ pub fn draw_debug(replay: &Replay, ui: &mut egui::Ui) {
         }
     }
     let status = replay.status();
+    ui.label(format!(
+        "Clipboard clip / reservation: {}",
+        gib(status.clipboard_bytes)
+    ));
     ui.label(format!("History resets: {}", status.resets));
     if status.resets > 0 {
         ui.label(format!("Last reset: {}", status.last_reset));

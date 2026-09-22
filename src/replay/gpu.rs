@@ -127,6 +127,17 @@ impl Readback {
             runtime.shared.stop.store(true, Ordering::Release);
             return;
         };
+        if plan
+            .overhead
+            .saturating_add(runtime.shared.clipboard.bytes())
+            >= runtime.config.budget()
+        {
+            runtime.shared.message(
+                "Replay stopped: RAM budget is too small for this surface and the clipboard clip",
+            );
+            runtime.shared.stop.store(true, Ordering::Release);
+            return;
+        }
         let generation = runtime.shared.generation.load(Ordering::Acquire);
         runtime
             .shared

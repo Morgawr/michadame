@@ -64,3 +64,8 @@ checklist.
 The replay enable checkbox is near the top of Controls; replay options are at
 the bottom. Expand **Save shortcuts** to edit bindings or save a clip manually.
 Press **D** in the video window to toggle stream and replay diagnostics.
+
+With replay enabled, **Ctrl+C** in the video window copies up to the last
+10 seconds as a video attachment. Wait for the copied notification, then paste
+into a compatible application or website. This uses a temporary MP4 in
+RAM-backed `/tmp`; no recording is added to your save folder.
