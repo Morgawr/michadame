@@ -24,18 +24,6 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     {
         state.ui.debug_open = !state.ui.debug_open;
     }
-    egui::Area::new(egui::Id::new("debug-toggle"))
-        .anchor(egui::Align2::RIGHT_TOP, [-8.0, 8.0])
-        .order(egui::Order::Foreground)
-        .show(ctx, |ui| {
-            if ui
-                .selectable_label(state.ui.debug_open, "D")
-                .on_hover_text("Debug (D)")
-                .clicked()
-            {
-                state.ui.debug_open = !state.ui.debug_open;
-            }
-        });
     if !state.ui.debug_open {
         return;
     }

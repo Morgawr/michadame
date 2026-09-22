@@ -1,7 +1,8 @@
 # Live replay buffer
 
 Replay is opt-in and starts **disabled** on every launch. Start the capture stream,
-open Controls (`M`), then enable **Live replay buffer**. Defaults:
+open Controls (`M`), then check **Enable replay buffer** near the top. Replay
+options are at the bottom of Controls. Defaults:
 
 - 5-minute maximum history and a 1024 MiB total replay memory budget.
 - Up to 512 MiB of that budget reserved for unencoded GPU/CPU work queues.
@@ -128,8 +129,8 @@ references in both histories. Saving can shorten the live history to stay within
 the budget. PBO storage is conservatively charged even if the driver places it in
 VRAM. Other driver-owned GPU memory is additional and not measured by this budget. The budget is not a promise of a precise process RSS ceiling.
 
-The video window's **Debug** overlay (press `D` while focused, or click **D** at
-the top-right) shows available RAM before enabling, projected remaining RAM, current
+The video window's **Debug** overlay (press `D` while focused) shows available
+RAM before enabling, projected remaining RAM, current
 available RAM, allocated packet bytes, queue/staging reservation, GPU and CPU queue
 occupancy, recording lag, separate video/audio drop counts, actual retained duration and an estimate from observed bitrate. Admission leaves
 512 MiB of system headroom. Recording stops if available RAM falls below that

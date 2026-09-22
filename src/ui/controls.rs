@@ -58,15 +58,18 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
     ui.separator();
 
-    if crate::replay::ui::draw(&mut state.replay, ui, state.ui.video_window_open) {
+    crate::replay::ui::draw_toggle(&mut state.replay, ui, state.ui.video_window_open);
+    changed |= profiles::draw_profile_management(ui, state);
+    changed |= devices::draw_device_selectors(ui, state);
+    changed |= filters::draw_filters(ui, state);
+
+    ui.separator();
+    if crate::replay::ui::draw(&mut state.replay, ui) {
         changed = true;
         if let Err(error) = crate::config::save_replay_config(&state.replay.config) {
             state.error(format!("Could not save replay settings: {error}"));
         }
     }
-    changed |= profiles::draw_profile_management(ui, state);
-    changed |= devices::draw_device_selectors(ui, state);
-    changed |= filters::draw_filters(ui, state);
 
     changed
 }

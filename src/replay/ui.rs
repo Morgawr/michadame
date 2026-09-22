@@ -24,26 +24,29 @@ pub fn key(n: u8) -> Option<Key> {
 fn gib(n: usize) -> String {
     format!("{:.2} GiB", n as f64 / (1024. * 1024. * 1024.))
 }
-pub fn draw(replay: &mut Replay, ui: &mut egui::Ui, streaming: bool) -> bool {
+pub fn draw_toggle(replay: &mut Replay, ui: &mut egui::Ui, streaming: bool) {
+    let mut enabled = replay.runtime.is_some();
+    if ui
+        .add_enabled(
+            streaming || enabled,
+            egui::Checkbox::new(&mut enabled, "Enable replay buffer"),
+        )
+        .changed()
+    {
+        if enabled {
+            if let Err(e) = replay.enable() {
+                replay.last_status.message = e.to_string();
+            }
+        } else {
+            replay.disable();
+        }
+    }
+}
+
+pub fn draw(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
     let mut changed = false;
     ui.group(|ui| {
         ui.strong("Live replay buffer");
-        let mut enabled = replay.runtime.is_some();
-        if ui
-            .add_enabled(
-                streaming || enabled,
-                egui::Checkbox::new(&mut enabled, "Enable replay buffer"),
-            )
-            .changed()
-        {
-            if enabled {
-                if let Err(e) = replay.enable() {
-                    replay.last_status.message = e.to_string();
-                }
-            } else {
-                replay.disable();
-            }
-        }
         if replay.runtime.is_none()
             && replay.available_now.is_some_and(|available| {
                 replay.config.budget().saturating_add(SAFETY_RESERVE) >= available
