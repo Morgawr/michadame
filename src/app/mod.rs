@@ -19,6 +19,7 @@ impl Default for AppState {
         Self {
             replay: crate::replay::Replay::default(),
             hardware: HardwareState {
+                video_queue_drops: Arc::new(AtomicU64::new(0)),
                 audio_peak_amplitude: Arc::new(AtomicU64::new(0)),
                 audio_latency_ms: Arc::new(AtomicU64::new(0)),
                 audio_buffer_size: 1024,
@@ -37,6 +38,7 @@ impl Default for AppState {
                 selected_framerate: 0,
             },
             ui: UiState {
+                debug_open: false,
                 is_fullscreen: false,
                 reset_usb_on_startup: false,
                 show_first_run_dialog: false,
@@ -80,6 +82,8 @@ impl Default for AppState {
             pending_audio_stream: None,
             device_scan_receiver: None,
             logo_texture: None,
+            gui_fps: 0.0,
+            video_fps: 0.0,
             last_fps_check: Instant::now(),
             frames_since_last_check: 0,
             last_video_fps_check: Instant::now(),
@@ -145,32 +149,23 @@ impl AppState {
         let elapsed_secs = (now - self.last_fps_check).as_secs_f32();
 
         if elapsed_secs >= 1.0 {
+            self.gui_fps = self.frames_since_last_check as f32 / elapsed_secs;
             self.last_fps_check = now;
             self.frames_since_last_check = 0;
         }
 
         let video_elapsed_secs = (now - self.last_video_fps_check).as_secs_f32();
         if video_elapsed_secs >= 1.0 {
+            self.video_fps = self.video_frames_since_last_check as f32 / video_elapsed_secs;
             self.last_video_fps_check = now;
             self.video_frames_since_last_check = 0;
         }
-
-        let gui_fps = if elapsed_secs > 0.0 {
-            self.frames_since_last_check as f32 / elapsed_secs
-        } else {
-            0.0
-        };
-        let video_fps = if video_elapsed_secs > 0.0 {
-            self.video_frames_since_last_check as f32 / video_elapsed_secs
-        } else {
-            0.0
-        };
 
         let audio_latency = self.hardware.audio_latency_ms.load(Ordering::Relaxed);
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
             "Michadame Viewer | UI: {:.0} FPS | Video: {:.0} FPS | Audio Latency: {} ms",
-            gui_fps, video_fps, audio_latency
+            self.gui_fps, self.video_fps, audio_latency
         )));
     }
 
@@ -372,6 +367,7 @@ impl eframe::App for AppState {
         }
 
         self.update_fps_counters(ctx);
+        ui::debug::draw(self, ctx);
         self.toasts.show(ctx);
 
         if repaint_requested {
@@ -383,6 +379,25 @@ impl eframe::App for AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fps_readings_survive_counter_reset_and_update_after_a_stall() {
+        let mut state = AppState::default();
+        let ctx = egui::Context::default();
+        state.last_fps_check = Instant::now() - std::time::Duration::from_secs(2);
+        state.last_video_fps_check = state.last_fps_check;
+        state.frames_since_last_check = 239;
+        state.video_frames_since_last_check = 120;
+        state.update_fps_counters(&ctx);
+        assert!((state.gui_fps - 120.0).abs() < 1.0);
+        assert!((state.video_fps - 60.0).abs() < 1.0);
+        let measured = (state.gui_fps, state.video_fps);
+        state.update_fps_counters(&ctx);
+        assert_eq!((state.gui_fps, state.video_fps), measured);
+        state.last_video_fps_check = Instant::now() - std::time::Duration::from_secs(2);
+        state.update_fps_counters(&ctx);
+        assert_eq!(state.video_fps, 0.0);
+    }
 
     #[test]
     fn test_handle_device_scan_result_success() {

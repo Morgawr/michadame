@@ -53,6 +53,14 @@ impl AppState {
             sample_format: self.hardware.audio_sample_format.clone(),
         });
         self.latest_frame = None;
+        // Give each stream its own counter: a retired worker may still be exiting.
+        self.hardware.video_queue_drops = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        self.gui_fps = 0.0;
+        self.video_fps = 0.0;
+        self.frames_since_last_check = 0;
+        self.video_frames_since_last_check = 0;
+        self.last_fps_check = std::time::Instant::now();
+        self.last_video_fps_check = self.last_fps_check;
 
         let new_size = egui::vec2(resolution.0 as f32, resolution.1 as f32);
         ctx.send_viewport_cmd_to(
@@ -77,6 +85,7 @@ impl AppState {
         let notify_video_event = Arc::clone(&request_repaint);
 
         let video_config = video::decoder::VideoThreadConfig {
+            queue_drops: self.hardware.video_queue_drops.clone(),
             device,
             format,
             resolution,

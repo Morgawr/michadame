@@ -26,97 +26,287 @@ fn gib(n: usize) -> String {
 }
 pub fn draw(replay: &mut Replay, ui: &mut egui::Ui, streaming: bool) -> bool {
     let mut changed = false;
-    ui.collapsing("Live replay buffer", |ui| {
+    ui.group(|ui| {
+        ui.strong("Live replay buffer");
         let mut enabled = replay.runtime.is_some();
-        if ui.add_enabled(streaming || enabled, egui::Checkbox::new(&mut enabled,"Enable replay buffer")).changed() {
-            if enabled { if let Err(e) = replay.enable() { replay.last_status.message = e.to_string(); } }
-            else { replay.disable(); }
+        if ui
+            .add_enabled(
+                streaming || enabled,
+                egui::Checkbox::new(&mut enabled, "Enable replay buffer"),
+            )
+            .changed()
+        {
+            if enabled {
+                if let Err(e) = replay.enable() {
+                    replay.last_status.message = e.to_string();
+                }
+            } else {
+                replay.disable();
+            }
         }
-        if !streaming { ui.label("Start the stream before enabling replay. Replay starts disabled each launch."); }
-        let available = replay.available_now;
-        if let Some(before) = replay.available_before { ui.label(format!("Available RAM before enabling: {}",gib(before))); }
-        if let Some(available) = available {
-            ui.label(format!("Available RAM now: {}",gib(available)));
-            if replay.runtime.is_none() {
-                ui.label(format!("Projected available RAM at full budget: {}",gib(available.saturating_sub(replay.config.budget()))));
-            }
-            if replay.config.budget().saturating_add(SAFETY_RESERVE) >= available && replay.runtime.is_none() {
-                ui.colored_label(egui::Color32::YELLOW,"Budget exceeds available RAM with the 512 MiB safety reserve.");
-            }
+        if replay.runtime.is_none()
+            && replay.available_now.is_some_and(|available| {
+                replay.config.budget().saturating_add(SAFETY_RESERVE) >= available
+            })
+        {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "Budget exceeds available RAM with the 512 MiB safety reserve.",
+            );
         }
         let status = replay.status();
-        ui.label(format!("History resets: {}", status.resets));
-        if status.resets > 0 { ui.label(format!("Last reset: {}", status.last_reset)); }
-        if status.history_exhaustions > 0 { ui.label(format!("History emptied by limits: {} · {}", status.history_exhaustions, status.last_exhaustion)); }
-        ui.label(format!("Retained: {:.1}s / {}s · packets and active save: {}",status.seconds,replay.config.history_seconds,gib(status.bytes)));
-        ui.label(format!("Work queues + staging/encoder allowance: {}",gib(status.overhead)));
-        if status.queue_slots > 0 {
-            ui.label(format!("Work queue: {} GPU + {} CPU frames waiting · {} slots per stage · {} reserved", status.gpu_pending, status.cpu_pending, status.queue_slots, gib(status.queue_bytes)));
-            ui.label(format!("Recording behind live: {:.2}s · dropped video total: {} (+{} since last update) · audio drop events: {}", status.backlog_ms as f64 / 1000., status.video_dropped, status.recent_video_drops, status.audio_dropped));
+        if !status.message.is_empty() {
+            ui.label(&status.message);
         }
-        if status.conversion_threads > 0 {
-            ui.label(format!("Recording work per frame: conversion {:.2} ms ({} threads) · upload/encode {:.2} ms · frame interval {:.2} ms", status.conversion_ms, status.conversion_threads, status.hardware_ms, status.frame_interval_ms));
+        if replay.runtime.is_none()
+            && !replay.last_status.message.is_empty()
+            && replay.last_status.message != status.message
+        {
+            ui.label(&replay.last_status.message);
         }
-        if let Some((w,h)) = status.surface { ui.label(format!("Recording surface: {w} × {h} · {}",status.codec)); }
-        if !status.message.is_empty() { ui.label(&status.message); }
-        if replay.runtime.is_none() && !replay.last_status.message.is_empty() && replay.last_status.message != status.message { ui.label(&replay.last_status.message); }
-        if status.saving { ui.label("Saving in background; retained packets remain allocated until finished."); }
+        if status.saving {
+            ui.label("Saving…");
+        }
         ui.add_enabled_ui(replay.runtime.is_none(), |ui| {
             ui.horizontal(|ui| {
-                ui.label("Maximum history (seconds)"); changed |= ui.add(egui::DragValue::new(&mut replay.config.history_seconds).clamp_range(1..=3600)).changed();
+                ui.label("Maximum history (seconds)");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut replay.config.history_seconds)
+                            .clamp_range(1..=3600),
+                    )
+                    .changed();
             });
             ui.horizontal(|ui| {
-                ui.label("RAM budget (MiB)"); changed |= ui.add(egui::DragValue::new(&mut replay.config.memory_mib).clamp_range(256..=32768)).changed();
+                ui.label("RAM budget (MiB)");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut replay.config.memory_mib)
+                            .clamp_range(256..=32768),
+                    )
+                    .changed();
             });
             ui.horizontal(|ui| {
-                ui.label("Work queue RAM (MiB)"); changed |= ui.add(egui::DragValue::new(&mut replay.config.work_queue_mib).clamp_range(32..=8192)).changed();
+                ui.label("Work queue RAM (MiB)");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut replay.config.work_queue_mib)
+                            .clamp_range(32..=8192),
+                    )
+                    .changed();
             });
-            ui.label("Work queues share the total RAM budget (up to half). More queue memory absorbs longer stalls but leaves less encoded history.");
             ui.horizontal(|ui| {
                 ui.label("Video codec");
-                egui::ComboBox::from_id_source("replay-codec").selected_text(format!("{:?}",replay.config.codec)).show_ui(ui,|ui| {
-                    for (codec,label) in [(Codec::Av1,"AV1"),(Codec::Hevc,"HEVC"),(Codec::H264,"H.264")] { changed |= ui.selectable_value(&mut replay.config.codec,codec,label).changed(); }
-                });
+                egui::ComboBox::from_id_source("replay-codec")
+                    .selected_text(format!("{:?}", replay.config.codec))
+                    .show_ui(ui, |ui| {
+                        for (codec, label) in [
+                            (Codec::Av1, "AV1"),
+                            (Codec::Hevc, "HEVC"),
+                            (Codec::H264, "H.264"),
+                        ] {
+                            changed |= ui
+                                .selectable_value(&mut replay.config.codec, codec, label)
+                                .changed();
+                        }
+                    });
             });
             ui.horizontal(|ui| {
                 ui.label("Compression mode");
-                changed |= ui.selectable_value(&mut replay.config.rate_control, RateControl::Bitrate, "Bitrate limited").changed();
-                changed |= ui.selectable_value(&mut replay.config.rate_control, RateControl::Quality, "Fixed quality").changed();
+                changed |= ui
+                    .selectable_value(
+                        &mut replay.config.rate_control,
+                        RateControl::Bitrate,
+                        "Bitrate limited",
+                    )
+                    .changed();
+                changed |= ui
+                    .selectable_value(
+                        &mut replay.config.rate_control,
+                        RateControl::Quality,
+                        "Fixed quality",
+                    )
+                    .changed();
             });
             if replay.config.rate_control == RateControl::Bitrate {
-                ui.horizontal(|ui| { ui.label("Video bitrate limit (Mbit/s)"); changed |= ui.add(egui::DragValue::new(&mut replay.config.max_bitrate_mbps).clamp_range(1..=200)).changed(); });
-                ui.label(format!("VBR target {:.1} Mbit/s, limit {} Mbit/s. Higher limits retain more detail but need more memory and decoding capacity. Driver rate control allows short bursts.", replay.config.max_bitrate_mbps as f64 * 0.75, replay.config.max_bitrate_mbps));
-            } else {
-                ui.horizontal(|ui| { ui.label("Quality level (lower = larger files)"); changed |= ui.add(egui::DragValue::new(&mut replay.config.quality).clamp_range(1..=51)).changed(); });
-                ui.label(format!("Encoder quantizer: {} ({}). Quality levels are not equivalent across codecs.", replay.config.codec.quantizer(replay.config.quality), if replay.config.codec == Codec::Av1 { "AV1 scale 0–255" } else { "QP scale 0–51" }));
-                ui.colored_label(egui::Color32::YELLOW, "No bitrate limit. Very detailed filters can produce files too demanding for some players; stream level limits are not guaranteed.");
-            }
-            ui.horizontal(|ui| { ui.label("GPU render device"); changed |= ui.text_edit_singleline(&mut replay.config.render_device).changed(); });
-            ui.horizontal(|ui| { ui.label("Save folder"); changed |= ui.text_edit_singleline(&mut replay.config.directory).changed(); });
-        });
-        if status.seconds > 2. && !status.saving && status.bytes > 0 {
-            let estimate = (status.bytes as f64 / status.seconds * replay.config.history_seconds as f64) as usize;
-            ui.label(format!("At the observed bitrate: ~{} for {}s of packets + {} staging allowance",gib(estimate),replay.config.history_seconds,gib(status.overhead)));
-        }
-        ui.label("Compression settings control storage and playback cost; history can be shorter than the duration limit. Unsupported rate control stops replay instead of silently removing the limit.");
-        ui.label("At 20 / 40 / 80 Mbit/s, 5 minutes uses about 722 / 1437 / 2868 MiB plus staging. Actual bitrate depends on motion, resolution, FPS and filters.");
-        ui.label("GPU memory is additional and driver-dependent. Rendered image size changes reset history. Playback has priority over recording.");
-        ui.horizontal(|ui| { ui.label("Custom clip seconds"); changed |= ui.add(egui::DragValue::new(&mut replay.config.custom_seconds).clamp_range(1..=3600)).changed(); });
-        for (index,seconds) in replay.config.durations().into_iter().enumerate() {
-            ui.horizontal(|ui| {
-                ui.label(format!("Save {seconds}s"));
-                egui::ComboBox::from_id_source(("replay-key",index)).selected_text(if replay.config.keys[index] == 0 { "Disabled".into() } else {format!("F{}",replay.config.keys[index])}).show_ui(ui,|ui| {
-                    for number in 0..=12 {
-                        let assigned = number != 0 && replay.config.keys.iter().enumerate().any(|(i,k)|i != index && *k == number);
-                        ui.add_enabled_ui(!assigned,|ui| { changed |= ui.selectable_value(&mut replay.config.keys[index],number,if number == 0 {"Disabled".into()} else {format!("F{number}")}).changed(); });
-                    }
+                ui.horizontal(|ui| {
+                    ui.label("Video bitrate limit (Mbit/s)");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut replay.config.max_bitrate_mbps)
+                                .clamp_range(1..=200),
+                        )
+                        .changed();
                 });
-                if ui.add_enabled(replay.runtime.is_some() && !status.saving,egui::Button::new("Save now")).clicked() {
-                    if let Err(e) = replay.save(seconds) { replay.last_status.message = e.to_string(); if let Some(r) = &replay.runtime {r.shared.message(e.to_string());} }
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label("Quality level (lower = larger files)");
+                    changed |= ui
+                        .add(egui::DragValue::new(&mut replay.config.quality).clamp_range(1..=51))
+                        .changed();
+                });
+            }
+            ui.horizontal(|ui| {
+                ui.label("GPU render device");
+                changed |= ui
+                    .text_edit_singleline(&mut replay.config.render_device)
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("Save folder");
+                changed |= ui
+                    .text_edit_singleline(&mut replay.config.directory)
+                    .changed();
+            });
+        });
+        egui::CollapsingHeader::new("Save shortcuts")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Custom clip seconds");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut replay.config.custom_seconds)
+                                .clamp_range(1..=3600),
+                        )
+                        .changed();
+                });
+                for (index, seconds) in replay.config.durations().into_iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Save {seconds}s"));
+                        egui::ComboBox::from_id_source(("replay-key", index))
+                            .selected_text(if replay.config.keys[index] == 0 {
+                                "Disabled".into()
+                            } else {
+                                format!("F{}", replay.config.keys[index])
+                            })
+                            .show_ui(ui, |ui| {
+                                for number in 0..=12 {
+                                    let assigned = number != 0
+                                        && replay
+                                            .config
+                                            .keys
+                                            .iter()
+                                            .enumerate()
+                                            .any(|(i, k)| i != index && *k == number);
+                                    ui.add_enabled_ui(!assigned, |ui| {
+                                        changed |= ui
+                                            .selectable_value(
+                                                &mut replay.config.keys[index],
+                                                number,
+                                                if number == 0 {
+                                                    "Disabled".into()
+                                                } else {
+                                                    format!("F{number}")
+                                                },
+                                            )
+                                            .changed();
+                                    });
+                                }
+                            });
+                        if ui
+                            .add_enabled(
+                                replay.runtime.is_some() && !status.saving,
+                                egui::Button::new("Save now"),
+                            )
+                            .clicked()
+                        {
+                            if let Err(e) = replay.save(seconds) {
+                                replay.last_status.message = e.to_string();
+                                if let Some(r) = &replay.runtime {
+                                    r.shared.message(e.to_string());
+                                }
+                            }
+                        }
+                    });
                 }
             });
-        }
-        ui.label("Shortcuts work while either Michadame window is focused, outside text editing. Clips start at a keyframe and may be slightly shorter.");
     });
     changed
+}
+
+pub fn draw_debug(replay: &Replay, ui: &mut egui::Ui) {
+    let available = replay.available_now;
+    if let Some(before) = replay.available_before {
+        ui.label(format!("Available RAM before enabling: {}", gib(before)));
+    }
+    if let Some(available) = available {
+        ui.label(format!("Available RAM now: {}", gib(available)));
+        if replay.runtime.is_none() {
+            ui.label(format!(
+                "Projected available RAM at full budget: {}",
+                gib(available.saturating_sub(replay.config.budget()))
+            ));
+        }
+    }
+    let status = replay.status();
+    ui.label(format!("History resets: {}", status.resets));
+    if status.resets > 0 {
+        ui.label(format!("Last reset: {}", status.last_reset));
+    }
+    if status.history_exhaustions > 0 {
+        ui.label(format!(
+            "History emptied by limits: {} · {}",
+            status.history_exhaustions, status.last_exhaustion
+        ));
+    }
+    ui.label(format!(
+        "Retained: {:.1}s / {}s · packets and active save: {}",
+        status.seconds,
+        replay.config.history_seconds,
+        gib(status.bytes)
+    ));
+    ui.label(format!(
+        "Work queues + staging/encoder allowance: {}",
+        gib(status.overhead)
+    ));
+    if status.queue_slots > 0 {
+        ui.label(format!(
+            "Work queue: {} GPU + {} CPU frames waiting · {} slots per stage · {} reserved",
+            status.gpu_pending,
+            status.cpu_pending,
+            status.queue_slots,
+            gib(status.queue_bytes)
+        ));
+        ui.label(format!("Recording behind live: {:.2}s · dropped video total: {} (+{} since last update) · audio drop events: {}", status.backlog_ms as f64 / 1000., status.video_dropped, status.recent_video_drops, status.audio_dropped));
+    }
+    if status.conversion_threads > 0 {
+        ui.label(format!("Recording work per frame: conversion {:.2} ms ({} threads) · upload/encode {:.2} ms · frame interval {:.2} ms", status.conversion_ms, status.conversion_threads, status.hardware_ms, status.frame_interval_ms));
+    }
+    if let Some((w, h)) = status.surface {
+        ui.label(format!("Recording surface: {w} × {h} · {}", status.codec));
+    }
+    if status.seconds > 2. && !status.saving && status.bytes > 0 {
+        let estimate =
+            (status.bytes as f64 / status.seconds * replay.config.history_seconds as f64) as usize;
+        ui.label(format!(
+            "At the observed bitrate: ~{} for {}s of packets + {} staging allowance",
+            gib(estimate),
+            replay.config.history_seconds,
+            gib(status.overhead)
+        ));
+    }
+    if !status.message.is_empty() {
+        ui.label(&status.message);
+    }
+    let compression = match replay.config.rate_control {
+        RateControl::Bitrate => format!(
+            "VBR {:.1} / {} Mbit/s target / limit",
+            replay.config.max_bitrate_mbps as f64 * 0.75,
+            replay.config.max_bitrate_mbps
+        ),
+        RateControl::Quality => format!(
+            "Fixed quality {} · encoder quantizer {}",
+            replay.config.quality,
+            replay.config.codec.quantizer(replay.config.quality)
+        ),
+    };
+    ui.label(format!(
+        "Configured: {:?} · {} · {}",
+        replay.config.codec, compression, replay.config.render_device
+    ));
+    ui.label(format!(
+        "RAM budget: {} MiB · work queue budget: {} MiB",
+        replay.config.memory_mib, replay.config.work_queue_mib
+    ));
 }

@@ -11,6 +11,7 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 pub struct HardwareState {
+    pub video_queue_drops: Arc<AtomicU64>,
     pub audio_peak_amplitude: Arc<AtomicU64>,
     pub audio_latency_ms: Arc<AtomicU64>,
     pub audio_buffer_size: u32,
@@ -30,6 +31,7 @@ pub struct HardwareState {
 }
 
 pub struct UiState {
+    pub debug_open: bool,
     pub is_fullscreen: bool,
     pub reset_usb_on_startup: bool,
     pub show_first_run_dialog: bool,
@@ -90,6 +92,8 @@ pub struct AppState {
     pub pending_audio_stream: Option<PendingAudioStream>,
     pub device_scan_receiver: Option<crossbeam_channel::Receiver<devices::DeviceScanResult>>,
     pub logo_texture: Option<egui::TextureHandle>,
+    pub gui_fps: f32,
+    pub video_fps: f32,
     pub last_fps_check: Instant,
     pub frames_since_last_check: u32,
     pub last_video_fps_check: Instant,

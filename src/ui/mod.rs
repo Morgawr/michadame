@@ -2,6 +2,7 @@ use crate::app::AppState;
 use eframe::egui;
 
 pub mod controls;
+pub mod debug;
 pub mod devices;
 pub mod dialogs;
 pub mod fft_mask;

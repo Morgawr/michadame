@@ -2,7 +2,7 @@ use crate::video::types::{RawFrame, VideoFormat};
 use anyhow::{anyhow, Context, Result};
 use std::ffi::{c_void, CString};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU8, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
     Arc, Mutex,
 };
 use std::thread;
@@ -23,6 +23,7 @@ pub enum VideoThreadEvent {
 }
 
 pub struct VideoThreadConfig {
+    pub queue_drops: Arc<AtomicU64>,
     pub device: String,
     pub format: VideoFormat,
     pub resolution: (u32, u32),
@@ -223,6 +224,7 @@ pub fn video_thread_main(
     config: VideoThreadConfig,
 ) -> Result<()> {
     let VideoThreadConfig {
+        queue_drops,
         device,
         format,
         resolution,
@@ -239,6 +241,7 @@ pub fn video_thread_main(
     loop {
         let result = run_video_capture_session(
             &frame_sender,
+            &queue_drops,
             &status_sender,
             &device,
             &format,
@@ -279,6 +282,7 @@ pub fn video_thread_main(
 #[allow(clippy::too_many_arguments)]
 fn run_video_capture_session(
     frame_sender: &crossbeam_channel::Sender<Arc<RawFrame>>,
+    queue_drops: &AtomicU64,
     status_sender: &crossbeam_channel::Sender<VideoThreadEvent>,
     device: &str,
     format: &VideoFormat,
@@ -453,7 +457,9 @@ fn run_video_capture_session(
 
             match frame_sender.try_send(raw_frame) {
                 Ok(()) => request_repaint(),
-                Err(crossbeam_channel::TrySendError::Full(_)) => {}
+                Err(crossbeam_channel::TrySendError::Full(_)) => {
+                    queue_drops.fetch_add(1, Ordering::Relaxed);
+                }
                 Err(crossbeam_channel::TrySendError::Disconnected(_)) => return Ok(()),
             }
 

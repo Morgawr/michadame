@@ -1,7 +1,7 @@
 # Live replay buffer
 
 Replay is opt-in and starts **disabled** on every launch. Start the capture stream,
-open Controls (`M`), expand **Live replay buffer**, then enable it. Defaults:
+open Controls (`M`), then enable **Live replay buffer**. Defaults:
 
 - 5-minute maximum history and a 1024 MiB total replay memory budget.
 - Up to 512 MiB of that budget reserved for unencoded GPU/CPU work queues.
@@ -17,7 +17,8 @@ shortcuts) are saved when edited and restored on restart. Enabling replay remain
 an explicit per-launch choice.
 
 Shortcuts work in either focused Michadame window, outside text editing. They are
-not desktop-global shortcuts. Save buttons are also available in Controls.
+not desktop-global shortcuts. Bindings, custom clip duration and save buttons are
+in the initially collapsed **Save shortcuts** section in Controls.
 All durations share one buffer and clamp to the retained decodable A/V history.
 The beginning rounds forward to a keyframe, so a clip can be about one second
 shorter. It never includes future gameplay after the keypress. Saving waits for
@@ -127,12 +128,23 @@ references in both histories. Saving can shorten the live history to stay within
 the budget. PBO storage is conservatively charged even if the driver places it in
 VRAM. Other driver-owned GPU memory is additional and not measured by this budget. The budget is not a promise of a precise process RSS ceiling.
 
-The controls show available RAM before enabling, projected remaining RAM, current
+The video window's **Debug** overlay (press `D` while focused, or click **D** at
+the top-right) shows available RAM before enabling, projected remaining RAM, current
 available RAM, allocated packet bytes, queue/staging reservation, GPU and CPU queue
 occupancy, recording lag, separate video/audio drop counts, actual retained duration and an estimate from observed bitrate. Admission leaves
 512 MiB of system headroom. Recording stops if available RAM falls below that
 reserve. Swap is not counted as replay capacity. Fixed-quality compression has
 variable bitrate, so a fixed RAM budget cannot guarantee a fixed history length.
+The RAM admission warning and recording/save messages remain in Controls.
+Debug is hidden by default and overlays the video without resizing it or appearing
+in replay recordings. It also shows measured UI/received-video FPS, nominal source
+FPS, decoded/window sizes, configured stream and shader options, and live audio
+queue depth and estimated latency. Playback video queue drops are counted per
+stream; playback underrun silence and clock-drift drops are counted per audio
+stream. These counters describe application queues, not losses inside the capture
+device or driver, and remain distinct from replay video/audio drops. Audio counters
+use relaxed atomics once per refill or discontinuity, with no added buffering or
+blocking in the playback callback. The detailed panel refreshes even during a stall.
 Persistent **History resets / Last reset** fields distinguish format resets from
 frame drops. **History emptied by limits** separately reports loss of the final
 decodable group to the RAM or age cap; ordinary rolling eviction does not count.

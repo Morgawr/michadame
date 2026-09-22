@@ -60,3 +60,7 @@ Optional rendered-video replay with audio, configurable RAM/history limits and
 F5–F10 save shortcuts is available in Controls. It starts disabled. See
 [Replay.md](Replay.md) for setup, resource behavior and the hardware validation
 checklist.
+
+Replay settings stay visible in Controls; expand **Save shortcuts** to edit
+bindings or save a clip manually. Press **D** in the video window (or click its
+top-right **D** button) to toggle stream and replay diagnostics.

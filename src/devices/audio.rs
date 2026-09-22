@@ -15,7 +15,17 @@ const ALSA_RECONNECT_DELAY: Duration = Duration::from_millis(50);
 const ALSA_STALL_TIMEOUT: Duration = Duration::from_secs(2);
 const ALSA_RECOVERY_TIMEOUT: Duration = Duration::from_secs(6);
 
+#[derive(Default)]
+pub struct PlaybackStatistics {
+    pub queued_frames: AtomicU64,
+    pub silence_frames: AtomicU64,
+    pub drift_dropped_frames: AtomicU64,
+}
+
 pub struct AudioStreamHandle {
+    pub statistics: Arc<PlaybackStatistics>,
+    pub sample_rate: u32,
+    pub channels: u16,
     alsa_capture_thread: Option<thread::JoinHandle<()>>,
     capture_failure_receiver: crossbeam_channel::Receiver<String>,
     stop_capture: Arc<AtomicBool>,
@@ -90,6 +100,7 @@ impl AudioCaptureProgress {
 }
 
 struct LiveSource {
+    statistics: Arc<PlaybackStatistics>,
     consumer: Consumer<f32>,
     channels: u16,
     sample_rate: u32,
@@ -117,6 +128,11 @@ impl Iterator for LiveSource {
                 (safe_queued as f64 / self.channels as f64 / self.sample_rate as f64 * 1000.0)
                     as u64;
 
+            // Publish once per refill, never per sample; no locks or allocations.
+            self.statistics.queued_frames.store(
+                (safe_queued / self.channels as usize) as u64,
+                Ordering::Relaxed,
+            );
             let capture_ms = self.capture_delay_ms.load(Ordering::Relaxed);
 
             // Heuristic for playback latency: Rodio/CPAL usually buffers 2-3 periods.
@@ -138,6 +154,10 @@ impl Iterator for LiveSource {
                     let drop_frames = (to_drop / self.channels as usize) * self.channels as usize;
                     if let Ok(chunk) = self.consumer.read_chunk(drop_frames) {
                         chunk.commit_all();
+                        self.statistics.drift_dropped_frames.fetch_add(
+                            (drop_frames / self.channels as usize) as u64,
+                            Ordering::Relaxed,
+                        );
                         skipped_audio = true;
                     }
                 }
@@ -179,6 +199,10 @@ impl Iterator for LiveSource {
                     * self.channels as usize)
                     .max(self.channels as usize);
 
+                self.statistics.silence_frames.fetch_add(
+                    (safe_silence / self.channels as usize) as u64,
+                    Ordering::Relaxed,
+                );
                 self.valid_len = safe_silence;
                 self.local_idx = 0;
                 self.fade_to_silence();
@@ -374,7 +398,9 @@ pub fn start_audio_stream(
     };
     sink.set_volume(1.0);
 
+    let statistics = Arc::new(PlaybackStatistics::default());
     let live_source = LiveSource {
+        statistics: statistics.clone(),
         consumer,
         channels: input_channels,
         sample_rate: input_sample_rate,
@@ -393,6 +419,9 @@ pub fn start_audio_stream(
     sink.append(live_source);
 
     Ok(AudioStreamHandle {
+        statistics,
+        sample_rate: input_sample_rate,
+        channels: input_channels,
         alsa_capture_thread: alsa_thread,
         capture_failure_receiver,
         stop_capture,
@@ -780,6 +809,7 @@ mod tests {
     fn underrun_uses_short_silence_and_accepts_new_audio_without_waiting() {
         let (mut producer, consumer) = RingBuffer::<f32>::new(256);
         let mut source = LiveSource {
+            statistics: Arc::new(PlaybackStatistics::default()),
             consumer,
             channels: 2,
             sample_rate: 48_000,
@@ -794,6 +824,7 @@ mod tests {
 
         assert_eq!(source.next(), Some(0.0));
         assert_eq!(source.valid_len, 96, "underrun recovery should cover 1 ms");
+        assert_eq!(source.statistics.silence_frames.load(Ordering::Relaxed), 48);
 
         producer.push(0.25).unwrap();
         producer.push(-0.25).unwrap();
@@ -814,6 +845,7 @@ mod tests {
         }
 
         let mut source = LiveSource {
+            statistics: Arc::new(PlaybackStatistics::default()),
             consumer,
             channels: 2,
             sample_rate: 48_000,
@@ -864,6 +896,7 @@ mod tests {
         }
 
         let mut source = LiveSource {
+            statistics: Arc::new(PlaybackStatistics::default()),
             consumer,
             channels: 2,
             sample_rate: 48_000,
@@ -882,5 +915,17 @@ mod tests {
         assert!(first_left < 1.0 && first_left > 0.25);
         assert!(first_right > -1.0 && first_right < -0.25);
         assert_eq!(source.consumer.slots(), 7_584);
+        assert_eq!(
+            source.statistics.queued_frames.load(Ordering::Relaxed),
+            5_000
+        );
+        assert_eq!(
+            source
+                .statistics
+                .drift_dropped_frames
+                .load(Ordering::Relaxed),
+            1_160
+        );
+        assert_eq!(source.statistics.silence_frames.load(Ordering::Relaxed), 0);
     }
 }
