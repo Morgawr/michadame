@@ -63,12 +63,41 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     changed |= devices::draw_device_selectors(ui, state);
     changed |= filters::draw_filters(ui, state);
 
-    ui.separator();
     if crate::replay::ui::draw(&mut state.replay, ui) {
         changed = true;
         if let Err(error) = crate::config::save_replay_config(&state.replay.config) {
             state.error(format!("Could not save replay settings: {error}"));
         }
+    }
+
+    ui.separator();
+    ui.label(egui::RichText::new("Quick OCR (Google Lens)").strong());
+    ui.horizontal(|ui| {
+        ui.label("Sticky Box Distance:");
+        let slider = egui::Slider::new(&mut state.ocr.sticky_distance, 0.0..=2.0)
+            .step_by(0.05)
+            .suffix("x");
+        if ui
+            .add(slider)
+            .on_hover_text(
+                "Maximum vertical distance between adjacent lines to merge into one block (as a multiple of line height).\n• 0.0: Keep all lines separate\n• 0.6: Default (tight, dialogue lines only)\n• 1.0+: Looser merging",
+            )
+            .changed()
+        {
+            state.ocr.recompute_boxes();
+            crate::config::save_config(state);
+            changed = true;
+        }
+    });
+    ui.label(
+        egui::RichText::new("Space = capture OCR, shift + space = clear OCR boxes").weak(),
+    );
+
+    if state.ocr.is_processing.load(Ordering::Relaxed) {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label("Processing OCR with Google Lens...");
+        });
     }
 
     changed

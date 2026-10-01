@@ -71,6 +71,7 @@ pub struct LegacyConfig {
     pub vibrance: Option<f32>,
     pub overscan_x: Option<f32>,
     pub overscan_y: Option<f32>,
+    pub ocr_sticky_distance: Option<f32>,
 }
 
 pub fn default_active_profile() -> String {
@@ -91,6 +92,7 @@ pub struct MichadameConfig {
     pub audio_sample_rate: Option<u32>,
     pub audio_sample_format: Option<String>,
     pub active_profile: String,
+    pub ocr_sticky_distance: Option<f32>,
     // confy's TOML serializer requires scalar fields before nested tables.
     pub replay: crate::replay::config::ReplayConfig,
     pub profiles: BTreeMap<String, Profile>,
@@ -113,6 +115,7 @@ impl Default for MichadameConfig {
             audio_sample_rate: None,
             audio_sample_format: None,
             active_profile: "Default".to_string(),
+            ocr_sticky_distance: Some(0.6),
             profiles,
         }
     }

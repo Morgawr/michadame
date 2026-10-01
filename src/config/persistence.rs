@@ -74,6 +74,7 @@ pub fn save_config(state: &AppState) {
     cfg.audio_buffer_size = Some(state.hardware.audio_buffer_size);
     cfg.audio_sample_rate = Some(state.hardware.audio_sample_rate);
     cfg.audio_sample_format = Some(state.hardware.audio_sample_format.clone());
+    cfg.ocr_sticky_distance = Some(state.ocr.sticky_distance);
 
     cfg.active_profile = state.active_profile.clone();
     cfg.profiles = state.profiles.clone();
@@ -109,6 +110,7 @@ pub fn save_global_hardware_config(state: &AppState) {
     cfg.audio_buffer_size = Some(state.hardware.audio_buffer_size);
     cfg.audio_sample_rate = Some(state.hardware.audio_sample_rate);
     cfg.audio_sample_format = Some(state.hardware.audio_sample_format.clone());
+    cfg.ocr_sticky_distance = Some(state.ocr.sticky_distance);
 
     cfg.active_profile = state.active_profile.clone();
     cfg.profiles = state.profiles.clone();
@@ -238,6 +240,7 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     if !cfg.has_shown_first_run_warning.unwrap_or(false) {
         state.ui.show_first_run_dialog = true;
     }
+    state.ocr.sticky_distance = cfg.ocr_sticky_distance.unwrap_or(0.6);
 
     state.active_profile = cfg.active_profile.clone();
 
@@ -382,5 +385,39 @@ mod tests {
         apply_config(&mut state, &cfg);
         // Should NOT update if not in list
         assert_eq!(state.hardware.selected_video_device, "");
+    }
+
+    #[test]
+    fn test_apply_config_ocr_sticky_distance() {
+        let mut state = AppState::default();
+        assert_eq!(state.ocr.sticky_distance, 0.6);
+
+        let cfg = MichadameConfig {
+            ocr_sticky_distance: Some(1.25),
+            ..Default::default()
+        };
+        apply_config(&mut state, &cfg);
+        assert!((state.ocr.sticky_distance - 1.25).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_ocr_sticky_distance_toml_roundtrip() {
+        let path = std::env::temp_dir().join(format!(
+            "michadame-ocr-config-{}-{}.toml",
+            std::process::id(),
+            crate::replay::now_us()
+        ));
+        let cfg = MichadameConfig {
+            ocr_sticky_distance: Some(0.85),
+            ..Default::default()
+        };
+        confy::store_path(&path, &cfg).unwrap();
+        let loaded: MichadameConfig = confy::load_path(&path).unwrap();
+        assert_eq!(loaded.ocr_sticky_distance, Some(0.85));
+
+        let mut state = AppState::default();
+        apply_config(&mut state, &loaded);
+        assert!((state.ocr.sticky_distance - 0.85).abs() < f32::EPSILON);
+        let _ = std::fs::remove_file(&path);
     }
 }

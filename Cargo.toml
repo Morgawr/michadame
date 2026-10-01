@@ -36,6 +36,9 @@ rusb = "0.9.4"
 rtrb = "0.3.3"
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
 tempfile = "3.23.0"
+prost = "0.13"
+ureq = { version = "2.10", features = ["tls"] }
+rand = "0.8"
 
 [profile.profiling]
 inherits = "release"

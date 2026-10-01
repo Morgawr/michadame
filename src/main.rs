@@ -4,6 +4,7 @@ mod devices;
 mod replay;
 mod ui;
 mod video;
+mod ocr;
 
 use anyhow::Result;
 use eframe::egui;

@@ -110,6 +110,7 @@ impl Default for AppState {
             fft_black_threshold: 0.0,
             fft_mask_save_name: String::new(),
             fft_available_masks: Vec::new(),
+            ocr: crate::ocr::OcrState::default(),
         }
     }
 }
@@ -366,6 +367,35 @@ impl eframe::App for AppState {
                 ctx.layer_painter(egui::LayerId::background()).add(callback);
             }
             repaint_requested = true;
+        }
+
+        if let Some(rx) = &self.ocr.result_receiver {
+            if let Ok(result) = rx.try_recv() {
+                self.ocr.is_processing.store(false, Ordering::Release);
+                match result {
+                    Ok(lines) => {
+                        self.ocr.raw_lines = lines;
+                        self.ocr.recompute_boxes();
+                        let count = self.ocr.boxes.len();
+                        self.ocr.last_copied_index = None;
+                        self.ocr.last_error = None;
+                        if count == 0 {
+                            self.info("Google Lens OCR: No Japanese text detected.");
+                        } else {
+                            self.info(format!(
+                                "Google Lens OCR: Found {} text box{}.",
+                                count,
+                                if count == 1 { "" } else { "es" }
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        self.ocr.last_error = Some(e.clone());
+                        self.error(format!("OCR error: {}", e));
+                    }
+                }
+                repaint_requested = true;
+            }
         }
 
         self.update_fps_counters(ctx);

@@ -52,6 +52,7 @@ impl From<LegacyConfig> for MichadameConfig {
             audio_sample_rate: legacy.audio_sample_rate,
             audio_sample_format: legacy.audio_sample_format,
             active_profile,
+            ocr_sticky_distance: legacy.ocr_sticky_distance,
             profiles,
         }
     }
@@ -100,6 +101,7 @@ mod tests {
             vibrance: Some(1.0),
             overscan_x: Some(0.0),
             overscan_y: Some(0.0),
+            ocr_sticky_distance: None,
         };
 
         let config: MichadameConfig = MichadameConfig::from(legacy);
@@ -160,6 +162,7 @@ mod tests {
             vibrance: None,
             overscan_x: None,
             overscan_y: None,
+            ocr_sticky_distance: None,
         };
 
         let config: MichadameConfig = MichadameConfig::from(legacy);
