@@ -517,26 +517,4 @@ mod tests {
         assert_eq!(boxes[0].text, "セリフの一行目");
         assert_eq!(boxes[1].text, "離れたボタン");
     }
-
-    #[test]
-    fn test_user_screenshot() {
-        let path = "/home/morg/.gemini/antigravity/brain/80a692cd-1269-4983-be60-b18f8b023762/.user_uploaded/media_1790868652272.png";
-        if let Ok(bytes) = std::fs::read(path) {
-            let img = image::load_from_memory(&bytes).unwrap();
-            let (w, h) = (img.width(), img.height());
-            let result = execute_lens_ocr_and_group(bytes, w, h, 0.6);
-            match result {
-                Ok(boxes) => {
-                    println!("Result boxes: {:?}", boxes);
-                    assert_eq!(boxes.len(), 1, "Expected exactly 1 merged box for the 2-line dialogue");
-                    assert!(
-                        boxes[0].text.contains("あの朝、無人の駅で『彼女』を見かけたときから、なにかが変わってしまったような気がしていた。")
-                    );
-                }
-                Err(e) => {
-                    eprintln!("Warning: Live Google Lens test skipped or network failed: {e}");
-                }
-            }
-        }
-    }
 }
