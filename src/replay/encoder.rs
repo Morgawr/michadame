@@ -436,8 +436,8 @@ fn export_output(
 }
 
 fn coded_size(width: u32, height: u32) -> (u32, u32) {
-    // Conservative surface alignment for AMD VCN; no scaling of the visible image.
-    (width.div_ceil(64) * 64, height.div_ceil(16) * 16)
+    // NV12/YUV420 requires even dimensions for 2:1 chroma subsampling.
+    (width.div_ceil(2) * 2, height.div_ceil(2) * 2)
 }
 fn set_display_crop(parameters: &mut codec::Parameters, width: u32, height: u32) -> Result<()> {
     unsafe {
@@ -628,6 +628,14 @@ mod tests {
         assert_eq!(av1_level(16385, 1080, Rate::new(60, 1), 40), None);
         assert_eq!(av1_level(u32::MAX, u32::MAX, Rate::new(60, 1), 40), None);
         assert_eq!(av1_level(0, 1080, Rate::new(60, 1), 40), None);
+    }
+    #[test]
+    fn coded_size_preserves_even_resolutions_and_aligns_odd_to_two() {
+        assert_eq!(coded_size(3024, 2160), (3024, 2160));
+        assert_eq!(coded_size(1920, 1080), (1920, 1080));
+        assert_eq!(coded_size(1440, 1080), (1440, 1080));
+        assert_eq!(coded_size(63, 47), (64, 48));
+        assert_eq!(coded_size(1441, 1079), (1442, 1080));
     }
     #[test]
     fn parallel_conversion_matches_original_pixels_including_chroma_and_odd_sizes() {
