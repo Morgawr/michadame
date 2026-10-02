@@ -60,6 +60,7 @@ impl Default for AppState {
                 hard_pix: -3.0,
             },
             halo: crate::app::models::HaloSettings::default(),
+            halo_defaults: crate::app::models::HaloSettings::default(),
             selected_crt_filter: CrtFilter::Lottes,
             video: VideoSettings {
                 pixelate_filter_enabled: false,

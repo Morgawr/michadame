@@ -2,6 +2,7 @@ use crate::config;
 use crate::devices::{self};
 use crate::video::{types::RawFrame, VideoFormat};
 use eframe::egui;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, AtomicU8},
@@ -54,7 +55,7 @@ pub struct CrtSettings {
     pub hard_pix: f32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HaloSettings {
     pub brightboost: f32,
     pub brightboost1: f32,
@@ -133,6 +134,7 @@ pub struct AppState {
     pub ui: UiState,
     pub crt: CrtSettings,
     pub halo: HaloSettings,
+    pub halo_defaults: HaloSettings,
     pub selected_crt_filter: crate::devices::filter_type::CrtFilter,
     pub video: VideoSettings,
     pub toasts: egui_toast::Toasts,
@@ -195,6 +197,7 @@ mod tests {
         assert!(state.pending_audio_stream.is_none());
         assert_eq!(state.crt.hard_scan, -8.0);
         assert_eq!(state.halo.brightboost, 1.30);
+        assert_eq!(state.halo_defaults, state.halo);
         assert_eq!(state.selected_crt_filter, crate::devices::filter_type::CrtFilter::Lottes);
         assert_eq!(state.video.horizontal_stretch, 1.0);
     }

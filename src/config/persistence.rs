@@ -99,6 +99,7 @@ pub fn save_config(state: &AppState) {
     cfg.audio_sample_format = Some(state.hardware.audio_sample_format.clone());
     cfg.ocr_sticky_distance = Some(state.ocr.sticky_distance);
     cfg.ocr_hide_overlay = Some(state.ocr.hide_overlay);
+    cfg.default_halo = Some(state.halo_defaults.clone());
 
     cfg.active_profile = state.active_profile.clone();
     cfg.profiles = state.profiles.clone();
@@ -136,6 +137,7 @@ pub fn save_global_hardware_config(state: &AppState) {
     cfg.audio_sample_format = Some(state.hardware.audio_sample_format.clone());
     cfg.ocr_sticky_distance = Some(state.ocr.sticky_distance);
     cfg.ocr_hide_overlay = Some(state.ocr.hide_overlay);
+    cfg.default_halo = Some(state.halo_defaults.clone());
 
     cfg.active_profile = state.active_profile.clone();
     cfg.profiles = state.profiles.clone();
@@ -333,6 +335,9 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     }
     state.ocr.sticky_distance = cfg.ocr_sticky_distance.unwrap_or(0.6);
     state.ocr.hide_overlay = cfg.ocr_hide_overlay.unwrap_or(false);
+    if let Some(defaults) = &cfg.default_halo {
+        state.halo_defaults = defaults.clone();
+    }
 
     state.active_profile = cfg.active_profile.clone();
 
@@ -583,6 +588,32 @@ mod tests {
         let mut state = AppState::default();
         apply_config(&mut state, &loaded);
         assert!(state.replay.config.capture_overlays);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_default_halo_toml_roundtrip() {
+        let path = std::env::temp_dir().join(format!(
+            "michadame-halo-defaults-{}-{}.toml",
+            std::process::id(),
+            crate::replay::now_us()
+        ));
+        let mut custom_defaults = crate::app::models::HaloSettings::default();
+        custom_defaults.brightboost = 2.45;
+        custom_defaults.h_sharp = 4.8;
+        custom_defaults.curvature = false;
+
+        let cfg = MichadameConfig {
+            default_halo: Some(custom_defaults.clone()),
+            ..Default::default()
+        };
+        confy::store_path(&path, &cfg).unwrap();
+        let loaded: MichadameConfig = confy::load_path(&path).unwrap();
+        assert_eq!(loaded.default_halo, Some(custom_defaults.clone()));
+
+        let mut state = AppState::default();
+        apply_config(&mut state, &loaded);
+        assert_eq!(state.halo_defaults, custom_defaults);
         let _ = std::fs::remove_file(&path);
     }
 }

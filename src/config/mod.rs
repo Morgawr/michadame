@@ -76,6 +76,7 @@ impl From<LegacyConfig> for MichadameConfig {
             active_profile,
             ocr_sticky_distance: legacy.ocr_sticky_distance,
             ocr_hide_overlay: legacy.ocr_hide_overlay,
+            default_halo: legacy.default_halo,
             profiles,
         }
     }
@@ -148,10 +149,12 @@ mod tests {
             halo_curvature: Some(true),
             ocr_sticky_distance: None,
             ocr_hide_overlay: None,
+            default_halo: None,
         };
 
         let config: MichadameConfig = MichadameConfig::from(legacy);
         assert_eq!(config.video_device, Some("/dev/video0".to_string()));
+        assert_eq!(config.default_halo, None);
         assert_eq!(config.profiles.len(), 1);
         let profile = config.profiles.get("Default").unwrap();
         assert_eq!(profile.video_format_fourcc, Some("MJPG".to_string()));
@@ -234,6 +237,7 @@ mod tests {
             halo_curvature: None,
             ocr_sticky_distance: None,
             ocr_hide_overlay: None,
+            default_halo: None,
         };
 
         let config: MichadameConfig = MichadameConfig::from(legacy);

@@ -587,10 +587,22 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 changed = true;
             }
 
-            if ui.button("Reset Defaults").clicked() {
-                state.halo = crate::app::models::HaloSettings::default();
-                changed = true;
-            }
+            ui.horizontal(|ui| {
+                if ui.button("Reset Defaults").clicked() {
+                    state.halo = state.halo_defaults.clone();
+                    changed = true;
+                }
+                if ui.button("Save as Defaults").clicked() {
+                    state.halo_defaults = state.halo.clone();
+                    let current_profile_data = crate::config::build_profile_from_state(state);
+                    state
+                        .profiles
+                        .insert(state.active_profile.clone(), current_profile_data);
+                    crate::config::save_config(state);
+                    state.info("Saved current settings as default");
+                    changed = true;
+                }
+            });
         });
     }
 
