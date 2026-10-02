@@ -59,6 +59,8 @@ impl Default for AppState {
                 shape: 2.0,
                 hard_pix: -3.0,
             },
+            halo: crate::app::models::HaloSettings::default(),
+            selected_crt_filter: CrtFilter::Lottes,
             video: VideoSettings {
                 pixelate_filter_enabled: false,
                 use_magenta_background: false,
@@ -276,7 +278,13 @@ impl eframe::App for AppState {
             && ctx.input(|i| i.focused && i.modifiers.is_none() && i.key_pressed(egui::Key::C))
         {
             let current_filter = CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed));
-            let next_filter = current_filter.next();
+            let next_filter = if current_filter != CrtFilter::Off {
+                CrtFilter::Off
+            } else if self.selected_crt_filter != CrtFilter::Off {
+                self.selected_crt_filter
+            } else {
+                CrtFilter::Lottes
+            };
             self.crt_filter.store(next_filter as u8, Ordering::Relaxed);
             config::save_config(self);
             self.info(format!("CRT filter set to: {}", next_filter));

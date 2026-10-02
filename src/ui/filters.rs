@@ -28,9 +28,20 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         .selectable_value(&mut current_filter.clone(), 1, "Lottes")
                         .clicked()
                     {
+                        state.selected_crt_filter = CrtFilter::Lottes;
                         state
                             .crt_filter
                             .store(1, std::sync::atomic::Ordering::Relaxed);
+                        changed = true;
+                    }
+                    if ui
+                        .selectable_value(&mut current_filter.clone(), 2, "Halo")
+                        .clicked()
+                    {
+                        state.selected_crt_filter = CrtFilter::Halo;
+                        state
+                            .crt_filter
+                            .store(2, std::sync::atomic::Ordering::Relaxed);
                         changed = true;
                     }
                 });
@@ -256,100 +267,88 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             let mut bloom_amount = state.crt.bloom_amount;
             let mut shape = state.crt.shape;
 
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add(egui::Slider::new(&mut scan, -20.0..=0.0).text("HardScan"))
-                    .changed()
-                {
-                    state.crt.hard_scan = scan;
-                    changed = true;
-                }
-                if ui
-                    .add(egui::Slider::new(&mut pix, -20.0..=0.0).text("HardPix"))
-                    .changed()
-                {
-                    state.crt.hard_pix = pix;
-                    changed = true;
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add(egui::Slider::new(&mut bright, 0.5..=2.0).text("Brightboost"))
-                    .changed()
-                {
-                    state.crt.brightboost = bright;
-                    changed = true;
-                }
-                if ui
-                    .add(egui::Slider::new(&mut bloom_amount, 0.0..=1.0).text("Bloom Amount"))
-                    .changed()
-                {
-                    state.crt.bloom_amount = bloom_amount;
-                    changed = true;
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add(egui::Slider::new(&mut warp_x, 0.0..=0.125).text("WarpX"))
-                    .changed()
-                {
-                    state.crt.warp_x = warp_x;
-                    changed = true;
-                }
-                if ui
-                    .add(egui::Slider::new(&mut warp_y, 0.0..=0.125).text("WarpY"))
-                    .changed()
-                {
-                    state.crt.warp_y = warp_y;
-                    changed = true;
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add(
-                        egui::Slider::new(&mut mask, 0.0..=4.0)
-                            .text("ShadowMask")
-                            .step_by(1.0),
-                    )
-                    .on_hover_text(
-                        "0=None, 1=Compressed TV, 2=Aperture-grille, 3=Stretched VGA, 4=VGA",
-                    )
-                    .changed()
-                {
-                    state.crt.shadow_mask = mask.round();
-                    changed = true;
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add(
-                        egui::Slider::new(&mut shape, 0.0..=10.0)
-                            .text("Shape")
-                            .step_by(0.05),
-                    )
-                    .on_hover_text("Kernel exponent. The original Lottes default is 2.0.")
-                    .changed()
-                {
-                    state.crt.shape = shape;
-                    changed = true;
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add(egui::Slider::new(&mut bloom_pix, -2.0..=-0.5).text("BloomPix"))
-                    .changed()
-                {
-                    state.crt.hard_bloom_pix = bloom_pix;
-                    changed = true;
-                }
-                if ui
-                    .add(egui::Slider::new(&mut bloom_scan, -4.0..=-1.0).text("BloomScan"))
-                    .changed()
-                {
-                    state.crt.hard_bloom_scan = bloom_scan;
-                    changed = true;
-                }
-            });
+            if ui
+                .add(egui::Slider::new(&mut scan, -20.0..=0.0).text("HardScan"))
+                .changed()
+            {
+                state.crt.hard_scan = scan;
+                changed = true;
+            }
+            if ui
+                .add(egui::Slider::new(&mut pix, -20.0..=0.0).text("HardPix"))
+                .changed()
+            {
+                state.crt.hard_pix = pix;
+                changed = true;
+            }
+            if ui
+                .add(egui::Slider::new(&mut bright, 0.5..=2.0).text("Brightboost"))
+                .changed()
+            {
+                state.crt.brightboost = bright;
+                changed = true;
+            }
+            if ui
+                .add(egui::Slider::new(&mut bloom_amount, 0.0..=1.0).text("Bloom Amount"))
+                .changed()
+            {
+                state.crt.bloom_amount = bloom_amount;
+                changed = true;
+            }
+            if ui
+                .add(egui::Slider::new(&mut warp_x, 0.0..=0.125).text("WarpX"))
+                .changed()
+            {
+                state.crt.warp_x = warp_x;
+                changed = true;
+            }
+            if ui
+                .add(egui::Slider::new(&mut warp_y, 0.0..=0.125).text("WarpY"))
+                .changed()
+            {
+                state.crt.warp_y = warp_y;
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::Slider::new(&mut mask, 0.0..=4.0)
+                        .text("ShadowMask")
+                        .step_by(1.0),
+                )
+                .on_hover_text(
+                    "0=None, 1=Compressed TV, 2=Aperture-grille, 3=Stretched VGA, 4=VGA",
+                )
+                .changed()
+            {
+                state.crt.shadow_mask = mask.round();
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::Slider::new(&mut shape, 0.0..=10.0)
+                        .text("Shape")
+                        .step_by(0.05),
+                )
+                .on_hover_text("Kernel exponent. The original Lottes default is 2.0.")
+                .changed()
+            {
+                state.crt.shape = shape;
+                changed = true;
+            }
+            if ui
+                .add(egui::Slider::new(&mut bloom_pix, -2.0..=-0.5).text("BloomPix"))
+                .changed()
+            {
+                state.crt.hard_bloom_pix = bloom_pix;
+                changed = true;
+            }
+            if ui
+                .add(egui::Slider::new(&mut bloom_scan, -4.0..=-1.0).text("BloomScan"))
+                .changed()
+            {
+                state.crt.hard_bloom_scan = bloom_scan;
+                changed = true;
+            }
             if ui.button("Reset Defaults").clicked() {
                 state.crt.hard_scan = -8.0;
                 state.crt.hard_pix = -3.0;
@@ -370,6 +369,226 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 state.video.median_mix = 1.0;
                 state.video.overscan_x = 0.0;
                 state.video.overscan_y = 0.0;
+                changed = true;
+            }
+        });
+    }
+
+    if current_filter == CrtFilter::Halo {
+        ui.group(|ui| {
+            ui.label("Halo CRT Parameters:");
+
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.halo.brightboost, 0.5..=3.0)
+                        .text("Brightboost (Dark)")
+                        .step_by(0.05),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.halo.brightboost1, 0.5..=3.0)
+                        .text("Brightboost (Bright)")
+                        .step_by(0.05),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.halo.beam_min, 0.5..=3.0)
+                        .text("Beam Min")
+                        .step_by(0.05),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.halo.beam_max, 0.2..=2.0)
+                        .text("Beam Max")
+                        .step_by(0.05),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.halo.beam_size, 0.0..=2.0)
+                        .text("Beam Size")
+                        .step_by(0.05),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.halo.h_sharp, 1.0..=10.0)
+                        .text("Sharpness")
+                        .step_by(0.1),
+                )
+                .on_hover_text("Horizontal sharpness (1.0 = soft analog CRT, 3.5 = Trinitron, 10.0 = razor-sharp PVM)")
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.halo.glow, 0.0..=1.0)
+                        .text("Glow")
+                        .step_by(0.01),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.halo.bloom, 0.0..=1.0)
+                        .text("Bloom")
+                        .step_by(0.01),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.halo.halation, 0.0..=0.5)
+                        .text("Halation")
+                        .step_by(0.01),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.halo.shadow_mask, 0.0..=6.0)
+                        .text("Shadow Mask")
+                        .step_by(1.0),
+                )
+                .on_hover_text(
+                    "0=None, 1=CGWG, 2=Lottes, 3=Stretched, 4=VGA, 5=Fine, 6=Trinitron",
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.halo.masksize, 1.0..=4.0)
+                        .text("Mask Size")
+                        .step_by(1.0),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.halo.maskstr, 0.0..=1.0)
+                        .text("Mask Strength")
+                        .step_by(0.05),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.halo.mcut, 0.0..=1.0)
+                        .text("Mask Cutoff")
+                        .step_by(0.05),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.halo.slotmask, 0.0..=1.0)
+                        .text("Slot Mask (Bright)")
+                        .step_by(0.05),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.halo.slotmask1, 0.0..=1.0)
+                        .text("Slot Mask (Dark)")
+                        .step_by(0.05),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.halo.double_slot, 1.0..=4.0)
+                        .text("Double Slot")
+                        .step_by(1.0),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.halo.smoothmask, 0.0..=2.0)
+                        .text("Smooth Mask")
+                        .step_by(0.05),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.halo.halo_zoom, 50.0..=100.0)
+                        .text("Screen Scale %")
+                        .step_by(0.5),
+                )
+                .on_hover_text("Scales the CRT screen within the viewport to create bezel room for the halo glow.")
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.halo.halo_intensity, 0.0..=2.0)
+                        .text("Halo Glow")
+                        .step_by(0.05),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.halo.corner_size, 0.0..=0.1)
+                        .text("Corner Size")
+                        .step_by(0.005),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            if ui.checkbox(&mut state.halo.curvature, "Curvature").changed() {
+                changed = true;
+            }
+
+            if ui.button("Reset Defaults").clicked() {
+                state.halo = crate::app::models::HaloSettings::default();
                 changed = true;
             }
         });

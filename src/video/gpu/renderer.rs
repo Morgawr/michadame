@@ -2,7 +2,8 @@ use super::anime4k::{Anime4kUpscaler, Anime4kVariant};
 use super::bunny::BunnyUpscaler;
 use super::fft_filter::FftFilter;
 use super::geometry::RenderedArea;
-use super::params::ShaderParams;
+use super::halo::HaloRenderer;
+use super::params::{HaloShaderParams, ShaderParams};
 use super::programs::*;
 use crate::video::types::{RawFrame, ScalerFilter};
 use eframe::glow::{self, HasContext};
@@ -28,6 +29,7 @@ pub struct CrtFilterRenderer {
     anime4k_small: Anime4kUpscaler,
     anime4k_medium: Anime4kUpscaler,
     anime4k_large: Anime4kUpscaler,
+    pub halo: HaloRenderer,
 
     fbos: [glow::Framebuffer; 7],
     pass_textures: [glow::Texture; 7],
@@ -347,6 +349,7 @@ impl CrtFilterRenderer {
                 anime4k_small: Anime4kUpscaler::new(gl, Anime4kVariant::Small),
                 anime4k_medium: Anime4kUpscaler::new(gl, Anime4kVariant::Medium),
                 anime4k_large: Anime4kUpscaler::new(gl, Anime4kVariant::Large),
+                halo: HaloRenderer::new(gl),
                 last_size: (0, 0),
                 last_scaler_filter: None,
                 last_pass_res: (0, 0),
@@ -636,8 +639,10 @@ impl CrtFilterRenderer {
         resolution: (u32, u32),
         output_size: (f32, f32),
         params: &ShaderParams,
+        halo_params: &HaloShaderParams,
         run_pixelate: bool,
         run_lottes: bool,
+        run_halo: bool,
         fft_filter: Option<&Arc<Mutex<FftFilter>>>,
         fft_mask_threshold: f32,
         fft_black_threshold: f32,
@@ -869,6 +874,15 @@ impl CrtFilterRenderer {
                     gl.enable(glow::SCISSOR_TEST);
                 }
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            } else if run_halo {
+                self.halo.paint(
+                    gl,
+                    final_input_texture,
+                    final_input_res,
+                    output_size,
+                    halo_params,
+                    scissor_enabled,
+                );
             } else if run_pixelate {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, None);
                 gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
@@ -1199,6 +1213,7 @@ impl CrtFilterRenderer {
             self.anime4k_small.destroy(gl);
             self.anime4k_medium.destroy(gl);
             self.anime4k_large.destroy(gl);
+            self.halo.destroy(gl);
             gl.delete_vertex_array(self.vertex_array);
             gl.delete_buffer(self.vbo);
             for fbo in self.fbos {

@@ -34,6 +34,28 @@ impl From<LegacyConfig> for MichadameConfig {
                 vibrance: legacy.vibrance,
                 overscan_x: legacy.overscan_x,
                 overscan_y: legacy.overscan_y,
+                selected_crt_filter: legacy.selected_crt_filter,
+                halo_brightboost: legacy.halo_brightboost,
+                halo_brightboost1: legacy.halo_brightboost1,
+                halo_beam_min: legacy.halo_beam_min,
+                halo_beam_max: legacy.halo_beam_max,
+                halo_beam_size: legacy.halo_beam_size,
+                halo_h_sharp: legacy.halo_h_sharp,
+                halo_glow: legacy.halo_glow,
+                halo_bloom: legacy.halo_bloom,
+                halo_halation: legacy.halo_halation,
+                halo_shadow_mask: legacy.halo_shadow_mask,
+                halo_masksize: legacy.halo_masksize,
+                halo_maskstr: legacy.halo_maskstr,
+                halo_mcut: legacy.halo_mcut,
+                halo_slotmask: legacy.halo_slotmask,
+                halo_slotmask1: legacy.halo_slotmask1,
+                halo_double_slot: legacy.halo_double_slot,
+                halo_smoothmask: legacy.halo_smoothmask,
+                halo_zoom: legacy.halo_zoom,
+                halo_intensity: legacy.halo_intensity,
+                halo_corner_size: legacy.halo_corner_size,
+                halo_curvature: legacy.halo_curvature,
             };
             profiles.insert("Default".to_string(), legacy_profile);
             active_profile = "Default".to_string();
@@ -101,6 +123,28 @@ mod tests {
             vibrance: Some(1.0),
             overscan_x: Some(0.0),
             overscan_y: Some(0.0),
+            selected_crt_filter: Some(2),
+            halo_brightboost: Some(1.9),
+            halo_brightboost1: Some(1.8),
+            halo_beam_min: Some(1.6),
+            halo_beam_max: Some(0.85),
+            halo_beam_size: Some(0.85),
+            halo_h_sharp: Some(3.5),
+            halo_glow: Some(0.1),
+            halo_bloom: Some(0.15),
+            halo_halation: Some(0.03),
+            halo_shadow_mask: Some(6.0),
+            halo_masksize: Some(3.0),
+            halo_maskstr: Some(0.35),
+            halo_mcut: Some(0.55),
+            halo_slotmask: Some(0.15),
+            halo_slotmask1: Some(0.3),
+            halo_double_slot: Some(2.0),
+            halo_smoothmask: Some(1.0),
+            halo_zoom: Some(85.0),
+            halo_intensity: Some(0.75),
+            halo_corner_size: Some(0.02),
+            halo_curvature: Some(true),
             ocr_sticky_distance: None,
         };
 
@@ -110,6 +154,8 @@ mod tests {
         let profile = config.profiles.get("Default").unwrap();
         assert_eq!(profile.video_format_fourcc, Some("MJPG".to_string()));
         assert_eq!(profile.crt_filter, Some(1));
+        assert_eq!(profile.selected_crt_filter, Some(2));
+        assert_eq!(profile.halo_brightboost, Some(1.9));
         assert_eq!(profile.pixelate_filter_enabled, Some(true));
         assert_eq!(profile.crt_hard_scan, Some(-8.0));
         assert_eq!(profile.crt_warp_x, Some(0.031));
@@ -139,6 +185,7 @@ mod tests {
             audio_source: None,
             video_format_fourcc: None,
             crt_filter: None,
+            selected_crt_filter: None,
             scaler_filter: None,
             color_range: None,
             pixelate_filter_enabled: None,
@@ -162,6 +209,27 @@ mod tests {
             vibrance: None,
             overscan_x: None,
             overscan_y: None,
+            halo_brightboost: None,
+            halo_brightboost1: None,
+            halo_beam_min: None,
+            halo_beam_max: None,
+            halo_beam_size: None,
+            halo_h_sharp: None,
+            halo_glow: None,
+            halo_bloom: None,
+            halo_halation: None,
+            halo_shadow_mask: None,
+            halo_masksize: None,
+            halo_maskstr: None,
+            halo_mcut: None,
+            halo_slotmask: None,
+            halo_slotmask1: None,
+            halo_double_slot: None,
+            halo_smoothmask: None,
+            halo_zoom: None,
+            halo_intensity: None,
+            halo_corner_size: None,
+            halo_curvature: None,
             ocr_sticky_distance: None,
         };
 

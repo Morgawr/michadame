@@ -49,6 +49,29 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         vibrance: Some(state.video.vibrance),
         overscan_x: Some(state.video.overscan_x),
         overscan_y: Some(state.video.overscan_y),
+
+        selected_crt_filter: Some(state.selected_crt_filter as u8),
+        halo_brightboost: Some(state.halo.brightboost),
+        halo_brightboost1: Some(state.halo.brightboost1),
+        halo_beam_min: Some(state.halo.beam_min),
+        halo_beam_max: Some(state.halo.beam_max),
+        halo_beam_size: Some(state.halo.beam_size),
+        halo_h_sharp: Some(state.halo.h_sharp),
+        halo_glow: Some(state.halo.glow),
+        halo_bloom: Some(state.halo.bloom),
+        halo_halation: Some(state.halo.halation),
+        halo_shadow_mask: Some(state.halo.shadow_mask),
+        halo_masksize: Some(state.halo.masksize),
+        halo_maskstr: Some(state.halo.maskstr),
+        halo_mcut: Some(state.halo.mcut),
+        halo_slotmask: Some(state.halo.slotmask),
+        halo_slotmask1: Some(state.halo.slotmask1),
+        halo_double_slot: Some(state.halo.double_slot),
+        halo_smoothmask: Some(state.halo.smoothmask),
+        halo_zoom: Some(state.halo.halo_zoom),
+        halo_intensity: Some(state.halo.halo_intensity),
+        halo_corner_size: Some(state.halo.corner_size),
+        halo_curvature: Some(state.halo.curvature),
     }
 }
 
@@ -184,6 +207,72 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) {
     if let Some(val) = profile.overscan_y {
         state.video.overscan_y = val;
     }
+    if let Some(val) = profile.selected_crt_filter {
+        state.selected_crt_filter = crate::devices::filter_type::CrtFilter::from_u8(val);
+    }
+    if let Some(val) = profile.halo_brightboost {
+        state.halo.brightboost = val;
+    }
+    if let Some(val) = profile.halo_brightboost1 {
+        state.halo.brightboost1 = val;
+    }
+    if let Some(val) = profile.halo_beam_min {
+        state.halo.beam_min = val;
+    }
+    if let Some(val) = profile.halo_beam_max {
+        state.halo.beam_max = val;
+    }
+    if let Some(val) = profile.halo_beam_size {
+        state.halo.beam_size = val;
+    }
+    if let Some(val) = profile.halo_h_sharp {
+        state.halo.h_sharp = val;
+    }
+    if let Some(val) = profile.halo_glow {
+        state.halo.glow = val;
+    }
+    if let Some(val) = profile.halo_bloom {
+        state.halo.bloom = val;
+    }
+    if let Some(val) = profile.halo_halation {
+        state.halo.halation = val;
+    }
+    if let Some(val) = profile.halo_shadow_mask {
+        state.halo.shadow_mask = val;
+    }
+    if let Some(val) = profile.halo_masksize {
+        state.halo.masksize = val;
+    }
+    if let Some(val) = profile.halo_maskstr {
+        state.halo.maskstr = val;
+    }
+    if let Some(val) = profile.halo_mcut {
+        state.halo.mcut = val;
+    }
+    if let Some(val) = profile.halo_slotmask {
+        state.halo.slotmask = val;
+    }
+    if let Some(val) = profile.halo_slotmask1 {
+        state.halo.slotmask1 = val;
+    }
+    if let Some(val) = profile.halo_double_slot {
+        state.halo.double_slot = val;
+    }
+    if let Some(val) = profile.halo_smoothmask {
+        state.halo.smoothmask = val;
+    }
+    if let Some(val) = profile.halo_zoom {
+        state.halo.halo_zoom = val;
+    }
+    if let Some(val) = profile.halo_intensity {
+        state.halo.halo_intensity = val;
+    }
+    if let Some(val) = profile.halo_corner_size {
+        state.halo.corner_size = val;
+    }
+    if let Some(val) = profile.halo_curvature {
+        state.halo.curvature = val;
+    }
 }
 
 pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
@@ -316,6 +405,8 @@ mod tests {
     fn test_build_profile_from_state() {
         let mut state = AppState::default();
         state.crt.hard_scan = -12.0;
+        state.halo.brightboost = 2.1;
+        state.selected_crt_filter = crate::devices::filter_type::CrtFilter::Halo;
         state.video.pixelate_filter_enabled = true;
         state.crt_filter.store(
             crate::devices::filter_type::CrtFilter::Lottes as u8,
@@ -324,6 +415,11 @@ mod tests {
 
         let profile = build_profile_from_state(&state);
         assert_eq!(profile.crt_hard_scan, Some(-12.0));
+        assert_eq!(profile.halo_brightboost, Some(2.1));
+        assert_eq!(
+            profile.selected_crt_filter,
+            Some(crate::devices::filter_type::CrtFilter::Halo as u8)
+        );
         assert_eq!(profile.pixelate_filter_enabled, Some(true));
         assert_eq!(
             profile.crt_filter,
@@ -336,6 +432,8 @@ mod tests {
         let mut state = AppState::default();
         let profile = Profile {
             crt_hard_scan: Some(-15.0),
+            halo_brightboost: Some(2.5),
+            selected_crt_filter: Some(crate::devices::filter_type::CrtFilter::Halo as u8),
             pixelate_filter_enabled: Some(true),
             crt_filter: Some(crate::devices::filter_type::CrtFilter::Lottes as u8),
             ..Default::default()
@@ -343,6 +441,8 @@ mod tests {
 
         apply_profile_to_state(&mut state, &profile);
         assert_eq!(state.crt.hard_scan, -15.0);
+        assert_eq!(state.halo.brightboost, 2.5);
+        assert_eq!(state.selected_crt_filter, crate::devices::filter_type::CrtFilter::Halo);
         assert!(state.video.pixelate_filter_enabled);
         assert_eq!(
             state.crt_filter.load(Ordering::Relaxed),
@@ -419,5 +519,24 @@ mod tests {
         apply_config(&mut state, &loaded);
         assert!((state.ocr.sticky_distance - 0.85).abs() < f32::EPSILON);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_apply_profile_halo_settings() {
+        let mut state = AppState::default();
+        let mut profile = Profile::default();
+        profile.selected_crt_filter = Some(crate::devices::filter_type::CrtFilter::Halo as u8);
+        profile.halo_brightboost = Some(2.2);
+        profile.halo_zoom = Some(75.0);
+        profile.halo_curvature = Some(false);
+
+        apply_profile_to_state(&mut state, &profile);
+        assert_eq!(
+            state.selected_crt_filter,
+            crate::devices::filter_type::CrtFilter::Halo
+        );
+        assert_eq!(state.halo.brightboost, 2.2);
+        assert_eq!(state.halo.halo_zoom, 75.0);
+        assert_eq!(state.halo.curvature, false);
     }
 }

@@ -13,6 +13,14 @@ pub const FS_FFT_MASK: &str = include_str!("../shaders/fs_fft_mask.glsl");
 pub const FS_FFT_EXTRACT: &str = include_str!("../shaders/fs_fft_extract.glsl");
 pub const FS_FFT_SPECTRUM: &str = include_str!("../shaders/fs_fft_spectrum.glsl");
 pub const FS_FFT_BITREV: &str = include_str!("../shaders/fs_fft_bitrev.glsl");
+pub const FS_HALO_LINEARIZE: &str = include_str!("../shaders/fs_halo_linearize.glsl");
+pub const FS_HALO_GLOW_H: &str = include_str!("../shaders/fs_halo_glow_h.glsl");
+pub const FS_HALO_GLOW_V: &str = include_str!("../shaders/fs_halo_glow_v.glsl");
+pub const FS_HALO_BLOOM_H: &str = include_str!("../shaders/fs_halo_bloom_h.glsl");
+pub const FS_HALO_BLOOM_V: &str = include_str!("../shaders/fs_halo_bloom_v.glsl");
+pub const FS_HALO_SCANLINES: &str = include_str!("../shaders/fs_halo_scanlines.glsl");
+pub const FS_HALO_COMPOSITE: &str = include_str!("../shaders/fs_halo_composite.glsl");
+pub const FS_HALO_FINAL: &str = include_str!("../shaders/fs_halo_final.glsl");
 
 pub unsafe fn compile_program(gl: &glow::Context, vs_src: &str, fs_src: &str) -> glow::Program {
     let program = gl.create_program().expect("Cannot create program");

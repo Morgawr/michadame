@@ -189,12 +189,14 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             state.video.horizontal_stretch,
         );
 
-        if state.video.pixelate_filter_enabled || filter == CrtFilter::Lottes {
+        if state.video.pixelate_filter_enabled || filter != CrtFilter::Off {
             if let Some(renderer_arc) = &state.crt_renderer {
                 let renderer_clone = renderer_arc.clone();
                 let params = video::gpu::ShaderParams::from_state(state);
+                let halo_params = video::gpu::HaloShaderParams::from_state(state);
                 let pixelate = state.video.pixelate_filter_enabled;
                 let run_lottes = filter == CrtFilter::Lottes;
+                let run_halo = filter == CrtFilter::Halo;
                 let rect = response.rect;
                 let latest_frame = state.latest_frame.clone();
                 let video_texture_id = state.video_texture.as_ref().map(|t| t.id());
@@ -233,8 +235,10 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 res,
                                 output_size,
                                 &params,
+                                &halo_params,
                                 pixelate,
                                 run_lottes,
+                                run_halo,
                                 fft_clone.as_ref(),
                                 fft_threshold,
                                 fft_black,

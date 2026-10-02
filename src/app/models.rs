@@ -54,6 +54,59 @@ pub struct CrtSettings {
     pub hard_pix: f32,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct HaloSettings {
+    pub brightboost: f32,
+    pub brightboost1: f32,
+    pub beam_min: f32,
+    pub beam_max: f32,
+    pub beam_size: f32,
+    pub h_sharp: f32,
+    pub glow: f32,
+    pub bloom: f32,
+    pub halation: f32,
+    pub shadow_mask: f32,
+    pub masksize: f32,
+    pub maskstr: f32,
+    pub mcut: f32,
+    pub slotmask: f32,
+    pub slotmask1: f32,
+    pub double_slot: f32,
+    pub smoothmask: f32,
+    pub halo_zoom: f32,
+    pub halo_intensity: f32,
+    pub corner_size: f32,
+    pub curvature: bool,
+}
+
+impl Default for HaloSettings {
+    fn default() -> Self {
+        Self {
+            brightboost: 1.30,
+            brightboost1: 1.65,
+            beam_min: 1.80,
+            beam_max: 1.65,
+            beam_size: 1.25,
+            h_sharp: 4.20,
+            glow: 0.53,
+            bloom: 0.57,
+            halation: 0.23,
+            shadow_mask: 6.0,
+            masksize: 2.0,
+            maskstr: 0.50,
+            mcut: 0.80,
+            slotmask: 0.45,
+            slotmask1: 0.30,
+            double_slot: 3.0,
+            smoothmask: 0.80,
+            halo_zoom: 100.0,
+            halo_intensity: 0.95,
+            corner_size: 0.0,
+            curvature: true,
+        }
+    }
+}
+
 pub struct VideoSettings {
     pub pixelate_filter_enabled: bool,
     pub use_magenta_background: bool,
@@ -79,6 +132,8 @@ pub struct AppState {
     pub hardware: HardwareState,
     pub ui: UiState,
     pub crt: CrtSettings,
+    pub halo: HaloSettings,
+    pub selected_crt_filter: crate::devices::filter_type::CrtFilter,
     pub video: VideoSettings,
     pub toasts: egui_toast::Toasts,
 
@@ -138,6 +193,8 @@ mod tests {
         assert!(state.video_status_receiver.is_none());
         assert!(state.pending_audio_stream.is_none());
         assert_eq!(state.crt.hard_scan, -8.0);
+        assert_eq!(state.halo.brightboost, 1.30);
+        assert_eq!(state.selected_crt_filter, crate::devices::filter_type::CrtFilter::Lottes);
         assert_eq!(state.video.horizontal_stretch, 1.0);
     }
 
