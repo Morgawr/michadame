@@ -194,11 +194,14 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
                 if has_db {
                     let db_guard = state.dict.db.lock().unwrap();
                     let db = db_guard.as_ref().unwrap();
+                    let freq_guard = state.dict.freq_db.lock().ok();
+                    let freq_db = freq_guard.as_ref().and_then(|g| g.as_ref());
                     let lookup = crate::dict::lookup::lookup_word_at_pointer(
                         pos,
                         &state.ocr.boxes,
                         video_rect,
                         db,
+                        freq_db,
                         crate::dict::global_deinflector(),
                     );
                     if lookup.is_some() {

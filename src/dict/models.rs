@@ -31,6 +31,26 @@ pub enum GlossaryEntry {
     Structured(serde_json::Value),
 }
 
+/// Frequency information for a dictionary term.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TermFrequency {
+    /// Name of the frequency dictionary (e.g. "Jiten")
+    pub dictionary: String,
+    /// Numerical frequency rank (1 = most common word)
+    pub rank: i64,
+    /// Optional formatted display rank from dictionary (e.g. "1㋕")
+    pub display_value: Option<String>,
+}
+
+impl TermFrequency {
+    pub fn display_text(&self) -> String {
+        match &self.display_value {
+            Some(dv) => format!("Jiten: {dv}"),
+            None => format!("Jiten: #{}", self.rank),
+        }
+    }
+}
+
 /// A single dictionary entry retrieved for a word or term.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TermEntry {
@@ -52,6 +72,8 @@ pub struct TermEntry {
     pub term_tags: Option<String>,
     /// Inflection chain reasons that led to this term (e.g. ["past"], ["causative", "passive"])
     pub inflection_reasons: Vec<String>,
+    /// Frequency information if available from a frequency dictionary (e.g. Jiten)
+    pub frequency: Option<TermFrequency>,
 }
 
 /// A candidate produced by the Japanese deinflector.
@@ -95,4 +117,14 @@ pub enum DictEvent {
         progress: f32, // 0.0 to 1.0
     },
     SyncFinished(Result<DictMetadata, String>),
+
+    FreqUpdateCheckFinished {
+        update_available: bool,
+        remote_metadata: Option<DictMetadata>,
+    },
+    FreqSyncProgress {
+        message: String,
+        progress: f32, // 0.0 to 1.0
+    },
+    FreqSyncFinished(Result<DictMetadata, String>),
 }

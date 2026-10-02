@@ -149,6 +149,7 @@ impl DictDatabase {
                     sequence,
                     term_tags,
                     inflection_reasons: candidate.reasons.clone(),
+                    frequency: None,
                 });
             }
         }

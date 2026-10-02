@@ -22,6 +22,9 @@ const COLOR_EXAMPLE_EN: Color32 = Color32::from_rgb(203, 213, 225);
 const COLOR_EXAMPLE_BG: Color32 = Color32::from_rgba_premultiplied(30, 41, 59, 140);
 const COLOR_RUBY: Color32 = Color32::from_rgb(56, 189, 248);
 const COLOR_MUTED: Color32 = Color32::from_rgb(100, 116, 139);
+const COLOR_FREQ_BG: Color32 = Color32::from_rgb(19, 78, 74);
+const COLOR_FREQ_BORDER: Color32 = Color32::from_rgb(20, 184, 166);
+const COLOR_FREQ_TEXT: Color32 = Color32::from_rgb(94, 234, 212);
 
 /// Circled numbers for sense indices ①..⑳
 const CIRCLED_NUMBERS: &[&str] = &[
@@ -53,6 +56,17 @@ pub fn render_term_entry(ui: &mut egui::Ui, entry: &TermEntry, index: usize) {
                 RichText::new(format!("【{}】", entry.reading))
                     .font(dict_font(38.0))
                     .color(COLOR_READING),
+            );
+        }
+
+        // Frequency rank badge
+        if let Some(freq) = &entry.frequency {
+            render_pill_badge(
+                ui,
+                &freq.display_text(),
+                COLOR_FREQ_BG,
+                COLOR_FREQ_TEXT,
+                COLOR_FREQ_BORDER,
             );
         }
 

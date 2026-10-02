@@ -10,6 +10,7 @@ pub fn lookup_word_at_pointer(
     ocr_boxes: &[OcrBox],
     video_rect: egui::Rect,
     db: &DictDatabase,
+    freq_db: Option<&super::frequency::FreqDatabase>,
     deinflector: &Deinflector,
 ) -> Option<DictPopupState> {
     if video_rect.width() <= 10.0 || video_rect.height() <= 10.0 || ocr_boxes.is_empty() {
@@ -146,7 +147,23 @@ pub fn lookup_word_at_pointer(
             }
         }
 
-        if let Some((start_offset, end_offset, entries)) = matched_entry {
+        if let Some((start_offset, end_offset, mut entries)) = matched_entry {
+            // Enrich entries with frequency if available and sort by frequency
+            if let Some(fdb) = freq_db {
+                for entry in &mut entries {
+                    entry.frequency = fdb.get_frequency(&entry.term, &entry.reading);
+                }
+                // Sort in order of frequency: lowest rank first, unranked last
+                entries.sort_by(|a, b| {
+                    match (&a.frequency, &b.frequency) {
+                        (Some(fa), Some(fb)) => fa.rank.cmp(&fb.rank),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    }
+                });
+            }
+
             // Calculate precise sub-bounding box for the recognized word on this single line
             let word_min_x = line_min_x
                 + (start_offset as f32 / chars.len() as f32) * (line_max_x - line_min_x);
@@ -267,6 +284,7 @@ mod tests {
             &[ocr_box.clone()],
             video_rect,
             &db,
+            None,
             global_deinflector(),
         );
         assert!(popup.is_some());
@@ -282,6 +300,7 @@ mod tests {
             &[ocr_box.clone()],
             video_rect,
             &db,
+            None,
             global_deinflector(),
         );
         assert!(popup.is_some());
@@ -298,6 +317,7 @@ mod tests {
             &[ocr_box.clone()],
             video_rect,
             &db,
+            None,
             global_deinflector(),
         );
         assert!(popup.is_some());
@@ -347,6 +367,7 @@ mod tests {
             &[ocr_box.clone()],
             video_rect,
             &db,
+            None,
             global_deinflector(),
         );
         assert!(popup1.is_some());
@@ -360,6 +381,7 @@ mod tests {
             &[ocr_box.clone()],
             video_rect,
             &db,
+            None,
             global_deinflector(),
         );
         assert!(popup2.is_some());
@@ -418,6 +440,7 @@ mod tests {
             &[ocr_box.clone()],
             video_rect,
             &db,
+            None,
             global_deinflector(),
         );
         assert!(popup_yo.is_some());
@@ -431,6 +454,7 @@ mod tests {
             &[ocr_box.clone()],
             video_rect,
             &db,
+            None,
             global_deinflector(),
         );
         assert!(popup_ki.is_some());
@@ -444,11 +468,74 @@ mod tests {
             &[ocr_box.clone()],
             video_rect,
             &db,
+            None,
             global_deinflector(),
         );
         assert!(popup_su.is_some());
         let p_su = popup_su.unwrap();
         assert_eq!(p_su.matched_term, "する");
         assert_eq!(p_su.char_range, (5, 7));
+    }
+
+    #[test]
+    fn test_lookup_sorts_by_frequency() {
+        let dir = tempdir().unwrap();
+        let dict_path = dir.path().join("test_dict.db");
+        let freq_path = dir.path().join("test_freq.db");
+
+        let dict_db = DictDatabase::open_or_create(&dict_path).unwrap();
+        // Insert multiple homophones or entries matching 'き'
+        dict_db
+            .conn
+            .execute_batch(
+                "
+                INSERT INTO terms VALUES ('生', 'き', 'n', '', 100.0, '[\"pure\"]', 1, '');
+                INSERT INTO terms VALUES ('気', 'き', 'n', '', 100.0, '[\"spirit\"]', 2, '');
+                INSERT INTO terms VALUES ('木', 'き', 'n', '', 100.0, '[\"tree\"]', 3, '');
+                INSERT INTO terms VALUES ('奇', 'き', 'n', '', 100.0, '[\"strange\"]', 4, '');
+                ",
+            )
+            .unwrap();
+
+        let freq_db = crate::dict::FreqDatabase::open_or_create(&freq_path).unwrap();
+        // Rank '気' as #150, '木' as #800, '生' as #3500. '奇' is unranked.
+        freq_db
+            .conn
+            .execute_batch(
+                "
+                INSERT INTO frequencies VALUES ('気', 'き', 150, '150㋕');
+                INSERT INTO frequencies VALUES ('木', 'き', 800, '800㋕');
+                INSERT INTO frequencies VALUES ('生', 'き', 3500, '3500㋕');
+                ",
+            )
+            .unwrap();
+
+        let ocr_box = OcrBox {
+            text: "き".to_string(),
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.1,
+            height: 0.1,
+            lines: Vec::new(),
+        };
+
+        let video_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
+        let popup = lookup_word_at_pointer(
+            egui::pos2(500.0, 300.0),
+            &[ocr_box],
+            video_rect,
+            &dict_db,
+            Some(&freq_db),
+            global_deinflector(),
+        )
+        .unwrap();
+
+        let terms: Vec<&str> = popup.entries.iter().map(|e| e.term.as_str()).collect();
+        // Must be sorted in order of frequency: 気 (150) -> 木 (800) -> 生 (3500) -> 奇 (unranked)
+        assert_eq!(terms, vec!["気", "木", "生", "奇"]);
+        assert_eq!(popup.entries[0].frequency.as_ref().unwrap().rank, 150);
+        assert_eq!(popup.entries[1].frequency.as_ref().unwrap().rank, 800);
+        assert_eq!(popup.entries[2].frequency.as_ref().unwrap().rank, 3500);
+        assert!(popup.entries[3].frequency.is_none());
     }
 }

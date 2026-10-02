@@ -186,5 +186,80 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         });
     }
 
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Frequency Dictionary (Jiten Global)").strong());
+        if state.dict.freq_update_available {
+            ui.label(
+                egui::RichText::new("(!)")
+                    .color(egui::Color32::from_rgb(251, 191, 36))
+                    .strong(),
+            )
+            .on_hover_text("An update is available for the Jiten frequency dictionary!");
+        }
+    });
+
+    if let Some(meta) = &state.dict.installed_freq_metadata {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!(
+                    "Installed: {} entries (rev {})",
+                    meta.total_entries, meta.revision
+                ))
+                .small()
+                .weak(),
+            );
+        });
+    } else {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Status: Not installed - click Sync to download")
+                    .small()
+                    .color(egui::Color32::from_rgb(251, 191, 36)),
+            );
+        });
+    }
+
+    let is_freq_syncing = state.dict.is_freq_syncing.load(Ordering::Relaxed);
+    if is_freq_syncing {
+        let (msg, prog) = if let Ok(lock) = state.dict.freq_sync_progress.lock() {
+            lock.clone().unwrap_or(("Syncing frequency dictionary...".into(), 0.0))
+        } else {
+            ("Syncing frequency dictionary...".into(), 0.0)
+        };
+        ui.add(egui::ProgressBar::new(prog).text(msg).animate(true));
+    } else {
+        ui.horizontal(|ui| {
+            let button_text = if state.dict.freq_update_available {
+                "⟳ Sync Jiten Frequency (!)"
+            } else {
+                "⟳ Sync Jiten Frequency"
+            };
+
+            let sync_btn = egui::Button::new(
+                egui::RichText::new(button_text).color(if state.dict.freq_update_available {
+                    egui::Color32::from_rgb(251, 191, 36)
+                } else {
+                    ui.visuals().text_color()
+                }),
+            );
+
+            if ui
+                .add(sync_btn)
+                .on_hover_text("Download and index the latest Jiten Global frequency dictionary from jiten.moe")
+                .clicked()
+            {
+                state.dict.trigger_freq_sync();
+            }
+
+            if state.dict.is_checking_freq_update.load(Ordering::Relaxed) {
+                ui.spinner();
+                ui.label(egui::RichText::new("Checking for updates...").weak().small());
+            } else if ui.small_button("Check Updates").clicked() {
+                state.dict.trigger_check_freq_version();
+            }
+        });
+    }
+
     changed
 }

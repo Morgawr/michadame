@@ -463,6 +463,50 @@ impl eframe::App for AppState {
                     }
                     repaint_requested = true;
                 }
+                crate::dict::DictEvent::FreqUpdateCheckFinished {
+                    update_available,
+                    remote_metadata,
+                } => {
+                    self.dict.freq_update_available = update_available;
+                    self.dict.remote_freq_metadata = remote_metadata;
+                    repaint_requested = true;
+                }
+                crate::dict::DictEvent::FreqSyncProgress { message, progress } => {
+                    if let Ok(mut lock) = self.dict.freq_sync_progress.lock() {
+                        *lock = Some((message, progress));
+                    }
+                    repaint_requested = true;
+                }
+                crate::dict::DictEvent::FreqSyncFinished(result) => {
+                    match result {
+                        Ok(meta) => {
+                            let db_path = self.dict.dict_dir.join("jiten_freq.db");
+                            match crate::dict::FreqDatabase::open(&db_path) {
+                                Ok(db) => {
+                                    if let Ok(mut db_lock) = self.dict.freq_db.lock() {
+                                        *db_lock = Some(db);
+                                    }
+                                }
+                                Err(e) => {
+                                    self.error(format!("Failed to open synced frequency dictionary: {e}"));
+                                }
+                            }
+                            self.dict.installed_freq_metadata = Some(meta.clone());
+                            self.dict.freq_update_available = false;
+                            if let Ok(mut lock) = self.dict.freq_sync_progress.lock() {
+                                *lock = None;
+                            }
+                            self.info(format!("Jiten frequency dictionary updated to {}!", meta.revision));
+                        }
+                        Err(e) => {
+                            if let Ok(mut lock) = self.dict.freq_sync_progress.lock() {
+                                *lock = None;
+                            }
+                            self.error(format!("Frequency dictionary sync failed: {e}"));
+                        }
+                    }
+                    repaint_requested = true;
+                }
             }
         }
 
