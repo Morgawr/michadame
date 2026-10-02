@@ -135,6 +135,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 state.ocr.boxes.clear();
                 state.ocr.raw_lines.clear();
                 state.ocr.last_copied_index = None;
+                state.dict.popup = None;
             }
         } else {
             if !state.ocr.is_processing.load(Ordering::Relaxed) {

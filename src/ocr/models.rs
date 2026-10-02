@@ -12,6 +12,7 @@ pub struct OcrBox {
     pub center_y: f32,
     pub width: f32,
     pub height: f32,
+    pub lines: Vec<ParsedLine>,
 }
 
 /// Represents an individual OCR-detected line prior to multi-line block grouping.
@@ -39,6 +40,8 @@ pub struct OcrState {
     /// Maximum distance threshold (as a multiple of line height) for merging
     /// adjacent lines into a single text block.
     pub sticky_distance: f32,
+    /// Whether to hide the visual OCR overlay (boxes and replacement text) on the video feed.
+    pub hide_overlay: bool,
     /// Index of the most recently clicked/copied box, for visual feedback.
     pub last_copied_index: Option<usize>,
     /// Timestamp when the box was copied, to expire visual highlight.
@@ -68,6 +71,7 @@ impl Default for OcrState {
             boxes: Vec::new(),
             raw_lines: Vec::new(),
             sticky_distance: 0.6,
+            hide_overlay: false,
             last_copied_index: None,
             copy_feedback_time: None,
             last_error: None,

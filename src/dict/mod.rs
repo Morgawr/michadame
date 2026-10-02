@@ -1,0 +1,147 @@
+pub mod database;
+pub mod deinflect;
+pub mod lookup;
+pub mod models;
+pub mod popup;
+pub mod render;
+pub mod sync;
+
+pub use database::DictDatabase;
+pub use deinflect::{global_deinflector, Deinflector};
+pub use models::*;
+
+use crossbeam_channel::{Receiver, Sender};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+/// Global state of the Yomitan / Jitendex dictionary subsystem in michadame.
+pub struct DictState {
+    /// Active SQLite dictionary connection, wrapped for cross-thread access.
+    pub db: Arc<Mutex<Option<DictDatabase>>>,
+    /// Currently installed dictionary metadata (from local SQLite db).
+    pub installed_metadata: Option<DictMetadata>,
+    /// Latest remote metadata checked from Jitendex.
+    pub remote_metadata: Option<DictMetadata>,
+    /// Whether an update is available (or dictionary is not yet installed).
+    pub update_available: bool,
+    /// Atomic flag indicating an update check is running.
+    pub is_checking_update: Arc<AtomicBool>,
+    /// Atomic flag indicating a dictionary download/sync is running.
+    pub is_syncing: Arc<AtomicBool>,
+    /// Current sync progress: (Status message, fraction 0.0..1.0).
+    pub sync_progress: Arc<Mutex<Option<(String, f32)>>>,
+    /// Local directory where dictionary database and temporary downloads are stored.
+    pub dict_dir: PathBuf,
+    /// Channel sender for worker events.
+    pub event_tx: Sender<DictEvent>,
+    /// Channel receiver for completed worker events.
+    pub event_rx: Option<Receiver<DictEvent>>,
+    /// Active popup state when user hovers over an OCR word.
+    pub popup: Option<DictPopupState>,
+}
+
+impl DictState {
+    pub fn new() -> Self {
+        let (tx, rx) = crossbeam_channel::unbounded();
+
+        let dict_dir = resolve_dict_directory();
+        let db_path = dict_dir.join("jitendex.db");
+
+        let mut installed_metadata = None;
+        let mut db_handle = None;
+
+        if db_path.exists() {
+            match DictDatabase::open(&db_path) {
+                Ok(database) => match database.get_metadata() {
+                    Ok(meta) => {
+                        tracing::info!(
+                            "Loaded Jitendex dictionary '{}' (rev {}) with {} entries",
+                            meta.title,
+                            meta.revision,
+                            meta.total_entries
+                        );
+                        installed_metadata = Some(meta);
+                        db_handle = Some(database);
+                    }
+                    Err(e) => tracing::warn!("Failed to read metadata from {}: {e}", db_path.display()),
+                },
+                Err(e) => tracing::warn!("Failed to open dictionary at {}: {e}", db_path.display()),
+            }
+        }
+
+        let is_checking_update = Arc::new(AtomicBool::new(false));
+        let is_syncing = Arc::new(AtomicBool::new(false));
+        let sync_progress = Arc::new(Mutex::new(None));
+
+        // If no dictionary is installed, mark update_available as true immediately
+        let update_available = installed_metadata.is_none();
+
+        // Trigger background check for remote version
+        let current_rev = installed_metadata.as_ref().map(|m| m.revision.clone());
+        sync::spawn_check_version(current_rev, is_checking_update.clone(), tx.clone());
+
+        Self {
+            db: Arc::new(Mutex::new(db_handle)),
+            installed_metadata,
+            remote_metadata: None,
+            update_available,
+            is_checking_update,
+            is_syncing,
+            sync_progress,
+            dict_dir,
+            event_tx: tx,
+            event_rx: Some(rx),
+            popup: None,
+        }
+    }
+
+    /// Triggers remote sync / download and indexing in a background thread.
+    pub fn trigger_sync(&mut self) {
+        if self.is_syncing.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let download_url = self
+            .remote_metadata
+            .as_ref()
+            .and_then(|m| m.download_url.clone());
+
+        sync::spawn_sync(
+            download_url,
+            self.dict_dir.clone(),
+            self.is_syncing.clone(),
+            self.event_tx.clone(),
+        );
+    }
+
+    /// Triggers a version check against jitendex.org.
+    pub fn trigger_check_version(&mut self) {
+        let current_rev = self.installed_metadata.as_ref().map(|m| m.revision.clone());
+        sync::spawn_check_version(
+            current_rev,
+            self.is_checking_update.clone(),
+            self.event_tx.clone(),
+        );
+    }
+}
+
+impl Default for DictState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Resolves standard directory path for storing dictionary files (~/.config/michadame/dict).
+pub fn resolve_dict_directory() -> PathBuf {
+    if let Ok(config_path) = confy::get_configuration_file_path("michadame", None) {
+        if let Some(parent) = config_path.parent() {
+            return parent.join("dict");
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".config").join("michadame").join("dict")
+    } else {
+        PathBuf::from("./dict")
+    }
+}

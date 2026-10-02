@@ -121,6 +121,7 @@ pub struct LegacyConfig {
     pub halo_corner_size: Option<f32>,
     pub halo_curvature: Option<bool>,
     pub ocr_sticky_distance: Option<f32>,
+    pub ocr_hide_overlay: Option<bool>,
 }
 
 pub fn default_active_profile() -> String {
@@ -142,6 +143,7 @@ pub struct MichadameConfig {
     pub audio_sample_format: Option<String>,
     pub active_profile: String,
     pub ocr_sticky_distance: Option<f32>,
+    pub ocr_hide_overlay: Option<bool>,
     // confy's TOML serializer requires scalar fields before nested tables.
     pub replay: crate::replay::config::ReplayConfig,
     pub profiles: BTreeMap<String, Profile>,
@@ -165,6 +167,7 @@ impl Default for MichadameConfig {
             audio_sample_format: None,
             active_profile: "Default".to_string(),
             ocr_sticky_distance: Some(0.6),
+            ocr_hide_overlay: Some(false),
             profiles,
         }
     }

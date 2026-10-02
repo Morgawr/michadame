@@ -174,6 +174,7 @@ pub struct AppState {
     pub fft_mask_save_name: String,
     pub fft_available_masks: Vec<String>,
     pub ocr: crate::ocr::OcrState,
+    pub dict: crate::dict::DictState,
 }
 
 #[cfg(test)]

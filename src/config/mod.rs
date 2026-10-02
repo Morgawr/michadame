@@ -75,6 +75,7 @@ impl From<LegacyConfig> for MichadameConfig {
             audio_sample_format: legacy.audio_sample_format,
             active_profile,
             ocr_sticky_distance: legacy.ocr_sticky_distance,
+            ocr_hide_overlay: legacy.ocr_hide_overlay,
             profiles,
         }
     }
@@ -146,6 +147,7 @@ mod tests {
             halo_corner_size: Some(0.02),
             halo_curvature: Some(true),
             ocr_sticky_distance: None,
+            ocr_hide_overlay: None,
         };
 
         let config: MichadameConfig = MichadameConfig::from(legacy);
@@ -231,6 +233,7 @@ mod tests {
             halo_corner_size: None,
             halo_curvature: None,
             ocr_sticky_distance: None,
+            ocr_hide_overlay: None,
         };
 
         let config: MichadameConfig = MichadameConfig::from(legacy);

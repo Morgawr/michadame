@@ -113,6 +113,7 @@ impl Default for AppState {
             fft_mask_save_name: String::new(),
             fft_available_masks: Vec::new(),
             ocr: crate::ocr::OcrState::default(),
+            dict: crate::dict::DictState::default(),
         }
     }
 }
@@ -403,6 +404,65 @@ impl eframe::App for AppState {
                     }
                 }
                 repaint_requested = true;
+            }
+        }
+
+        let dict_events: Vec<crate::dict::DictEvent> = if let Some(rx) = &self.dict.event_rx {
+            let mut events = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                events.push(event);
+            }
+            events
+        } else {
+            Vec::new()
+        };
+
+        for event in dict_events {
+            match event {
+                crate::dict::DictEvent::UpdateCheckFinished {
+                    update_available,
+                    remote_metadata,
+                } => {
+                    self.dict.update_available = update_available;
+                    self.dict.remote_metadata = remote_metadata;
+                    repaint_requested = true;
+                }
+                crate::dict::DictEvent::SyncProgress { message, progress } => {
+                    if let Ok(mut lock) = self.dict.sync_progress.lock() {
+                        *lock = Some((message, progress));
+                    }
+                    repaint_requested = true;
+                }
+                crate::dict::DictEvent::SyncFinished(result) => {
+                    match result {
+                        Ok(meta) => {
+                            let db_path = self.dict.dict_dir.join("jitendex.db");
+                            match crate::dict::DictDatabase::open(&db_path) {
+                                Ok(db) => {
+                                    if let Ok(mut db_lock) = self.dict.db.lock() {
+                                        *db_lock = Some(db);
+                                    }
+                                }
+                                Err(e) => {
+                                    self.error(format!("Failed to open synced dictionary: {e}"));
+                                }
+                            }
+                            self.dict.installed_metadata = Some(meta.clone());
+                            self.dict.update_available = false;
+                            if let Ok(mut lock) = self.dict.sync_progress.lock() {
+                                *lock = None;
+                            }
+                            self.info(format!("Jitendex dictionary updated to {}!", meta.revision));
+                        }
+                        Err(e) => {
+                            if let Ok(mut lock) = self.dict.sync_progress.lock() {
+                                *lock = None;
+                            }
+                            self.error(format!("Dictionary sync failed: {e}"));
+                        }
+                    }
+                    repaint_requested = true;
+                }
             }
         }
 

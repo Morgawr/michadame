@@ -98,6 +98,7 @@ pub fn save_config(state: &AppState) {
     cfg.audio_sample_rate = Some(state.hardware.audio_sample_rate);
     cfg.audio_sample_format = Some(state.hardware.audio_sample_format.clone());
     cfg.ocr_sticky_distance = Some(state.ocr.sticky_distance);
+    cfg.ocr_hide_overlay = Some(state.ocr.hide_overlay);
 
     cfg.active_profile = state.active_profile.clone();
     cfg.profiles = state.profiles.clone();
@@ -134,6 +135,7 @@ pub fn save_global_hardware_config(state: &AppState) {
     cfg.audio_sample_rate = Some(state.hardware.audio_sample_rate);
     cfg.audio_sample_format = Some(state.hardware.audio_sample_format.clone());
     cfg.ocr_sticky_distance = Some(state.ocr.sticky_distance);
+    cfg.ocr_hide_overlay = Some(state.ocr.hide_overlay);
 
     cfg.active_profile = state.active_profile.clone();
     cfg.profiles = state.profiles.clone();
@@ -330,6 +332,7 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
         state.ui.show_first_run_dialog = true;
     }
     state.ocr.sticky_distance = cfg.ocr_sticky_distance.unwrap_or(0.6);
+    state.ocr.hide_overlay = cfg.ocr_hide_overlay.unwrap_or(false);
 
     state.active_profile = cfg.active_profile.clone();
 
@@ -518,6 +521,27 @@ mod tests {
         let mut state = AppState::default();
         apply_config(&mut state, &loaded);
         assert!((state.ocr.sticky_distance - 0.85).abs() < f32::EPSILON);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_ocr_hide_overlay_toml_roundtrip() {
+        let path = std::env::temp_dir().join(format!(
+            "michadame-ocr-hide-config-{}-{}.toml",
+            std::process::id(),
+            crate::replay::now_us()
+        ));
+        let cfg = MichadameConfig {
+            ocr_hide_overlay: Some(true),
+            ..Default::default()
+        };
+        confy::store_path(&path, &cfg).unwrap();
+        let loaded: MichadameConfig = confy::load_path(&path).unwrap();
+        assert_eq!(loaded.ocr_hide_overlay, Some(true));
+
+        let mut state = AppState::default();
+        apply_config(&mut state, &loaded);
+        assert!(state.ocr.hide_overlay);
         let _ = std::fs::remove_file(&path);
     }
 

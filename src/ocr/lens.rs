@@ -256,6 +256,7 @@ pub fn group_lines_into_blocks(lines: &[ParsedLine], sticky_distance: f32) -> Ve
                 center_y: l.center_y,
                 width: l.width,
                 height: l.height,
+                lines: vec![l.clone()],
             })
             .collect();
     }
@@ -347,6 +348,7 @@ pub fn group_lines_into_blocks(lines: &[ParsedLine], sticky_distance: f32) -> Ve
             center_y,
             width,
             height,
+            lines: block,
         });
     }
 

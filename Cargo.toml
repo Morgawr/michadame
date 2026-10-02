@@ -39,6 +39,8 @@ tempfile = "3.23.0"
 prost = "0.13"
 ureq = { version = "2.10", features = ["tls"] }
 rand = "0.8"
+rusqlite = { version = "0.31", features = ["bundled"] }
+zip = { version = "2.1", default-features = false, features = ["deflate"] }
 
 [profile.profiling]
 inherits = "release"

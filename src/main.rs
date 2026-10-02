@@ -5,6 +5,7 @@ mod replay;
 mod ui;
 mod video;
 mod ocr;
+pub mod dict;
 
 use anyhow::Result;
 use eframe::egui;
@@ -53,6 +54,15 @@ fn main() -> Result<(), eframe::Error> {
         fonts.font_data.insert(
             "noto_emoji".to_owned(),
             egui::FontData::from_static(include_bytes!("../assets/NotoColorEmoji-Regular.ttf")),
+        );
+
+        fonts.families.insert(
+            egui::FontFamily::Name("GothicCJK".into()),
+            vec![
+                "noto_sans_jp".to_owned(),
+                "roboto_slab".to_owned(),
+                "noto_emoji".to_owned(),
+            ],
         );
 
         fonts
