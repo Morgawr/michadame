@@ -378,6 +378,7 @@ mod tests {
             max_bitrate_mbps: 65,
             codec: crate::replay::config::Codec::Hevc,
             keys: [1, 2, 3, 4, 5, 10],
+            capture_overlays: true,
             directory: "/tmp/my replays".into(),
             render_device: "/dev/dri/renderD129".into(),
         };
@@ -562,5 +563,26 @@ mod tests {
         assert_eq!(state.halo.brightboost, 2.2);
         assert_eq!(state.halo.halo_zoom, 75.0);
         assert_eq!(state.halo.curvature, false);
+    }
+
+    #[test]
+    fn test_replay_capture_overlays_roundtrip() {
+        let path = std::env::temp_dir().join(format!(
+            "michadame-replay-overlay-{}-{}.toml",
+            std::process::id(),
+            crate::replay::now_us()
+        ));
+        let mut cfg = MichadameConfig::default();
+        assert!(!cfg.replay.capture_overlays);
+        cfg.replay.capture_overlays = true;
+
+        confy::store_path(&path, &cfg).unwrap();
+        let loaded: MichadameConfig = confy::load_path(&path).unwrap();
+        assert!(loaded.replay.capture_overlays);
+
+        let mut state = AppState::default();
+        apply_config(&mut state, &loaded);
+        assert!(state.replay.config.capture_overlays);
+        let _ = std::fs::remove_file(&path);
     }
 }

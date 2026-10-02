@@ -16,6 +16,7 @@ pub struct ReplayConfig {
     pub custom_seconds: u32,
     /// Function key numbers; zero disables a binding.
     pub keys: [u8; 6],
+    pub capture_overlays: bool,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Codec {
@@ -63,6 +64,7 @@ impl Default for ReplayConfig {
                 .into_owned(),
             custom_seconds: 120,
             keys: [5, 6, 7, 8, 9, 10],
+            capture_overlays: false,
         }
     }
 }

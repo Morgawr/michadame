@@ -216,6 +216,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 let ocr_processing_cb = ocr_processing.clone();
                 let ocr_sender_cb = ocr_sender.clone();
 
+                let capture_overlays = state.replay.config.capture_overlays;
+
                 let callback = egui::PaintCallback {
                     rect: response.rect,
                     callback: std::sync::Arc::new(egui_glow::CallbackFn::new(
@@ -248,13 +250,15 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 .as_ref()
                                 .map(|f| (f.captured_at, f.rate))
                                 .unwrap_or((0, crate::replay::config::Rate::new(60, 1)));
-                            replay_gpu.lock().unwrap().capture(
-                                painter.gl(),
-                                replay.as_ref(),
-                                rendered_area,
-                                at,
-                                rate,
-                            );
+                            if !capture_overlays {
+                                replay_gpu.lock().unwrap().capture(
+                                    painter.gl(),
+                                    replay.as_ref(),
+                                    rendered_area,
+                                    at,
+                                    rate,
+                                );
+                            }
 
                             if ocr_capture_cb.swap(false, Ordering::AcqRel) {
                                 if let Some((pixels, w, h)) =
@@ -311,6 +315,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             let ocr_capture_cb = ocr_capture.clone();
             let ocr_processing_cb = ocr_processing.clone();
             let ocr_sender_cb = ocr_sender.clone();
+            let capture_overlays = state.replay.config.capture_overlays;
 
             let callback = egui::PaintCallback {
                 rect,
@@ -342,13 +347,15 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         .as_ref()
                         .map(|f| (f.captured_at, f.rate))
                         .unwrap_or((0, crate::replay::config::Rate::new(60, 1)));
-                    replay_gpu.lock().unwrap().capture(
-                        painter.gl(),
-                        replay.as_ref(),
-                        rendered_area,
-                        at,
-                        rate,
-                    );
+                    if !capture_overlays {
+                        replay_gpu.lock().unwrap().capture(
+                            painter.gl(),
+                            replay.as_ref(),
+                            rendered_area,
+                            at,
+                            rate,
+                        );
+                    }
 
                     if ocr_capture_cb.swap(false, Ordering::AcqRel) {
                         if let Some((pixels, w, h)) =
@@ -381,6 +388,43 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         let video_rect = egui::Rect::from_min_size(video_rect_min, video_rect_size);
 
         crate::ocr::overlay::draw_ocr_overlay(ui, state, video_rect);
+
+        // When capturing overlays in the replay buffer, capture the frame after egui has
+        // rendered the interactive OCR boxes and dictionary popup in the Foreground layer.
+        if state.replay.config.capture_overlays {
+            let replay_gpu = state.replay.gpu.clone();
+            let replay = state
+                .replay
+                .runtime
+                .as_ref()
+                .map(crate::replay::gpu::RuntimeView::new);
+            let (at, rate) = state
+                .latest_frame
+                .as_ref()
+                .map(|f| (f.captured_at, f.rate))
+                .unwrap_or((0, crate::replay::config::Rate::new(60, 1)));
+            let rendered_area = rendered_area_geom;
+
+            let callback = egui::PaintCallback {
+                rect: response.rect,
+                callback: std::sync::Arc::new(egui_glow::CallbackFn::new(
+                    move |_info, painter| {
+                        replay_gpu.lock().unwrap().capture(
+                            painter.gl(),
+                            replay.as_ref(),
+                            rendered_area,
+                            at,
+                            rate,
+                        );
+                    },
+                )),
+            };
+            ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Tooltip,
+                egui::Id::new("replay_capture_overlay"),
+            ))
+            .add(callback);
+        }
 
         if response.double_clicked() {
             let is_fullscreen = !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));

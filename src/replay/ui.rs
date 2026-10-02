@@ -162,6 +162,15 @@ pub fn draw(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
                     .changed();
             });
         });
+        changed |= ui
+            .checkbox(
+                &mut replay.config.capture_overlays,
+                "Capture overlays in replay buffer (popup & OCR)",
+            )
+            .on_hover_text(
+                "Include active dictionary popups and OCR overlay boxes in replay recordings.\nIf 'Hide OCR boxes overlay' is enabled in OCR settings, only the dictionary popup is captured.\nWhen unchecked, replays record clean game video without any overlays.",
+            )
+            .changed();
         egui::CollapsingHeader::new("Save shortcuts")
             .default_open(false)
             .show(ui, |ui| {
