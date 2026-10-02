@@ -46,6 +46,7 @@ pub struct HaloRenderer {
     composite_double_slot_loc: Option<glow::UniformLocation>,
     composite_smoothmask_loc: Option<glow::UniformLocation>,
     composite_curvature_loc: Option<glow::UniformLocation>,
+    composite_vibrance_loc: Option<glow::UniformLocation>,
 
     final_output_res_loc: Option<glow::UniformLocation>,
     final_source_size_loc: Option<glow::UniformLocation>,
@@ -188,6 +189,7 @@ impl HaloRenderer {
             let composite_double_slot_loc = gl.get_uniform_location(composite_prog, "double_slot");
             let composite_smoothmask_loc = gl.get_uniform_location(composite_prog, "smoothmask");
             let composite_curvature_loc = gl.get_uniform_location(composite_prog, "curvature");
+            let composite_vibrance_loc = gl.get_uniform_location(composite_prog, "vibrance");
 
             // Final uniform locations
             let final_output_res_loc = gl.get_uniform_location(final_prog, "outputResolution");
@@ -299,6 +301,7 @@ impl HaloRenderer {
                 composite_double_slot_loc,
                 composite_smoothmask_loc,
                 composite_curvature_loc,
+                composite_vibrance_loc,
 
                 final_output_res_loc,
                 final_source_size_loc,
@@ -499,6 +502,7 @@ impl HaloRenderer {
         gl.uniform_1_f32(self.composite_double_slot_loc.as_ref(), params.double_slot);
         gl.uniform_1_f32(self.composite_smoothmask_loc.as_ref(), params.smoothmask);
         gl.uniform_1_i32(self.composite_curvature_loc.as_ref(), if params.curvature { 1 } else { 0 });
+        gl.uniform_1_f32(self.composite_vibrance_loc.as_ref(), params.vibrance);
         gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
         // Pass 7: Final (Edge Halo, Dithering, Output)

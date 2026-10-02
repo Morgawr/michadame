@@ -25,6 +25,7 @@ uniform float slotmask1;
 uniform float double_slot;
 uniform float smoothmask;
 uniform int curvature;
+uniform float vibrance;
 
 vec2 Warp(vec2 pos) {
     pos = pos * 2.0 - 1.0;
@@ -171,6 +172,10 @@ void main() {
     if (abs(glow) > 0.01) {
         color = color + abs(glow) * glow_val;
     }
+
+    // Apply vibrance (saturation boost in linear space)
+    float luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    color = mix(vec3(luminance), color, vibrance);
 
     // Gamma out: linear -> display gamma 2.4
     color = pow(clamp(color, 0.0, 1.0), vec3(1.0 / 2.4));

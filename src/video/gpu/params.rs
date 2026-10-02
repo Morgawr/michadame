@@ -49,6 +49,7 @@ pub struct HaloShaderParams {
     pub curvature: bool,
     pub background_color: [f32; 3],
     pub horizontal_stretch: f32,
+    pub vibrance: f32,
 }
 
 impl HaloShaderParams {
@@ -81,6 +82,7 @@ impl HaloShaderParams {
                 [0.0, 0.0, 0.0]
             },
             horizontal_stretch: state.video.horizontal_stretch,
+            vibrance: state.video.vibrance,
         }
     }
 }
@@ -111,6 +113,7 @@ impl Default for HaloShaderParams {
             curvature: true,
             background_color: [0.0, 0.0, 0.0],
             horizontal_stretch: 1.0,
+            vibrance: 1.0,
         }
     }
 }
@@ -271,6 +274,7 @@ mod tests {
         assert_eq!(params.halo_intensity, 0.95);
         assert_eq!(params.corner_size, 0.0);
         assert!(params.curvature);
+        assert_eq!(params.vibrance, 1.0);
     }
 
     #[test]
@@ -279,11 +283,13 @@ mod tests {
         state.halo.brightboost = 2.2;
         state.halo.halo_zoom = 90.0;
         state.video.use_magenta_background = true;
+        state.video.vibrance = 1.5;
 
         let params = HaloShaderParams::from_state(&state);
         assert_eq!(params.brightboost, 2.2);
         assert_eq!(params.halo_zoom, 90.0);
         assert_eq!(params.background_color, [1.0, 0.0, 1.0]);
+        assert_eq!(params.vibrance, 1.5);
     }
 
     #[test]
