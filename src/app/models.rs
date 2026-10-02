@@ -40,6 +40,7 @@ pub struct UiState {
     pub show_stop_stream_dialog: bool,
     pub video_window_open: bool,
     pub control_window_open: bool,
+    pub dismissed_config_error: bool,
 }
 
 pub struct CrtSettings {
@@ -56,6 +57,7 @@ pub struct CrtSettings {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HaloSettings {
     pub brightboost: f32,
     pub brightboost1: f32,
@@ -108,6 +110,34 @@ impl Default for HaloSettings {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CathodeInterferenceSettings {
+    pub enabled: bool,
+    pub intensity: f32,
+    pub frequency: f32,
+    pub randomization: f32,
+    pub electricity_glow: f32,
+    pub flicker_depth: f32,
+    pub interference: f32,
+    pub lightbulb_effect: f32,
+}
+
+impl Default for CathodeInterferenceSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            intensity: 0.5,
+            frequency: 1.0,
+            randomization: 0.5,
+            electricity_glow: 0.5,
+            flicker_depth: 0.4,
+            interference: 0.3,
+            lightbulb_effect: 0.35,
+        }
+    }
+}
+
 pub struct VideoSettings {
     pub pixelate_filter_enabled: bool,
     pub use_magenta_background: bool,
@@ -135,6 +165,8 @@ pub struct AppState {
     pub crt: CrtSettings,
     pub halo: HaloSettings,
     pub halo_defaults: HaloSettings,
+    pub cathode_interference: CathodeInterferenceSettings,
+    pub cathode_interference_defaults: CathodeInterferenceSettings,
     pub selected_crt_filter: crate::devices::filter_type::CrtFilter,
     pub video: VideoSettings,
     pub toasts: egui_toast::Toasts,
@@ -177,6 +209,8 @@ pub struct AppState {
     pub fft_available_masks: Vec<String>,
     pub ocr: crate::ocr::OcrState,
     pub dict: crate::dict::DictState,
+    pub config_load_error: Option<String>,
+    pub config_quarantine_path: Option<std::path::PathBuf>,
 }
 
 #[cfg(test)]
@@ -198,6 +232,10 @@ mod tests {
         assert_eq!(state.crt.hard_scan, -8.0);
         assert_eq!(state.halo.brightboost, 1.30);
         assert_eq!(state.halo_defaults, state.halo);
+        assert_eq!(state.cathode_interference_defaults, state.cathode_interference);
+        assert!(!state.cathode_interference.enabled);
+        assert!(state.config_load_error.is_none());
+        assert!(state.config_quarantine_path.is_none());
         assert_eq!(state.selected_crt_filter, crate::devices::filter_type::CrtFilter::Lottes);
         assert_eq!(state.video.horizontal_stretch, 1.0);
     }

@@ -3,7 +3,7 @@ use super::bunny::BunnyUpscaler;
 use super::fft_filter::FftFilter;
 use super::geometry::RenderedArea;
 use super::halo::HaloRenderer;
-use super::params::{HaloShaderParams, ShaderParams};
+use super::params::{CathodeInterferenceShaderParams, HaloShaderParams, ShaderParams};
 use super::programs::*;
 use crate::video::types::{RawFrame, ScalerFilter};
 use eframe::glow::{self, HasContext};
@@ -60,6 +60,23 @@ pub struct CrtFilterRenderer {
     passthrough_vibrance_loc: glow::UniformLocation,
     passthrough_scaler_filter_loc: glow::UniformLocation,
 
+    cathode_prog: glow::Program,
+    cathode_output_res_loc: glow::UniformLocation,
+    cathode_source_size_loc: glow::UniformLocation,
+    cathode_horizontal_stretch_loc: glow::UniformLocation,
+    cathode_time_loc: glow::UniformLocation,
+    cathode_intensity_loc: glow::UniformLocation,
+    cathode_frequency_loc: glow::UniformLocation,
+    cathode_randomization_loc: glow::UniformLocation,
+    cathode_electricity_glow_loc: glow::UniformLocation,
+    cathode_flicker_depth_loc: glow::UniformLocation,
+    cathode_interference_loc: glow::UniformLocation,
+    cathode_lightbulb_effect_loc: glow::UniformLocation,
+
+    post_fbo: glow::Framebuffer,
+    post_texture: glow::Texture,
+    last_post_size: (u32, u32),
+
     last_size: (u32, u32),
     last_scaler_filter: Option<u8>,
     last_pass_res: (u32, u32),
@@ -113,6 +130,7 @@ impl CrtFilterRenderer {
             let final_prog = compile_program(gl, VS_SRC, FS_FINAL);
             let yuv_planar_prog = compile_program(gl, VS_SRC, FS_YUV_PLANAR);
             let yuyv_packed_prog = compile_program(gl, VS_SRC, FS_YUYV_PACKED);
+            let cathode_prog = compile_program(gl, VS_SRC, FS_CATHODE_INTERFERENCE);
 
             let p_passthrough_output_res_loc = gl
                 .get_uniform_location(passthrough_prog, "outputResolution")
@@ -168,6 +186,47 @@ impl CrtFilterRenderer {
             let passthrough_vibrance_loc = gl
                 .get_uniform_location(passthrough_prog, "vibrance")
                 .unwrap();
+
+            let cathode_output_res_loc = gl
+                .get_uniform_location(cathode_prog, "outputResolution")
+                .unwrap();
+            let cathode_source_size_loc = gl
+                .get_uniform_location(cathode_prog, "source_size")
+                .unwrap();
+            let cathode_horizontal_stretch_loc = gl
+                .get_uniform_location(cathode_prog, "horizontal_stretch")
+                .unwrap();
+            let cathode_time_loc = gl.get_uniform_location(cathode_prog, "time").unwrap();
+            let cathode_intensity_loc = gl
+                .get_uniform_location(cathode_prog, "intensity")
+                .unwrap();
+            let cathode_frequency_loc = gl
+                .get_uniform_location(cathode_prog, "frequency")
+                .unwrap();
+            let cathode_randomization_loc = gl
+                .get_uniform_location(cathode_prog, "randomization")
+                .unwrap();
+            let cathode_electricity_glow_loc = gl
+                .get_uniform_location(cathode_prog, "electricity_glow")
+                .unwrap();
+            let cathode_flicker_depth_loc = gl
+                .get_uniform_location(cathode_prog, "flicker_depth")
+                .unwrap();
+            let cathode_interference_loc = gl
+                .get_uniform_location(cathode_prog, "interference")
+                .unwrap();
+            let cathode_lightbulb_effect_loc = gl
+                .get_uniform_location(cathode_prog, "lightbulb_effect")
+                .unwrap();
+
+            gl.use_program(Some(cathode_prog));
+            gl.uniform_1_i32(
+                Some(
+                    &gl.get_uniform_location(cathode_prog, "input_texture")
+                        .unwrap(),
+                ),
+                0,
+            );
 
             gl.use_program(Some(passthrough_prog));
             gl.uniform_1_i32(
@@ -270,6 +329,9 @@ impl CrtFilterRenderer {
                 gl.create_buffer().unwrap(),
             ];
 
+            let post_fbo = gl.create_framebuffer().unwrap();
+            let post_texture = gl.create_texture().unwrap();
+
             let vertex_array = gl
                 .create_vertex_array()
                 .expect("Cannot create vertex array");
@@ -345,6 +407,21 @@ impl CrtFilterRenderer {
                 passthrough_scaler_filter_loc,
                 median_prog,
                 median_mix_loc,
+                cathode_prog,
+                cathode_output_res_loc,
+                cathode_source_size_loc,
+                cathode_horizontal_stretch_loc,
+                cathode_time_loc,
+                cathode_intensity_loc,
+                cathode_frequency_loc,
+                cathode_randomization_loc,
+                cathode_electricity_glow_loc,
+                cathode_flicker_depth_loc,
+                cathode_interference_loc,
+                cathode_lightbulb_effect_loc,
+                post_fbo,
+                post_texture,
+                last_post_size: (0, 0),
                 bunny: BunnyUpscaler::new(gl),
                 anime4k_small: Anime4kUpscaler::new(gl, Anime4kVariant::Small),
                 anime4k_medium: Anime4kUpscaler::new(gl, Anime4kVariant::Medium),
@@ -630,6 +707,45 @@ impl CrtFilterRenderer {
         tex
     }
 
+    unsafe fn setup_post_framebuffer(
+        &mut self,
+        gl: &glow::Context,
+        target_width: u32,
+        target_height: u32,
+    ) {
+        let w = target_width.max(1);
+        let h = target_height.max(1);
+        if (w, h) != self.last_post_size {
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.post_texture));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA8 as i32,
+                w as i32,
+                h as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                None,
+            );
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbo));
+            gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(self.post_texture),
+                0,
+            );
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.last_post_size = (w, h);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn paint(
         &mut self,
@@ -640,6 +756,8 @@ impl CrtFilterRenderer {
         output_size: (f32, f32),
         params: &ShaderParams,
         halo_params: &HaloShaderParams,
+        cathode_params: &CathodeInterferenceShaderParams,
+        time: f32,
         run_pixelate: bool,
         run_lottes: bool,
         run_halo: bool,
@@ -751,7 +869,6 @@ impl CrtFilterRenderer {
                 gl.bind_texture(glow::TEXTURE_2D, Some(current_video_texture));
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 current_video_texture = self.pass_textures[5];
-                // current_res remains (width, height)
             }
 
             let scaler = ScalerFilter::from_u8(params.scaler_filter);
@@ -834,8 +951,16 @@ impl CrtFilterRenderer {
                 final_input_res = pixelate_res;
             }
 
+            let run_cathode = cathode_params.enabled && cathode_params.intensity > 0.001;
+            let target_fbo = if run_cathode {
+                self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
+                Some(self.post_fbo)
+            } else {
+                None
+            };
+
             if run_lottes {
-                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                gl.bind_framebuffer(glow::FRAMEBUFFER, target_fbo);
                 gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
                 gl.use_program(Some(self.final_prog));
                 gl.active_texture(glow::TEXTURE0);
@@ -870,7 +995,7 @@ impl CrtFilterRenderer {
                     params.horizontal_stretch,
                 );
                 gl.uniform_1_f32(Some(&self.final_vibrance_loc), params.vibrance);
-                if scissor_enabled {
+                if scissor_enabled && !run_cathode {
                     gl.enable(glow::SCISSOR_TEST);
                 }
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
@@ -881,10 +1006,11 @@ impl CrtFilterRenderer {
                     final_input_res,
                     output_size,
                     halo_params,
-                    scissor_enabled,
+                    scissor_enabled && !run_cathode,
+                    target_fbo,
                 );
             } else if run_pixelate {
-                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                gl.bind_framebuffer(glow::FRAMEBUFFER, target_fbo);
                 gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
                 gl.use_program(Some(self.passthrough_prog));
                 gl.active_texture(glow::TEXTURE0);
@@ -909,7 +1035,7 @@ impl CrtFilterRenderer {
                     Some(&self.passthrough_scaler_filter_loc),
                     params.scaler_filter as i32,
                 );
-                if scissor_enabled {
+                if scissor_enabled && !run_cathode {
                     gl.enable(glow::SCISSOR_TEST);
                 }
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
@@ -924,7 +1050,46 @@ impl CrtFilterRenderer {
                     params.horizontal_stretch,
                     params.vibrance,
                     params.scaler_filter,
+                    target_fbo,
                 );
+            }
+
+            if run_cathode {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+                gl.use_program(Some(self.cathode_prog));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.post_texture));
+
+                gl.uniform_2_f32(
+                    Some(&self.cathode_output_res_loc),
+                    output_size.0,
+                    output_size.1,
+                );
+                gl.uniform_2_f32(
+                    Some(&self.cathode_source_size_loc),
+                    final_input_res.0 as f32,
+                    final_input_res.1 as f32,
+                );
+                gl.uniform_1_f32(
+                    Some(&self.cathode_horizontal_stretch_loc),
+                    params.horizontal_stretch,
+                );
+                gl.uniform_1_f32(Some(&self.cathode_time_loc), time);
+                gl.uniform_1_f32(Some(&self.cathode_intensity_loc), cathode_params.intensity);
+                gl.uniform_1_f32(Some(&self.cathode_frequency_loc), cathode_params.frequency);
+                gl.uniform_1_f32(Some(&self.cathode_randomization_loc), cathode_params.randomization);
+                gl.uniform_1_f32(Some(&self.cathode_electricity_glow_loc), cathode_params.electricity_glow);
+                gl.uniform_1_f32(Some(&self.cathode_flicker_depth_loc), cathode_params.flicker_depth);
+                gl.uniform_1_f32(Some(&self.cathode_interference_loc), cathode_params.interference);
+                gl.uniform_1_f32(Some(&self.cathode_lightbulb_effect_loc), cathode_params.lightbulb_effect);
+
+                if scissor_enabled {
+                    gl.enable(glow::SCISSOR_TEST);
+                }
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                gl.bind_texture(glow::TEXTURE_2D, None);
+                gl.use_program(None);
             }
 
             if blend_enabled {
@@ -962,6 +1127,8 @@ impl CrtFilterRenderer {
         fft_filter: Option<&Arc<Mutex<FftFilter>>>,
         fft_mask_threshold: f32,
         fft_black_threshold: f32,
+        cathode_params: Option<&CathodeInterferenceShaderParams>,
+        time: f32,
     ) -> RenderedArea {
         let mut video_texture = fallback_texture;
 
@@ -1128,7 +1295,17 @@ impl CrtFilterRenderer {
                 current_res = (upscaled.1, upscaled.2);
             }
 
-            if scissor_enabled {
+            let run_cathode = cathode_params
+                .map(|c| c.enabled && c.intensity > 0.001)
+                .unwrap_or(false);
+            let target_fbo = if run_cathode {
+                self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
+                Some(self.post_fbo)
+            } else {
+                None
+            };
+
+            if scissor_enabled && !run_cathode {
                 gl.enable(glow::SCISSOR_TEST);
             }
             let rendered_area = self.draw_passthrough_internal(
@@ -1140,7 +1317,47 @@ impl CrtFilterRenderer {
                 horizontal_stretch,
                 vibrance,
                 scaler_filter,
+                target_fbo,
             );
+
+            if run_cathode {
+                let cp = cathode_params.unwrap();
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+                gl.use_program(Some(self.cathode_prog));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.post_texture));
+
+                gl.uniform_2_f32(
+                    Some(&self.cathode_output_res_loc),
+                    output_size.0,
+                    output_size.1,
+                );
+                gl.uniform_2_f32(
+                    Some(&self.cathode_source_size_loc),
+                    current_res.0 as f32,
+                    current_res.1 as f32,
+                );
+                gl.uniform_1_f32(
+                    Some(&self.cathode_horizontal_stretch_loc),
+                    horizontal_stretch,
+                );
+                gl.uniform_1_f32(Some(&self.cathode_time_loc), time);
+                gl.uniform_1_f32(Some(&self.cathode_intensity_loc), cp.intensity);
+                gl.uniform_1_f32(Some(&self.cathode_frequency_loc), cp.frequency);
+                gl.uniform_1_f32(Some(&self.cathode_randomization_loc), cp.randomization);
+                gl.uniform_1_f32(Some(&self.cathode_electricity_glow_loc), cp.electricity_glow);
+                gl.uniform_1_f32(Some(&self.cathode_flicker_depth_loc), cp.flicker_depth);
+                gl.uniform_1_f32(Some(&self.cathode_interference_loc), cp.interference);
+                gl.uniform_1_f32(Some(&self.cathode_lightbulb_effect_loc), cp.lightbulb_effect);
+
+                if scissor_enabled {
+                    gl.enable(glow::SCISSOR_TEST);
+                }
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                gl.bind_texture(glow::TEXTURE_2D, None);
+                gl.use_program(None);
+            }
 
             if blend_enabled {
                 gl.enable(glow::BLEND);
@@ -1167,10 +1384,11 @@ impl CrtFilterRenderer {
         horizontal_stretch: f32,
         vibrance: f32,
         scaler_filter: u8,
+        target_fbo: Option<glow::Framebuffer>,
     ) -> RenderedArea {
         let final_input_texture = video_texture;
 
-        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, target_fbo);
         gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
         gl.use_program(Some(self.passthrough_prog));
         gl.active_texture(glow::TEXTURE0);
@@ -1209,6 +1427,9 @@ impl CrtFilterRenderer {
             gl.delete_program(self.final_prog);
             gl.delete_program(self.yuv_planar_prog);
             gl.delete_program(self.yuyv_packed_prog);
+            gl.delete_program(self.cathode_prog);
+            gl.delete_framebuffer(self.post_fbo);
+            gl.delete_texture(self.post_texture);
             self.bunny.destroy(gl);
             self.anime4k_small.destroy(gl);
             self.anime4k_medium.destroy(gl);

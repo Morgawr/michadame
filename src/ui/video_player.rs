@@ -190,11 +190,18 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             state.video.horizontal_stretch,
         );
 
-        if state.video.pixelate_filter_enabled || filter != CrtFilter::Off {
+        let cathode_params = video::gpu::CathodeInterferenceShaderParams::from_state(state);
+        let time = ui.input(|i| i.time) as f32;
+        if state.cathode_interference.enabled {
+            ui.ctx().request_repaint();
+        }
+
+        if state.video.pixelate_filter_enabled || filter != CrtFilter::Off || state.cathode_interference.enabled {
             if let Some(renderer_arc) = &state.crt_renderer {
                 let renderer_clone = renderer_arc.clone();
                 let params = video::gpu::ShaderParams::from_state(state);
                 let halo_params = video::gpu::HaloShaderParams::from_state(state);
+                let cathode_params_cb = cathode_params.clone();
                 let pixelate = state.video.pixelate_filter_enabled;
                 let run_lottes = filter == CrtFilter::Lottes;
                 let run_halo = filter == CrtFilter::Halo;
@@ -239,6 +246,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 output_size,
                                 &params,
                                 &halo_params,
+                                &cathode_params_cb,
+                                time,
                                 pixelate,
                                 run_lottes,
                                 run_halo,
@@ -342,6 +351,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         fft_clone.as_ref(),
                         fft_threshold,
                         fft_black,
+                        None,
+                        0.0,
                     );
                     let (at, rate) = latest_frame
                         .as_ref()

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Default, Serialize, Deserialize, Clone)]
+#[serde(default)]
 pub struct Profile {
     pub video_format_fourcc: Option<String>,
     pub crt_filter: Option<u8>,
@@ -52,9 +53,20 @@ pub struct Profile {
     pub halo_intensity: Option<f32>,
     pub halo_corner_size: Option<f32>,
     pub halo_curvature: Option<bool>,
+
+    // Cathode interference params
+    pub cathode_interference_enabled: Option<bool>,
+    pub cathode_intensity: Option<f32>,
+    pub cathode_frequency: Option<f32>,
+    pub cathode_randomization: Option<f32>,
+    pub cathode_electricity_glow: Option<f32>,
+    pub cathode_flicker_depth: Option<f32>,
+    pub cathode_interference: Option<f32>,
+    pub cathode_lightbulb_effect: Option<f32>,
 }
 
 #[derive(Deserialize, Clone)]
+#[serde(default)]
 pub struct LegacyConfig {
     #[serde(default)]
     pub replay: crate::replay::config::ReplayConfig,
@@ -123,6 +135,91 @@ pub struct LegacyConfig {
     pub ocr_sticky_distance: Option<f32>,
     pub ocr_hide_overlay: Option<bool>,
     pub default_halo: Option<crate::app::models::HaloSettings>,
+    pub cathode_interference_enabled: Option<bool>,
+    pub cathode_intensity: Option<f32>,
+    pub cathode_frequency: Option<f32>,
+    pub cathode_randomization: Option<f32>,
+    pub cathode_electricity_glow: Option<f32>,
+    pub cathode_flicker_depth: Option<f32>,
+    pub cathode_interference: Option<f32>,
+    pub cathode_lightbulb_effect: Option<f32>,
+    pub default_cathode_interference: Option<crate::app::models::CathodeInterferenceSettings>,
+}
+
+impl Default for LegacyConfig {
+    fn default() -> Self {
+        Self {
+            replay: Default::default(),
+            video_device: None,
+            usb_device: None,
+            video_resolution: None,
+            video_framerate: None,
+            reset_usb_on_startup: None,
+            has_shown_first_run_warning: None,
+            active_profile: default_active_profile(),
+            profiles: BTreeMap::new(),
+            audio_source: None,
+            video_format_fourcc: None,
+            crt_filter: None,
+            selected_crt_filter: None,
+            scaler_filter: None,
+            color_range: None,
+            pixelate_filter_enabled: None,
+            audio_buffer_size: None,
+            audio_sample_rate: None,
+            audio_sample_format: None,
+            crt_hard_scan: None,
+            crt_warp_x: None,
+            crt_warp_y: None,
+            crt_shadow_mask: None,
+            crt_brightboost: None,
+            crt_hard_bloom_pix: None,
+            crt_hard_bloom_scan: None,
+            crt_bloom_amount: None,
+            crt_shape: None,
+            crt_hard_pix: None,
+            use_magenta_background: None,
+            horizontal_stretch: None,
+            median_filter_enabled: None,
+            median_mix: None,
+            vibrance: None,
+            overscan_x: None,
+            overscan_y: None,
+            halo_brightboost: None,
+            halo_brightboost1: None,
+            halo_beam_min: None,
+            halo_beam_max: None,
+            halo_beam_size: None,
+            halo_h_sharp: None,
+            halo_glow: None,
+            halo_bloom: None,
+            halo_halation: None,
+            halo_shadow_mask: None,
+            halo_masksize: None,
+            halo_maskstr: None,
+            halo_mcut: None,
+            halo_slotmask: None,
+            halo_slotmask1: None,
+            halo_double_slot: None,
+            halo_smoothmask: None,
+            halo_zoom: None,
+            halo_intensity: None,
+            halo_corner_size: None,
+            halo_curvature: None,
+            ocr_sticky_distance: None,
+            ocr_hide_overlay: None,
+            default_halo: None,
+            cathode_interference_enabled: None,
+            cathode_intensity: None,
+            cathode_frequency: None,
+            cathode_randomization: None,
+            cathode_electricity_glow: None,
+            cathode_flicker_depth: None,
+            cathode_interference: None,
+            cathode_lightbulb_effect: None,
+            default_cathode_interference: None,
+        }
+    }
 }
 
 pub fn default_active_profile() -> String {
@@ -146,6 +243,7 @@ pub struct MichadameConfig {
     pub ocr_sticky_distance: Option<f32>,
     pub ocr_hide_overlay: Option<bool>,
     pub default_halo: Option<crate::app::models::HaloSettings>,
+    pub default_cathode_interference: Option<crate::app::models::CathodeInterferenceSettings>,
     // confy's TOML serializer requires scalar fields before nested tables.
     pub replay: crate::replay::config::ReplayConfig,
     pub profiles: BTreeMap<String, Profile>,
@@ -171,6 +269,7 @@ impl Default for MichadameConfig {
             ocr_sticky_distance: Some(0.6),
             ocr_hide_overlay: Some(false),
             default_halo: None,
+            default_cathode_interference: None,
             profiles,
         }
     }

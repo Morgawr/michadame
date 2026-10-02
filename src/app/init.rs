@@ -21,9 +21,27 @@ pub fn init_app_state(cc: &eframe::CreationContext) -> AppState {
         .load_texture("logo", logo_color_image, Default::default());
     state.logo_texture = Some(logo_texture);
 
-    let cfg = config::MichadameConfig::default();
-    let loaded_cfg = confy::load::<config::MichadameConfig>("michadame", None).unwrap_or(cfg);
-    config::apply_config(&mut state, &loaded_cfg);
+    let config_path = confy::get_configuration_file_path("michadame", None).ok();
+    match confy::load::<config::MichadameConfig>("michadame", None) {
+        Ok(loaded_cfg) => {
+            if let Some(ref path) = config_path {
+                config::persistence::create_rotating_backup(path);
+            }
+            config::apply_config(&mut state, &loaded_cfg);
+        }
+        Err(e) => {
+            let err_msg = e.to_string();
+            tracing::error!("Failed to load configuration: {}", err_msg);
+            if let Some(ref path) = config_path {
+                if let Some(quarantine) = config::persistence::quarantine_corrupted_config(path) {
+                    state.config_quarantine_path = Some(quarantine);
+                }
+            }
+            state.config_load_error = Some(err_msg);
+            let default_cfg = config::MichadameConfig::default();
+            config::apply_config(&mut state, &default_cfg);
+        }
+    }
 
     let egui_ctx = cc.egui_ctx.clone();
     let (tx, rx) = crossbeam_channel::unbounded();

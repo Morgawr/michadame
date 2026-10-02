@@ -378,6 +378,7 @@ impl HaloRenderer {
         gl.bind_framebuffer(glow::FRAMEBUFFER, None);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn paint(
         &mut self,
         gl: &glow::Context,
@@ -386,6 +387,7 @@ impl HaloRenderer {
         output_size: (f32, f32),
         params: &HaloShaderParams,
         scissor_enabled: bool,
+        target_fbo: Option<glow::Framebuffer>,
     ) {
         let in_w = input_res.0.max(1);
         let in_h = input_res.1.max(1);
@@ -500,7 +502,7 @@ impl HaloRenderer {
         gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
         // Pass 7: Final (Edge Halo, Dithering, Output)
-        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, target_fbo);
         gl.viewport(0, 0, out_w as i32, out_h as i32);
         gl.use_program(Some(self.final_prog));
         gl.active_texture(glow::TEXTURE0);

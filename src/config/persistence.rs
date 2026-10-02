@@ -1,6 +1,110 @@
 use super::models::{MichadameConfig, Profile};
 use crate::app::models::AppState;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub fn quarantine_corrupted_config(path: &Path) -> Option<PathBuf> {
+    if path.exists() && std::fs::metadata(path).map(|m| m.len() > 0).unwrap_or(false) {
+        let parent = path.parent()?;
+        let backups_dir = parent.join("backups");
+        let _ = std::fs::create_dir_all(&backups_dir);
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let quarantine_path = backups_dir.join(format!("corrupted-{}.toml", now_secs));
+        if std::fs::copy(path, &quarantine_path).is_ok() {
+            tracing::warn!("Quarantined unreadable config to {:?}", quarantine_path);
+            return Some(quarantine_path);
+        }
+    }
+    None
+}
+
+pub fn create_rotating_backup(config_path: &Path) {
+    if !config_path.exists() {
+        return;
+    }
+    let size = std::fs::metadata(config_path).map(|m| m.len()).unwrap_or(0);
+    if size == 0 {
+        return;
+    }
+
+    // 1. Direct .bak file alongside config
+    let bak_path = config_path.with_extension("toml.bak");
+    let _ = std::fs::copy(config_path, &bak_path);
+
+    // 2. Timestamped rotating backup in backups/
+    if let Some(parent) = config_path.parent() {
+        let backups_dir = parent.join("backups");
+        if std::fs::create_dir_all(&backups_dir).is_ok() {
+            let now_secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let backup_file = backups_dir.join(format!("config-{}.toml", now_secs));
+            let _ = std::fs::copy(config_path, &backup_file);
+
+            prune_old_backups(&backups_dir, 20);
+        }
+    }
+}
+
+pub fn prune_old_backups(dir: &Path, max_keep: usize) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let mut backups: Vec<(SystemTime, PathBuf)> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name();
+                let s = name.to_string_lossy();
+                s.starts_with("config-") && s.ends_with(".toml")
+            })
+            .map(|e| {
+                let mtime = e.metadata().and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH);
+                (mtime, e.path())
+            })
+            .collect();
+
+        if backups.len() > max_keep {
+            backups.sort_by_key(|b| b.0); // oldest first
+            let to_remove = backups.len() - max_keep;
+            for (_, path) in backups.into_iter().take(to_remove) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub fn store_config_atomic(cfg: &MichadameConfig) -> Result<(), confy::ConfyError> {
+    let path = confy::get_configuration_file_path("michadame", None)?;
+    store_config_atomic_at(&path, cfg)
+}
+
+pub fn store_config_atomic_at(path: &Path, cfg: &MichadameConfig) -> Result<(), confy::ConfyError> {
+    create_rotating_backup(path);
+
+    let parent = path.parent().ok_or_else(|| {
+        confy::ConfyError::BadConfigDirectory(format!("{:?} is a root or prefix", path))
+    })?;
+    std::fs::create_dir_all(parent).map_err(confy::ConfyError::DirectoryCreationFailed)?;
+
+    let tmp_path = parent.join(format!(
+        ".{}.tmp-{}",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("config"),
+        std::process::id()
+    ));
+
+    confy::store_path(&tmp_path, cfg)?;
+
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(confy::ConfyError::WriteConfigurationFileError(e));
+    }
+
+    Ok(())
+}
 
 pub fn save_replay_config(
     replay: &crate::replay::config::ReplayConfig,
@@ -17,7 +121,7 @@ fn save_replay_config_at(
     // replacing an unreadable configuration with defaults.
     let mut cfg: MichadameConfig = confy::load_path(path)?;
     cfg.replay = replay.clone();
-    confy::store_path(path, cfg)
+    store_config_atomic_at(path, &cfg)
 }
 
 pub fn build_profile_from_state(state: &AppState) -> Profile {
@@ -72,11 +176,40 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         halo_intensity: Some(state.halo.halo_intensity),
         halo_corner_size: Some(state.halo.corner_size),
         halo_curvature: Some(state.halo.curvature),
+
+        cathode_interference_enabled: Some(state.cathode_interference.enabled),
+        cathode_intensity: Some(state.cathode_interference.intensity),
+        cathode_frequency: Some(state.cathode_interference.frequency),
+        cathode_randomization: Some(state.cathode_interference.randomization),
+        cathode_electricity_glow: Some(state.cathode_interference.electricity_glow),
+        cathode_flicker_depth: Some(state.cathode_interference.flicker_depth),
+        cathode_interference: Some(state.cathode_interference.interference),
+        cathode_lightbulb_effect: Some(state.cathode_interference.lightbulb_effect),
     }
 }
 
 pub fn save_config(state: &AppState) {
-    let mut cfg = confy::load::<MichadameConfig>("michadame", None).unwrap_or_default();
+    let Ok(path) = confy::get_configuration_file_path("michadame", None) else {
+        tracing::error!("Failed to get configuration file path for save_config");
+        return;
+    };
+    if let Err(e) = save_config_at(&path, state) {
+        tracing::error!("Failed to save configuration: {}", e);
+    }
+}
+
+pub fn save_config_at(path: &Path, state: &AppState) -> Result<(), confy::ConfyError> {
+    if let Some(err) = &state.config_load_error {
+        tracing::error!(
+            "ABORTING save_config: Configuration loading failed at startup ({}). Overwriting is blocked to protect existing data.",
+            err
+        );
+        return Err(confy::ConfyError::GeneralLoadError(std::io::Error::other(
+            format!("Configuration loading failed at startup: {}", err),
+        )));
+    }
+
+    let mut cfg = confy::load_path::<MichadameConfig>(path)?;
 
     cfg.replay = state.replay.config.clone();
     cfg.video_device = Some(state.hardware.selected_video_device.clone());
@@ -100,6 +233,7 @@ pub fn save_config(state: &AppState) {
     cfg.ocr_sticky_distance = Some(state.ocr.sticky_distance);
     cfg.ocr_hide_overlay = Some(state.ocr.hide_overlay);
     cfg.default_halo = Some(state.halo_defaults.clone());
+    cfg.default_cathode_interference = Some(state.cathode_interference_defaults.clone());
 
     cfg.active_profile = state.active_profile.clone();
     cfg.profiles = state.profiles.clone();
@@ -108,13 +242,31 @@ pub fn save_config(state: &AppState) {
     cfg.profiles
         .insert(state.active_profile.clone(), current_profile_data);
 
-    if let Err(e) = confy::store("michadame", None, cfg) {
-        tracing::error!("Failed to save configuration: {}", e);
-    }
+    store_config_atomic_at(path, &cfg)
 }
 
 pub fn save_global_hardware_config(state: &AppState) {
-    let mut cfg = confy::load::<MichadameConfig>("michadame", None).unwrap_or_default();
+    let Ok(path) = confy::get_configuration_file_path("michadame", None) else {
+        tracing::error!("Failed to get configuration file path for save_global_hardware_config");
+        return;
+    };
+    if let Err(e) = save_global_hardware_config_at(&path, state) {
+        tracing::error!("Failed to save global hardware configuration: {}", e);
+    }
+}
+
+pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(), confy::ConfyError> {
+    if let Some(err) = &state.config_load_error {
+        tracing::error!(
+            "ABORTING save_global_hardware_config: Configuration loading failed at startup ({}). Overwriting is blocked to protect existing data.",
+            err
+        );
+        return Err(confy::ConfyError::GeneralLoadError(std::io::Error::other(
+            format!("Configuration loading failed at startup: {}", err),
+        )));
+    }
+
+    let mut cfg = confy::load_path::<MichadameConfig>(path)?;
 
     cfg.replay = state.replay.config.clone();
     cfg.video_device = Some(state.hardware.selected_video_device.clone());
@@ -142,9 +294,7 @@ pub fn save_global_hardware_config(state: &AppState) {
     cfg.active_profile = state.active_profile.clone();
     cfg.profiles = state.profiles.clone();
 
-    if let Err(e) = confy::store("michadame", None, cfg) {
-        tracing::error!("Failed to save global hardware configuration: {}", e);
-    }
+    store_config_atomic_at(path, &cfg)
 }
 
 pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) {
@@ -277,6 +427,30 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) {
     if let Some(val) = profile.halo_curvature {
         state.halo.curvature = val;
     }
+    if let Some(val) = profile.cathode_interference_enabled {
+        state.cathode_interference.enabled = val;
+    }
+    if let Some(val) = profile.cathode_intensity {
+        state.cathode_interference.intensity = val;
+    }
+    if let Some(val) = profile.cathode_frequency {
+        state.cathode_interference.frequency = val;
+    }
+    if let Some(val) = profile.cathode_randomization {
+        state.cathode_interference.randomization = val;
+    }
+    if let Some(val) = profile.cathode_electricity_glow {
+        state.cathode_interference.electricity_glow = val;
+    }
+    if let Some(val) = profile.cathode_flicker_depth {
+        state.cathode_interference.flicker_depth = val;
+    }
+    if let Some(val) = profile.cathode_interference {
+        state.cathode_interference.interference = val;
+    }
+    if let Some(val) = profile.cathode_lightbulb_effect {
+        state.cathode_interference.lightbulb_effect = val;
+    }
 }
 
 pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
@@ -337,6 +511,9 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     state.ocr.hide_overlay = cfg.ocr_hide_overlay.unwrap_or(false);
     if let Some(defaults) = &cfg.default_halo {
         state.halo_defaults = defaults.clone();
+    }
+    if let Some(defaults) = &cfg.default_cathode_interference {
+        state.cathode_interference_defaults = defaults.clone();
     }
 
     state.active_profile = cfg.active_profile.clone();
@@ -417,6 +594,8 @@ mod tests {
         state.halo.brightboost = 2.1;
         state.selected_crt_filter = crate::devices::filter_type::CrtFilter::Halo;
         state.video.pixelate_filter_enabled = true;
+        state.cathode_interference.enabled = true;
+        state.cathode_interference.intensity = 0.75;
         state.crt_filter.store(
             crate::devices::filter_type::CrtFilter::Lottes as u8,
             Ordering::Relaxed,
@@ -425,6 +604,9 @@ mod tests {
         let profile = build_profile_from_state(&state);
         assert_eq!(profile.crt_hard_scan, Some(-12.0));
         assert_eq!(profile.halo_brightboost, Some(2.1));
+        assert_eq!(profile.cathode_interference_enabled, Some(true));
+        assert_eq!(profile.cathode_intensity, Some(0.75));
+        assert_eq!(profile.cathode_lightbulb_effect, Some(0.35));
         assert_eq!(
             profile.selected_crt_filter,
             Some(crate::devices::filter_type::CrtFilter::Halo as u8)
@@ -444,6 +626,10 @@ mod tests {
             halo_brightboost: Some(2.5),
             selected_crt_filter: Some(crate::devices::filter_type::CrtFilter::Halo as u8),
             pixelate_filter_enabled: Some(true),
+            cathode_interference_enabled: Some(true),
+            cathode_intensity: Some(0.9),
+            cathode_frequency: Some(2.0),
+            cathode_lightbulb_effect: Some(0.65),
             crt_filter: Some(crate::devices::filter_type::CrtFilter::Lottes as u8),
             ..Default::default()
         };
@@ -451,6 +637,10 @@ mod tests {
         apply_profile_to_state(&mut state, &profile);
         assert_eq!(state.crt.hard_scan, -15.0);
         assert_eq!(state.halo.brightboost, 2.5);
+        assert!(state.cathode_interference.enabled);
+        assert_eq!(state.cathode_interference.intensity, 0.9);
+        assert_eq!(state.cathode_interference.frequency, 2.0);
+        assert_eq!(state.cathode_interference.lightbulb_effect, 0.65);
         assert_eq!(state.selected_crt_filter, crate::devices::filter_type::CrtFilter::Halo);
         assert!(state.video.pixelate_filter_enabled);
         assert_eq!(
@@ -615,5 +805,126 @@ mod tests {
         apply_config(&mut state, &loaded);
         assert_eq!(state.halo_defaults, custom_defaults);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_save_aborted_when_config_load_error_set() {
+        let dir = std::env::temp_dir().join(format!("michadame-test-abort-{}", crate::replay::now_us()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test-config.toml");
+        std::fs::write(&path, "original_content = true\n").unwrap();
+
+        let mut state = AppState::default();
+        state.config_load_error = Some("Failed to parse TOML".to_string());
+
+        let result = save_config_at(&path, &state);
+        assert!(result.is_err(), "save_config_at must return an Err when config_load_error is set");
+
+        // Verify the original file on disk was NOT touched or overwritten
+        let current_content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(current_content, "original_content = true\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_save_aborted_when_existing_file_corrupt() {
+        let dir = std::env::temp_dir().join(format!("michadame-test-corrupt-{}", crate::replay::now_us()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test-config.toml");
+        std::fs::write(&path, "invalid = [[[\n").unwrap();
+
+        let state = AppState::default();
+        let result = save_config_at(&path, &state);
+        assert!(result.is_err(), "save_config_at must refuse to overwrite corrupt config on disk");
+
+        let current_content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(current_content, "invalid = [[[\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_quarantine_corrupted_config() {
+        let dir = std::env::temp_dir().join(format!("michadame-test-quarantine-{}", crate::replay::now_us()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test-config.toml");
+        let corrupted_bytes = b"bad toml content = { [ unclosed";
+        std::fs::write(&path, corrupted_bytes).unwrap();
+
+        let quarantined = quarantine_corrupted_config(&path);
+        assert!(quarantined.is_some(), "quarantine_corrupted_config should return a quarantine path");
+        let q_path = quarantined.unwrap();
+        assert!(q_path.exists(), "quarantine file must exist on disk");
+        assert_eq!(std::fs::read(&q_path).unwrap(), corrupted_bytes);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rotating_backup_and_pruning() {
+        let dir = std::env::temp_dir().join(format!("michadame-test-backup-{}", crate::replay::now_us()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("default-config.toml");
+        std::fs::write(&path, "test = 1\n").unwrap();
+
+        create_rotating_backup(&path);
+        let bak_path = dir.join("default-config.toml.bak");
+        assert!(bak_path.exists(), ".bak backup should be created");
+        assert_eq!(std::fs::read_to_string(&bak_path).unwrap(), "test = 1\n");
+
+        let backups_dir = dir.join("backups");
+        assert!(backups_dir.exists(), "backups/ dir should be created");
+
+        // Create 25 dummy backup files in backups_dir
+        for i in 0..25 {
+            let f = backups_dir.join(format!("config-{}.toml", 1000 + i));
+            std::fs::write(&f, format!("backup {}", i)).unwrap();
+        }
+
+        prune_old_backups(&backups_dir, 5);
+
+        let count = std::fs::read_dir(&backups_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                name.starts_with("config-") && name.ends_with(".toml")
+            })
+            .count();
+        assert_eq!(count, 5, "prune_old_backups should reduce count to max_keep");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_legacy_config_missing_fields_deserialization() {
+        let dir = std::env::temp_dir().join(format!("michadame-test-legacy-{}", crate::replay::now_us()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test-config.toml");
+        let old_toml = r#"
+active_profile = "Saturn"
+
+[profiles.Saturn]
+crt_hard_scan = -8.0
+crt_brightboost = 1.4
+
+[profiles.Dreamcast]
+crt_hard_scan = -10.0
+crt_brightboost = 1.6
+"#;
+        std::fs::write(&path, old_toml).unwrap();
+        let loaded: MichadameConfig = confy::load_path(&path).expect("Old TOML should deserialize cleanly");
+        assert_eq!(loaded.active_profile, "Saturn");
+        assert!(loaded.profiles.contains_key("Saturn"));
+        assert!(loaded.profiles.contains_key("Dreamcast"));
+
+        let saturn = loaded.profiles.get("Saturn").unwrap();
+        assert_eq!(saturn.crt_hard_scan, Some(-8.0));
+        assert_eq!(saturn.crt_brightboost, Some(1.4));
+        assert_eq!(saturn.cathode_lightbulb_effect, None);
+        assert_eq!(saturn.cathode_interference_enabled, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

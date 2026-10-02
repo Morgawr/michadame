@@ -37,8 +37,27 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
         .frame(panel_frame)
         .show(ctx, |ui| {
             let mut repaint_requested = false;
+            if state.config_load_error.is_some() && !state.ui.dismissed_config_error {
+                repaint_requested |= dialogs::show_config_error_dialog(state, ctx, ui);
+            }
             if state.ui.show_first_run_dialog {
                 repaint_requested |= dialogs::show_first_run_dialog(state, ctx, ui);
+            }
+
+            if let Some(err) = &state.config_load_error {
+                ui.group(|ui| {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 100, 100),
+                        format!("⚠ CONFIG LOAD ERROR: {}. Saving is disabled to prevent overwriting settings.", err),
+                    );
+                    if let Some(q) = &state.config_quarantine_path {
+                        ui.colored_label(
+                            egui::Color32::LIGHT_BLUE,
+                            format!("Quarantined backup: {}", q.display()),
+                        );
+                    }
+                });
+                ui.add_space(6.0);
             }
 
             egui::ScrollArea::vertical().show(ui, |ui| {

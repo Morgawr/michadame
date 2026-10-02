@@ -606,5 +606,132 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         });
     }
 
+    ui.group(|ui| {
+        ui.horizontal(|ui| {
+            if ui
+                .checkbox(
+                    &mut state.cathode_interference.enabled,
+                    "Cathode Glow & Interference",
+                )
+                .on_hover_text(
+                    "Simulates CRT cathode ray flickering, electrical bloom, and subtle analog RF interference.",
+                )
+                .changed()
+            {
+                changed = true;
+            }
+        });
+
+        if state.cathode_interference.enabled {
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.cathode_interference.intensity, 0.0..=1.0)
+                        .text("Intensity")
+                        .step_by(0.01)
+                        .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
+                )
+                .on_hover_text("Master intensity of cathode glow, flicker, and interference.")
+                .changed()
+            {
+                changed = true;
+            }
+
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.cathode_interference.frequency, 0.1..=5.0)
+                        .text("Frequency")
+                        .step_by(0.05)
+                        .custom_formatter(|n, _| format!("{:.2}x", n)),
+                )
+                .on_hover_text("Speed of AC hum ripple, flicker rate, and glitch frequency.")
+                .changed()
+            {
+                changed = true;
+            }
+
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.cathode_interference.randomization, 0.0..=1.0)
+                        .text("Randomization")
+                        .step_by(0.01)
+                        .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
+                )
+                .on_hover_text("Unpredictability and jitteriness of flicker and micro-glitches.")
+                .changed()
+            {
+                changed = true;
+            }
+
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.cathode_interference.electricity_glow, 0.0..=1.0)
+                        .text("Electricity Glow")
+                        .step_by(0.01)
+                        .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
+                )
+                .on_hover_text("Lightbulb/cathode bloom that selectively energizes highlights and dynamically modulates dark areas.")
+                .changed()
+            {
+                changed = true;
+            }
+
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.cathode_interference.flicker_depth, 0.0..=1.0)
+                        .text("Flicker Depth")
+                        .step_by(0.01)
+                        .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
+                )
+                .on_hover_text("Depth of rolling AC power hum and high-frequency cathode phosphor flutter.")
+                .changed()
+            {
+                changed = true;
+            }
+
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.cathode_interference.interference, 0.0..=1.0)
+                        .text("Interference / Noise")
+                        .step_by(0.01)
+                        .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
+                )
+                .on_hover_text("Analog RF static noise and intermittent horizontal scanline micro-glitches.")
+                .changed()
+            {
+                changed = true;
+            }
+
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.cathode_interference.lightbulb_effect, 0.0..=1.0)
+                        .text("Lightbulb Effect")
+                        .step_by(0.01)
+                        .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
+                )
+                .on_hover_text("Pulsating lightbulb breathing that makes the brightness of bright areas and darkness of dark areas glow up and down.")
+                .changed()
+            {
+                changed = true;
+            }
+
+            ui.horizontal(|ui| {
+                if ui.button("Reset Defaults").clicked() {
+                    state.cathode_interference = state.cathode_interference_defaults.clone();
+                    changed = true;
+                }
+                if ui.button("Save as Defaults").clicked() {
+                    state.cathode_interference_defaults = state.cathode_interference.clone();
+                    let current_profile_data = crate::config::build_profile_from_state(state);
+                    state
+                        .profiles
+                        .insert(state.active_profile.clone(), current_profile_data);
+                    crate::config::save_config(state);
+                    state.info("Saved current cathode settings as default");
+                    changed = true;
+                }
+            });
+        }
+    });
+
     changed
 }

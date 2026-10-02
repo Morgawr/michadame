@@ -21,6 +21,7 @@ pub const FS_HALO_BLOOM_V: &str = include_str!("../shaders/fs_halo_bloom_v.glsl"
 pub const FS_HALO_SCANLINES: &str = include_str!("../shaders/fs_halo_scanlines.glsl");
 pub const FS_HALO_COMPOSITE: &str = include_str!("../shaders/fs_halo_composite.glsl");
 pub const FS_HALO_FINAL: &str = include_str!("../shaders/fs_halo_final.glsl");
+pub const FS_CATHODE_INTERFERENCE: &str = include_str!("../shaders/fs_cathode_interference.glsl");
 
 pub unsafe fn compile_program(gl: &glow::Context, vs_src: &str, fs_src: &str) -> glow::Program {
     let program = gl.create_program().expect("Cannot create program");

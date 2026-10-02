@@ -46,6 +46,7 @@ impl Default for AppState {
                 show_stop_stream_dialog: false,
                 video_window_open: false,
                 control_window_open: true,
+                dismissed_config_error: false,
             },
             crt: CrtSettings {
                 hard_scan: -8.0,
@@ -61,6 +62,8 @@ impl Default for AppState {
             },
             halo: crate::app::models::HaloSettings::default(),
             halo_defaults: crate::app::models::HaloSettings::default(),
+            cathode_interference: crate::app::models::CathodeInterferenceSettings::default(),
+            cathode_interference_defaults: crate::app::models::CathodeInterferenceSettings::default(),
             selected_crt_filter: CrtFilter::Lottes,
             video: VideoSettings {
                 pixelate_filter_enabled: false,
@@ -115,6 +118,8 @@ impl Default for AppState {
             fft_available_masks: Vec::new(),
             ocr: crate::ocr::OcrState::default(),
             dict: crate::dict::DictState::default(),
+            config_load_error: None,
+            config_quarantine_path: None,
         }
     }
 }
@@ -251,6 +256,13 @@ impl eframe::App for AppState {
 
                 if self.ui.show_quit_dialog {
                     ui::dialogs::show_quit_dialog(self, ctx, ui);
+                }
+
+                if !self.ui.control_window_open
+                    && self.config_load_error.is_some()
+                    && !self.ui.dismissed_config_error
+                {
+                    ui::dialogs::show_config_error_dialog(self, ctx, ui);
                 }
             });
 

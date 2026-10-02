@@ -10,5 +10,5 @@ pub mod renderer;
 pub use fft_filter::FftFilter;
 #[allow(unused_imports)]
 pub use halo::HaloRenderer;
-pub use params::{HaloShaderParams, ShaderParams};
+pub use params::{CathodeInterferenceShaderParams, HaloShaderParams, ShaderParams};
 pub use renderer::CrtFilterRenderer;

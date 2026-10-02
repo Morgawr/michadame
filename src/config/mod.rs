@@ -56,6 +56,14 @@ impl From<LegacyConfig> for MichadameConfig {
                 halo_intensity: legacy.halo_intensity,
                 halo_corner_size: legacy.halo_corner_size,
                 halo_curvature: legacy.halo_curvature,
+                cathode_interference_enabled: legacy.cathode_interference_enabled,
+                cathode_intensity: legacy.cathode_intensity,
+                cathode_frequency: legacy.cathode_frequency,
+                cathode_randomization: legacy.cathode_randomization,
+                cathode_electricity_glow: legacy.cathode_electricity_glow,
+                cathode_flicker_depth: legacy.cathode_flicker_depth,
+                cathode_interference: legacy.cathode_interference,
+                cathode_lightbulb_effect: legacy.cathode_lightbulb_effect,
             };
             profiles.insert("Default".to_string(), legacy_profile);
             active_profile = "Default".to_string();
@@ -77,6 +85,7 @@ impl From<LegacyConfig> for MichadameConfig {
             ocr_sticky_distance: legacy.ocr_sticky_distance,
             ocr_hide_overlay: legacy.ocr_hide_overlay,
             default_halo: legacy.default_halo,
+            default_cathode_interference: legacy.default_cathode_interference,
             profiles,
         }
     }
@@ -150,6 +159,15 @@ mod tests {
             ocr_sticky_distance: None,
             ocr_hide_overlay: None,
             default_halo: None,
+            cathode_interference_enabled: None,
+            cathode_intensity: None,
+            cathode_frequency: None,
+            cathode_randomization: None,
+            cathode_electricity_glow: None,
+            cathode_flicker_depth: None,
+            cathode_interference: None,
+            cathode_lightbulb_effect: None,
+            default_cathode_interference: None,
         };
 
         let config: MichadameConfig = MichadameConfig::from(legacy);
@@ -238,6 +256,15 @@ mod tests {
             ocr_sticky_distance: None,
             ocr_hide_overlay: None,
             default_halo: None,
+            cathode_interference_enabled: None,
+            cathode_intensity: None,
+            cathode_frequency: None,
+            cathode_randomization: None,
+            cathode_electricity_glow: None,
+            cathode_flicker_depth: None,
+            cathode_interference: None,
+            cathode_lightbulb_effect: None,
+            default_cathode_interference: None,
         };
 
         let config: MichadameConfig = MichadameConfig::from(legacy);

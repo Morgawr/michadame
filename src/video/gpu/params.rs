@@ -115,6 +115,48 @@ impl Default for HaloShaderParams {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CathodeInterferenceShaderParams {
+    pub enabled: bool,
+    pub intensity: f32,
+    pub frequency: f32,
+    pub randomization: f32,
+    pub electricity_glow: f32,
+    pub flicker_depth: f32,
+    pub interference: f32,
+    pub lightbulb_effect: f32,
+}
+
+impl CathodeInterferenceShaderParams {
+    pub fn from_state(state: &AppState) -> Self {
+        Self {
+            enabled: state.cathode_interference.enabled,
+            intensity: state.cathode_interference.intensity,
+            frequency: state.cathode_interference.frequency,
+            randomization: state.cathode_interference.randomization,
+            electricity_glow: state.cathode_interference.electricity_glow,
+            flicker_depth: state.cathode_interference.flicker_depth,
+            interference: state.cathode_interference.interference,
+            lightbulb_effect: state.cathode_interference.lightbulb_effect,
+        }
+    }
+}
+
+impl Default for CathodeInterferenceShaderParams {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            intensity: 0.5,
+            frequency: 1.0,
+            randomization: 0.5,
+            electricity_glow: 0.5,
+            flicker_depth: 0.4,
+            interference: 0.3,
+            lightbulb_effect: 0.35,
+        }
+    }
+}
+
 impl ShaderParams {
     pub fn from_state(state: &AppState) -> Self {
         Self {
@@ -242,5 +284,34 @@ mod tests {
         assert_eq!(params.brightboost, 2.2);
         assert_eq!(params.halo_zoom, 90.0);
         assert_eq!(params.background_color, [1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_cathode_interference_shader_params_default() {
+        let params = CathodeInterferenceShaderParams::default();
+        assert!(!params.enabled);
+        assert_eq!(params.intensity, 0.5);
+        assert_eq!(params.frequency, 1.0);
+        assert_eq!(params.randomization, 0.5);
+        assert_eq!(params.electricity_glow, 0.5);
+        assert_eq!(params.flicker_depth, 0.4);
+        assert_eq!(params.interference, 0.3);
+        assert_eq!(params.lightbulb_effect, 0.35);
+    }
+
+    #[test]
+    fn test_cathode_interference_shader_params_from_state() {
+        let mut state = AppState::default();
+        state.cathode_interference.enabled = true;
+        state.cathode_interference.intensity = 0.8;
+        state.cathode_interference.frequency = 2.5;
+        state.cathode_interference.lightbulb_effect = 0.6;
+
+        let params = CathodeInterferenceShaderParams::from_state(&state);
+        assert!(params.enabled);
+        assert_eq!(params.intensity, 0.8);
+        assert_eq!(params.frequency, 2.5);
+        assert_eq!(params.randomization, 0.5);
+        assert_eq!(params.lightbulb_effect, 0.6);
     }
 }
