@@ -232,6 +232,7 @@ pub fn save_config_at(path: &Path, state: &AppState) -> Result<(), confy::ConfyE
     cfg.audio_sample_format = Some(state.hardware.audio_sample_format.clone());
     cfg.ocr_sticky_distance = Some(state.ocr.sticky_distance);
     cfg.ocr_hide_overlay = Some(state.ocr.hide_overlay);
+    cfg.ocr_timeout_seconds = Some(state.ocr.timeout_seconds);
     cfg.default_halo = Some(state.halo_defaults.clone());
     cfg.default_cathode_interference = Some(state.cathode_interference_defaults.clone());
 
@@ -289,6 +290,7 @@ pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(
     cfg.audio_sample_format = Some(state.hardware.audio_sample_format.clone());
     cfg.ocr_sticky_distance = Some(state.ocr.sticky_distance);
     cfg.ocr_hide_overlay = Some(state.ocr.hide_overlay);
+    cfg.ocr_timeout_seconds = Some(state.ocr.timeout_seconds);
     cfg.default_halo = Some(state.halo_defaults.clone());
 
     cfg.active_profile = state.active_profile.clone();
@@ -509,6 +511,7 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     }
     state.ocr.sticky_distance = cfg.ocr_sticky_distance.unwrap_or(0.6);
     state.ocr.hide_overlay = cfg.ocr_hide_overlay.unwrap_or(false);
+    state.ocr.timeout_seconds = cfg.ocr_timeout_seconds.unwrap_or(45);
     if let Some(defaults) = &cfg.default_halo {
         state.halo_defaults = defaults.clone();
     }
@@ -738,6 +741,48 @@ mod tests {
         let mut state = AppState::default();
         apply_config(&mut state, &loaded);
         assert!(state.ocr.hide_overlay);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_apply_config_ocr_timeout_seconds() {
+        let mut state = AppState::default();
+        assert_eq!(state.ocr.timeout_seconds, 45);
+
+        let cfg = MichadameConfig {
+            ocr_timeout_seconds: Some(60),
+            ..Default::default()
+        };
+        apply_config(&mut state, &cfg);
+        assert_eq!(state.ocr.timeout_seconds, 60);
+
+        // Test disable (0)
+        let cfg_disabled = MichadameConfig {
+            ocr_timeout_seconds: Some(0),
+            ..Default::default()
+        };
+        apply_config(&mut state, &cfg_disabled);
+        assert_eq!(state.ocr.timeout_seconds, 0);
+    }
+
+    #[test]
+    fn test_ocr_timeout_seconds_toml_roundtrip() {
+        let path = std::env::temp_dir().join(format!(
+            "michadame-ocr-timeout-config-{}-{}.toml",
+            std::process::id(),
+            crate::replay::now_us()
+        ));
+        let cfg = MichadameConfig {
+            ocr_timeout_seconds: Some(30),
+            ..Default::default()
+        };
+        confy::store_path(&path, &cfg).unwrap();
+        let loaded: MichadameConfig = confy::load_path(&path).unwrap();
+        assert_eq!(loaded.ocr_timeout_seconds, Some(30));
+
+        let mut state = AppState::default();
+        apply_config(&mut state, &loaded);
+        assert_eq!(state.ocr.timeout_seconds, 30);
         let _ = std::fs::remove_file(&path);
     }
 

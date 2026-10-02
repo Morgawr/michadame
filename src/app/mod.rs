@@ -153,6 +153,11 @@ impl AppState {
         scan_successful
     }
 
+    pub fn clear_ocr(&mut self) {
+        self.ocr.clear();
+        self.dict.popup = None;
+    }
+
     pub fn update_fps_counters(&mut self, ctx: &egui::Context) {
         self.frames_since_last_check += 1;
         let now = Instant::now();
@@ -402,8 +407,10 @@ impl eframe::App for AppState {
                         self.ocr.last_copied_index = None;
                         self.ocr.last_error = None;
                         if count == 0 {
+                            self.ocr.last_scan_time = None;
                             self.info("Google Lens OCR: No Japanese text detected.");
                         } else {
+                            self.ocr.last_scan_time = Some(Instant::now());
                             self.info(format!(
                                 "Google Lens OCR: Found {} text box{}.",
                                 count,
@@ -418,6 +425,17 @@ impl eframe::App for AppState {
                 }
                 repaint_requested = true;
             }
+        }
+
+        if !self.ocr.boxes.is_empty() && self.ocr.last_scan_time.is_none() {
+            self.ocr.last_scan_time = Some(Instant::now());
+        }
+
+        if self.ocr.is_expired() {
+            self.clear_ocr();
+            repaint_requested = true;
+        } else if let Some(remaining) = self.ocr.remaining_time() {
+            ctx.request_repaint_after(remaining);
         }
 
         let dict_events: Vec<crate::dict::DictEvent> = if let Some(rx) = &self.dict.event_rx {

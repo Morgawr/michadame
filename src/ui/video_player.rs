@@ -132,10 +132,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
     if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
         if ctx.input(|i| i.modifiers.shift) {
             if !state.ocr.boxes.is_empty() {
-                state.ocr.boxes.clear();
-                state.ocr.raw_lines.clear();
-                state.ocr.last_copied_index = None;
-                state.dict.popup = None;
+                state.clear_ocr();
             }
         } else {
             if !state.ocr.is_processing.load(Ordering::Relaxed) {

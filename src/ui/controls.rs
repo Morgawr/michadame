@@ -89,6 +89,23 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             changed = true;
         }
     });
+
+    ui.horizontal(|ui| {
+        ui.label("Auto-clear Timeout:");
+        let slider = egui::Slider::new(&mut state.ocr.timeout_seconds, 0..=300)
+            .suffix("s");
+        if ui
+            .add(slider)
+            .on_hover_text(
+                "Time in seconds before OCR scan results automatically disappear.\n• 0s: Disabled (keep until Shift+Space or dismissed)\n• 45s: Default",
+            )
+            .changed()
+        {
+            crate::config::save_config(state);
+            changed = true;
+        }
+    });
+
     ui.label(
         egui::RichText::new("Space = capture OCR, shift + space = clear OCR boxes").weak(),
     );

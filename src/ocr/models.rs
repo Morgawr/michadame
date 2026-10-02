@@ -40,6 +40,10 @@ pub struct OcrState {
     /// Maximum distance threshold (as a multiple of line height) for merging
     /// adjacent lines into a single text block.
     pub sticky_distance: f32,
+    /// Number of seconds before OCR scan results automatically clear (0 = disabled).
+    pub timeout_seconds: u32,
+    /// Timestamp when the most recent OCR scan results were received.
+    pub last_scan_time: Option<Instant>,
     /// Whether to hide the visual OCR overlay (boxes and replacement text) on the video feed.
     pub hide_overlay: bool,
     /// Index of the most recently clicked/copied box, for visual feedback.
@@ -60,6 +64,36 @@ impl OcrState {
         self.boxes = crate::ocr::lens::group_lines_into_blocks(&self.raw_lines, self.sticky_distance);
         self.last_copied_index = None;
     }
+
+    /// Clears all detected OCR boxes, lines, and related state.
+    pub fn clear(&mut self) {
+        self.boxes.clear();
+        self.raw_lines.clear();
+        self.last_copied_index = None;
+        self.last_scan_time = None;
+    }
+
+    /// Returns true if the OCR boxes have expired according to `timeout_seconds`.
+    pub fn is_expired(&self) -> bool {
+        if self.timeout_seconds == 0 || self.boxes.is_empty() {
+            return false;
+        }
+        if let Some(scan_time) = self.last_scan_time {
+            scan_time.elapsed() >= std::time::Duration::from_secs(self.timeout_seconds as u64)
+        } else {
+            false
+        }
+    }
+
+    /// Returns the remaining duration until the OCR boxes expire, or None if expired or disabled.
+    pub fn remaining_time(&self) -> Option<std::time::Duration> {
+        if self.timeout_seconds == 0 || self.boxes.is_empty() {
+            return None;
+        }
+        let scan_time = self.last_scan_time?;
+        let timeout = std::time::Duration::from_secs(self.timeout_seconds as u64);
+        timeout.checked_sub(scan_time.elapsed())
+    }
 }
 
 impl Default for OcrState {
@@ -71,6 +105,8 @@ impl Default for OcrState {
             boxes: Vec::new(),
             raw_lines: Vec::new(),
             sticky_distance: 0.6,
+            timeout_seconds: 45,
+            last_scan_time: None,
             hide_overlay: false,
             last_copied_index: None,
             copy_feedback_time: None,
@@ -312,5 +348,92 @@ mod tests {
 
         let decoded = LensOverlayServerRequest::decode(&buf[..]).expect("Failed to decode");
         assert_eq!(req, decoded);
+    }
+
+    #[test]
+    fn test_ocr_state_clear() {
+        let mut state = OcrState::default();
+        state.boxes.push(OcrBox {
+            text: "Hello".to_string(),
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.2,
+            height: 0.1,
+            lines: Vec::new(),
+        });
+        state.raw_lines.push(ParsedLine {
+            text: "Hello".to_string(),
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.2,
+            height: 0.1,
+            paragraph_idx: 0,
+        });
+        state.last_copied_index = Some(0);
+        state.last_scan_time = Some(Instant::now());
+
+        state.clear();
+        assert!(state.boxes.is_empty());
+        assert!(state.raw_lines.is_empty());
+        assert_eq!(state.last_copied_index, None);
+        assert_eq!(state.last_scan_time, None);
+    }
+
+    #[test]
+    fn test_ocr_state_is_expired_and_remaining_time() {
+        let mut state = OcrState::default();
+        state.timeout_seconds = 45;
+
+        // When boxes is empty, never expired
+        assert!(!state.is_expired());
+        assert_eq!(state.remaining_time(), None);
+
+        // Add a box
+        state.boxes.push(OcrBox {
+            text: "Test".to_string(),
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.1,
+            height: 0.1,
+            lines: Vec::new(),
+        });
+
+        // If last_scan_time is None, not expired
+        assert!(!state.is_expired());
+        assert_eq!(state.remaining_time(), None);
+
+        // Just scanned now
+        state.last_scan_time = Some(Instant::now());
+        assert!(!state.is_expired());
+        assert!(state.remaining_time().unwrap().as_secs() <= 45);
+
+        // Simulated scan 50 seconds ago (exceeds 45s)
+        state.last_scan_time = Some(Instant::now() - std::time::Duration::from_secs(50));
+        assert!(state.is_expired());
+        assert_eq!(state.remaining_time(), None);
+
+        // Simulated scan 30 seconds ago (15s remaining)
+        state.last_scan_time = Some(Instant::now() - std::time::Duration::from_secs(30));
+        assert!(!state.is_expired());
+        let rem = state.remaining_time().unwrap();
+        assert!(rem.as_secs() >= 14 && rem.as_secs() <= 15);
+    }
+
+    #[test]
+    fn test_ocr_state_timeout_disabled() {
+        let mut state = OcrState::default();
+        state.timeout_seconds = 0; // Disabled
+        state.boxes.push(OcrBox {
+            text: "Permanent".to_string(),
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.1,
+            height: 0.1,
+            lines: Vec::new(),
+        });
+        state.last_scan_time = Some(Instant::now() - std::time::Duration::from_secs(9999));
+
+        assert!(!state.is_expired());
+        assert_eq!(state.remaining_time(), None);
     }
 }

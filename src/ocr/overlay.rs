@@ -150,6 +150,9 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
                 }
             }
             state.dict.popup = None;
+            if state.ocr.boxes.is_empty() {
+                state.ocr.last_scan_time = None;
+            }
         }
     }
 
