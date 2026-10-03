@@ -118,10 +118,37 @@ pub fn render_term_entry(ui: &mut egui::Ui, entry: &TermEntry, index: usize) {
                 ui.add_space(4.0);
             }
             GlossaryEntry::Structured(val) => {
-                render_structured_entry(ui, val);
+                if let Some((term, reasons)) = as_deinflection_glossary(val) {
+                    // Yomitan "deinflection" glossary item `[term, [reasons...]]`, e.g.
+                    // Jitendex redirects: ["熱い", ["redirected from あっつい"]].
+                    let text = if reasons.is_empty() {
+                        term.to_string()
+                    } else {
+                        format!("{term}  ({})", reasons.join(", "))
+                    };
+                    ui.label(RichText::new(text).font(dict_font(28.0)).color(COLOR_MUTED));
+                    ui.add_space(4.0);
+                } else {
+                    render_structured_entry(ui, val);
+                }
             }
         }
     }
+}
+
+/// Recognizes Yomitan's deinflection glossary item: `[uninflected_term, [reason, ...]]`.
+fn as_deinflection_glossary(val: &serde_json::Value) -> Option<(&str, Vec<&str>)> {
+    let arr = val.as_array()?;
+    let [term, reasons] = arr.as_slice() else {
+        return None;
+    };
+    let term = term.as_str()?;
+    let reasons = reasons
+        .as_array()?
+        .iter()
+        .map(|r| r.as_str())
+        .collect::<Option<Vec<_>>>()?;
+    Some((term, reasons))
 }
 
 /// Renders a small stylish pill badge (e.g. for tags or deinflections).
@@ -483,7 +510,21 @@ fn render_generic_node(ui: &mut egui::Ui, node: &serde_json::Value, depth: usize
                     ui.add_space(2.0);
                 }
                 _ => {
-                    if let Some(content) = map.get("content") {
+                    let Some(content) = map.get("content") else {
+                        return;
+                    };
+                    // Inline-only content (text, links, ruby, spans) must stay on one line,
+                    // e.g. a redirect `⟶ <a><ruby>熱<rt>あつ</rt></ruby>い</a>`, instead of
+                    // rendering each child as its own widget/line.
+                    if !content.is_string() && is_inline_only(content) {
+                        if contains_ruby(content) {
+                            let mut segments = extract_ruby_segments(content);
+                            normalize_glyphs(&mut segments);
+                            render_ruby_flow(ui, segments, None);
+                        } else {
+                            ui.horizontal_wrapped(|ui| render_inline_content(ui, content));
+                        }
+                    } else {
                         render_generic_node(ui, content, depth);
                     }
                 }
@@ -625,7 +666,12 @@ pub fn render_ruby_item(ui: &mut egui::Ui, base: &str, rt: &str) {
 
 /// Renders a complete Japanese example sentence with furigana stacked neatly on top of the kanji.
 pub fn render_ruby_sentence(ui: &mut egui::Ui, node: &serde_json::Value) {
-    let segments = extract_ruby_segments(node);
+    render_ruby_flow(ui, extract_ruby_segments(node), Some("例  "));
+}
+
+/// Renders ruby/plain segments as one wrapped line of text, with furigana on top of the
+/// kanji and all text sharing the same baseline. `badge` is an optional muted prefix.
+fn render_ruby_flow(ui: &mut egui::Ui, segments: Vec<RubySegment>, badge: Option<&str>) {
     if segments.is_empty() {
         return;
     }
@@ -640,22 +686,24 @@ pub fn render_ruby_sentence(ui: &mut egui::Ui, node: &serde_json::Value) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(0.0, 4.0);
 
-        // Render example badge "例 " aligned at the same base baseline
-        let badge_galley = ui.painter().layout_no_wrap("例  ".to_string(), dict_font(28.0), COLOR_MUTED);
-        let badge_y_offset = if let (Some(r_base), Some(r_badge)) = (sample_base.rows.first(), badge_galley.rows.first()) {
-            let base_ascent = r_base.glyphs.first().map(|g| g.ascent).unwrap_or(sample_base.size().y * 0.77);
-            let badge_ascent = r_badge.glyphs.first().map(|g| g.ascent).unwrap_or(badge_galley.size().y * 0.77);
-            base_y_offset + (base_ascent - badge_ascent)
-        } else {
-            base_y_offset + (sample_base.size().y - badge_galley.size().y) / 2.0
-        };
+        // Render the badge (e.g. example "例 ") aligned at the same base baseline
+        if let Some(badge) = badge {
+            let badge_galley = ui.painter().layout_no_wrap(badge.to_string(), dict_font(28.0), COLOR_MUTED);
+            let badge_y_offset = if let (Some(r_base), Some(r_badge)) = (sample_base.rows.first(), badge_galley.rows.first()) {
+                let base_ascent = r_base.glyphs.first().map(|g| g.ascent).unwrap_or(sample_base.size().y * 0.77);
+                let badge_ascent = r_badge.glyphs.first().map(|g| g.ascent).unwrap_or(badge_galley.size().y * 0.77);
+                base_y_offset + (base_ascent - badge_ascent)
+            } else {
+                base_y_offset + (sample_base.size().y - badge_galley.size().y) / 2.0
+            };
 
-        let (badge_rect, _) = ui.allocate_exact_size(egui::vec2(badge_galley.size().x, total_h), egui::Sense::hover());
-        ui.painter().galley(
-            egui::pos2(badge_rect.min.x, badge_rect.min.y + badge_y_offset),
-            badge_galley,
-            COLOR_MUTED,
-        );
+            let (badge_rect, _) = ui.allocate_exact_size(egui::vec2(badge_galley.size().x, total_h), egui::Sense::hover());
+            ui.painter().galley(
+                egui::pos2(badge_rect.min.x, badge_rect.min.y + badge_y_offset),
+                badge_galley,
+                COLOR_MUTED,
+            );
+        }
 
         for seg in segments {
             match seg {
@@ -689,6 +737,50 @@ pub fn render_ruby_sentence(ui: &mut egui::Ui, node: &serde_json::Value) {
             }
         }
     });
+}
+
+/// Tags whose content flows inline (on the same line as surrounding text).
+fn is_inline_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "" | "span" | "a" | "ruby" | "rt" | "rp" | "b" | "strong" | "i" | "em" | "sup" | "sub" | "small"
+    )
+}
+
+/// True if `node` consists only of text and inline elements (no blocks like div/ul/li/br).
+fn is_inline_only(node: &serde_json::Value) -> bool {
+    match node {
+        serde_json::Value::String(_) => true,
+        serde_json::Value::Array(arr) => arr.iter().all(is_inline_only),
+        serde_json::Value::Object(map) => {
+            let tag = map.get("tag").and_then(|v| v.as_str()).unwrap_or("");
+            is_inline_tag(tag) && map.get("content").map_or(true, is_inline_only)
+        }
+        _ => true,
+    }
+}
+
+/// True if `node` contains a `<ruby>` element anywhere.
+fn contains_ruby(node: &serde_json::Value) -> bool {
+    match node {
+        serde_json::Value::Array(arr) => arr.iter().any(contains_ruby),
+        serde_json::Value::Object(map) => {
+            map.get("tag").and_then(|v| v.as_str()) == Some("ruby")
+                || map.get("content").is_some_and(contains_ruby)
+        }
+        _ => false,
+    }
+}
+
+/// Glyphs used by Jitendex that the dictionary font lacks, mapped to renderable ones.
+fn normalize_glyphs(segments: &mut [RubySegment]) {
+    for seg in segments {
+        if let RubySegment::Plain(text) = seg {
+            if text.contains('⟶') {
+                *text = text.replace('⟶', "→");
+            }
+        }
+    }
 }
 
 /// Renders inline content (handling ruby, bold, plain text) using LayoutJob.
@@ -1105,6 +1197,44 @@ fn append_styled_text(job: &mut LayoutJob, text: &str, bold: bool, italic: bool)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_redirect_glossary_is_single_inline_run() {
+        let redirect = serde_json::json!({
+            "tag": "div",
+            "data": { "content": "redirect-glossary" },
+            "content": ["⟶", {
+                "tag": "a",
+                "href": "?query=熱い",
+                "content": [{ "tag": "ruby", "content": ["熱", { "tag": "rt", "content": "あつ" }] }, "い"]
+            }]
+        });
+        let content = &redirect["content"];
+        assert!(is_inline_only(content));
+        assert!(contains_ruby(content));
+        let mut segs = extract_ruby_segments(content);
+        normalize_glyphs(&mut segs);
+        assert_eq!(
+            segs,
+            vec![
+                RubySegment::Plain("→".into()),
+                RubySegment::Ruby { base: "熱".into(), rt: "あつ".into() },
+                RubySegment::Plain("い".into()),
+            ]
+        );
+
+        // Block content is not flattened
+        let block = serde_json::json!([{ "tag": "ul", "content": [{ "tag": "li", "content": "x" }] }]);
+        assert!(!is_inline_only(&block));
+    }
+
+    #[test]
+    fn test_as_deinflection_glossary() {
+        let v = serde_json::json!(["熱い", ["redirected from あっつい"]]);
+        assert_eq!(as_deinflection_glossary(&v), Some(("熱い", vec!["redirected from あっつい"])));
+        assert!(as_deinflection_glossary(&serde_json::json!(["a", "b"])).is_none());
+        assert!(as_deinflection_glossary(&serde_json::json!({"type": "structured-content"})).is_none());
+    }
 
     #[test]
     fn test_extract_ruby_components() {
