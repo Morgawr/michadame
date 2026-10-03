@@ -1,18 +1,70 @@
 use super::deinflect::parse_rule_flags;
 use super::models::{DeinflectionCandidate, DictMetadata, GlossaryEntry, TermEntry};
+use super::particles::ParticleIndex;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
+
+static DB_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 pub struct DictDatabase {
     pub conn: Connection,
+    /// Unique id per opened database instance (used to invalidate lookup caches when the
+    /// dictionary is swapped out, e.g. after a sync).
+    pub generation: u64,
+    /// Particle-swap index for expressions (built lazily in the background).
+    particle_index: Arc<RwLock<Option<Arc<ParticleIndex>>>>,
 }
 
 impl DictDatabase {
+    fn from_conn(conn: Connection) -> Self {
+        Self {
+            conn,
+            generation: DB_GENERATION.fetch_add(1, Ordering::Relaxed),
+            particle_index: Arc::new(RwLock::new(None)),
+        }
+    }
+
     /// Opens an existing dictionary SQLite database in read-only mode for lookups.
+    /// Also kicks off a background build of the particle-swap index using a separate
+    /// read-only connection so the UI thread is never blocked.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let conn = Self::open_read_only_conn(path.as_ref())?;
+        let db = Self::from_conn(conn);
+
+        let slot = db.particle_index.clone();
+        let path_buf = path.as_ref().to_path_buf();
+        std::thread::Builder::new()
+            .name("dict-particle-index".into())
+            .spawn(move || {
+                let started = std::time::Instant::now();
+                let result = Self::open_read_only_conn(&path_buf)
+                    .map(Self::from_conn)
+                    .and_then(|bg_db| ParticleIndex::build(&bg_db));
+                match result {
+                    Ok(index) => {
+                        tracing::info!(
+                            "Built particle-swap index with {} expressions in {:?}",
+                            index.len(),
+                            started.elapsed()
+                        );
+                        if let Ok(mut lock) = slot.write() {
+                            *lock = Some(Arc::new(index));
+                        }
+                    }
+                    Err(e) => tracing::warn!("Failed to build particle-swap index: {e}"),
+                }
+            })
+            .ok();
+
+        Ok(db)
+    }
+
+    fn open_read_only_conn(path: &Path) -> Result<Connection> {
         let conn = Connection::open_with_flags(
             path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -23,15 +75,28 @@ impl DictDatabase {
 
         // Fast read pragma
         let _ = conn.execute_batch("PRAGMA query_only = ON; PRAGMA cache_size = -64000;");
-
-        Ok(Self { conn })
+        Ok(conn)
     }
 
     /// Creates or connects to a dictionary SQLite database for reading/writing.
     pub fn open_or_create<P: AsRef<Path>>(path: P) -> Result<Self> {
         let conn = Connection::open(path).context("Failed to open/create dictionary database")?;
         Self::init_schema(&conn)?;
-        Ok(Self { conn })
+        Ok(Self::from_conn(conn))
+    }
+
+    /// Returns the particle-swap index if it has finished building.
+    pub fn particle_index(&self) -> Option<Arc<ParticleIndex>> {
+        self.particle_index.read().ok().and_then(|g| g.clone())
+    }
+
+    /// Synchronously (re)builds the particle-swap index from this connection.
+    pub fn rebuild_particle_index(&self) -> Result<()> {
+        let index = ParticleIndex::build(self)?;
+        if let Ok(mut lock) = self.particle_index.write() {
+            *lock = Some(Arc::new(index));
+        }
+        Ok(())
     }
 
     fn init_schema(conn: &Connection) -> Result<()> {

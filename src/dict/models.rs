@@ -95,6 +95,8 @@ pub struct DictPopupState {
     pub char_range: (usize, usize),
     /// Pixel bounding box of the recognized word in screen coordinates
     pub word_rect: egui::Rect,
+    /// Additional highlight rects when the matched word wraps onto other lines of the box
+    pub extra_word_rects: Vec<egui::Rect>,
     /// Pixel bounding box of the containing OCR box in screen coordinates
     pub box_rect: egui::Rect,
     /// Matching dictionary entries found for this word

@@ -24,12 +24,14 @@ pub fn draw_dict_popup(
 
     // 1. Draw glowing highlight over the recognized word boundary (if highlight is not hidden)
     if show_highlight {
-        ui.painter().rect(
-            popup.word_rect.expand(2.0),
-            3.0,
-            WORD_HIGHLIGHT_FILL,
-            Stroke::new(1.5, WORD_HIGHLIGHT_STROKE),
-        );
+        for rect in std::iter::once(&popup.word_rect).chain(popup.extra_word_rects.iter()) {
+            ui.painter().rect(
+                rect.expand(2.0),
+                3.0,
+                WORD_HIGHLIGHT_FILL,
+                Stroke::new(1.5, WORD_HIGHLIGHT_STROKE),
+            );
+        }
     }
 
     // 2. Compute popup window dimensions & smart placement (scaled ~1.7x)
