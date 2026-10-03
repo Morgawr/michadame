@@ -165,6 +165,31 @@ impl History {
         }
         Some(packets)
     }
+    /// Audio packets covering `[end - seconds, end]`, plus `preroll_us` of earlier
+    /// packets so a decoder can settle before the requested start. Returns the
+    /// packets and the requested (clamped) `(start, end)` interval.
+    pub fn audio_clip(
+        &self,
+        seconds: u32,
+        requested_end: i64,
+        preroll_us: i64,
+    ) -> Option<(Vec<Arc<Encoded>>, i64, i64)> {
+        if self.audio_count == 0 {
+            return None;
+        }
+        let end = self.audio_end.min(requested_end);
+        let target = end - seconds as i64 * 1_000_000;
+        let packets: Vec<_> = self
+            .packets
+            .iter()
+            .filter(|p| !p.video && p.end > target - preroll_us && p.start < end)
+            .cloned()
+            .collect();
+        if !packets.iter().any(|p| p.end > target) {
+            return None;
+        }
+        Some((packets, target, end))
+    }
 }
 
 #[cfg(test)]
@@ -216,6 +241,22 @@ mod tests {
         assert!(clip[0].key);
         assert_eq!(clip[0].start, 6_000_000);
         assert!(clip.iter().all(|p| p.end <= 10_000_000));
+    }
+    #[test]
+    fn audio_clip_contains_only_audio_with_preroll_and_ignores_keyframes() {
+        let mut h = History::new(600);
+        h.push(packet(0, true, true, 10), 100000);
+        for t in 0..20 {
+            h.push(packet(t, false, false, 10), 100000);
+        }
+        let (clip, start, end) = h.audio_clip(5, 20_000_000, 1_000_000).unwrap();
+        assert_eq!((start, end), (15_000_000, 20_000_000));
+        assert!(clip.iter().all(|p| !p.video));
+        // One preroll packet ending exactly at the start, then five within the range.
+        assert_eq!(clip.first().unwrap().start, 14_000_000);
+        assert_eq!(clip.last().unwrap().start, 19_000_000);
+        assert_eq!(clip.len(), 6);
+        assert!(History::new(10).audio_clip(5, 1, 0).is_none());
     }
     #[test]
     fn audio_absence_cannot_produce_successful_clip() {

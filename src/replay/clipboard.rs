@@ -58,7 +58,7 @@ impl Clipboard {
         })
     }
 
-    pub fn file(&self) -> Result<tempfile::NamedTempFile> {
+    pub fn file(&self, suffix: &str) -> Result<tempfile::NamedTempFile> {
         let mut state = self.state.lock().unwrap();
         ensure!(!state.closed, "Clipboard export cancelled during shutdown");
         // Never fall back to a disk-backed TMPDIR or the recording directory.
@@ -72,7 +72,7 @@ impl Clipboard {
         }
         let file = tempfile::Builder::new()
             .prefix("replay-")
-            .suffix(".mp4")
+            .suffix(suffix)
             .tempfile_in(state.directory.as_ref().unwrap().path())?;
         require_ram_filesystem(file.as_file())?;
         Ok(file)
@@ -239,14 +239,14 @@ mod tests {
             return;
         }
         let clipboard = Arc::new(Clipboard::default());
-        let mut first = clipboard.file().unwrap();
+        let mut first = clipboard.file(".mp4").unwrap();
         first.write_all(b"clip").unwrap();
         let original = first.path().to_owned();
         clipboard
             .publish_with(first, clipboard.reserve(8, 12).unwrap(), |_| Ok(None))
             .unwrap();
         assert_eq!(clipboard.bytes(), 4);
-        let mut failed = clipboard.file().unwrap();
+        let mut failed = clipboard.file(".mp4").unwrap();
         failed.write_all(b"fail").unwrap();
         let failed_path = failed.path().to_owned();
         assert!(clipboard
@@ -259,7 +259,7 @@ mod tests {
         assert!(original.exists());
         assert!(!failed_path.exists());
         assert_eq!(clipboard.bytes(), 4);
-        let mut second = clipboard.file().unwrap();
+        let mut second = clipboard.file(".mp4").unwrap();
         second.write_all(b"clip2").unwrap();
         let replacement = second.path().to_owned();
         clipboard
@@ -268,7 +268,7 @@ mod tests {
         assert!(!original.exists());
         assert!(replacement.exists());
         assert_eq!(clipboard.bytes(), 5);
-        let mut racing = clipboard.file().unwrap();
+        let mut racing = clipboard.file(".mp4").unwrap();
         racing.write_all(b"late").unwrap();
         assert!(clipboard
             .publish_with(racing, clipboard.reserve(7, 12).unwrap(), |_| {
@@ -298,10 +298,10 @@ mod tests {
         assert!(limited.seek(SeekFrom::Start(5)).is_err());
         assert_eq!(limited.file.metadata().unwrap().len(), 4);
         if require_ram_filesystem(&File::open("/tmp").unwrap()).is_err() {
-            assert!(clipboard.file().is_err());
+            assert!(clipboard.file(".mp4").is_err());
             return;
         }
-        let pending = clipboard.file().unwrap();
+        let pending = clipboard.file(".mp4").unwrap();
         let path = pending.path().to_owned();
         assert_eq!(
             pending.as_file().metadata().unwrap().permissions().mode() & 0o777,
@@ -309,6 +309,6 @@ mod tests {
         );
         clipboard.close();
         assert!(!path.exists());
-        assert!(clipboard.file().is_err());
+        assert!(clipboard.file(".mp4").is_err());
     }
 }

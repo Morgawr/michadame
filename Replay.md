@@ -31,11 +31,19 @@ shorter clip or reporting insufficient history.
 
 With replay enabled, press **Ctrl+C** in the focused video window, then wait for
 the **Copied … to clipboard** notification before pasting. This copies up to the
-last ten seconds as an MP4 file attachment, with the same audio, rendered effects,
+last fifteen seconds as an MP4 file attachment, with the same audio, rendered effects,
 codec, crop and timestamps as a normal replay save. The clip can be shorter when
 history is limited or its start must advance to a keyframe. It uses the existing
 background export queue; copying and saving cannot run simultaneously. Plain
 `C` still cycles CRT filters. Copying text in Controls is unaffected.
+
+Press **Ctrl+Shift+C** instead to copy only the audio of the last 7 seconds as an
+MP3 file (48 kHz stereo, 192 kbps CBR). The recorded Opus audio is decoded and
+re-encoded with FFmpeg's `libmp3lame`; no video keyframe is required, so the clip
+is not shortened to a keyframe. Missing audio stays as silence at its original
+position. The MP3 uses the same RAM-only `/tmp` directory, reservation and
+background export queue as video copies, and only one clipboard clip, audio or
+video, is kept at a time.
 
 Linux browsers normally expose pasted video attachments through file references,
 not arbitrary raw `video/mp4` bytes. This implementation uses arboard's native
@@ -62,7 +70,7 @@ including the previous clipboard clip and in-flight export. A bounded seekable
 writer enforces the reservation while muxing. Debug shows clipboard memory
 separately from retained packets. Copying remuxes encoded packets without
 re-encoding or changing quality. Website file-size limits and codec/paste support
-still apply: for example, ten seconds at a 30 Mbit/s video target is about 38 MB
+still apply: for example, fifteen seconds at a 30 Mbit/s video target is about 57 MB
 with audio, above Discord's current free upload limit. See
 [Discord's attachment limits](https://support.discord.com/hc/en-us/articles/25444343291031-File-Attachments-FAQ).
 Browser/website paste, sandboxed browser access to `/tmp`, and desktop clipboard

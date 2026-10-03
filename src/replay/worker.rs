@@ -357,6 +357,25 @@ pub(super) fn run(
                     shared.gpu_pending.load(Ordering::Relaxed),
                 )
             {
+                if save.destination == Destination::AudioClipboard {
+                    let clip = history.audio_clip(save.seconds, save.at, AUDIO_PREROLL_US);
+                    match (clip, session.as_ref()) {
+                        (Some((packets, start, end)), Some(s)) => {
+                            export_thread = spawn_audio_export(
+                                shared,
+                                &config,
+                                surface_overhead,
+                                s.audio.parameters(),
+                                packets,
+                                start,
+                                end,
+                            )?;
+                        }
+                        _ => shared.message("Audio copy failed: not enough replay audio yet"),
+                    }
+                    pending_save = None;
+                    continue;
+                }
                 let packets = history.clip(save.seconds, save.at);
                 if let (Some(packets), Some(s)) = (packets, session.as_ref()) {
                     let pinned: usize = packets.iter().map(|p| p.bytes).sum();
@@ -414,7 +433,7 @@ pub(super) fn run(
                                                 ),
                                                 "Not enough available RAM for the clipboard clip"
                                             );
-                                            let file = export_shared.clipboard.file()?;
+                                            let file = export_shared.clipboard.file(".mp4")?;
                                             encoder::export_clipboard(
                                                 file.as_file().try_clone()?,
                                                 reservation.limit,
@@ -522,6 +541,83 @@ fn next_audio_block(
         None
     } else {
         Some(block)
+    }
+}
+/// Opus needs a few frames to converge when decoding starts mid-stream.
+const AUDIO_PREROLL_US: i64 = 120_000;
+
+/// Start the Ctrl+Shift+C MP3 export. Returns `Ok(None)` when the request is
+/// rejected with a status message, and `Err` only if a thread cannot be spawned.
+#[allow(clippy::too_many_arguments)]
+fn spawn_audio_export(
+    shared: &Arc<Shared>,
+    config: &ReplayConfig,
+    surface_overhead: usize,
+    opus: ffmpeg_next::codec::Parameters,
+    packets: Vec<Arc<ring::Encoded>>,
+    start: i64,
+    end: i64,
+) -> Result<Option<std::thread::JoinHandle<()>>> {
+    let pinned: usize = packets.iter().map(|p| p.bytes).sum();
+    let seconds = (end - start).max(0) as usize / 1_000_000 + 1;
+    // CBR MP3 plus ID3/Xing headers and slack; the writer enforces this bound.
+    let maximum = seconds * encoder::MP3_BITRATE / 8 * 11 / 10 + 256 * 1024;
+    let reservation = match shared.clipboard.reserve(
+        maximum,
+        config
+            .budget()
+            .saturating_sub(surface_overhead)
+            .saturating_sub(pinned),
+    ) {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            shared.message(format!("Audio copy failed: {error}"));
+            return Ok(None);
+        }
+    };
+    shared.saving_bytes.store(pinned, Ordering::Release);
+    shared.status.lock().unwrap().saving = true;
+    let export_shared = shared.clone();
+    let spawned = std::thread::Builder::new()
+        .name("replay-audio-save".into())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ensure!(
+                    config::available_memory().is_some_and(|available| available
+                        > reservation.limit.saturating_add(config::SAFETY_RESERVE)),
+                    "Not enough available RAM for the clipboard clip"
+                );
+                let file = export_shared.clipboard.file(".mp3")?;
+                let duration = encoder::export_audio_mp3(
+                    file.as_file().try_clone()?,
+                    reservation.limit,
+                    opus,
+                    packets,
+                    start,
+                    end,
+                )?;
+                let size = export_shared.clipboard.publish(file, reservation)?;
+                Ok(format!(
+                    "Copied {duration:.1}s audio to clipboard ({:.1} MiB MP3)",
+                    size as f64 / 1_048_576.0
+                ))
+            }))
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("Audio writer panicked")));
+            export_shared.saving_bytes.store(0, Ordering::Release);
+            let mut status = export_shared.status.lock().unwrap();
+            status.saving = false;
+            status.message = match result {
+                Ok(message) => message,
+                Err(e) => format!("Audio copy failed: {e:#}"),
+            };
+        });
+    match spawned {
+        Ok(thread) => Ok(Some(thread)),
+        Err(e) => {
+            shared.saving_bytes.store(0, Ordering::Release);
+            shared.status.lock().unwrap().saving = false;
+            Err(e.into())
+        }
     }
 }
 fn save_wait_expired(

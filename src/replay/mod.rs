@@ -201,10 +201,12 @@ impl Shared {
         }
     }
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Destination {
     File,
     Clipboard,
+    /// Audio only, transcoded to MP3.
+    AudioClipboard,
 }
 pub struct Save {
     destination: Destination,
@@ -383,6 +385,7 @@ impl Replay {
         if message != self.last_notice
             && (message.starts_with("Copied ")
                 || message.starts_with("Replay copy failed:")
+                || message.starts_with("Audio copy failed:")
                 || message.starts_with("Saved ")
                 || message.starts_with("Replay stopped:")
                 || message.starts_with("Replay save failed:")
@@ -446,9 +449,13 @@ impl Replay {
         if self.runtime.is_none() || ctx.wants_keyboard_input() {
             return;
         }
-        if clipboard_shortcut(ctx) {
-            if let Err(error) = self.request_export(10, Destination::Clipboard) {
-                let message = format!("Replay copy failed: {error}");
+        if let Some(destination) = clipboard_shortcut(ctx) {
+            let (seconds, prefix) = match destination {
+                Destination::AudioClipboard => (AUDIO_CLIP_SECONDS, "Audio copy failed"),
+                _ => (VIDEO_CLIP_SECONDS, "Replay copy failed"),
+            };
+            if let Err(error) = self.request_export(seconds, destination) {
+                let message = format!("{prefix}: {error}");
                 self.last_status.message = message.clone();
                 if let Some(runtime) = &self.runtime {
                     runtime.shared.message(message);
@@ -477,21 +484,51 @@ impl Drop for Replay {
     }
 }
 
-// egui-winit translates Ctrl+C to Event::Copy rather than a C key event.
-fn clipboard_shortcut(ctx: &eframe::egui::Context) -> bool {
+/// Length of the Ctrl+C video clip.
+const VIDEO_CLIP_SECONDS: u32 = 15;
+/// Length of the Ctrl+Shift+C audio-only clip.
+const AUDIO_CLIP_SECONDS: u32 = 7;
+
+// egui-winit translates both Ctrl+C and Ctrl+Shift+C to Event::Copy rather than
+// a C key event; the held Shift modifier selects the audio-only export.
+fn clipboard_shortcut(ctx: &eframe::egui::Context) -> Option<Destination> {
     use eframe::egui::{Event, Key, ViewportId};
     if ctx.viewport_id() != ViewportId::ROOT || ctx.wants_keyboard_input() {
-        return false;
+        return None;
     }
     ctx.input_mut(|input| {
-        if !input.focused { return false; }
-        let mut copy = false;
+        if !input.focused {
+            return None;
+        }
+        let held_shift = input.modifiers.shift;
+        let mut found = None;
         input.events.retain(|event| {
-            let matches = matches!(event, Event::Copy) || matches!(event, Event::Key { key: Key::C, pressed: true, repeat: false, modifiers, .. } if modifiers.ctrl && !modifiers.shift && !modifiers.alt && !modifiers.mac_cmd);
-            copy |= matches;
-            !matches
+            let destination = match event {
+                Event::Copy => Some(held_shift),
+                Event::Key {
+                    key: Key::C,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } if modifiers.ctrl && !modifiers.alt && !modifiers.mac_cmd => {
+                    Some(modifiers.shift)
+                }
+                _ => None,
+            }
+            .map(|audio| {
+                if audio {
+                    Destination::AudioClipboard
+                } else {
+                    Destination::Clipboard
+                }
+            });
+            if destination.is_some() {
+                found = found.or(destination);
+            }
+            destination.is_none()
         });
-        copy
+        found
     })
 }
 
@@ -513,35 +550,48 @@ mod tests {
                 false,
             ),
         ] {
-            for event in [
-                Event::Copy,
-                Event::Key {
-                    key: Key::C,
-                    physical_key: None,
-                    pressed: true,
-                    repeat: false,
-                    modifiers: egui::Modifiers::CTRL,
-                },
-            ] {
-                let ctx = egui::Context::default();
-                let mut input = egui::RawInput {
-                    viewport_id: viewport,
-                    focused,
-                    events: vec![event],
-                    ..Default::default()
+            for shift in [false, true] {
+                let modifiers = if shift {
+                    egui::Modifiers::CTRL | egui::Modifiers::SHIFT
+                } else {
+                    egui::Modifiers::CTRL
                 };
-                input.viewports.entry(viewport).or_default();
-                let _ = ctx.run(input, |ctx| {
-                    if editing {
-                        ctx.memory_mut(|m| m.request_focus(egui::Id::new("text")));
-                    }
-                    assert_eq!(clipboard_shortcut(ctx), expected);
-                    assert!(
-                        !clipboard_shortcut(ctx),
-                        "Consumed copy must not be exported twice"
-                    );
-                    assert_eq!(ctx.input(|i| i.events.len()), usize::from(!expected));
+                let wanted = expected.then_some(if shift {
+                    Destination::AudioClipboard
+                } else {
+                    Destination::Clipboard
                 });
+                for event in [
+                    Event::Copy,
+                    Event::Key {
+                        key: Key::C,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                    },
+                ] {
+                    let ctx = egui::Context::default();
+                    let mut input = egui::RawInput {
+                        viewport_id: viewport,
+                        focused,
+                        modifiers,
+                        events: vec![event],
+                        ..Default::default()
+                    };
+                    input.viewports.entry(viewport).or_default();
+                    let _ = ctx.run(input, |ctx| {
+                        if editing {
+                            ctx.memory_mut(|m| m.request_focus(egui::Id::new("text")));
+                        }
+                        assert_eq!(clipboard_shortcut(ctx), wanted);
+                        assert!(
+                            clipboard_shortcut(ctx).is_none(),
+                            "Consumed copy must not be exported twice"
+                        );
+                        assert_eq!(ctx.input(|i| i.events.len()), usize::from(!expected));
+                    });
+                }
             }
         }
         // Plain C still belongs to the CRT filter, not the clipboard.
@@ -556,7 +606,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let _ = ctx.run(input, |ctx| assert!(!clipboard_shortcut(ctx)));
+        let _ = ctx.run(input, |ctx| assert!(clipboard_shortcut(ctx).is_none()));
     }
     pub(super) fn test_tap(
         capacity: usize,

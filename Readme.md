@@ -66,6 +66,10 @@ the bottom. Expand **Save shortcuts** to edit bindings or save a clip manually.
 Press **D** in the video window to toggle stream and replay diagnostics.
 
 With replay enabled, **Ctrl+C** in the video window copies up to the last
-10 seconds as a video attachment. Wait for the copied notification, then paste
+15 seconds as a video attachment. Wait for the copied notification, then paste
 into a compatible application or website. This uses a temporary MP4 in
 RAM-backed `/tmp`; no recording is added to your save folder.
+
+**Ctrl+Shift+C** copies only the audio of the last 7 seconds as an MP3
+attachment (for example, to paste into Discord). It replaces any clip
+previously copied with Ctrl+C, and vice versa.

@@ -435,6 +435,176 @@ fn export_output(
     Ok(())
 }
 
+pub const MP3_BITRATE: usize = 192_000;
+
+/// Decode replay Opus packets and write `[start, end)` (microseconds, capture
+/// clock) as a 48 kHz stereo CBR MP3. Gaps become silence and overlaps are
+/// dropped, so the file keeps the original timeline. If less history exists
+/// than requested, the file starts at the first decoded sample instead of
+/// with leading silence.
+pub fn export_audio_mp3(
+    file: std::fs::File,
+    limit: usize,
+    opus: codec::Parameters,
+    packets: Vec<std::sync::Arc<Encoded>>,
+    start: i64,
+    end: i64,
+) -> Result<f64> {
+    ensure!(!packets.is_empty() && end > start, "No replay audio");
+    let samples = decode_audio_timeline(opus, &packets, start, end)?;
+    ensure!(!samples.is_empty(), "No decodable replay audio");
+    let io = format::context::StreamIo::from_write_seek(super::clipboard::LimitedFile::new(
+        file, limit,
+    ))?;
+    let mut output = format::output_to_stream(io, None, Some("mp3"))?;
+    let codec =
+        encoder::find_by_name("libmp3lame").context("FFmpeg libmp3lame encoder is unavailable")?;
+    let mut mp3 = codec::context::Context::new_with_codec(codec)
+        .encoder()
+        .audio()?;
+    let sample_format = format::Sample::F32(format::sample::Type::Planar);
+    mp3.set_rate(48000);
+    mp3.set_channel_layout(ff::ChannelLayout::STEREO);
+    mp3.set_format(sample_format);
+    mp3.set_time_base((1, 48000));
+    mp3.set_bit_rate(MP3_BITRATE);
+    let mut mp3 = mp3.open()?;
+    let frame_size = (mp3.frame_size() as usize).max(1);
+    {
+        let mut stream = output.add_stream(codec)?;
+        stream.set_parameters(codec::Parameters::from(&mp3));
+        stream.set_time_base((1, 48000));
+    }
+    output.write_header()?;
+    let stream_tb = output.stream(0).unwrap().time_base();
+    let drain = |mp3: &mut encoder::Audio, output: &mut format::context::Output| -> Result<()> {
+        loop {
+            let mut packet = Packet::empty();
+            match mp3.receive_packet(&mut packet) {
+                Ok(()) => {
+                    packet.set_stream(0);
+                    packet.set_position(-1);
+                    packet.rescale_ts((1, 48000), stream_tb);
+                    packet.write_interleaved(output)?;
+                }
+                Err(ff::Error::Other { errno }) if errno == libc::EAGAIN => return Ok(()),
+                Err(ff::Error::Eof) => return Ok(()),
+                Err(e) => return Err(e.into()),
+            }
+        }
+    };
+    for (index, chunk) in samples.chunks(frame_size).enumerate() {
+        let mut frame = frame::Audio::new(sample_format, chunk.len(), ff::ChannelLayout::STEREO);
+        frame.set_rate(48000);
+        frame.set_pts(Some((index * frame_size) as i64));
+        for channel in 0..2 {
+            for (out, input) in frame.plane_mut::<f32>(channel).iter_mut().zip(chunk) {
+                *out = input[channel];
+            }
+        }
+        mp3.send_frame(&frame)?;
+        drain(&mut mp3, &mut output)?;
+    }
+    mp3.send_eof()?;
+    drain(&mut mp3, &mut output)?;
+    output.write_trailer()?;
+    unsafe {
+        let pb = (*output.as_mut_ptr()).pb;
+        ffi::avio_flush(pb);
+        check((*pb).error)?;
+    }
+    Ok(samples.len() as f64 / 48000.)
+}
+
+fn decode_audio_timeline(
+    opus: codec::Parameters,
+    packets: &[std::sync::Arc<Encoded>],
+    start: i64,
+    end: i64,
+) -> Result<Vec<[f32; 2]>> {
+    let mut decoder = codec::context::Context::from_parameters(opus)?
+        .decoder()
+        .audio()?;
+    unsafe {
+        // Lets libavcodec keep frame timestamps correct across Opus pre-skip.
+        (*decoder.as_mut_ptr()).pkt_timebase = Rational(1, 1_000_000).into();
+    }
+    let mut output: Vec<[f32; 2]> = Vec::new();
+    // Capture-clock time of output sample zero, fixed by the first usable frame.
+    let mut origin: Option<i64> = None;
+    let mut limit = 0usize;
+    let mut next_pts: Option<i64> = None;
+    let mut push_frame = |frame: &frame::Audio, output: &mut Vec<[f32; 2]>| -> Result<()> {
+        let count = frame.samples();
+        if count == 0 {
+            return Ok(());
+        }
+        ensure!(frame.rate() == 48000, "Unexpected decoded audio rate");
+        let channels = frame.channels() as usize;
+        ensure!(channels > 0, "Decoded audio has no channels");
+        let right = usize::from(channels > 1);
+        let decoded: Vec<[f32; 2]> = match frame.format() {
+            format::Sample::F32(format::sample::Type::Planar) => frame
+                .plane::<f32>(0)
+                .iter()
+                .zip(frame.plane::<f32>(right))
+                .map(|(l, r)| [*l, *r])
+                .collect(),
+            format::Sample::F32(format::sample::Type::Packed) => {
+                let data: &[f32] = bytemuck::cast_slice(&frame.data(0)[..count * channels * 4]);
+                data.chunks_exact(channels).map(|s| [s[0], s[right]]).collect()
+            }
+            format::Sample::I16(format::sample::Type::Packed) => {
+                let data: &[i16] = bytemuck::cast_slice(&frame.data(0)[..count * channels * 2]);
+                data.chunks_exact(channels)
+                    .map(|s| [s[0] as f32 / 32768., s[right] as f32 / 32768.])
+                    .collect()
+            }
+            other => anyhow::bail!("Unexpected decoded audio format {other:?}"),
+        };
+        let at = frame
+            .pts()
+            .or(next_pts)
+            .context("Decoded audio has no timestamp")?;
+        next_pts = Some(at + count as i64 * 1_000_000 / 48000);
+        let frame_end = at + count as i64 * 1_000_000 / 48000;
+        if frame_end <= start || at >= end {
+            return Ok(());
+        }
+        let origin = *origin.get_or_insert_with(|| {
+            let origin = at.max(start);
+            limit = ((end - origin) * 48000 / 1_000_000) as usize;
+            origin
+        });
+        let position = ((at - origin) as f64 * 48000. / 1e6).round() as i64;
+        for (i, sample) in decoded.into_iter().enumerate() {
+            let index = position + i as i64;
+            if index < output.len() as i64 {
+                continue; // Before the clip start, or overlaps earlier audio.
+            }
+            if index as usize >= limit {
+                break;
+            }
+            // Missing packets become silence instead of compressing time.
+            output.resize(index as usize, [0.; 2]);
+            output.push(sample);
+        }
+        Ok(())
+    };
+    let mut frame = frame::Audio::empty();
+    for p in packets {
+        decoder.send_packet(&p.packet)?;
+        while decoder.receive_frame(&mut frame).is_ok() {
+            push_frame(&frame, &mut output)?;
+        }
+    }
+    decoder.send_eof()?;
+    while decoder.receive_frame(&mut frame).is_ok() {
+        push_frame(&frame, &mut output)?;
+    }
+    Ok(output)
+}
+
 fn coded_size(width: u32, height: u32) -> (u32, u32) {
     // NV12/YUV420 requires even dimensions for 2:1 chroma subsampling.
     (width.div_ceil(2) * 2, height.div_ceil(2) * 2)
@@ -552,6 +722,111 @@ fn convert_rgba(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn audio_clip_transcodes_to_mp3_with_gaps_preserved_and_bounded_size() {
+        ff::init().unwrap();
+        let mut audio = AudioEncoder::new().unwrap();
+        let mut history = super::super::ring::History::new(60);
+        let epoch = 3_000_000i64;
+        // History eviction is anchored on video keyframes, as in a real recording.
+        let mut key = Packet::copy(&[0; 16]);
+        key.set_pts(Some(epoch));
+        key.set_dts(Some(epoch));
+        key.set_duration(1);
+        key.set_flags(ff::packet::Flags::KEY);
+        history.push(Encoded::new(key, true), usize::MAX);
+        // 20 s of 440 Hz; packets for 10.0–10.5 s are lost.
+        for block in 0..1000i64 {
+            let at = block * 960;
+            let samples: Vec<[f32; 2]> = (0..960)
+                .map(|i| {
+                    let v = (((at + i) as f32 / 48000.) * 440. * std::f32::consts::TAU).sin() * 0.3;
+                    [v, v]
+                })
+                .collect();
+            for mut p in audio.encode(&samples, at).unwrap() {
+                p.packet.set_pts(p.packet.pts().map(|t| t + epoch));
+                p.packet.set_dts(p.packet.dts().map(|t| t + epoch));
+                p.start += epoch;
+                p.end += epoch;
+                let t = p.start - epoch;
+                if !(10_000_000..10_500_000).contains(&t) {
+                    history.push(p, usize::MAX);
+                }
+            }
+        }
+        let (packets, start, end) = history
+            .audio_clip(15, epoch + 19_000_000, 120_000)
+            .unwrap();
+        assert_eq!(end - start, 15_000_000);
+        let temporary = tempfile::NamedTempFile::new().unwrap();
+        let limit = 15 * MP3_BITRATE / 8 * 11 / 10 + 256 * 1024;
+        let duration = export_audio_mp3(
+            temporary.as_file().try_clone().unwrap(),
+            limit,
+            audio.parameters(),
+            packets.clone(),
+            start,
+            end,
+        )
+        .unwrap();
+        assert!((duration - 15.).abs() < 0.01, "duration {duration}");
+        let size = temporary.as_file().metadata().unwrap().len() as usize;
+        assert!(size > 300_000 && size <= limit, "size {size}");
+        // Too small a reservation must fail instead of writing past it.
+        let small = tempfile::NamedTempFile::new().unwrap();
+        assert!(export_audio_mp3(
+            small.as_file().try_clone().unwrap(),
+            4096,
+            audio.parameters(),
+            packets,
+            start,
+            end
+        )
+        .is_err());
+        assert!(small.as_file().metadata().unwrap().len() <= 4096);
+
+        let mut input = format::input(&temporary.path()).unwrap();
+        assert_eq!(input.format().name(), "mp3");
+        let stream = input.streams().best(ff::media::Type::Audio).unwrap();
+        let index = stream.index();
+        assert_eq!(stream.parameters().id(), codec::Id::MP3);
+        let mut decoder = codec::context::Context::from_parameters(stream.parameters())
+            .unwrap()
+            .decoder()
+            .audio()
+            .unwrap();
+        let mut left = Vec::<f32>::new();
+        let mut frame = frame::Audio::empty();
+        for (s, packet) in input.packets() {
+            if s.index() != index {
+                continue;
+            }
+            decoder.send_packet(&packet).unwrap();
+            while decoder.receive_frame(&mut frame).is_ok() {
+                assert_eq!(frame.rate(), 48000);
+                match frame.format() {
+                    format::Sample::F32(format::sample::Type::Planar) => {
+                        left.extend_from_slice(frame.plane::<f32>(0))
+                    }
+                    other => panic!("Unexpected MP3 decoder format {other:?}"),
+                }
+            }
+        }
+        assert!(
+            (left.len() as f64 / 48000. - 15.).abs() < 0.1,
+            "decoded {} samples",
+            left.len()
+        );
+        let rms = |range: std::ops::Range<f64>| {
+            let window = &left[(range.start * 48000.) as usize..(range.end * 48000.) as usize];
+            (window.iter().map(|v| v * v).sum::<f32>() / window.len() as f32).sqrt()
+        };
+        // Clip covers 4–19 s of the source; the 10.0–10.5 s gap sits at 6.0–6.5 s.
+        assert!(rms(1.0..5.5) > 0.15, "audible tone expected");
+        assert!(rms(7.0..14.0) > 0.15, "audio after the gap kept its timeline");
+        assert!(rms(6.1..6.4) < 0.02, "lost packets must be silence");
+    }
     #[test]
     fn replay_rate_control_options_parse_without_opening_hardware() {
         ff::init().unwrap();
