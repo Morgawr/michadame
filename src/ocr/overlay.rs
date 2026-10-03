@@ -17,6 +17,14 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
     }
 
     let pointer_pos = ui.input(|i| i.pointer.hover_pos());
+    // The dictionary popup "eats" pointer events: if the cursor is currently over the
+    // popup window (using its rect from the last drawn frame), words/boxes underneath it
+    // must not react to hover or clicks. This is checked against the *current* pointer
+    // position so there is no one-frame lag when entering the popup.
+    let pointer_in_popup = match (pointer_pos, state.dict.popup.as_ref().and_then(|p| p.popup_rect)) {
+        (Some(pos), Some(rect)) => rect.contains(pos),
+        _ => false,
+    };
     let mut hovered_any_box = false;
     let mut copied_text: Option<String> = None;
     let mut copied_index: Option<usize> = None;
@@ -38,7 +46,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         let response = ui.interact(box_rect, box_id, egui::Sense::click());
 
         let is_recently_copied = state.ocr.last_copied_index == Some(idx);
-        let is_hovered = response.hovered();
+        let is_hovered = response.hovered() && !pointer_in_popup;
         let is_active_popup_box = state
             .dict
             .popup
@@ -53,7 +61,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         }
 
         // Right-click dismisses the OCR box from the UI
-        if response.secondary_clicked() {
+        if response.secondary_clicked() && !pointer_in_popup {
             dismissed_box_idx = Some(idx);
         }
 
@@ -117,7 +125,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
             }
         }
 
-        if response.clicked() {
+        if response.clicked() && !pointer_in_popup {
             copied_text = Some(ocr_box.text.clone());
             copied_index = Some(idx);
         }
@@ -180,12 +188,13 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
     }
 
     // Handle Dictionary Word Recognition and Popup with persistence grace period
-    let is_popup_currently_hovered = state
-        .dict
-        .popup
-        .as_ref()
-        .map(|p| p.is_popup_hovered)
-        .unwrap_or(false);
+    let is_popup_currently_hovered = pointer_in_popup
+        || state
+            .dict
+            .popup
+            .as_ref()
+            .map(|p| p.is_popup_hovered)
+            .unwrap_or(false);
 
     let grace_period = std::time::Duration::from_millis(450);
 

@@ -101,6 +101,9 @@ pub struct DictPopupState {
     pub entries: Vec<TermEntry>,
     /// True if the user's cursor is currently inside the popup window
     pub is_popup_hovered: bool,
+    /// Screen rect of the popup window as drawn on the last frame (None until first drawn).
+    /// Used to "eat" hover events so words underneath the popup don't steal focus.
+    pub popup_rect: Option<egui::Rect>,
     /// Timestamp of when this popup/word was last hovered, for persistence
     pub last_hover_time: std::time::Instant,
 }

@@ -46,7 +46,7 @@ pub fn draw_dict_popup(
     let mut is_pointer_in_popup = false;
 
     // 3. Render floating popup in Foreground layer
-    egui::Area::new(egui::Id::new("jitendex_dict_popup"))
+    let area_response = egui::Area::new(egui::Id::new("jitendex_dict_popup"))
         .fixed_pos(placement.pos)
         .order(egui::Order::Foreground)
         .show(ui.ctx(), |ui| {
@@ -87,6 +87,7 @@ pub fn draw_dict_popup(
         });
 
     // 4. Update whether the user is interacting with the popup window
+    popup.popup_rect = Some(area_response.response.rect);
     popup.is_popup_hovered = is_pointer_in_popup;
     if let Some(ptr) = ui.input(|i| i.pointer.hover_pos()) {
         if is_pointer_in_popup

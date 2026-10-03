@@ -162,6 +162,15 @@ impl AppState {
         self.dict.popup = None;
     }
 
+    /// Returns true if the pointer is currently over an open dictionary popup window.
+    pub fn is_pointer_in_dict_popup(&self, ctx: &egui::Context) -> bool {
+        let Some(rect) = self.dict.popup.as_ref().and_then(|p| p.popup_rect) else {
+            return false;
+        };
+        ctx.input(|i| i.pointer.hover_pos())
+            .map_or(false, |pos| rect.contains(pos))
+    }
+
     pub fn update_fps_counters(&mut self, ctx: &egui::Context) {
         self.frames_since_last_check += 1;
         let now = Instant::now();
@@ -436,8 +445,14 @@ impl eframe::App for AppState {
         }
 
         if self.ocr.is_expired() {
-            self.clear_ocr();
-            repaint_requested = true;
+            // Don't dismiss the overlay out from under the user while they are reading the
+            // dictionary popup. Once the timer has run out, it gets dismissed as soon as the
+            // pointer leaves the popup (pointer movement / PointerGone triggers a repaint).
+            // Shift+Space still dismisses immediately (handled in ui::draw_main_ui).
+            if !self.is_pointer_in_dict_popup(ctx) {
+                self.clear_ocr();
+                repaint_requested = true;
+            }
         } else if let Some(remaining) = self.ocr.remaining_time() {
             ctx.request_repaint_after(remaining);
         }
