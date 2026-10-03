@@ -153,6 +153,10 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         vibrance: Some(state.video.vibrance),
         overscan_x: Some(state.video.overscan_x),
         overscan_y: Some(state.video.overscan_y),
+        border_crop_left: Some(state.video.border_crop_left),
+        border_crop_right: Some(state.video.border_crop_right),
+        border_crop_top: Some(state.video.border_crop_top),
+        border_crop_bottom: Some(state.video.border_crop_bottom),
 
         selected_crt_filter: Some(state.selected_crt_filter as u8),
         halo_brightboost: Some(state.halo.brightboost),
@@ -362,6 +366,18 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) {
     }
     if let Some(val) = profile.overscan_y {
         state.video.overscan_y = val;
+    }
+    if let Some(val) = profile.border_crop_left {
+        state.video.border_crop_left = val;
+    }
+    if let Some(val) = profile.border_crop_right {
+        state.video.border_crop_right = val;
+    }
+    if let Some(val) = profile.border_crop_top {
+        state.video.border_crop_top = val;
+    }
+    if let Some(val) = profile.border_crop_bottom {
+        state.video.border_crop_bottom = val;
     }
     if let Some(val) = profile.selected_crt_filter {
         state.selected_crt_filter = crate::devices::filter_type::CrtFilter::from_u8(val);
@@ -803,6 +819,28 @@ mod tests {
         assert_eq!(state.halo.brightboost, 2.2);
         assert_eq!(state.halo.halo_zoom, 75.0);
         assert_eq!(state.halo.curvature, false);
+    }
+
+    #[test]
+    fn test_border_crop_profile_roundtrip() {
+        let mut state = AppState::default();
+        state.video.border_crop_left = 0.05;
+        state.video.border_crop_right = 0.06;
+        state.video.border_crop_top = 0.07;
+        state.video.border_crop_bottom = 0.08;
+
+        let profile = build_profile_from_state(&state);
+        assert_eq!(profile.border_crop_left, Some(0.05));
+        assert_eq!(profile.border_crop_right, Some(0.06));
+        assert_eq!(profile.border_crop_top, Some(0.07));
+        assert_eq!(profile.border_crop_bottom, Some(0.08));
+
+        let mut new_state = AppState::default();
+        apply_profile_to_state(&mut new_state, &profile);
+        assert_eq!(new_state.video.border_crop_left, 0.05);
+        assert_eq!(new_state.video.border_crop_right, 0.06);
+        assert_eq!(new_state.video.border_crop_top, 0.07);
+        assert_eq!(new_state.video.border_crop_bottom, 0.08);
     }
 
     #[test]

@@ -9,6 +9,7 @@ uniform float horizontal_stretch;
 uniform float halo_zoom;
 uniform float halo_intensity;
 uniform vec3 background_color;
+uniform vec4 border_crop; // left, right, top, bottom
 
 float ToSrgb1(float c) {
     return (c < 0.0031308 ? c * 12.92 : 1.055 * pow(c, 0.41666) - 0.055);
@@ -33,9 +34,8 @@ void main() {
 
     vec2 centered_tc = (corrected_tc - 0.5) / scale + 0.5;
 
-    // The CRT filter effect should ONLY be applied to the rendering surface!
-    // It must NEVER affect the black bars outside of it:
-    if (centered_tc.x < 0.0 || centered_tc.x > 1.0 || centered_tc.y < 0.0 || centered_tc.y > 1.0) {
+    if (centered_tc.x < border_crop.x || centered_tc.x > (1.0 - border_crop.y) ||
+        centered_tc.y < border_crop.z || centered_tc.y > (1.0 - border_crop.w)) {
         out_color = vec4(ToSrgb(background_color), 1.0);
         return;
     }

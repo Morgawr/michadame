@@ -248,6 +248,53 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         {
             changed = true;
         }
+
+        ui.separator();
+        ui.label("Border Cut-off (Pillowing Mask):");
+        if ui
+            .add(
+                egui::Slider::new(&mut state.video.border_crop_top, 0.0..=0.2)
+                    .text("Top Cut-off")
+                    .step_by(0.001)
+                    .custom_formatter(|n, _| format!("{:.1}%", n * 100.0)),
+            )
+            .changed()
+        {
+            changed = true;
+        }
+        if ui
+            .add(
+                egui::Slider::new(&mut state.video.border_crop_bottom, 0.0..=0.2)
+                    .text("Bottom Cut-off")
+                    .step_by(0.001)
+                    .custom_formatter(|n, _| format!("{:.1}%", n * 100.0)),
+            )
+            .changed()
+        {
+            changed = true;
+        }
+        if ui
+            .add(
+                egui::Slider::new(&mut state.video.border_crop_left, 0.0..=0.2)
+                    .text("Left Cut-off")
+                    .step_by(0.001)
+                    .custom_formatter(|n, _| format!("{:.1}%", n * 100.0)),
+            )
+            .changed()
+        {
+            changed = true;
+        }
+        if ui
+            .add(
+                egui::Slider::new(&mut state.video.border_crop_right, 0.0..=0.2)
+                    .text("Right Cut-off")
+                    .step_by(0.001)
+                    .custom_formatter(|n, _| format!("{:.1}%", n * 100.0)),
+            )
+            .changed()
+        {
+            changed = true;
+        }
     });
 
     let current_filter =
@@ -370,6 +417,10 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 state.video.median_mix = 1.0;
                 state.video.overscan_x = 0.0;
                 state.video.overscan_y = 0.0;
+                state.video.border_crop_left = 0.0;
+                state.video.border_crop_right = 0.0;
+                state.video.border_crop_top = 0.0;
+                state.video.border_crop_bottom = 0.0;
                 changed = true;
             }
         });

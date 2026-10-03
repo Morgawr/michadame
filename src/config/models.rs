@@ -28,6 +28,10 @@ pub struct Profile {
     pub vibrance: Option<f32>,
     pub overscan_x: Option<f32>,
     pub overscan_y: Option<f32>,
+    pub border_crop_left: Option<f32>,
+    pub border_crop_right: Option<f32>,
+    pub border_crop_top: Option<f32>,
+    pub border_crop_bottom: Option<f32>,
 
     pub selected_crt_filter: Option<u8>,
 

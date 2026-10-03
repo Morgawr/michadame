@@ -27,6 +27,7 @@ pub struct HaloRenderer {
     scanlines_h_sharp_loc: Option<glow::UniformLocation>,
     scanlines_corner_size_loc: Option<glow::UniformLocation>,
     scanlines_curvature_loc: Option<glow::UniformLocation>,
+    scanlines_border_crop_loc: Option<glow::UniformLocation>,
 
     composite_output_res_loc: Option<glow::UniformLocation>,
     composite_source_size_loc: Option<glow::UniformLocation>,
@@ -54,6 +55,7 @@ pub struct HaloRenderer {
     final_halo_zoom_loc: Option<glow::UniformLocation>,
     final_halo_intensity_loc: Option<glow::UniformLocation>,
     final_background_color_loc: Option<glow::UniformLocation>,
+    final_border_crop_loc: Option<glow::UniformLocation>,
 
     fbos: [glow::Framebuffer; 7],
     textures: [glow::Texture; 7],
@@ -166,6 +168,7 @@ impl HaloRenderer {
             let scanlines_h_sharp_loc = gl.get_uniform_location(scanlines_prog, "h_sharp");
             let scanlines_corner_size_loc = gl.get_uniform_location(scanlines_prog, "corner_size");
             let scanlines_curvature_loc = gl.get_uniform_location(scanlines_prog, "curvature");
+            let scanlines_border_crop_loc = gl.get_uniform_location(scanlines_prog, "border_crop");
 
             // Composite uniform locations
             let composite_output_res_loc =
@@ -200,6 +203,8 @@ impl HaloRenderer {
             let final_halo_intensity_loc = gl.get_uniform_location(final_prog, "halo_intensity");
             let final_background_color_loc =
                 gl.get_uniform_location(final_prog, "background_color");
+            let final_border_crop_loc =
+                gl.get_uniform_location(final_prog, "border_crop");
 
             let fbos = [
                 gl.create_framebuffer().unwrap(),
@@ -282,6 +287,7 @@ impl HaloRenderer {
                 scanlines_h_sharp_loc,
                 scanlines_corner_size_loc,
                 scanlines_curvature_loc,
+                scanlines_border_crop_loc,
 
                 composite_output_res_loc,
                 composite_source_size_loc,
@@ -309,6 +315,7 @@ impl HaloRenderer {
                 final_halo_zoom_loc,
                 final_halo_intensity_loc,
                 final_background_color_loc,
+                final_border_crop_loc,
 
                 fbos,
                 textures,
@@ -467,6 +474,13 @@ impl HaloRenderer {
         gl.uniform_1_f32(self.scanlines_h_sharp_loc.as_ref(), params.h_sharp);
         gl.uniform_1_f32(self.scanlines_corner_size_loc.as_ref(), params.corner_size);
         gl.uniform_1_i32(self.scanlines_curvature_loc.as_ref(), if params.curvature { 1 } else { 0 });
+        gl.uniform_4_f32(
+            self.scanlines_border_crop_loc.as_ref(),
+            params.border_crop[0],
+            params.border_crop[1],
+            params.border_crop[2],
+            params.border_crop[3],
+        );
         gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
         // Pass 6: Composite
@@ -521,6 +535,13 @@ impl HaloRenderer {
             params.background_color[0],
             params.background_color[1],
             params.background_color[2],
+        );
+        gl.uniform_4_f32(
+            self.final_border_crop_loc.as_ref(),
+            params.border_crop[0],
+            params.border_crop[1],
+            params.border_crop[2],
+            params.border_crop[3],
         );
         if scissor_enabled {
             gl.enable(glow::SCISSOR_TEST);

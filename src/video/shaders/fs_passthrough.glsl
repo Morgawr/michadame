@@ -6,8 +6,8 @@
     uniform vec3 background_color;
     uniform float horizontal_stretch;
     uniform float vibrance;
-    
     uniform int scaler_filter;
+    uniform vec4 border_crop; // left, right, top, bottom
 
     // Convert from linear to sRGB color space
     float ToSrgb1(float c) {
@@ -114,7 +114,8 @@
 
         vec2 centered_tc = (corrected_tc - 0.5) / scale + 0.5;
 
-        if (centered_tc.x < 0.0 || centered_tc.x > 1.0 || centered_tc.y < 0.0 || centered_tc.y > 1.0) {
+        if (centered_tc.x < border_crop.x || centered_tc.x > (1.0 - border_crop.y) ||
+            centered_tc.y < border_crop.z || centered_tc.y > (1.0 - border_crop.w)) {
             out_color = vec4(ToSrgb(background_color), 1.0);
         } else {
             vec3 linear_color = SampleVideo(video_texture, centered_tc, video_res, scaler_filter);

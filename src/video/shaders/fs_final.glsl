@@ -19,6 +19,7 @@ uniform float shape;
 uniform vec3 background_color;
 uniform float horizontal_stretch;
 uniform float vibrance;
+uniform vec4 border_crop; // left, right, top, bottom
 
 float ToSrgb1(float c) {
     return (c < 0.0031308 ? c * 12.92 : 1.055 * pow(c, 0.41666) - 0.055);
@@ -207,7 +208,8 @@ void main() {
     }
 
     vec2 warped_tc = Warp(centered_tc);
-    if (warped_tc.x < 0.0 || warped_tc.x > 1.0 || warped_tc.y < 0.0 || warped_tc.y > 1.0) {
+    if (warped_tc.x < border_crop.x || warped_tc.x > (1.0 - border_crop.y) ||
+        warped_tc.y < border_crop.z || warped_tc.y > (1.0 - border_crop.w)) {
         out_color = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }

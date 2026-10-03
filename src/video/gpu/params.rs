@@ -22,6 +22,7 @@ pub struct ShaderParams {
     pub scaler_filter: u8,
     pub overscan_x: f32,
     pub overscan_y: f32,
+    pub border_crop: [f32; 4],
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -50,6 +51,7 @@ pub struct HaloShaderParams {
     pub background_color: [f32; 3],
     pub horizontal_stretch: f32,
     pub vibrance: f32,
+    pub border_crop: [f32; 4],
 }
 
 impl HaloShaderParams {
@@ -83,6 +85,12 @@ impl HaloShaderParams {
             },
             horizontal_stretch: state.video.horizontal_stretch,
             vibrance: state.video.vibrance,
+            border_crop: [
+                state.video.border_crop_left,
+                state.video.border_crop_right,
+                state.video.border_crop_top,
+                state.video.border_crop_bottom,
+            ],
         }
     }
 }
@@ -114,6 +122,7 @@ impl Default for HaloShaderParams {
             background_color: [0.0, 0.0, 0.0],
             horizontal_stretch: 1.0,
             vibrance: 1.0,
+            border_crop: [0.0, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -128,6 +137,7 @@ pub struct CathodeInterferenceShaderParams {
     pub flicker_depth: f32,
     pub interference: f32,
     pub lightbulb_effect: f32,
+    pub border_crop: [f32; 4],
 }
 
 impl CathodeInterferenceShaderParams {
@@ -141,6 +151,12 @@ impl CathodeInterferenceShaderParams {
             flicker_depth: state.cathode_interference.flicker_depth,
             interference: state.cathode_interference.interference,
             lightbulb_effect: state.cathode_interference.lightbulb_effect,
+            border_crop: [
+                state.video.border_crop_left,
+                state.video.border_crop_right,
+                state.video.border_crop_top,
+                state.video.border_crop_bottom,
+            ],
         }
     }
 }
@@ -156,6 +172,7 @@ impl Default for CathodeInterferenceShaderParams {
             flicker_depth: 0.4,
             interference: 0.3,
             lightbulb_effect: 0.35,
+            border_crop: [0.0, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -185,6 +202,12 @@ impl ShaderParams {
             scaler_filter: state.scaler_filter.load(Ordering::Relaxed),
             overscan_x: state.video.overscan_x,
             overscan_y: state.video.overscan_y,
+            border_crop: [
+                state.video.border_crop_left,
+                state.video.border_crop_right,
+                state.video.border_crop_top,
+                state.video.border_crop_bottom,
+            ],
         }
     }
 }
@@ -210,6 +233,7 @@ impl Default for ShaderParams {
             scaler_filter: crate::video::types::ScalerFilter::FastBilinear as u8,
             overscan_x: 0.0,
             overscan_y: 0.0,
+            border_crop: [0.0, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -319,5 +343,23 @@ mod tests {
         assert_eq!(params.frequency, 2.5);
         assert_eq!(params.randomization, 0.5);
         assert_eq!(params.lightbulb_effect, 0.6);
+    }
+
+    #[test]
+    fn test_shader_params_border_crop() {
+        let mut state = AppState::default();
+        state.video.border_crop_left = 0.05;
+        state.video.border_crop_right = 0.06;
+        state.video.border_crop_top = 0.07;
+        state.video.border_crop_bottom = 0.08;
+
+        let shader_params = ShaderParams::from_state(&state);
+        assert_eq!(shader_params.border_crop, [0.05, 0.06, 0.07, 0.08]);
+
+        let halo_params = HaloShaderParams::from_state(&state);
+        assert_eq!(halo_params.border_crop, [0.05, 0.06, 0.07, 0.08]);
+
+        let cathode_params = CathodeInterferenceShaderParams::from_state(&state);
+        assert_eq!(cathode_params.border_crop, [0.05, 0.06, 0.07, 0.08]);
     }
 }

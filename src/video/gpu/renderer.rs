@@ -57,6 +57,8 @@ pub struct CrtFilterRenderer {
     final_vibrance_loc: glow::UniformLocation,
     passthrough_vibrance_loc: glow::UniformLocation,
     passthrough_scaler_filter_loc: glow::UniformLocation,
+    final_border_crop_loc: glow::UniformLocation,
+    passthrough_border_crop_loc: glow::UniformLocation,
 
     cathode_prog: glow::Program,
     cathode_output_res_loc: glow::UniformLocation,
@@ -70,6 +72,7 @@ pub struct CrtFilterRenderer {
     cathode_flicker_depth_loc: glow::UniformLocation,
     cathode_interference_loc: glow::UniformLocation,
     cathode_lightbulb_effect_loc: glow::UniformLocation,
+    cathode_border_crop_loc: glow::UniformLocation,
 
     post_fbo: glow::Framebuffer,
     post_texture: glow::Texture,
@@ -184,6 +187,11 @@ impl CrtFilterRenderer {
             let passthrough_vibrance_loc = gl
                 .get_uniform_location(passthrough_prog, "vibrance")
                 .unwrap();
+            let final_border_crop_loc =
+                gl.get_uniform_location(final_prog, "border_crop").unwrap();
+            let passthrough_border_crop_loc = gl
+                .get_uniform_location(passthrough_prog, "border_crop")
+                .unwrap();
 
             let cathode_output_res_loc = gl
                 .get_uniform_location(cathode_prog, "outputResolution")
@@ -215,6 +223,9 @@ impl CrtFilterRenderer {
                 .unwrap();
             let cathode_lightbulb_effect_loc = gl
                 .get_uniform_location(cathode_prog, "lightbulb_effect")
+                .unwrap();
+            let cathode_border_crop_loc = gl
+                .get_uniform_location(cathode_prog, "border_crop")
                 .unwrap();
 
             gl.use_program(Some(cathode_prog));
@@ -403,6 +414,8 @@ impl CrtFilterRenderer {
                 final_vibrance_loc,
                 passthrough_vibrance_loc,
                 passthrough_scaler_filter_loc,
+                final_border_crop_loc,
+                passthrough_border_crop_loc,
                 median_prog,
                 median_mix_loc,
                 cathode_prog,
@@ -417,6 +430,7 @@ impl CrtFilterRenderer {
                 cathode_flicker_depth_loc,
                 cathode_interference_loc,
                 cathode_lightbulb_effect_loc,
+                cathode_border_crop_loc,
                 post_fbo,
                 post_texture,
                 last_post_size: (0, 0),
@@ -957,6 +971,13 @@ impl CrtFilterRenderer {
                     params.horizontal_stretch,
                 );
                 gl.uniform_1_f32(Some(&self.final_vibrance_loc), params.vibrance);
+                gl.uniform_4_f32(
+                    Some(&self.final_border_crop_loc),
+                    params.border_crop[0],
+                    params.border_crop[1],
+                    params.border_crop[2],
+                    params.border_crop[3],
+                );
                 if scissor_enabled && !run_cathode {
                     gl.enable(glow::SCISSOR_TEST);
                 }
@@ -997,6 +1018,13 @@ impl CrtFilterRenderer {
                     Some(&self.passthrough_scaler_filter_loc),
                     params.scaler_filter as i32,
                 );
+                gl.uniform_4_f32(
+                    Some(&self.passthrough_border_crop_loc),
+                    params.border_crop[0],
+                    params.border_crop[1],
+                    params.border_crop[2],
+                    params.border_crop[3],
+                );
                 if scissor_enabled && !run_cathode {
                     gl.enable(glow::SCISSOR_TEST);
                 }
@@ -1012,6 +1040,7 @@ impl CrtFilterRenderer {
                     params.horizontal_stretch,
                     params.vibrance,
                     params.scaler_filter,
+                    params.border_crop,
                     target_fbo,
                 );
             }
@@ -1045,6 +1074,13 @@ impl CrtFilterRenderer {
                 gl.uniform_1_f32(Some(&self.cathode_flicker_depth_loc), cathode_params.flicker_depth);
                 gl.uniform_1_f32(Some(&self.cathode_interference_loc), cathode_params.interference);
                 gl.uniform_1_f32(Some(&self.cathode_lightbulb_effect_loc), cathode_params.lightbulb_effect);
+                gl.uniform_4_f32(
+                    Some(&self.cathode_border_crop_loc),
+                    cathode_params.border_crop[0],
+                    cathode_params.border_crop[1],
+                    cathode_params.border_crop[2],
+                    cathode_params.border_crop[3],
+                );
 
                 if scissor_enabled {
                     gl.enable(glow::SCISSOR_TEST);
@@ -1086,6 +1122,7 @@ impl CrtFilterRenderer {
         scaler_filter: u8,
         overscan_x: f32,
         overscan_y: f32,
+        border_crop: [f32; 4],
         fft_filter: Option<&Arc<Mutex<FftFilter>>>,
         fft_mask_threshold: f32,
         fft_black_threshold: f32,
@@ -1244,6 +1281,7 @@ impl CrtFilterRenderer {
                 horizontal_stretch,
                 vibrance,
                 scaler_filter,
+                border_crop,
                 target_fbo,
             );
 
@@ -1277,6 +1315,13 @@ impl CrtFilterRenderer {
                 gl.uniform_1_f32(Some(&self.cathode_flicker_depth_loc), cp.flicker_depth);
                 gl.uniform_1_f32(Some(&self.cathode_interference_loc), cp.interference);
                 gl.uniform_1_f32(Some(&self.cathode_lightbulb_effect_loc), cp.lightbulb_effect);
+                gl.uniform_4_f32(
+                    Some(&self.cathode_border_crop_loc),
+                    cp.border_crop[0],
+                    cp.border_crop[1],
+                    cp.border_crop[2],
+                    cp.border_crop[3],
+                );
 
                 if scissor_enabled {
                     gl.enable(glow::SCISSOR_TEST);
@@ -1311,6 +1356,7 @@ impl CrtFilterRenderer {
         horizontal_stretch: f32,
         vibrance: f32,
         scaler_filter: u8,
+        border_crop: [f32; 4],
         target_fbo: Option<glow::Framebuffer>,
     ) -> RenderedArea {
         let final_input_texture = video_texture;
@@ -1340,6 +1386,13 @@ impl CrtFilterRenderer {
         gl.uniform_1_i32(
             Some(&self.passthrough_scaler_filter_loc),
             scaler_filter as i32,
+        );
+        gl.uniform_4_f32(
+            Some(&self.passthrough_border_crop_loc),
+            border_crop[0],
+            border_crop[1],
+            border_crop[2],
+            border_crop[3],
         );
 
         gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);

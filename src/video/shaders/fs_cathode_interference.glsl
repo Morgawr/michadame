@@ -7,6 +7,7 @@ uniform vec2 outputResolution;
 uniform vec2 source_size;
 uniform float horizontal_stretch;
 uniform float time;
+uniform vec4 border_crop; // left, right, top, bottom
 
 // User-customizable parameters
 uniform float intensity;          // Master effect intensity (0.0 to 1.0)
@@ -53,8 +54,9 @@ void main() {
 
     vec2 centered_tc = (v_tc - 0.5) / scale + 0.5;
 
-    // Pillarbox / letterbox padding outside active video area remains untouched
-    if (centered_tc.x < 0.0 || centered_tc.x > 1.0 || centered_tc.y < 0.0 || centered_tc.y > 1.0) {
+    // Pillarbox / letterbox / border padding outside active video area remains untouched
+    if (centered_tc.x < border_crop.x || centered_tc.x > (1.0 - border_crop.y) ||
+        centered_tc.y < border_crop.z || centered_tc.y > (1.0 - border_crop.w)) {
         out_color = texture(input_texture, v_tc);
         return;
     }

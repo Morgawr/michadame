@@ -13,6 +13,7 @@ uniform float beam_size;
 uniform float h_sharp;
 uniform float corner_size;
 uniform int curvature;
+uniform vec4 border_crop; // left, right, top, bottom
 
 vec2 Warp(vec2 pos) {
     pos = pos * 2.0 - 1.0;
@@ -62,10 +63,11 @@ void main() {
     vec2 warped = centered;
     if (curvature != 0) {
         warped = Warp(centered);
-        if (warped.x < 0.0 || warped.x > 1.0 || warped.y < 0.0 || warped.y > 1.0) {
-            out_color = vec4(0.0);
-            return;
-        }
+    }
+    if (warped.x < border_crop.x || warped.x > (1.0 - border_crop.y) ||
+        warped.y < border_crop.z || warped.y > (1.0 - border_crop.w)) {
+        out_color = vec4(0.0);
+        return;
     }
 
     float cval = 1.0;

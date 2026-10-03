@@ -128,6 +128,13 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                 state.video.overscan_y
             ));
             ui.label(format!(
+                "Border cut-off (T/B/L/R): {:.1}% / {:.1}% / {:.1}% / {:.1}%",
+                state.video.border_crop_top * 100.0,
+                state.video.border_crop_bottom * 100.0,
+                state.video.border_crop_left * 100.0,
+                state.video.border_crop_right * 100.0,
+            ));
+            ui.label(format!(
                 "Pixelate: {} · FFT: {} · median: {} ({:.2}) · vibrance: {:.2}",
                 state.video.pixelate_filter_enabled,
                 state.video.fft_filter_enabled,
