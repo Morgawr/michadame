@@ -1,5 +1,6 @@
 use super::database::DictDatabase;
 use super::deinflect::Deinflector;
+use super::elongation::elongation_variants;
 use super::long_vowel::long_vowel_variants;
 use super::models::DictPopupState;
 use super::particles::ParticleIndex;
@@ -131,10 +132,14 @@ pub fn lookup_word_at_pointer(
                 .map(|(_, v)| v.clone())
         });
 
-        let matched_entry: Option<(usize, usize, Vec<super::models::TermEntry>)> = if let Some(hit) = cached {
+        let matched_entry: ScanResult = if let Some(hit) = cached {
             hit
         } else {
-            let mut matched_entry = None;
+            // All lookups feed one accumulator. The first span that matches becomes the
+            // primary match (highlighted, popup anchor); scanning then continues over
+            // shorter spans to collect lower-priority alternatives until the cap is reached.
+            let mut acc = ScanAccumulator::default();
+            let mut primary_span: Option<(usize, usize)> = None;
 
             for len in (1..=max_len).rev() {
                 let start = char_idx;
@@ -146,9 +151,12 @@ pub fn lookup_word_at_pointer(
                 if is_ignorable_token(&sub_str) {
                     continue;
                 }
-                let entries = find_span_entries(&sub_str, db, deinflector, particle_index.as_deref());
-                if !entries.is_empty() {
-                    matched_entry = Some((start, end, entries));
+                let full =
+                    find_span_entries(&sub_str, db, deinflector, particle_index.as_deref(), &mut acc);
+                if primary_span.is_none() && acc.has_primary() {
+                    primary_span = Some((start, end));
+                }
+                if full {
                     break;
                 }
             }
@@ -158,7 +166,9 @@ pub fn lookup_word_at_pointer(
             // in the middle of a word whose starting character is up to 6 characters earlier
             // (possibly on the previous line).
             // We search from the closest start (char_idx - 1) backwards to min_start.
-            if matched_entry.is_none() {
+            // Once a start matches, shorter spans from that same start still contribute
+            // alternatives.
+            if primary_span.is_none() {
                 let min_start = char_idx.saturating_sub(6);
                 'lookbehind: for start in (min_start..char_idx).rev() {
                     if is_punct_char(chars[start]) {
@@ -173,35 +183,53 @@ pub fn lookup_word_at_pointer(
                         if is_ignorable_token(&sub_str) {
                             continue;
                         }
-                        let entries =
-                            find_span_entries(&sub_str, db, deinflector, particle_index.as_deref());
-                        if !entries.is_empty() {
-                            matched_entry = Some((start, end, entries));
+                        let full = find_span_entries(
+                            &sub_str,
+                            db,
+                            deinflector,
+                            particle_index.as_deref(),
+                            &mut acc,
+                        );
+                        if primary_span.is_none() && acc.has_primary() {
+                            primary_span = Some((start, end));
+                        }
+                        if full {
                             break 'lookbehind;
                         }
+                    }
+                    if primary_span.is_some() {
+                        break;
                     }
                 }
             }
 
+            let matched_entry =
+                primary_span.map(|(start, end)| (start, end, acc.entries, acc.groups));
             SCAN_CACHE.with(|c| *c.borrow_mut() = Some((cache_key, matched_entry.clone())));
             matched_entry
         };
 
-        if let Some((start_offset, end_offset, mut entries)) = matched_entry {
-            // Enrich entries with frequency if available and sort by frequency
+        if let Some((start_offset, end_offset, entries, groups)) = matched_entry {
+            // Enrich entries with frequency if available and sort. Priority group always
+            // comes first (primary match, then longer before shorter spans, exact before
+            // normalized); frequency only orders entries within the same group.
+            let mut entries = entries;
             if let Some(fdb) = freq_db {
                 for entry in &mut entries {
                     entry.frequency = fdb.get_frequency(&entry.term, &entry.reading);
                 }
                 // Sort in order of frequency: lowest rank first, unranked last
-                entries.sort_by(|a, b| {
+                let by_freq = |a: &super::models::TermEntry, b: &super::models::TermEntry| {
                     match (&a.frequency, &b.frequency) {
                         (Some(fa), Some(fb)) => fa.rank.cmp(&fb.rank),
                         (Some(_), None) => std::cmp::Ordering::Less,
                         (None, Some(_)) => std::cmp::Ordering::Greater,
                         (None, None) => std::cmp::Ordering::Equal,
                     }
-                });
+                };
+                let mut tagged: Vec<_> = groups.into_iter().zip(entries).collect();
+                tagged.sort_by(|(ga, a), (gb, b)| ga.cmp(gb).then_with(|| by_freq(a, b)));
+                entries = tagged.into_iter().map(|(_, e)| e).collect();
             }
 
             // Calculate precise per-line sub-bounding boxes for the recognized word.
@@ -279,7 +307,9 @@ struct ScanCacheKey {
     char_idx: usize,
 }
 
-type ScanResult = Option<(usize, usize, Vec<super::models::TermEntry>)>;
+/// `(start, end, entries, groups)`: the primary span and all collected entries, with each
+/// entry's priority group (see [`ScanAccumulator`]; group 0 is the primary match).
+type ScanResult = Option<(usize, usize, Vec<super::models::TermEntry>, Vec<usize>)>;
 
 thread_local! {
     static SCAN_CACHE: std::cell::RefCell<Option<(ScanCacheKey, ScanResult)>> =
@@ -291,21 +321,32 @@ thread_local! {
 /// 1. Exact / deinflected match (as before).
 /// 2. Long-vowel normalized match for any word (e.g. `どーせ` → `どうせ`,
 ///    `せんせー` → `せんせい`), combined with deinflection.
+///    2b. Emphatic elongation normalization: runs of `っ`/`ッ` collapsed or removed, `ー` and
+///    `〜` removed (e.g. `ぜっっったい` → `ぜったい`, `ぜーんぜん` → `ぜんぜん`,
+///    `い〜っぱい` → `いっぱい`), combined with deinflection.
 /// 3. Particle-swapped forms of set expressions over the candidates of 1 and 2
 ///    (e.g. `突拍子がない` → `突拍子もない`). Only entries tagged as expressions are kept.
 ///
 /// Because this is evaluated per span length (longest first), a longer normalized/swapped
 /// match beats a shorter exact match, while at equal length an exact match always wins.
+///
+/// Results are added to `acc`: the first tier (of the longest matching span) that yields
+/// entries provides the *primary* results; everything found afterwards (later tiers, then
+/// shorter spans) is kept as lower-priority *alternatives*, up to [`MAX_ALTERNATES`]
+/// (e.g. `なーい` matches `ナーイ` exactly, but `ない` is offered as an alternative).
+///
+/// Returns `true` once `acc` is full and no further lookups are needed.
 fn find_span_entries(
     sub_str: &str,
     db: &DictDatabase,
     deinflector: &Deinflector,
     particle_index: Option<&ParticleIndex>,
-) -> Vec<super::models::TermEntry> {
+    acc: &mut ScanAccumulator,
+) -> bool {
     let mut candidates = deinflector.deinflect(sub_str);
     if let Ok(entries) = db.find_terms(&candidates) {
-        if !entries.is_empty() {
-            return entries;
+        if acc.absorb(entries) {
+            return true;
         }
     }
 
@@ -321,8 +362,8 @@ fn find_span_entries(
                 cand.reasons.insert(0, reason.clone());
             }
             if let Ok(entries) = db.find_terms(&cands) {
-                if !entries.is_empty() {
-                    return entries;
+                if acc.absorb(entries) {
+                    return true;
                 }
             }
             lv_candidates.extend(cands);
@@ -330,20 +371,89 @@ fn find_span_entries(
         candidates.extend(lv_candidates);
     }
 
-    // Tier 3: particle swap for expressions.
-    let Some(index) = particle_index else {
-        return Vec::new();
-    };
-    let swapped = index.swapped_candidates(&candidates);
-    if swapped.is_empty() {
-        return Vec::new();
-    }
-    match db.find_terms(&swapped) {
-        Ok(mut entries) => {
-            entries.retain(|e| index.is_allowed(&e.term, &e.reading));
-            entries
+    // Tier 2b: emphatic elongation (ぜっっったい, ぜーんぜん, い〜っぱい). Only does work if
+    // the span contains っ/ッ, ー or 〜.
+    let variants = elongation_variants(sub_str);
+    if !variants.is_empty() {
+        let mut el_candidates = Vec::new();
+        for (variant, reason) in &variants {
+            let mut cands = deinflector.deinflect(variant);
+            for cand in &mut cands {
+                cand.reasons.insert(0, reason.clone());
+            }
+            if let Ok(entries) = db.find_terms(&cands) {
+                if acc.absorb(entries) {
+                    return true;
+                }
+            }
+            el_candidates.extend(cands);
         }
-        Err(_) => Vec::new(),
+        candidates.extend(el_candidates);
+    }
+
+    // Tier 3: particle swap for expressions. Unlike spelling normalizations, a swap yields a
+    // different expression (気がする vs 気もする), so it is only used when nothing else matched
+    // and never contributes alternatives.
+    if let (Some(index), false) = (particle_index, acc.has_primary()) {
+        let swapped = index.swapped_candidates(&candidates);
+        if !swapped.is_empty() {
+            if let Ok(mut entries) = db.find_terms(&swapped) {
+                entries.retain(|e| index.is_allowed(&e.term, &e.reading));
+                return acc.absorb(entries);
+            }
+        }
+    }
+    false
+}
+
+/// Maximum number of lower-priority alternative entries appended after the primary match.
+const MAX_ALTERNATES: usize = 8;
+
+/// Collects entries over the whole scan (all tiers of all candidate spans, in priority order).
+///
+/// Every non-empty lookup batch gets its own priority `group`, increasing as the scan goes:
+/// longer spans before shorter ones, and within a span exact before normalized. Group 0 is
+/// the primary match. Display order is by group first, then by frequency within a group.
+#[derive(Default)]
+struct ScanAccumulator {
+    entries: Vec<super::models::TermEntry>,
+    groups: Vec<usize>,
+    next_group: usize,
+    primary_len: usize,
+    seen: std::collections::HashSet<(String, String, i64)>,
+}
+
+impl ScanAccumulator {
+    fn has_primary(&self) -> bool {
+        self.primary_len > 0
+    }
+
+    fn is_full(&self) -> bool {
+        self.has_primary() && self.entries.len() - self.primary_len >= MAX_ALTERNATES
+    }
+
+    /// Adds the results of one lookup. The first non-empty batch becomes the primary set;
+    /// subsequent batches contribute unseen entries as alternatives. Returns `true` once no
+    /// more alternatives are wanted.
+    fn absorb(&mut self, found: Vec<super::models::TermEntry>) -> bool {
+        let is_primary = !self.has_primary();
+        let before = self.entries.len();
+        for e in found {
+            if self.is_full() {
+                break;
+            }
+            if self.seen.insert((e.term.clone(), e.reading.clone(), e.sequence)) {
+                self.entries.push(e);
+                self.groups.push(self.next_group);
+            }
+        }
+        if self.entries.len() > before {
+            self.next_group += 1;
+        }
+        if is_primary {
+            self.primary_len = self.entries.len();
+        }
+        self.is_full()
     }
 }
 
@@ -713,6 +823,91 @@ mod tests {
         lookup_word_at_pointer(egui::pos2(x, 300.0), &[ocr_box], video_rect, db, None, global_deinflector())
     }
 
+    /// Hovers over the character at `idx` of `text` (single-line box) and returns the popup.
+    fn hover_char(text: &str, idx: usize, db: &DictDatabase) -> Option<DictPopupState> {
+        let n = text.chars().count() as f32;
+        let ocr_box = OcrBox {
+            text: text.to_string(),
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.8,
+            height: 0.1,
+            lines: Vec::new(),
+        };
+        let video_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
+        let x = 100.0 + (800.0 / n) * (idx as f32 + 0.5);
+        lookup_word_at_pointer(egui::pos2(x, 300.0), &[ocr_box], video_rect, db, None, global_deinflector())
+    }
+
+    #[test]
+    fn test_wave_dash_long_vowel_and_alternatives() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test_alternatives.db");
+        let db = DictDatabase::open_or_create(&db_path).unwrap();
+        let plain = r#"["gloss"]"#;
+        let rows: &[(&str, &str, &str, i64)] = &[
+            ("関係ない", "かんけいない", "adj-i", 1),
+            ("全然", "ぜんぜん", "", 2),
+            ("ナーイ", "ナーイ", "", 3),
+            ("無い", "ない", "adj-i", 4),
+        ];
+        for (term, reading, rules, seq) in rows {
+            db.conn
+                .execute(
+                    "INSERT INTO terms VALUES (?1, ?2, '', ?3, 100.0, ?4, ?5, '')",
+                    rusqlite::params![term, reading, rules, plain, seq],
+                )
+                .unwrap();
+        }
+
+        // 〜 resolved as a long vowel (ケ〜 → ケイ), ー removed, mixed kana normalized.
+        let text = "それ、ぜんぜんカンケ〜なーい";
+        let p = hover_char(text, 7, &db).unwrap();
+        assert_eq!(p.matched_term, "関係ない");
+        assert_eq!(p.char_range, (7, 14));
+
+        // Exact match stays primary, elongation-normalized match offered as alternative.
+        let p = hover_first_char("なーい", &db).unwrap();
+        assert_eq!(p.matched_term, "ナーイ");
+        assert_eq!(p.char_range, (0, 3));
+        assert!(p.entries.iter().any(|e| e.term == "無い"), "{:?}", p.entries);
+        assert_eq!(p.entries[0].term, "ナーイ");
+    }
+
+    #[test]
+    fn test_shorter_span_alternatives() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test_shorter_alts.db");
+        let db = DictDatabase::open_or_create(&db_path).unwrap();
+        let plain = r#"["gloss"]"#;
+        let rows: &[(&str, &str, i64)] = &[
+            ("然迄", "さまで", 1),
+            ("様", "さま", 2),
+            ("さ", "さ", 3),
+            ("王子様", "おうじさま", 4),
+        ];
+        for (term, reading, seq) in rows {
+            db.conn
+                .execute(
+                    "INSERT INTO terms VALUES (?1, ?2, '', '', 100.0, ?3, ?4, '')",
+                    rusqlite::params![term, reading, plain, seq],
+                )
+                .unwrap();
+        }
+
+        // Hover さ in オージさまで: longest match さまで stays primary (and highlighted),
+        // shorter さま and さ follow as alternatives, longest first.
+        let p = hover_char("オージさまで", 3, &db).unwrap();
+        assert_eq!(p.char_range, (3, 6));
+        let terms: Vec<&str> = p.entries.iter().map(|e| e.term.as_str()).collect();
+        assert_eq!(terms, vec!["然迄", "様", "さ"]);
+
+        // Hover オ: 王子様 via long-vowel normalization, shorter spans have nothing extra.
+        let p = hover_first_char("オージさまで", &db).unwrap();
+        assert_eq!(p.matched_term, "王子様");
+        assert_eq!(p.char_range, (0, 5));
+    }
+
     #[test]
     fn test_particle_swap_matches_expressions() {
         let dir = tempdir().unwrap();
@@ -824,6 +1019,45 @@ mod tests {
         let p = hover_first_char("とっぴょーしがない", &db).unwrap();
         assert_eq!(p.matched_term, "突拍子もない");
         assert_eq!(p.entries[0].inflection_reasons, vec!["ー→う", "が→も"]);
+    }
+
+    #[test]
+    fn test_elongation_normalization() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test_elongation.db");
+        let db = DictDatabase::open_or_create(&db_path).unwrap();
+        let plain = r#"["gloss"]"#;
+        let rows: &[(&str, &str, &str, i64)] = &[
+            ("絶対", "ぜったい", "", 1),
+            ("全然", "ぜんぜん", "", 2),
+            ("一杯", "いっぱい", "", 3),
+            ("凄い", "すごい", "adj-i", 4),
+        ];
+        for (term, reading, rules, seq) in rows {
+            db.conn
+                .execute(
+                    "INSERT INTO terms VALUES (?1, ?2, '', ?3, 100.0, ?4, ?5, '')",
+                    rusqlite::params![term, reading, rules, plain, seq],
+                )
+                .unwrap();
+        }
+
+        let p = hover_first_char("ぜっっっっっったい", &db).unwrap();
+        assert_eq!(p.matched_term, "絶対");
+        assert_eq!(p.char_range, (0, 9));
+
+        let p = hover_first_char("ぜーんぜん", &db).unwrap();
+        assert_eq!(p.matched_term, "全然");
+        assert_eq!(p.char_range, (0, 5));
+
+        let p = hover_first_char("い〜っぱい", &db).unwrap();
+        assert_eq!(p.matched_term, "一杯");
+        assert_eq!(p.char_range, (0, 5));
+
+        // Combined with deinflection
+        let p = hover_first_char("すっごーかった", &db).unwrap();
+        assert_eq!(p.matched_term, "凄い");
+        assert_eq!(p.char_range, (0, 7));
     }
 
     #[test]

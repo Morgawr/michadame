@@ -7,6 +7,19 @@ const POPUP_STROKE: Color32 = Color32::from_rgb(51, 65, 85);
 const WORD_HIGHLIGHT_FILL: Color32 = Color32::from_rgba_premultiplied(56, 189, 248, 45);
 const WORD_HIGHLIGHT_STROKE: Color32 = Color32::from_rgb(56, 189, 248);
 
+/// Hash identifying what a popup shows (which lookup, which entries). Changes whenever the
+/// popup switches to a different word, so per-popup UI state like scrolling can be reset.
+fn popup_identity(popup: &DictPopupState) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    popup.source_text.hash(&mut h);
+    popup.char_range.hash(&mut h);
+    for e in &popup.entries {
+        (&e.term, &e.reading, e.sequence).hash(&mut h);
+    }
+    h.finish()
+}
+
 /// Renders the word highlight and interactive popup window on top of the video feed.
 pub fn draw_dict_popup(
     ui: &mut egui::Ui,
@@ -70,15 +83,59 @@ pub fn draw_dict_popup(
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 5.0);
 
                 let scroll_max_h = (placement.height - 36.0).max(40.0);
-                egui::ScrollArea::vertical()
+
+                // While the popup is open, mouse-wheel scrolling anywhere goes to the popup.
+                // When the pointer is over the popup, egui's ScrollArea handles it natively;
+                // otherwise take the scroll delta (so nothing underneath scrolls) and apply
+                // it to the popup's scroll offset ourselves. egui clamps the offset.
+                let offset_key = egui::Id::new("jitendex_dict_popup_scroll_offset");
+                let pointer_over_popup = match (ui.input(|i| i.pointer.hover_pos()), popup.popup_rect) {
+                    (Some(ptr), Some(rect)) => rect.contains(ptr),
+                    _ => false,
+                };
+                let external_scroll = if pointer_over_popup {
+                    0.0
+                } else {
+                    ui.ctx().input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta.y))
+                };
+
+                // Start at the top whenever the popup shows a different lookup, or it was not
+                // drawn on the previous frame (i.e. it was closed and has been re-opened).
+                let session_key = egui::Id::new("jitendex_dict_popup_session");
+                let identity = popup_identity(popup);
+                let frame_nr = ui.ctx().frame_nr();
+                let last: Option<(u64, u64)> = ui.ctx().data(|d| d.get_temp(session_key));
+                let is_new_session = match last {
+                    Some((last_identity, last_frame)) => {
+                        last_identity != identity || last_frame + 1 < frame_nr
+                    }
+                    None => true,
+                };
+                ui.ctx().data_mut(|d| d.insert_temp(session_key, (identity, frame_nr)));
+
+                let mut scroll_area = egui::ScrollArea::vertical()
+                    .id_source("jitendex_dict_popup_scroll")
                     .auto_shrink([false, false])
-                    .max_height(scroll_max_h)
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(8.0, 5.0);
-                        for (idx, entry) in popup.entries.iter().enumerate() {
-                            render_term_entry(ui, entry, idx);
-                        }
-                    });
+                    .max_height(scroll_max_h);
+                if is_new_session {
+                    scroll_area = scroll_area.vertical_scroll_offset(0.0);
+                } else if external_scroll != 0.0 {
+                    let current: f32 =
+                        ui.ctx().data(|d| d.get_temp(offset_key)).unwrap_or(0.0);
+                    scroll_area = scroll_area.vertical_scroll_offset((current - external_scroll).max(0.0));
+                }
+                let scroll_output = scroll_area.show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 5.0);
+                    for (idx, entry) in popup.entries.iter().enumerate() {
+                        render_term_entry(ui, entry, idx);
+                    }
+                });
+                let offset = scroll_output.state.offset.y;
+                ui.ctx().data_mut(|d| d.insert_temp(offset_key, offset));
+                if external_scroll != 0.0 {
+                    // Keep animating smooth scrolling even if the pointer is idle.
+                    ui.ctx().request_repaint();
+                }
             });
 
             if let Some(ptr) = ui.input(|i| i.pointer.hover_pos()) {

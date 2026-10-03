@@ -20,8 +20,10 @@
 /// Maximum number of `ー` runs expanded per string (2^3 = at most 8 variants).
 const MAX_EXPANDED_RUNS: usize = 3;
 
+/// `ー` and wave dashes (`〜`, `～`, `~`), which stylized text also uses to stretch vowels
+/// (e.g. `カンケ〜` for `カンケイ`).
 fn is_long_mark(c: char) -> bool {
-    matches!(c, 'ー' | 'ｰ')
+    matches!(c, 'ー' | 'ｰ' | '〜' | '～' | '~')
 }
 
 fn to_hiragana(c: char) -> char {

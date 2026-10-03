@@ -1,5 +1,6 @@
 pub mod database;
 pub mod deinflect;
+pub mod elongation;
 pub mod frequency;
 pub mod lookup;
 pub mod long_vowel;

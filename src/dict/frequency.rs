@@ -90,52 +90,41 @@ impl FreqDatabase {
     }
 
     /// Looks up frequency for a given term and reading.
-    /// Prioritizes exact (term, reading) match, then falls back to general (term, NULL) match.
+    ///
+    /// If a reading is given, only rows for that reading (or reading-less rows for the term)
+    /// count, with kana normalization. It never falls back to a *different* reading of the
+    /// same term: e.g. `方`/`さま` must not inherit the rank of `方`/`ほう`.
+    /// Without a reading, any reading of the term is accepted.
     pub fn get_frequency(&self, term: &str, reading: &str) -> Option<TermFrequency> {
         let clean_reading = reading.trim();
         let clean_term = term.trim();
 
-        // 1. Try with provided reading if not empty
+        let kana_variants = |s: &str| -> Vec<String> {
+            let mut v = vec![s.to_string()];
+            for alt in [katakana_to_hiragana(s), hiragana_to_katakana(s)] {
+                if !v.contains(&alt) {
+                    v.push(alt);
+                }
+            }
+            v
+        };
+        let terms = kana_variants(clean_term);
+
+        // 1. Specific reading: exact (term, reading) match only, with kana normalization.
         if !clean_reading.is_empty() {
-            if let Some(freq) = self.query_single_term_reading(clean_term, clean_reading) {
-                return Some(freq);
-            }
-
-            // Kana normalization fallback for reading
-            let hira_reading = katakana_to_hiragana(clean_reading);
-            if hira_reading != clean_reading {
-                if let Some(freq) = self.query_single_term_reading(clean_term, &hira_reading) {
-                    return Some(freq);
+            let readings = kana_variants(clean_reading);
+            for t in &terms {
+                for r in &readings {
+                    if let Some(freq) = self.query_single_term_reading(t, r) {
+                        return Some(freq);
+                    }
                 }
             }
-            let kata_reading = hiragana_to_katakana(clean_reading);
-            if kata_reading != clean_reading {
-                if let Some(freq) = self.query_single_term_reading(clean_term, &kata_reading) {
-                    return Some(freq);
-                }
-            }
+            return None;
         }
 
-        // 2. Fall back to generic term match without specific reading requirement
-        if let Some(freq) = self.query_term_any_reading(clean_term) {
-            return Some(freq);
-        }
-
-        // Kana normalization fallback for term
-        let hira_term = katakana_to_hiragana(clean_term);
-        if hira_term != clean_term {
-            if let Some(freq) = self.query_term_any_reading(&hira_term) {
-                return Some(freq);
-            }
-        }
-        let kata_term = hiragana_to_katakana(clean_term);
-        if kata_term != clean_term {
-            if let Some(freq) = self.query_term_any_reading(&kata_term) {
-                return Some(freq);
-            }
-        }
-
-        None
+        // 2. No reading given: accept any reading of the term.
+        terms.iter().find_map(|t| self.query_term_any_reading(t))
     }
 
     fn query_single_term_reading(&self, term: &str, reading: &str) -> Option<TermFrequency> {
@@ -431,9 +420,9 @@ mod tests {
         let f_watashi_kata = db.get_frequency("私", "ワタシ").unwrap();
         assert_eq!(f_watashi_kata.rank, 23);
 
-        // 3. Fallback to generic reading when reading isn't found
-        let f_watashi_other = db.get_frequency("私", "あたし").unwrap();
-        assert_eq!(f_watashi_other.rank, 23); // lowest rank for term
+        // 3. A different reading of the same term must NOT inherit its rank
+        //    (e.g. 方/さま must not get 方/ほう's rank).
+        assert!(db.get_frequency("私", "あたし").is_none());
 
         // 4. Term without reading
         let f_suru = db.get_frequency("する", "").unwrap();
