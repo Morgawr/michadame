@@ -56,8 +56,9 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             egui::ComboBox::from_id_source("scaler_selector")
                 .selected_text(scaler_text)
                 .show_ui(ui, |ui| {
-                    for i in 0..=12 {
-                        let text = crate::video::types::ScalerFilter::from_u8(i).to_string();
+                    for &scaler in &crate::video::types::ScalerFilter::ALL {
+                        let i = scaler as u8;
+                        let text = scaler.to_string();
                         if ui
                             .selectable_value(&mut current_scaler.clone(), i, text)
                             .clicked()

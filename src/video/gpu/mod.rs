@@ -1,5 +1,4 @@
 pub mod anime4k;
-pub mod bunny;
 pub mod fft_filter;
 pub mod geometry;
 pub mod halo;

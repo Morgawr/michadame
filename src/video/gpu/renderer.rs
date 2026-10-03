@@ -1,5 +1,4 @@
 use super::anime4k::{Anime4kUpscaler, Anime4kVariant};
-use super::bunny::BunnyUpscaler;
 use super::fft_filter::FftFilter;
 use super::geometry::RenderedArea;
 use super::halo::HaloRenderer;
@@ -25,7 +24,6 @@ pub struct CrtFilterRenderer {
     yuv_overscan_loc: glow::UniformLocation,
     yuyv_overscan_loc: glow::UniformLocation,
     median_mix_loc: glow::UniformLocation,
-    bunny: BunnyUpscaler,
     anime4k_small: Anime4kUpscaler,
     anime4k_medium: Anime4kUpscaler,
     anime4k_large: Anime4kUpscaler,
@@ -422,7 +420,6 @@ impl CrtFilterRenderer {
                 post_fbo,
                 post_texture,
                 last_post_size: (0, 0),
-                bunny: BunnyUpscaler::new(gl),
                 anime4k_small: Anime4kUpscaler::new(gl, Anime4kVariant::Small),
                 anime4k_medium: Anime4kUpscaler::new(gl, Anime4kVariant::Medium),
                 anime4k_large: Anime4kUpscaler::new(gl, Anime4kVariant::Large),
@@ -768,27 +765,12 @@ impl CrtFilterRenderer {
         let mut video_texture = fallback_texture;
 
         let scaler = ScalerFilter::from_u8(params.scaler_filter);
-        let is_bunny = matches!(
-            scaler,
-            ScalerFilter::BuNNy
-                | ScalerFilter::BuNNyMedium
-                | ScalerFilter::BuNNyHigh
-                | ScalerFilter::BuNNyNeutral
-                | ScalerFilter::BuNNyNVL
-        );
         let is_anime4k = matches!(
             scaler,
             ScalerFilter::Anime4kSmall | ScalerFilter::Anime4kMedium | ScalerFilter::Anime4kLarge
         );
 
-        let effective_res = if is_bunny {
-            self.bunny.get_upscaled_size(
-                resolution.0,
-                resolution.1,
-                output_size.0 as u32,
-                output_size.1 as u32,
-            )
-        } else if is_anime4k {
+        let effective_res = if is_anime4k {
             match scaler {
                 ScalerFilter::Anime4kSmall => self.anime4k_small.get_upscaled_size(
                     resolution.0,
@@ -872,14 +854,6 @@ impl CrtFilterRenderer {
             }
 
             let scaler = ScalerFilter::from_u8(params.scaler_filter);
-            let is_bunny = matches!(
-                scaler,
-                ScalerFilter::BuNNy
-                    | ScalerFilter::BuNNyMedium
-                    | ScalerFilter::BuNNyHigh
-                    | ScalerFilter::BuNNyNeutral
-                    | ScalerFilter::BuNNyNVL
-            );
             let is_anime4k = matches!(
                 scaler,
                 ScalerFilter::Anime4kSmall
@@ -887,19 +861,7 @@ impl CrtFilterRenderer {
                     | ScalerFilter::Anime4kLarge
             );
 
-            if is_bunny {
-                let upscaled = self.bunny.upscale(
-                    gl,
-                    current_video_texture,
-                    current_res.0,
-                    current_res.1,
-                    output_size.0 as u32,
-                    output_size.1 as u32,
-                    scaler,
-                );
-                current_video_texture = upscaled.0;
-                current_res = (upscaled.1, upscaled.2);
-            } else if is_anime4k {
+            if is_anime4k {
                 let upscaled = match scaler {
                     ScalerFilter::Anime4kSmall => self.anime4k_small.upscale(
                         gl,
@@ -1133,27 +1095,12 @@ impl CrtFilterRenderer {
         let mut video_texture = fallback_texture;
 
         let scaler = ScalerFilter::from_u8(scaler_filter);
-        let is_bunny = matches!(
-            scaler,
-            ScalerFilter::BuNNy
-                | ScalerFilter::BuNNyMedium
-                | ScalerFilter::BuNNyHigh
-                | ScalerFilter::BuNNyNeutral
-                | ScalerFilter::BuNNyNVL
-        );
         let is_anime4k = matches!(
             scaler,
             ScalerFilter::Anime4kSmall | ScalerFilter::Anime4kMedium | ScalerFilter::Anime4kLarge
         );
 
-        let effective_res = if is_bunny {
-            self.bunny.get_upscaled_size(
-                resolution.0,
-                resolution.1,
-                output_size.0 as u32,
-                output_size.1 as u32,
-            )
-        } else if is_anime4k {
+        let effective_res = if is_anime4k {
             match scaler {
                 ScalerFilter::Anime4kSmall => self.anime4k_small.get_upscaled_size(
                     resolution.0,
@@ -1236,14 +1183,6 @@ impl CrtFilterRenderer {
             }
 
             let scaler = ScalerFilter::from_u8(scaler_filter);
-            let is_bunny = matches!(
-                scaler,
-                ScalerFilter::BuNNy
-                    | ScalerFilter::BuNNyMedium
-                    | ScalerFilter::BuNNyHigh
-                    | ScalerFilter::BuNNyNeutral
-                    | ScalerFilter::BuNNyNVL
-            );
             let is_anime4k = matches!(
                 scaler,
                 ScalerFilter::Anime4kSmall
@@ -1251,19 +1190,7 @@ impl CrtFilterRenderer {
                     | ScalerFilter::Anime4kLarge
             );
 
-            if is_bunny {
-                let upscaled = self.bunny.upscale(
-                    gl,
-                    current_video_texture,
-                    current_res.0,
-                    current_res.1,
-                    output_size.0 as u32,
-                    output_size.1 as u32,
-                    scaler,
-                );
-                current_video_texture = upscaled.0;
-                current_res = (upscaled.1, upscaled.2);
-            } else if is_anime4k {
+            if is_anime4k {
                 let upscaled = match scaler {
                     ScalerFilter::Anime4kSmall => self.anime4k_small.upscale(
                         gl,
@@ -1430,7 +1357,6 @@ impl CrtFilterRenderer {
             gl.delete_program(self.cathode_prog);
             gl.delete_framebuffer(self.post_fbo);
             gl.delete_texture(self.post_texture);
-            self.bunny.destroy(gl);
             self.anime4k_small.destroy(gl);
             self.anime4k_medium.destroy(gl);
             self.anime4k_large.destroy(gl);
@@ -1462,23 +1388,12 @@ impl CrtFilterRenderer {
         scaler_filter: u8,
     ) {
         let scaler = ScalerFilter::from_u8(scaler_filter);
-        let is_bunny = matches!(
-            scaler,
-            ScalerFilter::BuNNy
-                | ScalerFilter::BuNNyMedium
-                | ScalerFilter::BuNNyHigh
-                | ScalerFilter::BuNNyNeutral
-                | ScalerFilter::BuNNyNVL
-        );
         let is_anime4k = matches!(
             scaler,
             ScalerFilter::Anime4kSmall | ScalerFilter::Anime4kMedium | ScalerFilter::Anime4kLarge
         );
 
-        let (effective_width, effective_height) = if is_bunny {
-            self.bunny
-                .get_upscaled_size(width, height, target_width, target_height)
-        } else if is_anime4k {
+        let (effective_width, effective_height) = if is_anime4k {
             match scaler {
                 ScalerFilter::Anime4kSmall => {
                     self.anime4k_small
