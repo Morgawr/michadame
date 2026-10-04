@@ -45,6 +45,9 @@ const COLOR_MUTED: Color32 = Color32::from_rgb(100, 116, 139);
 const COLOR_FREQ_BG: Color32 = Color32::from_rgb(19, 78, 74);
 const COLOR_FREQ_BORDER: Color32 = Color32::from_rgb(20, 184, 166);
 const COLOR_FREQ_TEXT: Color32 = Color32::from_rgb(94, 234, 212);
+const COLOR_MINED_BG: Color32 = Color32::from_rgb(67, 26, 7);
+const COLOR_MINED_BORDER: Color32 = Color32::from_rgb(249, 115, 22);
+const COLOR_MINED_TEXT: Color32 = Color32::from_rgb(254, 215, 170);
 
 /// Circled numbers for sense indices ①..⑳
 const CIRCLED_NUMBERS: &[&str] = &[
@@ -60,6 +63,7 @@ pub fn render_term_entry(
     entry: &TermEntry,
     index: usize,
     mine_status: Option<crate::bank::MineStatus>,
+    is_mined: bool,
 ) -> bool {
     if index > 0 {
         ui.add_space(14.0);
@@ -81,7 +85,7 @@ pub fn render_term_entry(
         ui.allocate_ui_with_layout(
             egui::vec2(header_width, 0.0),
             egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
-            |ui| render_entry_header(ui, entry),
+            |ui| render_entry_header(ui, entry, is_mined),
         );
         if let Some(status) = mine_status {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
@@ -133,7 +137,7 @@ fn render_mine_button(ui: &mut egui::Ui, status: crate::bank::MineStatus, size: 
 }
 
 /// Renders the headword, reading, frequency, deinflection and tag badges of an entry.
-pub fn render_entry_header(ui: &mut egui::Ui, entry: &TermEntry) {
+pub fn render_entry_header(ui: &mut egui::Ui, entry: &TermEntry, is_mined: bool) {
     // Headword
     ui.label(
         RichText::new(&entry.term)
@@ -149,6 +153,18 @@ pub fn render_entry_header(ui: &mut egui::Ui, entry: &TermEntry) {
                 .font(dict_font(38.0))
                 .color(COLOR_READING),
         );
+    }
+
+    // Mined badge / icon if already in the mining bank
+    if is_mined {
+        render_pill_badge(
+            ui,
+            "✔ Mined",
+            COLOR_MINED_BG,
+            COLOR_MINED_TEXT,
+            COLOR_MINED_BORDER,
+        )
+        .on_hover_text("Already in the mining bank");
     }
 
     // Frequency rank badge
@@ -249,14 +265,14 @@ pub fn render_pill_badge(
     bg: Color32,
     fg: Color32,
     border: Color32,
-) {
+) -> egui::Response {
     let scale = dict_scale();
     let padding = egui::vec2(14.0, 6.0) * scale;
     let font_id = dict_font(26.0);
     let galley = ui.painter().layout_no_wrap(text.to_string(), font_id, fg);
 
     let desired_size = galley.size() + padding * 2.0;
-    let (rect, _response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
 
     ui.painter().rect(
         rect,
@@ -267,6 +283,7 @@ pub fn render_pill_badge(
 
     let text_pos = rect.min + padding;
     ui.painter().galley(text_pos, galley, fg);
+    response
 }
 
 /// Top-level dispatcher for Yomitan / Jitendex structured content.

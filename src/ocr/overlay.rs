@@ -278,6 +278,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         video_rect,
         !state.ocr.hide_overlay,
         |entry| bank.status(&entry.term, &entry.reading, &popup_sentence),
+        |entry| bank.is_entry_mined(&entry.term, &entry.reading, entry.sequence),
     );
 
     // Queue a mining request; the screenshot is grabbed by the video paint callback at the

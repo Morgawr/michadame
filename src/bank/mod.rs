@@ -129,6 +129,14 @@ fn entry_to_json(entry: &TermEntry) -> String {
     .to_string()
 }
 
+/// Extracts the sequence number from a stored `definition_json`, or 0 if missing.
+pub fn extract_sequence_from_json(json: &str) -> i64 {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v.get("sequence").and_then(|s| s.as_i64()))
+        .unwrap_or(0)
+}
+
 /// Reconstructs a renderable dictionary entry from a stored `definition_json`.
 /// Missing fields (e.g. entries mined by older versions) fall back to defaults.
 pub fn entry_from_json(term: &str, reading: &str, json: &str) -> Option<TermEntry> {
@@ -309,6 +317,8 @@ pub struct BankState {
     /// All entries, most recent first.
     pub entries: Vec<BankEntryMeta>,
     mined_keys: HashSet<MineKey>,
+    mined_definitions: HashSet<(String, String, i64)>,
+    mined_terms: HashSet<(String, String)>,
     in_flight: HashSet<MineKey>,
     pending: Arc<Mutex<Option<MineRequest>>>,
     event_tx: Sender<BankEvent>,
@@ -379,6 +389,8 @@ impl BankState {
             db: Arc::new(Mutex::new(db)),
             entries,
             mined_keys: HashSet::new(),
+            mined_definitions: HashSet::new(),
+            mined_terms: HashSet::new(),
             in_flight: HashSet::new(),
             pending: Arc::new(Mutex::new(None)),
             event_tx,
@@ -404,6 +416,16 @@ impl BankState {
             .entries
             .iter()
             .map(|e| (e.term.clone(), e.reading.clone(), e.sentence.clone()))
+            .collect();
+        self.mined_definitions = self
+            .entries
+            .iter()
+            .map(|e| (e.term.clone(), e.reading.clone(), extract_sequence_from_json(&e.definition_json)))
+            .collect();
+        self.mined_terms = self
+            .entries
+            .iter()
+            .map(|e| (e.term.clone(), e.reading.clone()))
             .collect();
         self.rebuild_known_tags();
     }
@@ -471,6 +493,33 @@ impl BankState {
         }
     }
 
+    /// Returns true if this specific dictionary entry is already in the mined bank.
+    pub fn is_entry_mined(&self, term: &str, reading: &str, sequence: i64) -> bool {
+        if sequence != 0
+            && self
+                .mined_definitions
+                .contains(&(term.to_string(), reading.to_string(), sequence))
+        {
+            return true;
+        }
+        if sequence == 0 && self.mined_terms.contains(&(term.to_string(), reading.to_string())) {
+            return true;
+        }
+        // Fallback: match if bank contains (term, reading, 0)
+        if sequence != 0
+            && self
+                .mined_definitions
+                .contains(&(term.to_string(), reading.to_string(), 0))
+        {
+            return true;
+        }
+        // Also check if any in-flight requests match
+        if self.in_flight.iter().any(|(t, r, _)| t == term && r == reading) {
+            return true;
+        }
+        false
+    }
+
     /// Queues a mining request. The screenshot is captured by the video paint callback at
     /// the end of the current frame. Returns false if it was rejected (duplicate or busy).
     pub fn request_mine(&mut self, request: MineRequest) -> bool {
@@ -512,6 +561,11 @@ impl BankState {
                     let key = (meta.term.clone(), meta.reading.clone(), meta.sentence.clone());
                     self.in_flight.remove(&key);
                     self.mined_keys.insert(key);
+                    let seq = extract_sequence_from_json(&meta.definition_json);
+                    self.mined_definitions
+                        .insert((meta.term.clone(), meta.reading.clone(), seq));
+                    self.mined_terms
+                        .insert((meta.term.clone(), meta.reading.clone()));
                     messages.push(Ok(format!("Mined: {}", meta.term)));
                     let pos = self
                         .entries
@@ -821,5 +875,77 @@ mod tests {
         assert_eq!(bank.known_tags, vec!["Final Fantasy 7"]);
         let reloaded = bank.db.lock().unwrap().as_ref().unwrap().list_meta().unwrap();
         assert_eq!(reloaded.iter().find(|e| e.id == d).unwrap().tag.as_deref(), Some("Final Fantasy 7"));
+    }
+
+    #[test]
+    fn is_entry_mined_identifies_specific_mined_definitions() {
+        let mut bank = BankState::with_database(Some(BankDatabase::open_in_memory().unwrap()), None);
+        let entry1 = TermEntry {
+            term: "熱い".into(),
+            reading: "あつい".into(),
+            definition_tags: None,
+            rules: String::new(),
+            score: 0.0,
+            glossary: vec![crate::dict::GlossaryEntry::Text("hot to touch".into())],
+            sequence: 101,
+            term_tags: None,
+            inflection_reasons: vec![],
+            frequency: None,
+        };
+        let request = MineRequest::from_lookup(&entry1, "お茶が熱い。", (3, 5), bank.mining_tag());
+        assert!(bank.request_mine(request));
+        let handle = bank.capture_handle();
+        handle.save(handle.take_pending().unwrap(), None);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while bank.is_busy() && Instant::now() < deadline {
+            bank.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let id = bank.entries.iter().find(|e| e.term == "熱い").unwrap().id;
+
+        // Exact match with sequence 101
+        assert!(bank.is_entry_mined("熱い", "あつい", 101));
+        // Different sequence (e.g. another definition of the same word) does not match
+        assert!(!bank.is_entry_mined("熱い", "あつい", 102));
+        // Different headword does not match
+        assert!(!bank.is_entry_mined("厚い", "あつい", 101));
+        assert!(!bank.is_entry_mined("暑い", "あつい", 101));
+
+        // When looked up in another sentence, status() for the sentence is Available, but is_entry_mined is true!
+        assert_eq!(bank.status("熱い", "あつい", "別の文。"), MineStatus::Available);
+        assert!(bank.is_entry_mined("熱い", "あつい", 101));
+
+        // Delete entry clears is_entry_mined
+        bank.delete(id).unwrap();
+        assert!(!bank.is_entry_mined("熱い", "あつい", 101));
+
+        // Test fallback when sequence is 0
+        let entry_zero = TermEntry {
+            term: "林檎".into(),
+            reading: "りんご".into(),
+            definition_tags: None,
+            rules: String::new(),
+            score: 0.0,
+            glossary: vec![crate::dict::GlossaryEntry::Text("apple".into())],
+            sequence: 0,
+            term_tags: None,
+            inflection_reasons: vec![],
+            frequency: None,
+        };
+        let req = MineRequest::from_lookup(&entry_zero, "林檎を食べた。", (0, 2), None);
+        assert!(bank.request_mine(req));
+        let handle = bank.capture_handle();
+        handle.save(handle.take_pending().unwrap(), None);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while bank.is_busy() && Instant::now() < deadline {
+            bank.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // sequence 0 matches when sequence is 0
+        assert!(bank.is_entry_mined("林檎", "りんご", 0));
+        // sequence 0 in bank also matches if queried with non-zero sequence as fallback
+        assert!(bank.is_entry_mined("林檎", "りんご", 999));
+        // different reading does not match
+        assert!(!bank.is_entry_mined("林檎", "みかん", 0));
     }
 }

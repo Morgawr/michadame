@@ -53,6 +53,7 @@ fn popup_identity(popup: &DictPopupState) -> u64 {
 /// Renders the word highlight and interactive popup window on top of the video feed.
 ///
 /// `mine_status` returns the mining-bank state of an entry (shown as a `+` button).
+/// `is_mined` returns true if the entry is already in the mined word bank (marked with an icon).
 /// Returns the index of the entry whose mining button was clicked, if any.
 pub fn draw_dict_popup(
     ui: &mut egui::Ui,
@@ -60,6 +61,7 @@ pub fn draw_dict_popup(
     video_rect: egui::Rect,
     show_highlight: bool,
     mine_status: impl Fn(&super::models::TermEntry) -> crate::bank::MineStatus,
+    is_mined: impl Fn(&super::models::TermEntry) -> bool,
 ) -> Option<usize> {
     let Some(popup) = popup_state else {
         return None;
@@ -163,7 +165,7 @@ pub fn draw_dict_popup(
                 let scroll_output = scroll_area.show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(8.0, 5.0);
                     for (idx, entry) in popup.entries.iter().enumerate() {
-                        if render_term_entry(ui, entry, idx, Some(mine_status(entry))) {
+                        if render_term_entry(ui, entry, idx, Some(mine_status(entry)), is_mined(entry)) {
                             mine_clicked = Some(idx);
                         }
                     }

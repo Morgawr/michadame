@@ -234,7 +234,7 @@ fn draw_row(
                             |ui| match &dict_entry {
                                 Some(de) => with_dict_scale(DICT_SCALE, || {
                                     ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
-                                    render_entry_header(ui, de);
+                                    render_entry_header(ui, de, false);
                                 }),
                                 None => {
                                     ui.label(
