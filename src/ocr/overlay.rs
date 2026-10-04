@@ -269,10 +269,11 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
     // Queue a mining request; the screenshot is grabbed by the video paint callback at the
     // end of this frame, before any overlay is drawn.
     if let Some(idx) = mine_clicked {
+        let tag = state.bank.mining_tag();
         let request = state.dict.popup.as_ref().and_then(|p| {
-            p.entries
-                .get(idx)
-                .map(|e| crate::bank::MineRequest::from_lookup(e, &p.source_text, p.char_range))
+            p.entries.get(idx).map(|e| {
+                crate::bank::MineRequest::from_lookup(e, &p.source_text, p.char_range, tag)
+            })
         });
         if let Some(request) = request {
             if !state.bank.request_mine(request) {

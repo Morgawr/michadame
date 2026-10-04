@@ -149,6 +149,7 @@ pub struct LegacyConfig {
     pub cathode_interference: Option<f32>,
     pub cathode_lightbulb_effect: Option<f32>,
     pub default_cathode_interference: Option<crate::app::models::CathodeInterferenceSettings>,
+    pub bank_current_tag: Option<String>,
 }
 
 impl Default for LegacyConfig {
@@ -224,6 +225,7 @@ impl Default for LegacyConfig {
             cathode_interference: None,
             cathode_lightbulb_effect: None,
             default_cathode_interference: None,
+            bank_current_tag: None,
         }
     }
 }
@@ -249,6 +251,8 @@ pub struct MichadameConfig {
     pub ocr_sticky_distance: Option<f32>,
     pub ocr_hide_overlay: Option<bool>,
     pub ocr_timeout_seconds: Option<u32>,
+    /// Tag applied to newly mined words in the mining bank.
+    pub bank_current_tag: Option<String>,
     pub default_halo: Option<crate::app::models::HaloSettings>,
     pub default_cathode_interference: Option<crate::app::models::CathodeInterferenceSettings>,
     // confy's TOML serializer requires scalar fields before nested tables.
@@ -278,6 +282,7 @@ impl Default for MichadameConfig {
             ocr_timeout_seconds: Some(45),
             default_halo: None,
             default_cathode_interference: None,
+            bank_current_tag: None,
             profiles,
         }
     }

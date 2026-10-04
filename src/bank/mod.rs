@@ -3,6 +3,7 @@
 
 pub mod database;
 pub mod sentence;
+pub mod tags;
 
 pub use database::{BankDatabase, BankEntryMeta, NewBankEntry};
 
@@ -35,12 +36,19 @@ pub struct MineRequest {
     pub sentence: String,
     pub word_range: (usize, usize),
     pub source_text: String,
+    /// Tag to store with the entry (already normalized/canonicalized).
+    pub tag: Option<String>,
     pub requested_at: Instant,
 }
 
 impl MineRequest {
     /// Builds a request for `entry`, matched at `char_range` within the OCR box `source_text`.
-    pub fn from_lookup(entry: &TermEntry, source_text: &str, char_range: (usize, usize)) -> Self {
+    pub fn from_lookup(
+        entry: &TermEntry,
+        source_text: &str,
+        char_range: (usize, usize),
+        tag: Option<String>,
+    ) -> Self {
         let (sentence, word_range) = sentence::extract_sentence(source_text, char_range);
         Self {
             created_at: unix_millis(),
@@ -51,6 +59,7 @@ impl MineRequest {
             sentence,
             word_range,
             source_text: source_text.to_string(),
+            tag,
             requested_at: Instant::now(),
         }
     }
@@ -232,6 +241,7 @@ fn save_entry(
         source_text: request.source_text,
         screenshot,
         thumbnail,
+        tag: request.tag,
     };
     let guard = db.lock().map_err(|_| anyhow::anyhow!("bank database lock poisoned"))?;
     let db = guard
@@ -315,6 +325,25 @@ pub struct BankState {
     pub pending_delete: Option<i64>,
     /// Error opening the database, if any.
     pub load_error: Option<String>,
+    /// Tag applied to newly mined words (set in the settings panel, persisted in the config).
+    pub current_tag: String,
+    /// Last `current_tag` value written to the config, to avoid redundant saves.
+    pub saved_current_tag: String,
+    /// Tag filter typed at the top of the bank window (empty = show everything).
+    pub filter_tag: String,
+    /// Distinct tags in use, most recently used first. Used for suggestions.
+    pub known_tags: Vec<String>,
+    /// Inline tag editor state for a bank row.
+    pub editing_tag: Option<TagEdit>,
+}
+
+/// In-progress edit of a bank entry's tag.
+#[derive(Clone, Debug)]
+pub struct TagEdit {
+    pub id: i64,
+    pub text: String,
+    /// Whether keyboard focus has already been requested for the editor.
+    pub focused: bool,
 }
 
 /// Popup button state for a dictionary entry.
@@ -360,6 +389,11 @@ impl BankState {
             enlarged: None,
             pending_delete: None,
             load_error,
+            current_tag: String::new(),
+            saved_current_tag: String::new(),
+            filter_tag: String::new(),
+            known_tags: Vec::new(),
+            editing_tag: None,
         };
         state.rebuild_keys();
         state
@@ -371,6 +405,51 @@ impl BankState {
             .iter()
             .map(|e| (e.term.clone(), e.reading.clone(), e.sentence.clone()))
             .collect();
+        self.rebuild_known_tags();
+    }
+
+    /// Recomputes the distinct tags in use, ordered by most recent use (entries are kept
+    /// most-recent-first).
+    fn rebuild_known_tags(&mut self) {
+        let mut seen = HashSet::new();
+        self.known_tags = self
+            .entries
+            .iter()
+            .filter_map(|e| e.tag.as_ref())
+            .filter(|t| seen.insert(t.as_str()))
+            .cloned()
+            .collect();
+    }
+
+    /// The tag to stamp on a newly mined word: the settings tag, trimmed and matched to an
+    /// existing tag's capitalization if one exists.
+    pub fn mining_tag(&self) -> Option<String> {
+        tags::canonicalize_tag(&self.current_tag, &self.known_tags)
+    }
+
+    /// Indices into `entries` of the words matching the bank-window tag filter, most
+    /// recent first.
+    pub fn visible_indices(&self) -> Vec<usize> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| tags::tag_matches_filter(e.tag.as_deref(), &self.filter_tag))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Sets (or removes, if empty) the tag of an entry. The tag is trimmed and matched to an
+    /// existing tag's capitalization. Returns the stored tag.
+    pub fn set_tag(&mut self, id: i64, tag: &str) -> anyhow::Result<Option<String>> {
+        let tag = tags::canonicalize_tag(tag, &self.known_tags);
+        if let Some(db) = self.db.lock().map_err(|_| anyhow::anyhow!("lock poisoned"))?.as_ref() {
+            db.set_tag(id, tag.as_deref())?;
+        }
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
+            entry.tag = tag.clone();
+        }
+        self.rebuild_known_tags();
+        Ok(tag)
     }
 
     pub fn capture_handle(&self) -> BankCaptureHandle {
@@ -440,6 +519,7 @@ impl BankState {
                         .position(|e| e.created_at <= meta.created_at)
                         .unwrap_or(self.entries.len());
                     self.entries.insert(pos, meta);
+                    self.rebuild_known_tags();
                 }
                 BankEvent::Failed { key, error } => {
                     self.in_flight.remove(&key);
@@ -646,7 +726,7 @@ mod tests {
             frequency: None,
         };
         let text = "おはよう。今日は暑いね。";
-        let request = MineRequest::from_lookup(&entry, text, (8, 10));
+        let request = MineRequest::from_lookup(&entry, text, (8, 10), bank.mining_tag());
         assert_eq!(request.sentence, "今日は暑いね。");
         assert!(bank.request_mine(request.clone()));
         assert_eq!(bank.status("暑い", "あつい", "今日は暑いね。"), MineStatus::Pending);
@@ -667,10 +747,79 @@ mod tests {
         assert!(bank.entries[0].has_screenshot);
         assert_eq!(bank.entries[0].definition_text, "hot");
         assert_eq!(bank.status("暑い", "あつい", "今日は暑いね。"), MineStatus::Mined);
+        assert_eq!(bank.entries[0].tag, None);
 
         let id = bank.entries[0].id;
         bank.delete(id).unwrap();
         assert!(bank.entries.is_empty());
         assert_eq!(bank.status("暑い", "あつい", "今日は暑いね。"), MineStatus::Available);
+    }
+
+    fn mine_and_wait(bank: &mut BankState, term: &str, sentence: &str) -> i64 {
+        let entry = TermEntry {
+            term: term.into(),
+            reading: "よみ".into(),
+            definition_tags: None,
+            rules: String::new(),
+            score: 0.0,
+            glossary: vec![crate::dict::GlossaryEntry::Text("meaning".into())],
+            sequence: 1,
+            term_tags: None,
+            inflection_reasons: vec![],
+            frequency: None,
+        };
+        let len = term.chars().count();
+        let request = MineRequest::from_lookup(&entry, sentence, (0, len), bank.mining_tag());
+        assert!(bank.request_mine(request));
+        let handle = bank.capture_handle();
+        handle.save(handle.take_pending().unwrap(), None);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while bank.is_busy() && Instant::now() < deadline {
+            bank.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        bank.entries.iter().find(|e| e.term == term).unwrap().id
+    }
+
+    #[test]
+    fn mined_words_get_current_tag_with_canonical_casing() {
+        let mut bank = BankState::with_database(Some(BankDatabase::open_in_memory().unwrap()), None);
+        bank.current_tag = "  Final Fantasy 7 ".into();
+        let a = mine_and_wait(&mut bank, "猫", "猫だ。");
+        assert_eq!(bank.known_tags, vec!["Final Fantasy 7"]);
+
+        // A differently-capitalized tag reuses the existing spelling.
+        bank.current_tag = "final fantasy 7".into();
+        let b = mine_and_wait(&mut bank, "犬", "犬だ。");
+        // A brand new tag is stored as typed.
+        bank.current_tag = "final fantasy 8".into();
+        let c = mine_and_wait(&mut bank, "鳥", "鳥だ。");
+        bank.current_tag.clear();
+        let d = mine_and_wait(&mut bank, "魚", "魚だ。");
+
+        let tag_of = |bank: &BankState, id| bank.entries.iter().find(|e| e.id == id).unwrap().tag.clone();
+        assert_eq!(tag_of(&bank, a).as_deref(), Some("Final Fantasy 7"));
+        assert_eq!(tag_of(&bank, b).as_deref(), Some("Final Fantasy 7"));
+        assert_eq!(tag_of(&bank, c).as_deref(), Some("final fantasy 8"));
+        assert_eq!(tag_of(&bank, d), None);
+        assert_eq!(bank.known_tags, vec!["final fantasy 8", "Final Fantasy 7"]);
+
+        // Filtering by a partial tag shows matching words, most recent first.
+        bank.filter_tag = "Final Fantasy".into();
+        let visible: Vec<i64> = bank.visible_indices().iter().map(|&i| bank.entries[i].id).collect();
+        assert_eq!(visible, vec![c, b, a]);
+        bank.filter_tag = "fantasy 8".into();
+        let visible: Vec<i64> = bank.visible_indices().iter().map(|&i| bank.entries[i].id).collect();
+        assert_eq!(visible, vec![c]);
+        bank.filter_tag.clear();
+        assert_eq!(bank.visible_indices().len(), 4);
+
+        // Editing tags: canonicalize, add, and remove.
+        assert_eq!(bank.set_tag(d, "FINAL FANTASY 7").unwrap().as_deref(), Some("Final Fantasy 7"));
+        assert_eq!(bank.set_tag(c, "  ").unwrap(), None);
+        assert_eq!(tag_of(&bank, c), None);
+        assert_eq!(bank.known_tags, vec!["Final Fantasy 7"]);
+        let reloaded = bank.db.lock().unwrap().as_ref().unwrap().list_meta().unwrap();
+        assert_eq!(reloaded.iter().find(|e| e.id == d).unwrap().tag.as_deref(), Some("Final Fantasy 7"));
     }
 }

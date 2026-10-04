@@ -237,6 +237,7 @@ pub fn save_config_at(path: &Path, state: &AppState) -> Result<(), confy::ConfyE
     cfg.ocr_sticky_distance = Some(state.ocr.sticky_distance);
     cfg.ocr_hide_overlay = Some(state.ocr.hide_overlay);
     cfg.ocr_timeout_seconds = Some(state.ocr.timeout_seconds);
+    cfg.bank_current_tag = crate::bank::tags::normalize_tag(&state.bank.current_tag);
     cfg.default_halo = Some(state.halo_defaults.clone());
     cfg.default_cathode_interference = Some(state.cathode_interference_defaults.clone());
 
@@ -295,6 +296,7 @@ pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(
     cfg.ocr_sticky_distance = Some(state.ocr.sticky_distance);
     cfg.ocr_hide_overlay = Some(state.ocr.hide_overlay);
     cfg.ocr_timeout_seconds = Some(state.ocr.timeout_seconds);
+    cfg.bank_current_tag = crate::bank::tags::normalize_tag(&state.bank.current_tag);
     cfg.default_halo = Some(state.halo_defaults.clone());
 
     cfg.active_profile = state.active_profile.clone();
@@ -528,6 +530,8 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     state.ocr.sticky_distance = cfg.ocr_sticky_distance.unwrap_or(0.6);
     state.ocr.hide_overlay = cfg.ocr_hide_overlay.unwrap_or(false);
     state.ocr.timeout_seconds = cfg.ocr_timeout_seconds.unwrap_or(45);
+    state.bank.current_tag = cfg.bank_current_tag.clone().unwrap_or_default();
+    state.bank.saved_current_tag = state.bank.current_tag.clone();
     if let Some(defaults) = &cfg.default_halo {
         state.halo_defaults = defaults.clone();
     }
@@ -779,6 +783,44 @@ mod tests {
         };
         apply_config(&mut state, &cfg_disabled);
         assert_eq!(state.ocr.timeout_seconds, 0);
+    }
+
+    #[test]
+    fn test_bank_current_tag_toml_roundtrip() {
+        let path = std::env::temp_dir().join(format!(
+            "michadame-bank-tag-config-{}-{}.toml",
+            std::process::id(),
+            crate::replay::now_us()
+        ));
+        let cfg = MichadameConfig {
+            bank_current_tag: Some("Final Fantasy 7".into()),
+            default_halo: Some(Default::default()),
+            ..Default::default()
+        };
+        confy::store_path(&path, &cfg).unwrap();
+        let loaded: MichadameConfig = confy::load_path(&path).unwrap();
+        assert_eq!(loaded.bank_current_tag.as_deref(), Some("Final Fantasy 7"));
+
+        let mut state = AppState::default();
+        apply_config(&mut state, &loaded);
+        assert_eq!(state.bank.current_tag, "Final Fantasy 7");
+
+        // Saving from state writes the (trimmed) tag back; an empty tag is omitted.
+        state.bank.current_tag = "  Grandia 2 ".into();
+        save_config_at(&path, &state).unwrap();
+        let loaded: MichadameConfig = confy::load_path(&path).unwrap();
+        assert_eq!(loaded.bank_current_tag.as_deref(), Some("Grandia 2"));
+        state.bank.current_tag.clear();
+        save_config_at(&path, &state).unwrap();
+        let loaded: MichadameConfig = confy::load_path(&path).unwrap();
+        assert_eq!(loaded.bank_current_tag, None);
+
+        // Older configs without the field load with no tag.
+        let mut state = AppState::default();
+        apply_config(&mut state, &MichadameConfig::default());
+        assert_eq!(state.bank.current_tag, "");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("toml.bak"));
     }
 
     #[test]

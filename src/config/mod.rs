@@ -91,6 +91,7 @@ impl From<LegacyConfig> for MichadameConfig {
             ocr_timeout_seconds: legacy.ocr_timeout_seconds,
             default_halo: legacy.default_halo,
             default_cathode_interference: legacy.default_cathode_interference,
+            bank_current_tag: legacy.bank_current_tag,
             profiles,
         }
     }
@@ -174,6 +175,7 @@ mod tests {
             cathode_interference: None,
             cathode_lightbulb_effect: None,
             default_cathode_interference: None,
+            bank_current_tag: None,
         };
 
         let config: MichadameConfig = MichadameConfig::from(legacy);
@@ -272,6 +274,7 @@ mod tests {
             cathode_interference: None,
             cathode_lightbulb_effect: None,
             default_cathode_interference: None,
+            bank_current_tag: None,
         };
 
         let config: MichadameConfig = MichadameConfig::from(legacy);

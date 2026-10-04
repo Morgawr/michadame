@@ -10,6 +10,7 @@ pub mod fft_mask;
 pub mod filters;
 pub mod networking;
 pub mod profiles;
+pub mod tag_input;
 pub mod video_player;
 
 pub use networking::send_ws_command;
@@ -23,7 +24,8 @@ pub fn setup_style(ctx: &eframe::egui::Context) {
 
 pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
     state.replay.shortcuts(ctx);
-    if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+    // Ignore Space while typing in a text field (e.g. the mining tag).
+    if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
         if ctx.input(|i| i.modifiers.shift) {
             state.clear_ocr();
         } else {

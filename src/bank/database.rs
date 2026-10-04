@@ -19,6 +19,8 @@ pub struct BankEntryMeta {
     /// Character range `[start, end)` of the mined word within `sentence`.
     pub word_range: (usize, usize),
     pub has_screenshot: bool,
+    /// Optional single tag (e.g. the game the word was mined from).
+    pub tag: Option<String>,
 }
 
 /// A fully-prepared entry ready to be inserted.
@@ -36,6 +38,7 @@ pub struct NewBankEntry {
     pub screenshot: Option<Vec<u8>>,
     /// Encoded (JPEG) thumbnail for list previews.
     pub thumbnail: Option<Vec<u8>>,
+    pub tag: Option<String>,
 }
 
 pub struct BankDatabase {
@@ -79,6 +82,16 @@ impl BankDatabase {
              CREATE INDEX IF NOT EXISTS idx_mined_words_created
                  ON mined_words(created_at DESC);",
         )?;
+        // Migration: databases created before tags were introduced lack the column.
+        let has_tag = conn
+            .prepare("SELECT 1 FROM pragma_table_info('mined_words') WHERE name = 'tag'")?
+            .exists([])?;
+        if !has_tag {
+            conn.execute_batch("ALTER TABLE mined_words ADD COLUMN tag TEXT;")?;
+        }
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_mined_words_tag ON mined_words(tag);",
+        )?;
         Ok(Self { conn })
     }
 
@@ -86,8 +99,8 @@ impl BankDatabase {
     pub fn insert(&self, entry: &NewBankEntry) -> Result<BankEntryMeta> {
         self.conn.execute(
             "INSERT INTO mined_words (created_at, term, reading, definition_text, definition_json,
-                 sentence, word_start, word_end, source_text, screenshot, thumbnail)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 sentence, word_start, word_end, source_text, screenshot, thumbnail, tag)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 entry.created_at,
                 entry.term,
@@ -100,6 +113,7 @@ impl BankDatabase {
                 entry.source_text,
                 entry.screenshot,
                 entry.thumbnail,
+                entry.tag,
             ],
         )?;
         Ok(BankEntryMeta {
@@ -112,6 +126,7 @@ impl BankDatabase {
             sentence: entry.sentence.clone(),
             word_range: entry.word_range,
             has_screenshot: entry.screenshot.is_some(),
+            tag: entry.tag.clone(),
         })
     }
 
@@ -119,7 +134,7 @@ impl BankDatabase {
     pub fn list_meta(&self) -> Result<Vec<BankEntryMeta>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, created_at, term, reading, definition_text, sentence, word_start, word_end,
-                    screenshot IS NOT NULL, definition_json
+                    screenshot IS NOT NULL, definition_json, tag
              FROM mined_words ORDER BY created_at DESC, id DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -133,6 +148,7 @@ impl BankDatabase {
                 word_range: (row.get::<_, i64>(6)? as usize, row.get::<_, i64>(7)? as usize),
                 has_screenshot: row.get(8)?,
                 definition_json: row.get(9)?,
+                tag: row.get(10)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -153,6 +169,13 @@ impl BankDatabase {
             .query_row(&sql, params![id], |row| row.get::<_, Option<Vec<u8>>>(0))
             .optional()?
             .flatten())
+    }
+
+    /// Sets (or, with `None`, removes) the tag of an entry.
+    pub fn set_tag(&self, id: i64, tag: Option<&str>) -> Result<()> {
+        self.conn
+            .execute("UPDATE mined_words SET tag = ?1 WHERE id = ?2", params![tag, id])?;
+        Ok(())
     }
 
     pub fn delete(&self, id: i64) -> Result<()> {
@@ -177,6 +200,7 @@ mod tests {
             source_text: format!("前の文。{term}を見た。"),
             screenshot: shot.then(|| vec![1, 2, 3]),
             thumbnail: shot.then(|| vec![4, 5]),
+            tag: None,
         }
     }
 
@@ -201,5 +225,49 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].term, "犬");
         assert_eq!(db.screenshot(a.id).unwrap(), None);
+    }
+
+    #[test]
+    fn tags_round_trip_and_can_be_edited() {
+        let db = BankDatabase::open_in_memory().unwrap();
+        let a = db
+            .insert(&NewBankEntry { tag: Some("Final Fantasy 7".into()), ..entry("猫", 1_000, false) })
+            .unwrap();
+        assert_eq!(a.tag.as_deref(), Some("Final Fantasy 7"));
+        let b = db.insert(&entry("犬", 2_000, false)).unwrap();
+        assert_eq!(b.tag, None);
+
+        let list = db.list_meta().unwrap();
+        assert_eq!(list[1].tag.as_deref(), Some("Final Fantasy 7"));
+        assert_eq!(list[0].tag, None);
+
+        db.set_tag(b.id, Some("Dragon Quest")).unwrap();
+        db.set_tag(a.id, None).unwrap();
+        let list = db.list_meta().unwrap();
+        assert_eq!(list[0].tag.as_deref(), Some("Dragon Quest"));
+        assert_eq!(list[1].tag, None);
+    }
+
+    #[test]
+    fn databases_without_tag_column_are_migrated() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE mined_words (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL,
+                 term TEXT NOT NULL, reading TEXT NOT NULL, definition_text TEXT NOT NULL,
+                 definition_json TEXT NOT NULL, sentence TEXT NOT NULL,
+                 word_start INTEGER NOT NULL, word_end INTEGER NOT NULL,
+                 source_text TEXT NOT NULL, screenshot BLOB, thumbnail BLOB);
+             INSERT INTO mined_words (created_at, term, reading, definition_text, definition_json,
+                 sentence, word_start, word_end, source_text)
+             VALUES (1, '猫', 'ねこ', 'cat', '[]', '猫だ', 0, 1, '猫だ');",
+        )
+        .unwrap();
+        let db = BankDatabase::from_conn(conn).unwrap();
+        let list = db.list_meta().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].tag, None);
+        db.set_tag(list[0].id, Some("Grandia 2")).unwrap();
+        assert_eq!(db.list_meta().unwrap()[0].tag.as_deref(), Some("Grandia 2"));
     }
 }

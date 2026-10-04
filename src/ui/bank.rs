@@ -1,8 +1,9 @@
 //! Standalone "Mining Bank" window (toggled with B): lists mined words, most recent first.
 
 use crate::app::AppState;
-use crate::bank::BankEntryMeta;
+use crate::bank::{tags, BankEntryMeta, TagEdit};
 use crate::dict::render::{dict_font, render_entry_header, render_glossaries, with_dict_scale};
+use crate::ui::tag_input::tag_input;
 use eframe::egui::{self, text::LayoutJob, Color32, RichText, TextFormat};
 
 const ROW_BG: Color32 = Color32::from_rgb(24, 27, 34);
@@ -14,6 +15,8 @@ const COLOR_HIGHLIGHT: Color32 = Color32::from_rgb(253, 224, 71);
 const COLOR_HIGHLIGHT_BG: Color32 = Color32::from_rgba_premultiplied(66, 56, 10, 160);
 const COLOR_MUTED: Color32 = Color32::from_rgb(100, 116, 139);
 const COLOR_DEFINITION: Color32 = Color32::from_rgb(203, 213, 225);
+const COLOR_TAG: Color32 = Color32::from_rgb(196, 181, 253);
+const COLOR_TAG_BG: Color32 = Color32::from_rgb(46, 38, 74);
 
 /// Scale of the dictionary entry relative to the (large, over-video) popup rendering.
 const DICT_SCALE: f32 = 0.55;
@@ -61,11 +64,35 @@ fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.heading("Mining Bank");
-            let n = state.bank.entries.len();
-            ui.label(
-                RichText::new(format!("{n} word{}", if n == 1 { "" } else { "s" }))
-                    .color(COLOR_MUTED),
+            let total = state.bank.entries.len();
+            let plural = |n: usize| if n == 1 { "" } else { "s" };
+            let text = if state.bank.filter_tag.trim().is_empty() {
+                format!("{total} word{}", plural(total))
+            } else {
+                let shown = state.bank.visible_indices().len();
+                format!("{shown} of {total} word{}", plural(total))
+            };
+            ui.label(RichText::new(text).color(COLOR_MUTED));
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("🏷 Filter by tag:").color(COLOR_TAG));
+            let bank = &mut state.bank;
+            let out = tag_input(
+                ui,
+                "bank_tag_filter",
+                &mut bank.filter_tag,
+                &bank.known_tags,
+                "Type a tag (partial matches included)…",
+                320.0,
+                false,
             );
+            if out.cancelled {
+                bank.filter_tag.clear();
+            }
+            if !bank.filter_tag.is_empty() && ui.button("✖").on_hover_text("Clear filter").clicked() {
+                bank.filter_tag.clear();
+            }
         });
         ui.add_space(6.0);
     });
@@ -96,11 +123,23 @@ fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
             return;
         }
 
+        let visible = state.bank.visible_indices();
+        if visible.is_empty() {
+            ui.add_space(40.0);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new(format!("No words tagged “{}”.", state.bank.filter_tag.trim()))
+                        .size(20.0),
+                );
+            });
+            return;
+        }
+
         let mut loads_left = THUMB_LOADS_PER_FRAME;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for idx in 0..state.bank.entries.len() {
+                for idx in visible {
                     let entry = state.bank.entries[idx].clone();
                     match draw_row(ui, ctx, state, &entry, &mut loads_left) {
                         RowAction::None => {}
@@ -238,6 +277,10 @@ fn draw_row(
                         });
                     });
 
+                    // Tag (click to edit)
+                    ui.add_space(2.0);
+                    draw_tag_row(ui, state, entry);
+
                     // Sentence, with the mined word highlighted
                     ui.add_space(4.0);
                     ui.label(sentence_job(entry, ui.available_width()));
@@ -262,6 +305,112 @@ fn draw_row(
             });
         });
     action
+}
+
+/// Draws the entry's tag chip, or the inline tag editor if this entry is being edited.
+fn draw_tag_row(ui: &mut egui::Ui, state: &mut AppState, entry: &BankEntryMeta) {
+    ui.horizontal(|ui| {
+        let editing = state.bank.editing_tag.as_ref().map_or(false, |e| e.id == entry.id);
+        if editing {
+            let bank = &mut state.bank;
+            let Some(edit) = bank.editing_tag.as_mut() else { return };
+            let request_focus = !edit.focused;
+            edit.focused = true;
+            ui.label(RichText::new("🏷").color(COLOR_TAG));
+            let out = tag_input(
+                ui,
+                ("bank_tag_edit", entry.id),
+                &mut edit.text,
+                &bank.known_tags,
+                "Tag (leave empty for none)",
+                260.0,
+                request_focus,
+            );
+            ui.label(RichText::new("Enter to save · Esc to cancel").small().color(COLOR_MUTED));
+            if out.cancelled {
+                state.bank.editing_tag = None;
+            } else if out.committed {
+                let text = edit.text.clone();
+                state.bank.editing_tag = None;
+                if let Err(e) = state.bank.set_tag(entry.id, &text) {
+                    state.error(format!("Failed to update tag: {e}"));
+                }
+            }
+            return;
+        }
+
+        let start_edit = |state: &mut AppState, text: String| {
+            state.bank.editing_tag = Some(TagEdit { id: entry.id, text, focused: false });
+        };
+        match &entry.tag {
+            Some(tag) => {
+                let chip = egui::Button::new(RichText::new(format!("🏷 {tag}")).color(COLOR_TAG))
+                    .fill(COLOR_TAG_BG)
+                    .rounding(10.0);
+                if ui.add(chip).on_hover_text("Click to edit the tag").clicked() {
+                    start_edit(state, tag.clone());
+                }
+                if ui.small_button("✖").on_hover_text("Remove the tag").clicked() {
+                    if let Err(e) = state.bank.set_tag(entry.id, "") {
+                        state.error(format!("Failed to remove tag: {e}"));
+                    }
+                }
+            }
+            None => {
+                let add = egui::Button::new(RichText::new("🏷 Add tag").small().color(COLOR_MUTED))
+                    .frame(false);
+                if ui.add(add).on_hover_text("Add a tag to this word").clicked() {
+                    start_edit(state, String::new());
+                }
+            }
+        }
+    });
+}
+
+/// Settings-panel row for the tag applied to newly mined words (shown above "Appearance").
+/// Returns true if the setting changed.
+pub fn draw_tag_setting(ui: &mut egui::Ui, state: &mut AppState) -> bool {
+    ui.separator();
+    let mut committed = false;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Mining Tag:").strong());
+        let bank = &mut state.bank;
+        let out = tag_input(
+            ui,
+            "settings_mining_tag",
+            &mut bank.current_tag,
+            &bank.known_tags,
+            "e.g. Final Fantasy 7",
+            260.0,
+            false,
+        );
+        if out.cancelled {
+            bank.current_tag = bank.saved_current_tag.clone();
+        }
+        committed = out.committed;
+        if !bank.current_tag.is_empty()
+            && ui.small_button("✖").on_hover_text("Clear the tag").clicked()
+        {
+            bank.current_tag.clear();
+            committed = true;
+        }
+    });
+    ui.label(
+        RichText::new("Newly mined words are tagged with this (e.g. the game being played). Leave empty for no tag.")
+            .weak(),
+    );
+
+    if !committed {
+        return false;
+    }
+    let bank = &mut state.bank;
+    bank.current_tag = tags::canonicalize_tag(&bank.current_tag, &bank.known_tags).unwrap_or_default();
+    if bank.current_tag == bank.saved_current_tag {
+        return false;
+    }
+    bank.saved_current_tag = bank.current_tag.clone();
+    crate::config::save_config(state);
+    true
 }
 
 fn paint_thumbnail(

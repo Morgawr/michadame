@@ -61,6 +61,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     crate::replay::ui::draw_toggle(&mut state.replay, ui, state.ui.video_window_open);
     changed |= profiles::draw_profile_management(ui, state);
     changed |= devices::draw_device_selectors(ui, state);
+    changed |= super::bank::draw_tag_setting(ui, state);
     changed |= filters::draw_filters(ui, state);
 
     if crate::replay::ui::draw(&mut state.replay, ui) {
