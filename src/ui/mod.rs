@@ -1,6 +1,7 @@
 use crate::app::AppState;
 use eframe::egui;
 
+pub mod bank;
 pub mod controls;
 pub mod debug;
 pub mod devices;

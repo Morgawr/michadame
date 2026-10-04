@@ -251,7 +251,36 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
     }
 
     // Draw the dictionary popup window and word highlight on top of the video feed
-    crate::dict::popup::draw_dict_popup(ui, &mut state.dict.popup, video_rect, !state.ocr.hide_overlay);
+    let popup_sentence = state
+        .dict
+        .popup
+        .as_ref()
+        .map(|p| crate::bank::sentence::extract_sentence(&p.source_text, p.char_range).0)
+        .unwrap_or_default();
+    let bank = &state.bank;
+    let mine_clicked = crate::dict::popup::draw_dict_popup(
+        ui,
+        &mut state.dict.popup,
+        video_rect,
+        !state.ocr.hide_overlay,
+        |entry| bank.status(&entry.term, &entry.reading, &popup_sentence),
+    );
+
+    // Queue a mining request; the screenshot is grabbed by the video paint callback at the
+    // end of this frame, before any overlay is drawn.
+    if let Some(idx) = mine_clicked {
+        let request = state.dict.popup.as_ref().and_then(|p| {
+            p.entries
+                .get(idx)
+                .map(|e| crate::bank::MineRequest::from_lookup(e, &p.source_text, p.char_range))
+        });
+        if let Some(request) = request {
+            if !state.bank.request_mine(request) {
+                state.error("Another word is still being mined, try again.");
+            }
+            ui.ctx().request_repaint();
+        }
+    }
 }
 
 /// Paints an individual OCR text line character-by-character to guarantee exact alignment

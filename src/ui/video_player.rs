@@ -176,6 +176,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             .as_ref()
             .expect("OCR sender channel not initialized")
             .clone();
+        let bank_capture = state.bank.capture_handle();
 
         let ppp = ctx.pixels_per_point();
         let output_size = (response.rect.width() * ppp, response.rect.height() * ppp);
@@ -219,6 +220,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 let ocr_capture_cb = ocr_capture.clone();
                 let ocr_processing_cb = ocr_processing.clone();
                 let ocr_sender_cb = ocr_sender.clone();
+                let bank_capture_cb = bank_capture.clone();
 
                 let capture_overlays = state.replay.config.capture_overlays;
 
@@ -279,6 +281,11 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                     );
                                 }
                             }
+
+                            if let Some(request) = bank_capture_cb.take_pending() {
+                                let shot = capture_frame_pixels(painter.gl(), rendered_area);
+                                bank_capture_cb.save(request, shot);
+                            }
                         },
                     )),
                 };
@@ -327,6 +334,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             let ocr_capture_cb = ocr_capture.clone();
             let ocr_processing_cb = ocr_processing.clone();
             let ocr_sender_cb = ocr_sender.clone();
+            let bank_capture_cb = bank_capture.clone();
             let capture_overlays = state.replay.config.capture_overlays;
 
             let callback = egui::PaintCallback {
@@ -384,6 +392,11 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 ocr_processing_cb.clone(),
                             );
                         }
+                    }
+
+                    if let Some(request) = bank_capture_cb.take_pending() {
+                        let shot = capture_frame_pixels(painter.gl(), rendered_area);
+                        bank_capture_cb.save(request, shot);
                     }
                 })),
             };

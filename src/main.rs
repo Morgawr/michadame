@@ -5,6 +5,7 @@ mod replay;
 mod ui;
 mod video;
 mod ocr;
+mod bank;
 pub mod dict;
 
 use anyhow::Result;

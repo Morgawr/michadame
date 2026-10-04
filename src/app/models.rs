@@ -213,6 +213,7 @@ pub struct AppState {
     pub fft_available_masks: Vec<String>,
     pub ocr: crate::ocr::OcrState,
     pub dict: crate::dict::DictState,
+    pub bank: crate::bank::BankState,
     pub config_load_error: Option<String>,
     pub config_quarantine_path: Option<std::path::PathBuf>,
 }

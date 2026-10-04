@@ -3,9 +3,29 @@ use eframe::egui::{self, text::LayoutJob, Color32, FontId, RichText, TextFormat}
 
 pub const FONT_DICT_FAMILY: &str = "GothicCJK";
 
+thread_local! {
+    /// Scale applied to all dictionary fonts. The popup renders at 1.0 (it is drawn large
+    /// over the video); other views (e.g. the mining bank) render the same content smaller.
+    static DICT_SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
+}
+
+/// Current dictionary font scale.
+#[inline]
+pub fn dict_scale() -> f32 {
+    DICT_SCALE.with(|s| s.get())
+}
+
+/// Runs `f` with all dictionary rendering scaled by `scale`.
+pub fn with_dict_scale<R>(scale: f32, f: impl FnOnce() -> R) -> R {
+    let previous = DICT_SCALE.with(|s| s.replace(scale));
+    let result = f();
+    DICT_SCALE.with(|s| s.set(previous));
+    result
+}
+
 #[inline]
 pub fn dict_font(size: f32) -> FontId {
-    FontId::new(size, egui::FontFamily::Name(FONT_DICT_FAMILY.into()))
+    FontId::new(size * dict_scale(), egui::FontFamily::Name(FONT_DICT_FAMILY.into()))
 }
 
 /// Dark-theme palette constants
@@ -33,74 +53,145 @@ const CIRCLED_NUMBERS: &[&str] = &[
 ];
 
 /// Renders a single dictionary entry inside the popup scroll area.
-pub fn render_term_entry(ui: &mut egui::Ui, entry: &TermEntry, index: usize) {
+/// Renders a dictionary entry. If `mine_status` is given, a mining button (`+`) is drawn at
+/// the right of the header row. Returns true if the mining button was clicked.
+pub fn render_term_entry(
+    ui: &mut egui::Ui,
+    entry: &TermEntry,
+    index: usize,
+    mine_status: Option<crate::bank::MineStatus>,
+) -> bool {
     if index > 0 {
         ui.add_space(14.0);
         ui.separator();
         ui.add_space(8.0);
     }
 
+    let mut mine_clicked = false;
+
     // 1. Entry Header
-    ui.horizontal_wrapped(|ui| {
-        // Headword
-        ui.label(
-            RichText::new(&entry.term)
-                .font(dict_font(50.0))
-                .strong()
-                .color(COLOR_HEADWORD),
+    ui.horizontal(|ui| {
+        // Reserve room on the right for the mining button.
+        let button_size = 56.0;
+        let header_width = if mine_status.is_some() {
+            (ui.available_width() - button_size - 12.0).max(100.0)
+        } else {
+            ui.available_width()
+        };
+        ui.allocate_ui_with_layout(
+            egui::vec2(header_width, 0.0),
+            egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
+            |ui| render_entry_header(ui, entry),
         );
-
-        // Kana reading if different from headword
-        if !entry.reading.is_empty() && entry.reading != entry.term {
-            ui.label(
-                RichText::new(format!("【{}】", entry.reading))
-                    .font(dict_font(38.0))
-                    .color(COLOR_READING),
-            );
-        }
-
-        // Frequency rank badge
-        if let Some(freq) = &entry.frequency {
-            render_pill_badge(
-                ui,
-                &freq.display_text(),
-                COLOR_FREQ_BG,
-                COLOR_FREQ_TEXT,
-                COLOR_FREQ_BORDER,
-            );
-        }
-
-        // Deinflection trail badge
-        if !entry.inflection_reasons.is_empty() {
-            let trail = entry.inflection_reasons.join(" ← ");
-            render_pill_badge(
-                ui,
-                &format!("← {trail}"),
-                COLOR_DEINFLECT_BG,
-                COLOR_DEINFLECT_TEXT,
-                Color32::TRANSPARENT,
-            );
-        }
-
-        // Part-of-speech & definition tags
-        if let Some(tags) = &entry.definition_tags {
-            for tag in tags.split_whitespace() {
-                if !tag.is_empty() {
-                    render_pill_badge(
-                        ui,
-                        tag,
-                        COLOR_TAG_BG,
-                        COLOR_TAG_TEXT,
-                        COLOR_TAG_BORDER,
-                    );
-                }
-            }
+        if let Some(status) = mine_status {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                mine_clicked = render_mine_button(ui, status, button_size);
+            });
         }
     });
 
     ui.add_space(6.0);
+    render_glossaries(ui, entry);
+    mine_clicked
+}
 
-    // 2. Glossaries / Senses
+/// Round `+` / `…` / `✔` button used to add an entry to the mining bank.
+fn render_mine_button(ui: &mut egui::Ui, status: crate::bank::MineStatus, size: f32) -> bool {
+    use crate::bank::MineStatus;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    let hovered = response.hovered() && status == MineStatus::Available;
+    let (fill, stroke, glyph, glyph_color) = match status {
+        MineStatus::Available => (
+            if hovered { Color32::from_rgb(14, 116, 144) } else { COLOR_TAG_BG },
+            COLOR_READING,
+            "+",
+            COLOR_HEADWORD,
+        ),
+        MineStatus::Pending => (COLOR_TAG_BG, COLOR_TAG_BORDER, "…", COLOR_TAG_TEXT),
+        MineStatus::Mined => (COLOR_FREQ_BG, COLOR_FREQ_BORDER, "✔", COLOR_FREQ_TEXT),
+    };
+    ui.painter()
+        .circle(rect.center(), size / 2.0 - 1.0, fill, egui::Stroke::new(1.5, stroke));
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        FontId::proportional(size * 0.6),
+        glyph_color,
+    );
+    let response = match status {
+        MineStatus::Available => {
+            if hovered {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            response.on_hover_text("Add to mining bank (B)")
+        }
+        MineStatus::Pending => response.on_hover_text("Saving…"),
+        MineStatus::Mined => response.on_hover_text("Already in the mining bank"),
+    };
+    status == MineStatus::Available && response.clicked()
+}
+
+/// Renders the headword, reading, frequency, deinflection and tag badges of an entry.
+pub fn render_entry_header(ui: &mut egui::Ui, entry: &TermEntry) {
+    // Headword
+    ui.label(
+        RichText::new(&entry.term)
+            .font(dict_font(50.0))
+            .strong()
+            .color(COLOR_HEADWORD),
+    );
+
+    // Kana reading if different from headword
+    if !entry.reading.is_empty() && entry.reading != entry.term {
+        ui.label(
+            RichText::new(format!("【{}】", entry.reading))
+                .font(dict_font(38.0))
+                .color(COLOR_READING),
+        );
+    }
+
+    // Frequency rank badge
+    if let Some(freq) = &entry.frequency {
+        render_pill_badge(
+            ui,
+            &freq.display_text(),
+            COLOR_FREQ_BG,
+            COLOR_FREQ_TEXT,
+            COLOR_FREQ_BORDER,
+        );
+    }
+
+    // Deinflection trail badge
+    if !entry.inflection_reasons.is_empty() {
+        let trail = entry.inflection_reasons.join(" ← ");
+        render_pill_badge(
+            ui,
+            &format!("← {trail}"),
+            COLOR_DEINFLECT_BG,
+            COLOR_DEINFLECT_TEXT,
+            Color32::TRANSPARENT,
+        );
+    }
+
+    // Part-of-speech & definition tags
+    if let Some(tags) = &entry.definition_tags {
+        for tag in tags.split_whitespace() {
+            if !tag.is_empty() {
+                render_pill_badge(
+                    ui,
+                    tag,
+                    COLOR_TAG_BG,
+                    COLOR_TAG_TEXT,
+                    COLOR_TAG_BORDER,
+                );
+            }
+        }
+    }
+}
+
+/// Renders all glossaries / senses of an entry.
+pub fn render_glossaries(ui: &mut egui::Ui, entry: &TermEntry) {
     for (g_idx, item) in entry.glossary.iter().enumerate() {
         match item {
             GlossaryEntry::Text(text) => {
@@ -159,7 +250,8 @@ pub fn render_pill_badge(
     fg: Color32,
     border: Color32,
 ) {
-    let padding = egui::vec2(14.0, 6.0);
+    let scale = dict_scale();
+    let padding = egui::vec2(14.0, 6.0) * scale;
     let font_id = dict_font(26.0);
     let galley = ui.painter().layout_no_wrap(text.to_string(), font_id, fg);
 
@@ -168,7 +260,7 @@ pub fn render_pill_badge(
 
     ui.painter().rect(
         rect,
-        8.0,
+        8.0 * scale,
         bg,
         egui::Stroke::new(1.2, border),
     );
@@ -1192,6 +1284,81 @@ fn append_styled_text(job: &mut LayoutJob, text: &str, bold: bool, italic: bool)
             ..Default::default()
         },
     );
+}
+
+/// Strips HTML tags from a plain glossary string.
+fn strip_html_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_tag = false;
+    for c in text.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.trim().to_string()
+}
+
+/// Builds a plain-text summary of all senses of an entry, one sense per line, numbered
+/// like the popup ("① to eat; ...") when there is more than one sense.
+pub fn glossary_plain_text(entry: &TermEntry) -> String {
+    let mut senses: Vec<String> = Vec::new();
+    for item in &entry.glossary {
+        match item {
+            GlossaryEntry::Text(text) => {
+                let text = strip_html_tags(text);
+                if !text.is_empty() {
+                    senses.push(text);
+                }
+            }
+            GlossaryEntry::Structured(val) => {
+                if let Some((term, reasons)) = as_deinflection_glossary(val) {
+                    senses.push(if reasons.is_empty() {
+                        term.to_string()
+                    } else {
+                        format!("{term} ({})", reasons.join(", "))
+                    });
+                    continue;
+                }
+                let mut sense_nodes = Vec::new();
+                collect_nodes_by_data_content(val, "sense", &mut sense_nodes);
+                if sense_nodes.is_empty() {
+                    let text = extract_plain_text_excluding_extras(val);
+                    if !text.is_empty() {
+                        senses.push(text);
+                    }
+                }
+                for sense in sense_nodes {
+                    let mut defs = Vec::new();
+                    if let Some(glossary_node) = find_node_by_data_content(sense, "glossary") {
+                        collect_definitions(glossary_node, &mut defs);
+                    }
+                    let text = if defs.is_empty() {
+                        extract_plain_text_excluding_extras(sense)
+                    } else {
+                        defs.join("; ")
+                    };
+                    if !text.is_empty() {
+                        senses.push(text);
+                    }
+                }
+            }
+        }
+    }
+    if senses.len() <= 1 {
+        return senses.pop().unwrap_or_default();
+    }
+    senses
+        .iter()
+        .enumerate()
+        .map(|(i, s)| match CIRCLED_NUMBERS.get(i) {
+            Some(n) => format!("{n} {s}"),
+            None => format!("{}. {s}", i + 1),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]

@@ -73,3 +73,20 @@ RAM-backed `/tmp`; no recording is added to your save folder.
 **Ctrl+Shift+C** copies only the audio of the last 7 seconds as an MP3
 attachment (for example, to paste into Discord). It replaces any clip
 previously copied with Ctrl+C, and vice versa.
+
+## Mining bank
+
+While an OCR dictionary popup is open, click the round **+** next to a
+dictionary entry to mine it. This saves the dictionary entry as shown in the
+popup (word, reading, frequency, part-of-speech/JMdict tags and all senses,
+without Jitendex example sentences), the sentence it came from (only the sentence that contains the word)
+and a screenshot of the video taken at the moment you click. The screenshot
+includes shaders but no overlays or black bars, and is downscaled to 720p
+(or its aspect-ratio equivalent) when larger. The button turns into a ✔ once
+the word is saved.
+
+Press **B** to open the **Mining Bank** window, which lists all mined words
+with the most recent at the top, each showing the dictionary entry, the
+sentence and a screenshot thumbnail. Click a thumbnail to enlarge it, or use 🗑
+to delete an entry. The bank
+is stored in `~/.config/michadame/bank/bank.db`.

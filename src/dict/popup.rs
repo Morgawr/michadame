@@ -21,19 +21,25 @@ fn popup_identity(popup: &DictPopupState) -> u64 {
 }
 
 /// Renders the word highlight and interactive popup window on top of the video feed.
+///
+/// `mine_status` returns the mining-bank state of an entry (shown as a `+` button).
+/// Returns the index of the entry whose mining button was clicked, if any.
 pub fn draw_dict_popup(
     ui: &mut egui::Ui,
     popup_state: &mut Option<DictPopupState>,
     video_rect: egui::Rect,
     show_highlight: bool,
-) {
+    mine_status: impl Fn(&super::models::TermEntry) -> crate::bank::MineStatus,
+) -> Option<usize> {
     let Some(popup) = popup_state else {
-        return;
+        return None;
     };
 
     if popup.entries.is_empty() {
-        return;
+        return None;
     }
+
+    let mut mine_clicked: Option<usize> = None;
 
     // 1. Draw glowing highlight over the recognized word boundary (if highlight is not hidden)
     if show_highlight {
@@ -127,7 +133,9 @@ pub fn draw_dict_popup(
                 let scroll_output = scroll_area.show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(8.0, 5.0);
                     for (idx, entry) in popup.entries.iter().enumerate() {
-                        render_term_entry(ui, entry, idx);
+                        if render_term_entry(ui, entry, idx, Some(mine_status(entry))) {
+                            mine_clicked = Some(idx);
+                        }
                     }
                 });
                 let offset = scroll_output.state.offset.y;
@@ -156,6 +164,7 @@ pub fn draw_dict_popup(
             popup.last_hover_time = std::time::Instant::now();
         }
     }
+    mine_clicked
 }
 
 /// Placement result containing the top-left position and dimensions for the popup.

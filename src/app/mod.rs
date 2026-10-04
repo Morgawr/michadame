@@ -122,6 +122,7 @@ impl Default for AppState {
             fft_available_masks: Vec::new(),
             ocr: crate::ocr::OcrState::default(),
             dict: crate::dict::DictState::default(),
+            bank: crate::bank::BankState::default(),
             config_load_error: None,
             config_quarantine_path: None,
         }
@@ -343,6 +344,14 @@ impl eframe::App for AppState {
         if ctx.input(|i| i.key_pressed(egui::Key::M)) {
             self.ui.control_window_open = !self.ui.control_window_open;
         }
+        if !ctx.wants_keyboard_input()
+            && ctx.input(|i| i.modifiers.is_none() && i.key_pressed(egui::Key::B))
+        {
+            self.bank.window_open = !self.bank.window_open;
+            if !self.bank.window_open {
+                self.bank.enlarged = None;
+            }
+        }
 
         if ctx.input(|i| i.viewport().close_requested()) {
             if self.ui.video_window_open && !self.ui.show_quit_dialog {
@@ -559,6 +568,18 @@ impl eframe::App for AppState {
                 }
             }
         }
+
+        for message in self.bank.poll() {
+            match message {
+                Ok(info) => self.info(info),
+                Err(err) => self.error(err),
+            }
+            repaint_requested = true;
+        }
+        if self.bank.is_busy() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+        ui::bank::draw_bank_window(self, ctx);
 
         self.update_fps_counters(ctx);
         ui::debug::draw(self, ctx);
