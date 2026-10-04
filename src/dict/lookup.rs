@@ -261,6 +261,7 @@ pub fn lookup_word_at_pointer(
                 is_popup_hovered: false,
                 popup_rect: None,
                 last_hover_time: std::time::Instant::now(),
+                last_word_hover_time: std::time::Instant::now(),
             });
         }
     }

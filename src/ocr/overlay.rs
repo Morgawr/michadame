@@ -216,8 +216,22 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
                         freq_db,
                         crate::dict::global_deinflector(),
                     );
-                    if lookup.is_some() {
-                        state.dict.popup = lookup;
+                    if let Some(new_popup) = lookup {
+                        // Don't jump to a neighboring word right after leaving the current
+                        // word/popup: the cursor may just be passing over it on its way to
+                        // the popup.
+                        let wait = state.dict.popup.as_ref().and_then(|current| {
+                            crate::dict::popup::popup_switch_wait(
+                                current,
+                                &new_popup,
+                                pos,
+                                crate::dict::popup::POPUP_SWITCH_DELAY,
+                            )
+                        });
+                        match wait {
+                            Some(remaining) => ui.ctx().request_repaint_after(remaining),
+                            None => state.dict.popup = Some(new_popup),
+                        }
                     } else if let Some(ref popup) = state.dict.popup {
                         if popup.last_hover_time.elapsed() < grace_period {
                             let remaining =

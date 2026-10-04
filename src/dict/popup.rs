@@ -6,6 +6,36 @@ const POPUP_BG: Color32 = Color32::from_rgb(22, 24, 30);
 const POPUP_STROKE: Color32 = Color32::from_rgb(51, 65, 85);
 const WORD_HIGHLIGHT_FILL: Color32 = Color32::from_rgba_premultiplied(56, 189, 248, 45);
 const WORD_HIGHLIGHT_STROKE: Color32 = Color32::from_rgb(56, 189, 248);
+/// After the cursor leaves the popup or the highlighted word, hovering a different word
+/// only replaces the popup once this much time has passed.
+pub const POPUP_SWITCH_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// True if `pos` is over the highlighted word (including parts wrapped onto other lines).
+fn pointer_on_word(popup: &DictPopupState, pos: egui::Pos2) -> bool {
+    std::iter::once(&popup.word_rect)
+        .chain(popup.extra_word_rects.iter())
+        .any(|r| r.expand(2.0).contains(pos))
+}
+
+/// Decides whether `new` (the word under the cursor at `pos`) may replace the `current`
+/// popup. Returns `None` if it may, or the remaining wait otherwise: the cursor is still on
+/// the current word, or left it / the popup less than `delay` ago.
+pub fn popup_switch_wait(
+    current: &DictPopupState,
+    new: &DictPopupState,
+    pos: egui::Pos2,
+    delay: std::time::Duration,
+) -> Option<std::time::Duration> {
+    let same_word = current.source_text == new.source_text && current.char_range == new.char_range;
+    if same_word {
+        return None;
+    }
+    if pointer_on_word(current, pos) {
+        return Some(delay);
+    }
+    let elapsed = current.last_word_hover_time.elapsed();
+    (elapsed < delay).then(|| delay - elapsed)
+}
 
 /// Hash identifying what a popup shows (which lookup, which entries). Changes whenever the
 /// popup switches to a different word, so per-popup UI state like scrolling can be reset.
@@ -157,11 +187,15 @@ pub fn draw_dict_popup(
     popup.popup_rect = Some(area_response.response.rect);
     popup.is_popup_hovered = is_pointer_in_popup;
     if let Some(ptr) = ui.input(|i| i.pointer.hover_pos()) {
+        let now = std::time::Instant::now();
         if is_pointer_in_popup
             || popup.word_rect.expand(6.0).contains(ptr)
             || popup.box_rect.contains(ptr)
         {
-            popup.last_hover_time = std::time::Instant::now();
+            popup.last_hover_time = now;
+        }
+        if is_pointer_in_popup || pointer_on_word(popup, ptr) {
+            popup.last_word_hover_time = now;
         }
     }
     mine_clicked
@@ -249,6 +283,49 @@ pub fn calculate_clamped_popup_pos(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
+
+    fn popup_at(x: f32, char_range: (usize, usize), last_word_hover_time: Instant) -> DictPopupState {
+        let word_rect = egui::Rect::from_min_size(egui::pos2(x, 100.0), egui::vec2(40.0, 30.0));
+        DictPopupState {
+            matched_term: "語".into(),
+            source_text: "今日は暑いね".into(),
+            char_range,
+            word_rect,
+            extra_word_rects: vec![],
+            box_rect: egui::Rect::from_min_size(egui::pos2(0.0, 100.0), egui::vec2(400.0, 30.0)),
+            entries: vec![],
+            is_popup_hovered: false,
+            popup_rect: None,
+            last_hover_time: last_word_hover_time,
+            last_word_hover_time,
+        }
+    }
+
+    #[test]
+    fn switching_to_another_word_waits_after_leaving_current_word() {
+        let delay = Duration::from_millis(300);
+        let on_next_word = egui::pos2(70.0, 110.0);
+        let next = popup_at(60.0, (3, 5), Instant::now());
+
+        // Just left the current word: the neighbor must wait out the remaining delay.
+        let current = popup_at(0.0, (0, 2), Instant::now());
+        let wait = popup_switch_wait(&current, &next, on_next_word, delay).unwrap();
+        assert!(wait > Duration::from_millis(250) && wait <= delay);
+
+        // Left long enough ago: switch immediately.
+        let stale = Instant::now() - Duration::from_millis(400);
+        let current = popup_at(0.0, (0, 2), stale);
+        assert_eq!(popup_switch_wait(&current, &next, on_next_word, delay), None);
+
+        // Still on the current word (e.g. overlapping lookup): never switch.
+        assert!(popup_switch_wait(&current, &next, egui::pos2(10.0, 110.0), delay).is_some());
+
+        // Same word is always accepted.
+        let same = popup_at(0.0, (0, 2), Instant::now());
+        let current = popup_at(0.0, (0, 2), Instant::now());
+        assert_eq!(popup_switch_wait(&current, &same, egui::pos2(10.0, 110.0), delay), None);
+    }
 
     #[test]
     fn test_calculate_clamped_popup_pos_stays_in_video_rect() {

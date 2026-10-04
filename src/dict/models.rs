@@ -108,6 +108,11 @@ pub struct DictPopupState {
     pub popup_rect: Option<egui::Rect>,
     /// Timestamp of when this popup/word was last hovered, for persistence
     pub last_hover_time: std::time::Instant,
+    /// Timestamp of when the cursor was last over the popup window or the highlighted word
+    /// itself (not just the containing OCR box). Switching to a different word is delayed
+    /// until `POPUP_SWITCH_DELAY` after this, so the cursor can travel from the word to the
+    /// popup across neighboring words without replacing the popup.
+    pub last_word_hover_time: std::time::Instant,
 }
 
 /// Background events sent between worker threads and the UI.
