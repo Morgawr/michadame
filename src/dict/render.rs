@@ -39,8 +39,8 @@ const COLOR_TAG_TEXT: Color32 = Color32::from_rgb(148, 163, 184);
 const COLOR_DEFINITION: Color32 = Color32::from_rgb(226, 232, 240);
 const COLOR_EXAMPLE_JA: Color32 = Color32::from_rgb(241, 245, 249);
 const COLOR_EXAMPLE_EN: Color32 = Color32::from_rgb(203, 213, 225);
-const COLOR_EXAMPLE_BG: Color32 = Color32::from_rgba_premultiplied(30, 41, 59, 140);
-const COLOR_RUBY: Color32 = Color32::from_rgb(56, 189, 248);
+const COLOR_EXAMPLE_BG: Color32 = Color32::from_rgba_premultiplied(30, 41, 59, 70);
+const COLOR_RUBY: Color32 = Color32::from_rgb(125, 211, 252);
 const COLOR_MUTED: Color32 = Color32::from_rgb(100, 116, 139);
 const COLOR_FREQ_BG: Color32 = Color32::from_rgb(19, 78, 74);
 const COLOR_FREQ_BORDER: Color32 = Color32::from_rgb(20, 184, 166);
@@ -84,7 +84,7 @@ pub fn render_term_entry(
         };
         ui.allocate_ui_with_layout(
             egui::vec2(header_width, 0.0),
-            egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
+            egui::Layout::top_down(egui::Align::LEFT),
             |ui| render_entry_header(ui, entry, is_mined),
         );
         if let Some(status) = mine_status {
@@ -136,64 +136,115 @@ fn render_mine_button(ui: &mut egui::Ui, status: crate::bank::MineStatus, size: 
     status == MineStatus::Available && response.clicked()
 }
 
+/// Combines a headword and its bracketed kana reading into a single `LayoutJob`,
+/// ensuring typographic baseline alignment across differing font sizes.
+pub fn build_headword_reading_job(
+    term: &str,
+    reading: &str,
+    term_size: f32,
+    reading_size: f32,
+    term_color: Color32,
+    reading_color: Color32,
+) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    job.append(
+        term,
+        0.0,
+        TextFormat {
+            font_id: dict_font(term_size),
+            color: term_color,
+            ..Default::default()
+        },
+    );
+    if !reading.is_empty() && reading != term {
+        let space = (term_size * 0.16).max(5.0) * dict_scale();
+        job.append(
+            &format!("【{}】", reading),
+            space,
+            TextFormat {
+                font_id: dict_font(reading_size),
+                color: reading_color,
+                ..Default::default()
+            },
+        );
+    }
+    job
+}
+
 /// Renders the headword, reading, frequency, deinflection and tag badges of an entry.
 pub fn render_entry_header(ui: &mut egui::Ui, entry: &TermEntry, is_mined: bool) {
-    // Headword
-    ui.label(
-        RichText::new(&entry.term)
-            .font(dict_font(50.0))
-            .strong()
-            .color(COLOR_HEADWORD),
-    );
+    let scale = dict_scale();
 
-    // Kana reading if different from headword
-    if !entry.reading.is_empty() && entry.reading != entry.term {
-        ui.label(
-            RichText::new(format!("【{}】", entry.reading))
-                .font(dict_font(38.0))
-                .color(COLOR_READING),
+    // Tier 1: Primary lexical info (Headword + Kana reading + Mined badge)
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(8.0 * scale, 4.0 * scale);
+
+        // Headword + Kana reading combined in a single LayoutJob for baseline alignment
+        let job = build_headword_reading_job(
+            &entry.term,
+            &entry.reading,
+            48.0,
+            34.0,
+            COLOR_HEADWORD,
+            COLOR_READING,
         );
-    }
+        ui.label(job);
 
-    // Mined badge / icon if already in the mining bank
-    if is_mined {
-        render_pill_badge(
-            ui,
-            "✔ Mined",
-            COLOR_MINED_BG,
-            COLOR_MINED_TEXT,
-            COLOR_MINED_BORDER,
-        )
-        .on_hover_text("Already in the mining bank");
-    }
+        // Mined badge / icon if already in the mining bank
+        if is_mined {
+            render_pill_badge(
+                ui,
+                "✔ Mined",
+                COLOR_MINED_BG,
+                COLOR_MINED_TEXT,
+                COLOR_MINED_BORDER,
+            )
+            .on_hover_text("Already in the mining bank");
+        }
+    });
 
-    // Frequency rank badge
-    if let Some(freq) = &entry.frequency {
-        render_pill_badge(
-            ui,
-            &freq.display_text(),
-            COLOR_FREQ_BG,
-            COLOR_FREQ_TEXT,
-            COLOR_FREQ_BORDER,
-        );
-    }
+    // Tier 2: Subordinate metadata row (frequency, deinflection trail, part of speech / definition tags)
+    let has_freq = entry.frequency.is_some();
+    let has_deinflect = !entry.inflection_reasons.is_empty();
+    let tags_to_show: Vec<&str> = entry
+        .definition_tags
+        .as_deref()
+        .unwrap_or("")
+        .split_whitespace()
+        .filter(|t| !t.is_empty() && *t != "★" && *t != "form" && *t != "P")
+        .collect();
+    let has_tags = !tags_to_show.is_empty();
 
-    // Deinflection trail badge
-    if !entry.inflection_reasons.is_empty() {
-        let trail = entry.inflection_reasons.join(" ← ");
-        render_pill_badge(
-            ui,
-            &format!("← {trail}"),
-            COLOR_DEINFLECT_BG,
-            COLOR_DEINFLECT_TEXT,
-            Color32::TRANSPARENT,
-        );
-    }
+    if has_freq || has_deinflect || has_tags {
+        ui.add_space(3.0 * scale);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(6.0 * scale, 4.0 * scale);
 
-    // Part-of-speech & definition tags
-    if let Some(tags) = &entry.definition_tags {
-        for tag in tags.split_whitespace() {
-            if !tag.is_empty() {
+            // Frequency rank badge
+            if let Some(freq) = &entry.frequency {
+                render_pill_badge(
+                    ui,
+                    &freq.display_text(),
+                    COLOR_FREQ_BG,
+                    COLOR_FREQ_TEXT,
+                    COLOR_FREQ_BORDER,
+                );
+            }
+
+            // Deinflection trail badge
+            if has_deinflect {
+                let trail = entry.inflection_reasons.join(" ← ");
+                render_pill_badge(
+                    ui,
+                    &format!("← {trail}"),
+                    COLOR_DEINFLECT_BG,
+                    COLOR_DEINFLECT_TEXT,
+                    Color32::from_rgba_premultiplied(147, 51, 234, 80),
+                );
+            }
+
+            // Part-of-speech & definition tags (excluding noise tags like ★ and form)
+            for tag in tags_to_show {
                 render_pill_badge(
                     ui,
                     tag,
@@ -202,7 +253,7 @@ pub fn render_entry_header(ui: &mut egui::Ui, entry: &TermEntry, is_mined: bool)
                     COLOR_TAG_BORDER,
                 );
             }
-        }
+        });
     }
 }
 
@@ -267,8 +318,8 @@ pub fn render_pill_badge(
     border: Color32,
 ) -> egui::Response {
     let scale = dict_scale();
-    let padding = egui::vec2(14.0, 6.0) * scale;
-    let font_id = dict_font(26.0);
+    let padding = egui::vec2(10.0, 4.0) * scale;
+    let font_id = dict_font(23.0);
     let galley = ui.painter().layout_no_wrap(text.to_string(), font_id, fg);
 
     let desired_size = galley.size() + padding * 2.0;
@@ -276,9 +327,9 @@ pub fn render_pill_badge(
 
     ui.painter().rect(
         rect,
-        8.0 * scale,
+        5.0 * scale,
         bg,
-        egui::Stroke::new(1.2, border),
+        egui::Stroke::new(1.0, border),
     );
 
     let text_pos = rect.min + padding;
@@ -481,12 +532,18 @@ fn render_sense(ui: &mut egui::Ui, sense_val: &serde_json::Value, index: usize) 
             .map(extract_en_sentence_text)
             .unwrap_or_default();
 
-        ui.add_space(5.0);
-        egui::Frame::none()
+        ui.add_space(4.0);
+        let accent_color = Color32::from_rgb(56, 189, 248); // sky-400 accent
+        let frame_resp = egui::Frame::none()
             .fill(COLOR_EXAMPLE_BG)
-            .rounding(8.0)
-            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(45, 55, 72)))
-            .inner_margin(egui::Margin::symmetric(14.0, 8.0))
+            .rounding(egui::Rounding { nw: 4.0, sw: 4.0, ne: 4.0, se: 4.0 })
+            .stroke(egui::Stroke::NONE)
+            .inner_margin(egui::Margin {
+                left: 14.0,
+                right: 10.0,
+                top: 6.0,
+                bottom: 6.0,
+            })
             .show(ui, |ui| {
                 // Japanese sentence with vertical ruby furigana
                 if let Some(ja) = ja_node {
@@ -494,18 +551,20 @@ fn render_sense(ui: &mut egui::Ui, sense_val: &serde_json::Value, index: usize) 
                 }
                 // English translation below
                 if !en_text.is_empty() {
-                    ui.add_space(4.0);
+                    ui.add_space(3.0);
                     ui.horizontal_wrapped(|ui| {
-                        ui.add_space(8.0);
+                        ui.add_space(4.0);
                         ui.label(
                             RichText::new(en_text)
-                                .font(dict_font(28.0))
+                                .font(dict_font(27.0))
                                 .italics()
                                 .color(COLOR_EXAMPLE_EN),
                         );
                     });
                 }
             });
+        let r = frame_resp.response.rect;
+        ui.painter().vline(r.min.x + 2.0, r.y_range(), egui::Stroke::new(2.5, accent_color));
     }
 
     // E. Cross references ("See also")
@@ -766,8 +825,24 @@ pub fn render_ruby_item(ui: &mut egui::Ui, base: &str, rt: &str) {
 
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, total_h), egui::Sense::hover());
 
+    let base_top = galley_base
+        .rows
+        .first()
+        .and_then(|r| r.glyphs.first())
+        .map(|g| g.pos.y + g.uv_rect.offset.y)
+        .unwrap_or(galley_base.size().y * 0.18);
+    let rt_glyph_bottom = galley_rt
+        .rows
+        .first()
+        .and_then(|r| r.glyphs.first())
+        .map(|g| g.pos.y + g.uv_rect.offset.y + g.uv_rect.size.y)
+        .unwrap_or(galley_rt.size().y * 0.80);
+    let ruby_gap = 2.0;
+    let target_bottom = base_y_offset + base_top - ruby_gap;
+    let rt_y = (target_bottom - rt_glyph_bottom).max(0.0);
+
     let rt_x = rect.min.x + (w - galley_rt.size().x) / 2.0;
-    ui.painter().galley(egui::pos2(rt_x, rect.min.y), galley_rt, COLOR_RUBY);
+    ui.painter().galley(egui::pos2(rt_x, rect.min.y + rt_y), galley_rt, COLOR_RUBY);
 
     let base_x = rect.min.x + (w - galley_base.size().x) / 2.0;
     ui.painter().galley(egui::pos2(base_x, rect.min.y + base_y_offset), galley_base, COLOR_EXAMPLE_JA);
@@ -791,6 +866,14 @@ fn render_ruby_flow(ui: &mut egui::Ui, segments: Vec<RubySegment>, badge: Option
     let sample_rt = ui.painter().layout_no_wrap("あ".to_string(), font_rt.clone(), COLOR_RUBY);
     let sample_base = ui.painter().layout_no_wrap("あ".to_string(), font_base.clone(), COLOR_EXAMPLE_JA);
     let (base_y_offset, total_h) = calculate_ruby_metrics(&sample_rt, &sample_base);
+    let base_top = sample_base
+        .rows
+        .first()
+        .and_then(|r| r.glyphs.first())
+        .map(|g| g.pos.y + g.uv_rect.offset.y)
+        .unwrap_or(sample_base.size().y * 0.18);
+    let ruby_gap = 2.0;
+    let target_bottom = base_y_offset + base_top - ruby_gap;
 
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(0.0, 4.0);
@@ -826,8 +909,16 @@ fn render_ruby_flow(ui: &mut egui::Ui, segments: Vec<RubySegment>, badge: Option
 
                     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, total_h), egui::Sense::hover());
 
+                    let rt_glyph_bottom = galley_rt
+                        .rows
+                        .first()
+                        .and_then(|r| r.glyphs.first())
+                        .map(|g| g.pos.y + g.uv_rect.offset.y + g.uv_rect.size.y)
+                        .unwrap_or(galley_rt.size().y * 0.80);
+                    let rt_y = (target_bottom - rt_glyph_bottom).max(0.0);
+
                     let rt_x = rect.min.x + (w - galley_rt.size().x) / 2.0;
-                    ui.painter().galley(egui::pos2(rt_x, rect.min.y), galley_rt, COLOR_RUBY);
+                    ui.painter().galley(egui::pos2(rt_x, rect.min.y + rt_y), galley_rt, COLOR_RUBY);
 
                     let base_x = rect.min.x + (w - galley_base.size().x) / 2.0;
                     ui.painter().galley(egui::pos2(base_x, rect.min.y + base_y_offset), galley_base, COLOR_EXAMPLE_JA);
@@ -1610,6 +1701,44 @@ mod tests {
         let base_glyph_top = base_y_offset + g_base.pos.y + g_base.uv_rect.offset.y;
         let gap = base_glyph_top - rt_glyph_bottom;
         assert!((gap - 2.0).abs() < 0.1, "Calculated visual gap was {gap} instead of 2.0");
+    }
+
+    #[test]
+    fn test_header_layout_job_baseline_alignment() {
+        let ctx = egui::Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "noto_sans_jp".to_owned(),
+            egui::FontData::from_static(include_bytes!("../../assets/NotoSansJP-Regular.ttf")),
+        );
+        fonts.families.insert(
+            egui::FontFamily::Name("GothicCJK".into()),
+            vec!["noto_sans_jp".to_owned()],
+        );
+        ctx.set_fonts(fonts);
+        let _ = ctx.begin_frame(egui::RawInput::default());
+
+        let job = build_headword_reading_job(
+            "暗い",
+            "くらい",
+            48.0,
+            34.0,
+            COLOR_HEADWORD,
+            COLOR_READING,
+        );
+
+        let galley = ctx.fonts(|f| f.layout_job(job));
+        assert_eq!(galley.rows.len(), 1);
+        let baseline_y = galley.rows[0].glyphs[0].pos.y;
+        for g in &galley.rows[0].glyphs {
+            assert!(
+                (g.pos.y - baseline_y).abs() < f32::EPSILON,
+                "Glyph '{}' pos.y ({}) did not match headword baseline ({})",
+                g.chr,
+                g.pos.y,
+                baseline_y
+            );
+        }
     }
 }
 
