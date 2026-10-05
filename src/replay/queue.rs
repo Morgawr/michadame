@@ -170,7 +170,7 @@ mod tests {
                 vec![tick; 16],
                 "Queued shader output was lost or overwritten"
             );
-            assert_eq!(schedule.accept(frame.at).unwrap().0, frame.at);
+            assert_eq!(schedule.accept(frame.at).unwrap().pts, frame.at);
             queue.recycle(frame.generation, frame.rgba);
         }
         assert_eq!(queue.len(), 0);

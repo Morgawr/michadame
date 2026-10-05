@@ -1,5 +1,5 @@
 use super::{
-    config::{Codec, Rate, RateControl, ReplayConfig},
+    config::{self, Rate, ReplayConfig},
     ring::Encoded,
 };
 use anyhow::{bail, ensure, Context, Result};
@@ -22,74 +22,15 @@ impl Drop for Buffer {
     }
 }
 
-fn video_options(
-    config: &ReplayConfig,
-    width: u32,
-    height: u32,
-    rate: Rate,
-) -> Result<ff::Dictionary<'static>> {
+fn video_options() -> ff::Dictionary<'static> {
     let mut options = ff::Dictionary::new();
     options.set("async_depth", "2");
-    match config.rate_control {
-        RateControl::Quality => {
-            options.set("rc_mode", "CQP");
-            options.set(
-                "global_quality",
-                &config.codec.quantizer(config.quality).to_string(),
-            );
-        }
-        RateControl::Bitrate => {
-            let peak = u64::from(config.max_bitrate_mbps) * 1_000_000;
-            options.set("rc_mode", "VBR");
-            options.set("b", &(peak * 3 / 4).to_string());
-            options.set("maxrate", &peak.to_string());
-            options.set("bufsize", &(peak * 2).to_string());
-            if config.codec == Codec::Av1 {
-                // FFmpeg guesses AV1 level from target bitrate, not maxrate.
-                // Account for peak bitrate and the padded VAAPI surface instead.
-                let (level, high_tier) = av1_level(width, height, rate, config.max_bitrate_mbps)
-                    .context("Replay dimensions/FPS/bitrate exceed supported AV1 levels")?;
-                options.set("level", &level.to_string());
-                options.set("tier", if high_tier { "high" } else { "main" });
-            }
-        }
-    }
-    Ok(options)
-}
-
-fn av1_level(width: u32, height: u32, rate: Rate, peak_mbps: u32) -> Option<(u8, bool)> {
-    // Limits from FFmpeg libavcodec/av1_levels.c (AV1 Annex A).
-    // Conservative rate check covers either 64- or 128-pixel VAAPI superblocks.
-    // index, max picture size, max width/height, display rate, main/high Mbit/s * 10
-    const LEVELS: &[(u8, u64, u32, u32, u64, u32, u32)] = &[
-        (0, 147456, 2048, 1152, 4423680, 15, 0),
-        (1, 278784, 2816, 1584, 8363520, 30, 0),
-        (4, 665856, 4352, 2448, 19975680, 60, 0),
-        (5, 1065024, 5504, 3096, 31950720, 100, 0),
-        (8, 2359296, 6144, 3456, 70778880, 120, 300),
-        (9, 2359296, 6144, 3456, 141557760, 200, 500),
-        (12, 8912896, 8192, 4352, 267386880, 300, 1000),
-        (13, 8912896, 8192, 4352, 534773760, 400, 1600),
-        (14, 8912896, 8192, 4352, 1069547520, 600, 2400),
-        (16, 35651584, 16384, 8704, 1069547520, 600, 2400),
-        (17, 35651584, 16384, 8704, 2139095040, 1000, 4800),
-        (18, 35651584, 16384, 8704, 4278190080, 1600, 8000),
-    ];
-    let w = u64::from(width).div_ceil(128) * 128;
-    let h = u64::from(height).div_ceil(128) * 128;
-    LEVELS
-        .iter()
-        .find(|(_, area, max_w, max_h, display, main, high)| {
-            w > 0
-                && h > 0
-                && w <= u64::from(*max_w)
-                && h <= u64::from(*max_h)
-                && w * h <= *area
-                && u128::from(w * h) * u128::from(rate.num)
-                    <= u128::from(*display) * u128::from(rate.den)
-                && u64::from(peak_mbps) * 10 <= u64::from((*main).max(*high))
-        })
-        .map(|(index, _, _, _, _, main, _)| (*index, u64::from(peak_mbps) * 10 > u64::from(*main)))
+    options.set("rc_mode", "VBR");
+    options.set("b", &config::VIDEO_BITRATE.to_string());
+    options.set("maxrate", &config::VIDEO_MAXRATE.to_string());
+    options.set("bufsize", &config::VIDEO_BUFSIZE.to_string());
+    options.set("profile", "high");
+    options
 }
 
 fn conversion_threads() -> usize {
@@ -169,10 +110,11 @@ impl VideoEncoder {
         unsafe { (*self.scaler.0).threads as usize }
     }
     /// Runs only on the recording worker; never opens a capture device.
-    pub fn new(config: &ReplayConfig, width: u32, height: u32, rate: Rate) -> Result<Self> {
+    pub fn new(config: &ReplayConfig, width: u32, height: u32) -> Result<Self> {
         ff::init()?;
+        let rate = Rate::new(config::OUTPUT_FPS, 1);
         let (coded_width, coded_height) = coded_size(width, height);
-        let codec = encoder::find_by_name(config.codec.encoder())
+        let codec = encoder::find_by_name(config::VIDEO_ENCODER)
             .context("Requested hardware encoder is unavailable in FFmpeg")?;
         let mut encoder = codec::context::Context::new_with_codec(codec)
             .encoder()
@@ -181,8 +123,8 @@ impl VideoEncoder {
         encoder.set_height(coded_height);
         encoder.set_format(format::Pixel::VAAPI);
         encoder.set_time_base((1, 1_000_000));
-        encoder.set_frame_rate(Some(Rational(rate.num as i32, rate.den as i32)));
-        encoder.set_gop((rate.num / rate.den).max(1));
+        encoder.set_frame_rate(Some(Rational(config::OUTPUT_FPS as i32, 1)));
+        encoder.set_gop(config::OUTPUT_FPS);
         encoder.set_max_b_frames(0);
         encoder.set_flags(codec::Flags::GLOBAL_HEADER);
         let mut device = Buffer(ptr::null_mut());
@@ -215,9 +157,9 @@ impl VideoEncoder {
             (*encoder.as_mut_ptr()).colorspace = ffi::AVColorSpace::AVCOL_SPC_BT709;
             (*encoder.as_mut_ptr()).color_primaries = ffi::AVColorPrimaries::AVCOL_PRI_BT709;
             (*encoder.as_mut_ptr()).color_trc =
-                ffi::AVColorTransferCharacteristic::AVCOL_TRC_IEC61966_2_1;
+                ffi::AVColorTransferCharacteristic::AVCOL_TRC_BT709;
         }
-        let options = video_options(config, coded_width, coded_height, rate)?;
+        let options = video_options();
         let encoder = encoder.open_with(options).context(
             "Hardware encoder rejected the selected settings/rate-control mode; no unbounded or software fallback was started",
         )?;
@@ -239,24 +181,8 @@ impl VideoEncoder {
         set_display_crop(&mut parameters, self.width, self.height)?;
         Ok(parameters)
     }
-    pub fn encode(&mut self, rgba: &[u8], pts: i64, key: bool) -> Result<Vec<Encoded>> {
-        ensure!(
-            rgba.len() == self.width as usize * self.height as usize * 4,
-            "Wrong replay surface length"
-        );
+    fn send_hardware_frame(&mut self, pts: i64, key: bool) -> Result<Vec<Encoded>> {
         let mut hardware = frame::Video::empty();
-        let conversion_started = std::time::Instant::now();
-        unsafe {
-            check(ffi::av_frame_make_writable(self.sw.as_mut_ptr()))?;
-            convert_rgba(
-                &mut self.scaler,
-                &mut self.sw,
-                rgba,
-                self.width,
-                self.height,
-            )?;
-        }
-        self.timings.conversion_ms += conversion_started.elapsed().as_secs_f64() * 1000.;
         let hardware_started = std::time::Instant::now();
         unsafe {
             check(ffi::av_hwframe_get_buffer(
@@ -294,6 +220,28 @@ impl VideoEncoder {
         self.timings.frames += 1;
         Ok(packets)
     }
+    pub fn repeat(&mut self, pts: i64, key: bool) -> Result<Vec<Encoded>> {
+        self.send_hardware_frame(pts, key)
+    }
+    pub fn encode(&mut self, rgba: &[u8], pts: i64, key: bool) -> Result<Vec<Encoded>> {
+        ensure!(
+            rgba.len() == self.width as usize * self.height as usize * 4,
+            "Wrong replay surface length"
+        );
+        let conversion_started = std::time::Instant::now();
+        unsafe {
+            check(ffi::av_frame_make_writable(self.sw.as_mut_ptr()))?;
+            convert_rgba(
+                &mut self.scaler,
+                &mut self.sw,
+                rgba,
+                self.width,
+                self.height,
+            )?;
+        }
+        self.timings.conversion_ms += conversion_started.elapsed().as_secs_f64() * 1000.;
+        self.send_hardware_frame(pts, key)
+    }
 }
 
 pub struct AudioEncoder {
@@ -302,36 +250,37 @@ pub struct AudioEncoder {
 impl AudioEncoder {
     pub fn new() -> Result<Self> {
         let codec =
-            encoder::find_by_name("libopus").context("FFmpeg libopus encoder is unavailable")?;
+            encoder::find_by_name("aac").context("FFmpeg aac encoder is unavailable")?;
         let mut encoder = codec::context::Context::new_with_codec(codec)
             .encoder()
             .audio()?;
         encoder.set_rate(48000);
         encoder.set_channel_layout(ff::ChannelLayout::STEREO);
-        encoder.set_format(format::Sample::F32(format::sample::Type::Packed));
+        encoder.set_format(format::Sample::F32(format::sample::Type::Planar));
         encoder.set_time_base((1, 48000));
-        encoder.set_bit_rate(192000);
+        encoder.set_bit_rate(super::config::AUDIO_BITRATE);
         encoder.set_flags(codec::Flags::GLOBAL_HEADER);
-        let mut options = ff::Dictionary::new();
-        options.set("application", "audio");
-        options.set("frame_duration", "20");
-        let encoder = encoder.open_with(options)?;
-        ensure!(encoder.frame_size() == 960, "Unexpected Opus frame size");
+        let encoder = encoder.open()?;
+        ensure!(encoder.frame_size() == super::config::AUDIO_FRAME_SIZE as u32, "Unexpected AAC frame size");
         Ok(Self { encoder })
     }
     pub fn parameters(&self) -> codec::Parameters {
         codec::Parameters::from(&self.encoder)
     }
     pub fn encode(&mut self, samples: &[[f32; 2]], pts: i64) -> Result<Vec<Encoded>> {
-        ensure!(samples.len() == 960, "Expected 20ms audio block");
+        ensure!(samples.len() == super::config::AUDIO_FRAME_SIZE, "Expected 1024 audio samples");
         let mut frame = frame::Audio::new(
-            format::Sample::F32(format::sample::Type::Packed),
-            960,
+            format::Sample::F32(format::sample::Type::Planar),
+            super::config::AUDIO_FRAME_SIZE,
             ff::ChannelLayout::STEREO,
         );
         frame.set_rate(48000);
         frame.set_pts(Some(pts));
-        frame.data_mut(0)[..960 * 8].copy_from_slice(bytemuck::cast_slice(samples));
+        for channel in 0..2 {
+            for (out, input) in frame.plane_mut::<f32>(channel).iter_mut().zip(samples.iter()) {
+                *out = input[channel];
+            }
+        }
         self.encoder.send_frame(&frame)?;
         let mut packets = Vec::new();
         loop {
@@ -353,7 +302,7 @@ impl AudioEncoder {
 impl Drop for AudioEncoder {
     fn drop(&mut self) {
         // Live recording deliberately leaves the final delayed packet unsaved on
-        // cancellation. Drain it on the worker so libopus closes cleanly.
+        // cancellation. Drain it on the worker so AAC closes cleanly.
         if self.encoder.send_eof().is_ok() {
             let mut packet = Packet::empty();
             while self.encoder.receive_packet(&mut packet).is_ok() {}
@@ -371,21 +320,22 @@ pub fn export(
 }
 
 pub fn export_clipboard(
-    file: std::fs::File,
+    path: &std::path::Path,
     limit: usize,
     video: codec::Parameters,
     audio: codec::Parameters,
     packets: Vec<std::sync::Arc<Encoded>>,
-) -> Result<()> {
-    let io = format::context::StreamIo::from_write_seek(super::clipboard::LimitedFile::new(
-        file, limit,
-    ))?;
-    export_output(
-        format::output_to_stream(io, None, Some("mp4"))?,
-        video,
-        audio,
-        packets,
-    )
+) -> Result<usize> {
+    export(path, video, audio, packets)?;
+    let size = std::fs::metadata(path)?.len() as usize;
+    if size > limit {
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .and_then(|f| f.set_len(0));
+        anyhow::bail!("Clipboard clip exceeded its RAM reservation ({size} > {limit})");
+    }
+    Ok(size)
 }
 
 fn export_output(
@@ -410,11 +360,15 @@ fn export_output(
                 stream.set_rate(Rational(rate.num, rate.den));
                 stream.set_avg_frame_rate(Rational(rate.num, rate.den));
             }
+            stream.set_time_base((1, 15360));
+        } else {
+            stream.set_time_base((1, 48000));
         }
         stream.set_parameters(parameters);
-        stream.set_time_base((1, 1_000_000));
     }
-    output.write_header()?;
+    let mut options = ff::Dictionary::new();
+    options.set("movflags", "+faststart");
+    output.write_header_with(options)?;
     for p in packets {
         let mut packet = p.packet.clone();
         let index = usize::from(!p.video);
@@ -429,8 +383,10 @@ fn export_output(
     // Surface custom-IO errors, including a reservation exceeded during the trailer.
     unsafe {
         let pb = (*output.as_mut_ptr()).pb;
-        ffi::avio_flush(pb);
-        check((*pb).error)?;
+        if !pb.is_null() {
+            ffi::avio_flush(pb);
+            check((*pb).error)?;
+        }
     }
     Ok(())
 }
@@ -737,8 +693,8 @@ mod tests {
         history.push(Encoded::new(key, true), usize::MAX);
         // 20 s of 440 Hz; packets for 10.0–10.5 s are lost.
         for block in 0..1000i64 {
-            let at = block * 960;
-            let samples: Vec<[f32; 2]> = (0..960)
+            let at = block * 1024;
+            let samples: Vec<[f32; 2]> = (0..1024)
                 .map(|i| {
                     let v = (((at + i) as f32 / 48000.) * 440. * std::f32::consts::TAU).sin() * 0.3;
                     [v, v]
@@ -830,79 +786,29 @@ mod tests {
     #[test]
     fn replay_rate_control_options_parse_without_opening_hardware() {
         ff::init().unwrap();
-        for codec in [Codec::Av1, Codec::Hevc, Codec::H264] {
-            for mode in [RateControl::Bitrate, RateControl::Quality] {
-                let config = ReplayConfig {
-                    codec,
-                    rate_control: mode,
-                    ..Default::default()
-                };
-                let options = video_options(&config, 3072, 2160, Rate::new(60, 1)).unwrap();
-                let encoder = encoder::find_by_name(codec.encoder()).unwrap();
-                // Allocation and AVOption parsing only; never avcodec_open2,
-                // hwdevice creation or access to a render/capture device.
-                let mut context = codec::context::Context::new_with_codec(encoder);
-                for (key, value) in options.iter() {
-                    let key = CString::new(key).unwrap();
-                    let value = CString::new(value).unwrap();
-                    unsafe {
-                        check(ffi::av_opt_set(
-                            context.as_mut_ptr().cast(),
-                            key.as_ptr(),
-                            value.as_ptr(),
-                            ffi::AV_OPT_SEARCH_CHILDREN,
-                        ))
-                        .unwrap();
-                    }
-                }
-                unsafe {
-                    let ctx = &*context.as_ptr();
-                    assert_eq!(ctx.flags & ffi::AV_CODEC_FLAG_QSCALE as i32, 0);
-                    if mode == RateControl::Bitrate {
-                        assert_eq!(ctx.bit_rate, 30_000_000);
-                        assert_eq!(ctx.rc_max_rate, 40_000_000);
-                        assert_eq!(ctx.rc_buffer_size, 80_000_000);
-                        assert!(options.get("global_quality").is_none());
-                        if codec == Codec::Av1 {
-                            assert_eq!(options.get("level"), Some("13"));
-                            assert_eq!(options.get("tier"), Some("main"));
-                        }
-                    } else {
-                        assert_eq!(
-                            ctx.global_quality,
-                            if codec == Codec::Av1 { 100 } else { 20 }
-                        );
-                        assert_eq!(options.get("rc_mode"), Some("CQP"));
-                        assert!(options.get("b").is_none());
-                        assert!(options.get("maxrate").is_none());
-                    }
-                }
+        let options = video_options();
+        let encoder = encoder::find_by_name(config::VIDEO_ENCODER).unwrap();
+        let mut context = codec::context::Context::new_with_codec(encoder);
+        for (key, value) in options.iter() {
+            let key = CString::new(key).unwrap();
+            let value = CString::new(value).unwrap();
+            unsafe {
+                check(ffi::av_opt_set(
+                    context.as_mut_ptr().cast(),
+                    key.as_ptr(),
+                    value.as_ptr(),
+                    ffi::AV_OPT_SEARCH_CHILDREN,
+                ))
+                .unwrap();
             }
         }
-    }
-
-    #[test]
-    fn av1_level_accounts_for_peak_bitrate_tier_and_fractional_frame_rate() {
-        assert_eq!(
-            av1_level(3072, 2160, Rate::new(60, 1), 40),
-            Some((13, false))
-        );
-        // Choose tier from the 40 Mbit peak, not just the 30 Mbit target.
-        assert_eq!(
-            av1_level(1920, 1080, Rate::new(60000, 1001), 40),
-            Some((9, true))
-        );
-        assert_eq!(
-            av1_level(3072, 2160, Rate::new(60, 1), 200),
-            Some((14, true))
-        );
-        assert_eq!(
-            av1_level(3840, 2160, Rate::new(120, 1), 40),
-            Some((14, false))
-        );
-        assert_eq!(av1_level(16385, 1080, Rate::new(60, 1), 40), None);
-        assert_eq!(av1_level(u32::MAX, u32::MAX, Rate::new(60, 1), 40), None);
-        assert_eq!(av1_level(0, 1080, Rate::new(60, 1), 40), None);
+        unsafe {
+            let ctx = &*context.as_ptr();
+            assert_eq!(ctx.flags & ffi::AV_CODEC_FLAG_QSCALE as i32, 0);
+            assert_eq!(ctx.bit_rate, config::VIDEO_BITRATE as i64);
+            assert_eq!(ctx.rc_max_rate, config::VIDEO_MAXRATE as i64);
+            assert_eq!(ctx.rc_buffer_size, config::VIDEO_BUFSIZE as i32);
+        }
     }
     #[test]
     fn coded_size_preserves_even_resolutions_and_aligns_odd_to_two() {
@@ -1121,6 +1027,7 @@ mod tests {
         let mut history = super::super::ring::History::new(10);
         let epoch = 4_000_000i64;
         let mut schedule = super::super::worker::VideoSchedule::new(epoch);
+        let mut audio_samples_emitted = 0i64;
         for tick in 0..90 {
             let missing = drop_frames
                 && (tick == 6
@@ -1130,8 +1037,9 @@ mod tests {
             if !missing {
                 let at = epoch + tick * 1_000_000 / 30
                     - if jitter && tick % 2 == 1 { 24_000 } else { 0 };
-                let (pts, key) = schedule.accept(at).unwrap();
-                assert_eq!(pts, at);
+                let output = schedule.accept(at).unwrap();
+                let pts = output.pts;
+                let key = output.key;
                 let mut f = frame::Video::new(format::Pixel::YUV420P, 64, 48);
                 f.data_mut(0).fill(if tick < 45 { 40 } else { 180 });
                 f.data_mut(1).fill(128);
@@ -1150,25 +1058,27 @@ mod tests {
                     p = Packet::empty();
                 }
             }
-            if tick % 3 == 0 {
-                for j in 0..5 {
-                    let at = tick / 3 * 4800 + j * 960;
-                    let samples: Vec<[f32; 2]> = (0..960)
-                        .map(|i| {
-                            let v = (((at + i) as f32 / 48000.) * 440. * std::f32::consts::TAU)
-                                .sin()
-                                * 0.2;
-                            [v, v]
-                        })
-                        .collect();
-                    for mut p in audio.encode(&samples, at).unwrap() {
-                        p.packet.set_pts(p.packet.pts().map(|t| t + epoch));
-                        p.packet.set_dts(p.packet.dts().map(|t| t + epoch));
-                        p.start += epoch;
-                        p.end += epoch;
-                        history.push(p, 10_000_000);
-                    }
+            let target_samples = ((tick + 1) as i64 * 48_000 + 29) / 30;
+            while audio_samples_emitted + super::config::AUDIO_FRAME_SIZE as i64 <= target_samples {
+                let audio_block_at = audio_samples_emitted;
+                let samples: Vec<[f32; 2]> = (0..super::config::AUDIO_FRAME_SIZE)
+                    .map(|i| {
+                        let v = (((audio_block_at + i as i64) as f32 / 48000.)
+                            * 440.
+                            * std::f32::consts::TAU)
+                            .sin()
+                            * 0.2;
+                        [v, v]
+                    })
+                    .collect();
+                for mut p in audio.encode(&samples, audio_block_at).unwrap() {
+                    p.packet.set_pts(p.packet.pts().map(|t| t + epoch));
+                    p.packet.set_dts(p.packet.dts().map(|t| t + epoch));
+                    p.start += epoch;
+                    p.end += epoch;
+                    history.push(p, 10_000_000);
                 }
+                audio_samples_emitted += super::config::AUDIO_FRAME_SIZE as i64;
             }
         }
         let clip = history
@@ -1216,7 +1126,7 @@ mod tests {
         // Exercise the actual bounded clipboard muxer without touching any clipboard.
         let temporary = tempfile::NamedTempFile::new_in("/tmp").unwrap();
         export_clipboard(
-            temporary.as_file().try_clone().unwrap(),
+            temporary.path(),
             bytes.len() + 1024,
             vp.clone(),
             audio.parameters(),
@@ -1230,7 +1140,7 @@ mod tests {
         );
         let too_small = tempfile::NamedTempFile::new_in("/tmp").unwrap();
         assert!(export_clipboard(
-            too_small.as_file().try_clone().unwrap(),
+            too_small.path(),
             128,
             vp,
             audio.parameters(),
@@ -1243,6 +1153,9 @@ mod tests {
             b"ftyp",
             "Must write an MP4 container, not just rename Matroska"
         );
+        let moov_pos = bytes.windows(4).position(|w| w == b"moov").expect("must have moov");
+        let mdat_pos = bytes.windows(4).position(|w| w == b"mdat").expect("must have mdat");
+        assert!(moov_pos < mdat_pos, "moov box must precede mdat box (+faststart)");
         let mut input = format::input(&path).unwrap();
         assert_eq!(input.nb_streams(), 2);
         let vs = input.streams().best(ff::media::Type::Video).unwrap();
@@ -1270,7 +1183,7 @@ mod tests {
         let audio_stream = input.streams().best(ff::media::Type::Audio).unwrap();
         let ai = audio_stream.index();
         let atb = audio_stream.time_base();
-        assert_eq!(audio_stream.parameters().id(), codec::Id::OPUS);
+        assert_eq!(audio_stream.parameters().id(), codec::Id::AAC);
         let mut ad = codec::context::Context::from_parameters(audio_stream.parameters())
             .unwrap()
             .decoder()

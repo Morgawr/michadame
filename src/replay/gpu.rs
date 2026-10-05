@@ -456,16 +456,18 @@ mod tests {
                 continue;
             }
             while let Some(frame) = queue.receive(Duration::ZERO) {
-                let (pts, key) = schedule.accept(frame.at).unwrap();
-                for video in [true, false] {
-                    let mut packet = ffmpeg_next::Packet::copy(&[0; 16]);
-                    packet.set_pts(Some(pts));
-                    packet.set_dts(Some(pts));
-                    packet.set_duration(rate.us(1));
-                    if video && key {
-                        packet.set_flags(ffmpeg_next::packet::Flags::KEY);
+                let output = schedule.accept(frame.at).unwrap();
+                for (pts, key) in output.all_frames() {
+                    for video in [true, false] {
+                        let mut packet = ffmpeg_next::Packet::copy(&[0; 16]);
+                        packet.set_pts(Some(pts));
+                        packet.set_dts(Some(pts));
+                        packet.set_duration(rate.us(1));
+                        if video && key {
+                            packet.set_flags(ffmpeg_next::packet::Flags::KEY);
+                        }
+                        history.push(Encoded::new(packet, video), 64 * 1024 * 1024);
                     }
-                    history.push(Encoded::new(packet, video), 64 * 1024 * 1024);
                 }
                 queue.recycle(1, frame.rgba);
             }

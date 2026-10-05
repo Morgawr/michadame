@@ -1,7 +1,4 @@
-use super::{
-    config::{Codec, RateControl, SAFETY_RESERVE},
-    Replay,
-};
+use super::{config::SAFETY_RESERVE, Replay};
 use eframe::egui::{self, Key};
 pub fn key(n: u8) -> Option<Key> {
     [
@@ -98,57 +95,6 @@ pub fn draw(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
                     )
                     .changed();
             });
-            ui.horizontal(|ui| {
-                ui.label("Video codec");
-                egui::ComboBox::from_id_source("replay-codec")
-                    .selected_text(format!("{:?}", replay.config.codec))
-                    .show_ui(ui, |ui| {
-                        for (codec, label) in [
-                            (Codec::Av1, "AV1"),
-                            (Codec::Hevc, "HEVC"),
-                            (Codec::H264, "H.264"),
-                        ] {
-                            changed |= ui
-                                .selectable_value(&mut replay.config.codec, codec, label)
-                                .changed();
-                        }
-                    });
-            });
-            ui.horizontal(|ui| {
-                ui.label("Compression mode");
-                changed |= ui
-                    .selectable_value(
-                        &mut replay.config.rate_control,
-                        RateControl::Bitrate,
-                        "Bitrate limited",
-                    )
-                    .changed();
-                changed |= ui
-                    .selectable_value(
-                        &mut replay.config.rate_control,
-                        RateControl::Quality,
-                        "Fixed quality",
-                    )
-                    .changed();
-            });
-            if replay.config.rate_control == RateControl::Bitrate {
-                ui.horizontal(|ui| {
-                    ui.label("Video bitrate limit (Mbit/s)");
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(&mut replay.config.max_bitrate_mbps)
-                                .clamp_range(1..=200),
-                        )
-                        .changed();
-                });
-            } else {
-                ui.horizontal(|ui| {
-                    ui.label("Quality level (lower = larger files)");
-                    changed |= ui
-                        .add(egui::DragValue::new(&mut replay.config.quality).clamp_range(1..=51))
-                        .changed();
-                });
-            }
             ui.horizontal(|ui| {
                 ui.label("GPU render device");
                 changed |= ui
@@ -305,21 +251,9 @@ pub fn draw_debug(replay: &Replay, ui: &mut egui::Ui) {
     if !status.message.is_empty() {
         ui.label(&status.message);
     }
-    let compression = match replay.config.rate_control {
-        RateControl::Bitrate => format!(
-            "VBR {:.1} / {} Mbit/s target / limit",
-            replay.config.max_bitrate_mbps as f64 * 0.75,
-            replay.config.max_bitrate_mbps
-        ),
-        RateControl::Quality => format!(
-            "Fixed quality {} · encoder quantizer {}",
-            replay.config.quality,
-            replay.config.codec.quantizer(replay.config.quality)
-        ),
-    };
     ui.label(format!(
-        "Configured: {:?} · {} · {}",
-        replay.config.codec, compression, replay.config.render_device
+        "Configured: H.264 VBR 8/10 Mbit/s · 60 fps CFR · AAC 160k · {}",
+        replay.config.render_device
     ));
     ui.label(format!(
         "RAM budget: {} MiB · work queue budget: {} MiB",

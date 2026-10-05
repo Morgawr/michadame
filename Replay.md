@@ -6,16 +6,16 @@ options are at the bottom of Controls. Defaults:
 
 - 5-minute maximum history and a 1024 MiB total replay memory budget.
 - Up to 512 MiB of that budget reserved for unencoded GPU/CPU work queues.
-- Hardware AV1 through VAAPI, VBR target 30 Mbit/s with a 40 Mbit/s limit,
-  stereo Opus at 192 kbit/s, MP4 files.
+- Hardware H.264 (VAAPI) locked to 60 FPS CFR, 8 Mbit/s target with a 10 Mbit/s limit,
+  stereo AAC-LC at 160 kbit/s, faststart-enabled MP4 files (`movflags=+faststart`).
 - F5 / F6 / F7 / F8 / F9 save approximately 30 / 60 / 180 / 300 / 600 seconds.
 - F10 saves the customizable duration (initially 120 seconds).
 - Files go to `$HOME/Videos/Michadame`; folder and bindings are configurable.
 
-Replay preferences (including RAM budget, history, codec, compression mode,
-bitrate limit, quality, folder and
-shortcuts) are saved when edited and restored on restart. Enabling replay remains
-an explicit per-launch choice.
+Replay preferences (including RAM budget, work queue RAM, history duration, folder and
+shortcuts) are saved when edited and restored on restart. Video saving uses a fixed,
+widely-compatible profile across all export actions (Ctrl+C clipboard copy, F5–F10 save
+shortcuts, and manual save). Enabling replay remains an explicit per-launch choice.
 
 Shortcuts work in either focused Michadame window, outside text editing. They are
 not desktop-global shortcuts. Bindings, custom clip duration and save buttons are
@@ -38,7 +38,7 @@ background export queue; copying and saving cannot run simultaneously. Plain
 `C` still cycles CRT filters. Copying text in Controls is unaffected.
 
 Press **Ctrl+Shift+C** instead to copy only the audio of the last 7 seconds as an
-MP3 file (48 kHz stereo, 192 kbps CBR). The recorded Opus audio is decoded and
+MP3 file (48 kHz stereo, 192 kbps CBR). The recorded audio is decoded and
 re-encoded with FFmpeg's `libmp3lame`; no video keyframe is required, so the clip
 is not shortened to a keyframe. Missing audio stays as silence at its original
 position. The MP3 uses the same RAM-only `/tmp` directory, reservation and
@@ -70,42 +70,36 @@ including the previous clipboard clip and in-flight export. A bounded seekable
 writer enforces the reservation while muxing. Debug shows clipboard memory
 separately from retained packets. Copying remuxes encoded packets without
 re-encoding or changing quality. Website file-size limits and codec/paste support
-still apply: for example, fifteen seconds at a 30 Mbit/s video target is about 57 MB
-with audio, above Discord's current free upload limit. See
+still apply: fifteen seconds at an 8 Mbit/s video target is about 15 MB with audio,
+well within Discord's upload limits. See
 [Discord's attachment limits](https://support.discord.com/hc/en-us/articles/25444343291031-File-Attachments-FAQ).
 Browser/website paste, sandboxed browser access to `/tmp`, and desktop clipboard
 ownership need user validation; local tests do not access the live clipboard.
 
 ## Compression and player compatibility
 
-**Bitrate limited** is the default, including when loading settings saved before
-this option existed. The configurable limit is 1–200 Mbit/s; the VBR target is
-75% of that limit, with a two-second rate-control buffer. The driver can allow
-short bursts, so this is not a per-packet size ceiling. Raising the limit retains
-more detail but increases storage, memory bandwidth and decoding cost. Lowering
-it can lose detail in complex scenes or fine CRT masks. Resolution, frame timing
-and rendered effects remain unchanged. Unsupported VBR settings stop replay;
-there is no silent fallback to unlimited bitrate or software encoding.
+All replay video saving and clipboard export features use a unified, highly-compatible
+recording profile designed to play smoothly across Discord, web browsers, and iOS:
 
-**Fixed quality** remains available without a bitrate limit. Its UI scale is
-1–51, lower meaning higher quality. AV1 maps this to its native quantizer index
-by multiplying by five (default 20 becomes 100); H.264/HEVC use the number directly
-as QP. This is a range normalization, not equivalent quality across codecs.
-Fixed-quality output can exceed player capabilities and declared stream level
-limits. In bitrate-limited AV1, level and tier account for the configured peak,
-padded dimensions and fractional frame rate, rather than just the target bitrate.
-
-The reported 19.37-second recording contained about 951 MB, averaging 392 Mbit/s
-of video. Its AV1 quantizer was 20 on the 0–255 scale, and it declared level 5.1
-Main tier, whose bitrate allowance is 40 Mbit/s. Packet timestamps increased
-normally and audio/video packets were interleaved; software decoding found no
-bitstream errors. The previous encoder configuration treated AV1 quantizers like
-H.264/HEVC QP and allowed unlimited bitrate. See FFmpeg's
-[AV1 VAAPI quantizer handling](https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/libavcodec/vaapi_encode_av1.c)
-and [AV1 level limits](https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/libavcodec/av1_levels.c).
-These changes affect new recordings. Remuxing an existing recording cannot reduce
-its encoded bitrate. Actual hardware rate control and player compatibility still
-need validation with a newly recorded clip.
+- **Hardware H.264 (`h264_vaapi`)**: Standard H.264 High Profile encoding via VAAPI,
+  with VBR rate control set to an 8 Mbit/s target, 10 Mbit/s peak, and 20 Mbit buffer size.
+  This produces crisp quality for gameplay and CRT shaders while keeping clip file sizes
+  modest and well within chat and upload limits (e.g., 15s clipboard clip is ~15 MB).
+- **Strict 60 FPS Constant Frame Rate (CFR)**: Capture timestamps are mapped onto a
+  fixed 60 FPS timeline (`1/60` second grid) with an exact `(1, 15360)` stream timebase
+  (256 ticks per frame with zero rounding error). Missing frames up to 1 second are filled
+  by referencing the previous picture without re-encoding duplicate pixels; stalls longer
+  than 1 second resume cleanly with an IDR keyframe without catch-up stutter.
+- **Faststart MP4 container (`movflags=+faststart`)**: The MP4 `moov` atom (metadata index)
+  is placed before media data (`mdat`), allowing instant playback in Discord, iOS Safari,
+  and web players without waiting for the entire file to download or buffer.
+- **Stereo AAC-LC audio**: 48 kHz stereo encoded with FFmpeg's native `aac` encoder at
+  160 kbit/s (1024 samples per frame), universally supported on Apple and mobile platforms.
+- **Native irregular dimensions and display crop**: Non-standard video dimensions (such as
+  unscaled retro resolutions or custom aspect ratios) are preserved exactly as rendered.
+  Internal hardware alignment padding uses standard MP4 container display crop metadata
+  (`set_display_crop`) so the player displays only the intended active viewport without
+  stretching or artificial black bars.
 
 ## Performance and memory behavior
 
@@ -274,7 +268,7 @@ and legacy configuration defaults have regression coverage.
 
 The two skipped legacy tests can traverse configuration paths that open
 `/dev/video0`. The synthetic media test uses software H.264, HEVC and AV1 fixtures
-with Opus, exports through the real muxer, demuxes and decodes the result, and checks duration,
+with AAC, exports through the real muxer, demuxes and decodes the result, and checks duration,
 A/V start alignment, content and MP4 cropping. Other tests cover byte/time
 limits, keyframe dependencies, truncated clips, fractional FPS, audio drift/gaps,
 configuration compatibility, FIFO frame retention through simulated encoder stalls,
@@ -283,7 +277,7 @@ backlogged save requests, nonblocking audio taps, and recovery after isolated
 missing frames, bursts, >1-second stalls and queue saturation. The dropped-frame
 media fixture checks retained pre-gap content, held-frame timing, resumed video,
 audio sync and save snapshots. Audio regressions feed 1 ms stereo reads through
-the real tap, resampler and Opus encoder/decoder with 100 ms servicing delays and
+the real tap, resampler and AAC encoder/decoder with 100 ms servicing delays and
 8 ms timestamp jitter, checking waveform continuity, channel energy and drift.
 Configuration tests use actual TOML files and reload settings into fresh state.
 Reset regressions cover backwards timestamps, missing timestamps, minimized or

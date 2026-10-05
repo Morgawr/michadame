@@ -42,29 +42,90 @@ fn invalidate_changed_surface(
 /// can merge distinct pictures when timestamps jitter or the actual capture
 /// rate differs slightly from its advertised rate. Queue processing time never
 /// changes playback timing; keyframes follow elapsed capture time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ScheduleOutput {
+    pub repeats: Vec<(i64, bool)>,
+    pub pts: i64,
+    pub key: bool,
+}
+
+#[cfg(test)]
+impl ScheduleOutput {
+    pub fn all_frames(self) -> impl Iterator<Item = (i64, bool)> {
+        self.repeats.into_iter().chain(std::iter::once((self.pts, self.key)))
+    }
+}
+
 pub(super) struct VideoSchedule {
     epoch: i64,
-    last_at: Option<i64>,
-    last_key_at: Option<i64>,
+    last_tick: Option<i64>,
+    last_key_tick: Option<i64>,
 }
 impl VideoSchedule {
     pub(super) fn new(epoch: i64) -> Self {
         Self {
             epoch,
-            last_at: None,
-            last_key_at: None,
+            last_tick: None,
+            last_key_tick: None,
         }
     }
-    pub(super) fn accept(&mut self, at: i64) -> Option<(i64, bool)> {
-        if at < self.epoch || self.last_at.is_some_and(|last| at <= last) {
+    pub(super) fn accept(&mut self, at: i64) -> Option<ScheduleOutput> {
+        if at < self.epoch {
             return None;
         }
-        let key = self.last_key_at.is_none_or(|last| at - last >= 1_000_000);
-        self.last_at = Some(at);
-        if key {
-            self.last_key_at = Some(at);
+        let tick = ((at - self.epoch) as f64 * config::OUTPUT_FPS as f64 / 1_000_000.0).round() as i64;
+        if self.last_tick.is_some_and(|last| tick <= last) {
+            return None;
         }
-        Some((at, key))
+        let rate = config::Rate::new(config::OUTPUT_FPS, 1);
+        let mut repeats = Vec::new();
+        let key;
+        if let Some(last) = self.last_tick {
+            let gap = tick - (last + 1);
+            if gap > 0 && gap <= 60 {
+                for repeat_tick in (last + 1)..tick {
+                    let repeat_pts = self.epoch + rate.us(repeat_tick);
+                    let repeat_key = self.last_key_tick.is_none_or(|k| repeat_tick - k >= 60);
+                    if repeat_key {
+                        self.last_key_tick = Some(repeat_tick);
+                    }
+                    repeats.push((repeat_pts, repeat_key));
+                }
+                let pts = self.epoch + rate.us(tick);
+                key = self.last_key_tick.is_none_or(|k| tick - k >= 60);
+                if key {
+                    self.last_key_tick = Some(tick);
+                }
+                self.last_tick = Some(tick);
+                Some(ScheduleOutput { repeats, pts, key })
+            } else if gap > 60 {
+                let pts = self.epoch + rate.us(tick);
+                self.last_tick = Some(tick);
+                self.last_key_tick = Some(tick);
+                Some(ScheduleOutput {
+                    repeats: Vec::new(),
+                    pts,
+                    key: true,
+                })
+            } else {
+                let pts = self.epoch + rate.us(tick);
+                key = self.last_key_tick.is_none_or(|k| tick - k >= 60);
+                if key {
+                    self.last_key_tick = Some(tick);
+                }
+                self.last_tick = Some(tick);
+                Some(ScheduleOutput { repeats, pts, key })
+            }
+        } else {
+            let pts = self.epoch + rate.us(tick);
+            self.last_tick = Some(tick);
+            self.last_key_tick = Some(tick);
+            Some(ScheduleOutput {
+                repeats,
+                pts,
+                key: true,
+            })
+        }
     }
 }
 
@@ -161,12 +222,12 @@ impl AudioClock {
         Ok(true)
     }
     fn take(&mut self) -> Option<(i64, Vec<[f32; 2]>)> {
-        if self.pending.len() < 960 {
+        if self.pending.len() < config::AUDIO_FRAME_SIZE {
             return None;
         }
         let at = self.frame_start;
-        self.frame_start += 960;
-        Some((at, self.pending.drain(..960).collect()))
+        self.frame_start += config::AUDIO_FRAME_SIZE as i64;
+        Some((at, self.pending.drain(..config::AUDIO_FRAME_SIZE).collect()))
     }
 }
 
@@ -233,25 +294,21 @@ pub(super) fn run(
                 continue;
             }
             if session.as_ref().is_none_or(|s| {
-                (s.width, s.height, s.video.rate) != (frame.width, frame.height, frame.rate)
+                (s.width, s.height) != (frame.width, frame.height)
             }) {
                 if let Some(s) = &session {
                     shared.record_reset(format!(
-                        "Video format changed: {} × {} at {}/{} fps → {} × {} at {}/{} fps",
+                        "Video format changed: {} × {} → {} × {}",
                         s.width,
                         s.height,
-                        s.video.rate.num,
-                        s.video.rate.den,
                         frame.width,
                         frame.height,
-                        frame.rate.num,
-                        frame.rate.den
                     ));
                 }
                 history.clear();
                 pending_save = None;
                 shared.message("Starting hardware replay encoder…");
-                let video = VideoEncoder::new(&config, frame.width, frame.height, frame.rate)?;
+                let video = VideoEncoder::new(&config, frame.width, frame.height)?;
                 let audio = AudioEncoder::new()?;
                 session = Some(Session {
                     video,
@@ -271,8 +328,15 @@ pub(super) fn run(
                 shared.message("Buffering replay");
             }
             let s = session.as_mut().unwrap();
-            if let Some((pts, key)) = s.schedule.accept(frame.at) {
-                for packet in s.video.encode(&frame.rgba, pts, key)? {
+            if let Some(output) = s.schedule.accept(frame.at) {
+                for (repeat_pts, repeat_key) in output.repeats {
+                    for packet in s.video.repeat(repeat_pts, repeat_key)? {
+                        if packet.start >= s.epoch {
+                            history.push(packet, limit);
+                        }
+                    }
+                }
+                for packet in s.video.encode(&frame.rgba, output.pts, output.key)? {
                     if packet.start >= s.epoch {
                         history.push(packet, limit);
                     }
@@ -435,7 +499,7 @@ pub(super) fn run(
                                             );
                                             let file = export_shared.clipboard.file(".mp4")?;
                                             encoder::export_clipboard(
-                                                file.as_file().try_clone()?,
+                                                file.path(),
                                                 reservation.limit,
                                                 video,
                                                 audio,
@@ -495,7 +559,7 @@ pub(super) fn run(
             status.overhead = shared.staging_bytes.load(Ordering::Acquire);
             status.available = available;
             status.surface = session.as_ref().map(|s| (s.width, s.height));
-            status.codec = config.codec.encoder().into();
+            status.codec = config::VIDEO_ENCODER.into();
             status.video_dropped = shared.video_dropped.load(Ordering::Relaxed);
             status.recent_video_drops = status.video_dropped.saturating_sub(previous_drops);
             previous_drops = status.video_dropped;
@@ -510,7 +574,7 @@ pub(super) fn run(
                     status.hardware_ms = 0.;
                 }
                 status.conversion_threads = s.video.conversion_threads();
-                status.frame_interval_ms = s.video.rate.us(1) as f64 / 1000.;
+                status.frame_interval_ms = 1000.0 / config::OUTPUT_FPS as f64;
             }
 
             monitor = Instant::now();
@@ -690,7 +754,7 @@ mod tests {
         clock.append(&block(100_000, 44100, 2205), 0).unwrap();
         let (pts, samples) = clock.take().unwrap();
         assert_eq!(pts, 4800);
-        assert_eq!(samples.len(), 960);
+        assert_eq!(samples.len(), config::AUDIO_FRAME_SIZE);
         assert!(samples.iter().all(|v| (v[0] - 0.5).abs() < 1e-6));
     }
     #[test]
@@ -774,7 +838,7 @@ mod tests {
                 assert!(!clock.append_recovering(&input, epoch).unwrap());
                 while let Some((at, samples)) = clock.take() {
                     assert_eq!(at, next_pts);
-                    next_pts += 960;
+                    next_pts += config::AUDIO_FRAME_SIZE as i64;
                     recorded.extend_from_slice(&samples);
                     for packet in encoder.encode(&samples, at).unwrap() {
                         decoder.send_packet(&packet.packet).unwrap();
@@ -803,19 +867,40 @@ mod tests {
                 free.send(input).unwrap();
             }
         }
+        decoder.send_eof().unwrap();
+        let mut frame = ff::frame::Audio::empty();
+        while decoder.receive_frame(&mut frame).is_ok() {
+            match frame.format() {
+                ff::format::Sample::F32(ff::format::sample::Type::Planar) => {
+                    decoded.extend(
+                        frame
+                            .plane::<f32>(0)
+                            .iter()
+                            .zip(frame.plane::<f32>(1))
+                            .map(|(l, r)| [*l, *r]),
+                    );
+                }
+                ff::format::Sample::F32(ff::format::sample::Type::Packed) => {
+                    decoded.extend(
+                        frame.plane::<(f32, f32)>(0).iter().map(|(l, r)| [*l, *r]),
+                    );
+                }
+                other => panic!("Unexpected decoder format {other:?}"),
+            }
+        }
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
-        assert!(decoded.len() > 94000);
+        assert!(decoded.len() > 92000);
         for waveform in [&recorded, &decoded] {
-            // Skip Opus startup lookahead. Check every 5ms for holes and each
+            // Skip AAC startup priming. Check every 5ms for holes and each
             // sample boundary for splices, in both independently generated channels.
-            for window in waveform[960..].chunks_exact(240) {
+            for window in waveform[config::AUDIO_FRAME_SIZE..].chunks_exact(240) {
                 for (channel, minimum) in [(0, 0.20), (1, 0.15)] {
                     let rms =
                         (window.iter().map(|v| v[channel].powi(2)).sum::<f32>() / 240.).sqrt();
                     assert!(rms > minimum, "Silent/skipped recording interval: {rms}");
                 }
             }
-            for pair in waveform[960..].windows(2) {
+            for pair in waveform[config::AUDIO_FRAME_SIZE..].windows(2) {
                 assert!(
                     (pair[1][0] - pair[0][0]).abs() < 0.04,
                     "Left channel splice"
@@ -834,7 +919,7 @@ mod tests {
         let epoch = 10_000_000;
         let mut schedule = VideoSchedule::new(epoch);
         let timestamps: Vec<_> = (0..1800)
-            .map(|tick| epoch + rate.us(tick) - if tick % 2 == 1 { 12_000 } else { 0 })
+            .map(|tick| epoch + rate.us(tick) - if tick % 2 == 1 { 3_000 } else { 0 })
             .collect();
         assert!(timestamps.windows(2).all(|t| t[1] > t[0]));
         let accepted: Vec<_> = timestamps
@@ -846,10 +931,11 @@ mod tests {
             timestamps.len(),
             "Unique frames were silently discarded despite an empty work queue"
         );
-        for ((pts, _), at) in accepted.iter().zip(timestamps) {
+        for (i, output) in accepted.iter().enumerate() {
             assert_eq!(
-                *pts, at,
-                "Frame timing was rounded away from the capture clock"
+                output.pts,
+                epoch + rate.us(i as i64),
+                "Frame timing was locked to the 60 FPS grid"
             );
         }
     }
@@ -861,13 +947,13 @@ mod tests {
         let mut schedule = VideoSchedule::new(epoch);
         for tick in 0..1800 {
             let at = epoch + actual_rate.us(tick);
-            assert_eq!(schedule.accept(at).map(|(pts, _)| pts), Some(at));
+            assert_eq!(schedule.accept(at).map(|out| out.pts), Some(at));
         }
     }
 
     #[test]
     fn dropped_frames_and_long_pauses_do_not_restart_video_time_or_create_catchup_work() {
-        let rate = config::Rate::new(60000, 1001);
+        let rate = config::Rate::new(60, 1);
         let epoch = 10_000_000;
         let mut schedule = VideoSchedule::new(epoch);
         let ticks = [0, 1, 3, 7, 31, 160, 161]; // isolated, burst, >250ms, >1s
@@ -876,11 +962,14 @@ mod tests {
             .map(|t| schedule.accept(epoch + rate.us(t)).unwrap())
             .collect();
         assert_eq!(accepted.len(), ticks.len());
-        for ((pts, _), tick) in accepted.iter().zip(ticks) {
-            assert_eq!(*pts, epoch + rate.us(tick));
+        for (output, &tick) in accepted.iter().zip(&ticks) {
+            assert_eq!(output.pts, epoch + rate.us(tick));
         }
-        assert!(accepted[5].1, "Recovered frame needs a time-based keyframe");
-        assert!(!accepted[6].1);
+        assert_eq!(accepted[2].repeats.len(), 1);
+        assert_eq!(accepted[3].repeats.len(), 3);
+        assert_eq!(accepted[5].repeats.len(), 0);
+        assert!(accepted[5].key, "Recovered frame needs a time-based keyframe");
+        assert!(!accepted[6].key);
         assert!(
             schedule.accept(epoch + rate.us(160)).is_none(),
             "Late pictures cannot move timestamps backward"
