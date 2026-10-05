@@ -99,6 +99,7 @@ fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
 
     let mut enlarge: Option<i64> = None;
     let mut delete: Option<i64> = None;
+    let mut copy_screenshot: Option<i64> = None;
 
     egui::CentralPanel::default().show(ctx, |ui| {
         if let Some(err) = &state.bank.load_error {
@@ -145,6 +146,7 @@ fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
                         RowAction::None => {}
                         RowAction::Enlarge => enlarge = Some(entry.id),
                         RowAction::Delete => delete = Some(entry.id),
+                        RowAction::CopyScreenshot => copy_screenshot = Some(entry.id),
                     }
                     ui.add_space(8.0);
                 }
@@ -167,6 +169,9 @@ fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
             state.error(format!("Failed to delete entry: {e}"));
         }
     }
+    if let Some(id) = copy_screenshot {
+        state.copy_bank_screenshot(id, ctx);
+    }
 
     draw_enlarged(state, ctx);
 }
@@ -175,6 +180,7 @@ enum RowAction {
     None,
     Enlarge,
     Delete,
+    CopyScreenshot,
 }
 
 fn draw_row(
@@ -213,11 +219,39 @@ fn draw_row(
                     paint_thumbnail(ui, rect, texture.as_ref(), entry.has_screenshot, cached);
                 }
                 if entry.has_screenshot {
-                    if response.hovered() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::ZoomIn);
-                    }
-                    if response.on_hover_text("Click to enlarge").clicked() {
+                    let copying = state.bank.copying_screenshot == Some(entry.id);
+                    let copy_id = ui.id().with(("copy_btn", entry.id));
+                    let btn_rect = egui::Rect::from_min_size(
+                        rect.min + egui::vec2(6.0, 6.0),
+                        egui::vec2(28.0, 28.0),
+                    );
+                    let copy_resp = ui.interact(
+                        btn_rect,
+                        copy_id,
+                        if copying {
+                            egui::Sense::hover()
+                        } else {
+                            egui::Sense::click()
+                        },
+                    );
+                    paint_copy_overlay(ui.painter(), btn_rect, copy_resp.hovered(), copying);
+
+                    if copy_resp.clicked() {
+                        action = RowAction::CopyScreenshot;
+                    } else if response.clicked() {
                         action = RowAction::Enlarge;
+                    }
+
+                    if copy_resp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        copy_resp.on_hover_text(if copying {
+                            "Copying screenshot to clipboard…"
+                        } else {
+                            "Copy screenshot to clipboard"
+                        });
+                    } else if response.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ZoomIn);
+                        response.on_hover_text("Click to enlarge");
                     }
                 }
 
@@ -442,6 +476,68 @@ fn paint_thumbnail(
                 COLOR_MUTED,
             );
         }
+    }
+}
+
+fn paint_copy_overlay(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    hovered: bool,
+    copying: bool,
+) {
+    let (bg, stroke_color, icon_color) = if copying {
+        (
+            Color32::from_rgba_premultiplied(30, 41, 59, 230),
+            Color32::from_rgb(148, 163, 184),
+            Color32::from_rgb(148, 163, 184),
+        )
+    } else if hovered {
+        (
+            Color32::from_rgba_premultiplied(51, 65, 85, 240),
+            Color32::from_rgb(226, 232, 240),
+            Color32::WHITE,
+        )
+    } else {
+        (
+            Color32::from_rgba_premultiplied(15, 23, 42, 200),
+            Color32::from_rgba_premultiplied(100, 116, 139, 180),
+            Color32::from_rgb(203, 213, 225),
+        )
+    };
+
+    painter.rect_filled(rect, 5.0, bg);
+    painter.rect_stroke(rect, 5.0, egui::Stroke::new(1.0, stroke_color));
+
+    let center = rect.center();
+    if copying {
+        painter.text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            "…",
+            egui::FontId::proportional(16.0),
+            icon_color,
+        );
+    } else {
+        let stroke = egui::Stroke::new(1.5, icon_color);
+        // Back sheet (top-right)
+        let back = egui::Rect::from_min_size(center + egui::vec2(-2.0, -7.0), egui::vec2(10.0, 12.0));
+        painter.rect_stroke(back, 1.5, stroke);
+
+        // Front sheet (bottom-left) - filled with bg to occlude overlapping back sheet
+        let front = egui::Rect::from_min_size(center + egui::vec2(-7.0, -3.0), egui::vec2(10.0, 12.0));
+        painter.rect_filled(front, 1.5, bg);
+        painter.rect_stroke(front, 1.5, stroke);
+
+        // Lines on front sheet to clearly represent a document
+        let line_stroke = egui::Stroke::new(1.0, icon_color);
+        painter.line_segment(
+            [center + egui::vec2(-4.5, 0.5), center + egui::vec2(0.5, 0.5)],
+            line_stroke,
+        );
+        painter.line_segment(
+            [center + egui::vec2(-4.5, 3.5), center + egui::vec2(0.5, 3.5)],
+            line_stroke,
+        );
     }
 }
 

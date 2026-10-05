@@ -58,7 +58,7 @@ impl Clipboard {
         })
     }
 
-    pub fn file(&self, suffix: &str) -> Result<tempfile::NamedTempFile> {
+    pub fn file_with_prefix(&self, prefix: &str, suffix: &str) -> Result<tempfile::NamedTempFile> {
         let mut state = self.state.lock().unwrap();
         ensure!(!state.closed, "Clipboard export cancelled during shutdown");
         // Never fall back to a disk-backed TMPDIR or the recording directory.
@@ -71,11 +71,15 @@ impl Clipboard {
             );
         }
         let file = tempfile::Builder::new()
-            .prefix("replay-")
+            .prefix(prefix)
             .suffix(suffix)
             .tempfile_in(state.directory.as_ref().unwrap().path())?;
         require_ram_filesystem(file.as_file())?;
         Ok(file)
+    }
+
+    pub fn file(&self, suffix: &str) -> Result<tempfile::NamedTempFile> {
+        self.file_with_prefix("replay-", suffix)
     }
 
     pub fn publish(
@@ -91,9 +95,41 @@ impl Clipboard {
                 .set()
                 .exclude_from_history()
                 .file_list(&[path])
-                .context("Cannot offer the replay file to the Linux clipboard")?;
+                .context("Cannot offer the file to the Linux clipboard")?;
             Ok(Some(backend))
         })
+    }
+
+    pub fn publish_bytes(
+        self: &Arc<Self>,
+        prefix: &str,
+        suffix: &str,
+        bytes: &[u8],
+    ) -> Result<usize> {
+        self.publish_bytes_with(prefix, suffix, bytes, |path| {
+            let mut backend =
+                arboard::Clipboard::new().context("Cannot connect to the Linux clipboard")?;
+            backend
+                .set()
+                .exclude_from_history()
+                .file_list(&[path])
+                .context("Cannot offer the file to the Linux clipboard")?;
+            Ok(Some(backend))
+        })
+    }
+
+    pub fn publish_bytes_with(
+        self: &Arc<Self>,
+        prefix: &str,
+        suffix: &str,
+        bytes: &[u8],
+        offer: impl FnOnce(&std::path::Path) -> Result<Option<arboard::Clipboard>>,
+    ) -> Result<usize> {
+        let reservation = self.reserve(bytes.len(), usize::MAX)?;
+        let mut file = self.file_with_prefix(prefix, suffix)?;
+        file.write_all(bytes)?;
+        file.flush()?;
+        self.publish_with(file, reservation, offer)
     }
 
     fn publish_with(
@@ -164,7 +200,7 @@ fn require_ram_filesystem(file: &File) -> Result<()> {
     let kind = unsafe { fs.assume_init() }.f_type;
     ensure!(
         kind == libc::TMPFS_MAGIC,
-        "Clipboard video requires RAM-backed /tmp; no video was written to disk"
+        "Clipboard export requires RAM-backed /tmp; no file was written to disk"
     );
     Ok(())
 }
@@ -310,5 +346,27 @@ mod tests {
         clipboard.close();
         assert!(!path.exists());
         assert!(clipboard.file(".mp4").is_err());
+    }
+
+    #[test]
+    fn publish_bytes_creates_ram_file_and_replaces_previous() {
+        if require_ram_filesystem(&File::open("/tmp").unwrap()).is_err() {
+            return;
+        }
+        let clipboard = Arc::new(Clipboard::default());
+        let size1 = clipboard
+            .publish_bytes_with("screenshot-", ".jpg", b"first-image-data", |_| Ok(None))
+            .unwrap();
+        assert_eq!(size1, 16);
+        assert_eq!(clipboard.bytes(), 16);
+
+        let size2 = clipboard
+            .publish_bytes_with("screenshot-", ".jpg", b"second-image-bytes-longer", |_| Ok(None))
+            .unwrap();
+        assert_eq!(size2, 25);
+        assert_eq!(clipboard.bytes(), 25);
+
+        clipboard.close();
+        assert_eq!(clipboard.bytes(), 0);
     }
 }

@@ -188,6 +188,8 @@ pub fn entry_from_json(term: &str, reading: &str, json: &str) -> Option<TermEntr
 pub enum BankEvent {
     Saved(BankEntryMeta),
     Failed { key: MineKey, error: String },
+    ClipboardCopied,
+    ClipboardFailed(String),
 }
 
 /// Cloneable handle passed into the video paint callback, which captures the screenshot
@@ -345,6 +347,8 @@ pub struct BankState {
     pub known_tags: Vec<String>,
     /// Inline tag editor state for a bank row.
     pub editing_tag: Option<TagEdit>,
+    /// Entry currently having its screenshot copied to the clipboard.
+    pub copying_screenshot: Option<i64>,
 }
 
 /// In-progress edit of a bank entry's tag.
@@ -406,6 +410,7 @@ impl BankState {
             filter_tag: String::new(),
             known_tags: Vec::new(),
             editing_tag: None,
+            copying_screenshot: None,
         };
         state.rebuild_keys();
         state
@@ -579,14 +584,21 @@ impl BankState {
                     self.in_flight.remove(&key);
                     messages.push(Err(format!("Failed to mine word: {error}")));
                 }
+                BankEvent::ClipboardCopied => {
+                    self.copying_screenshot = None;
+                }
+                BankEvent::ClipboardFailed(error) => {
+                    self.copying_screenshot = None;
+                    messages.push(Err(format!("Failed to copy screenshot: {error}")));
+                }
             }
         }
         messages
     }
 
-    /// True while a mining request is waiting for a capture or being saved.
+    /// True while a mining request is waiting for a capture or being saved, or copying a screenshot.
     pub fn is_busy(&self) -> bool {
-        !self.in_flight.is_empty()
+        !self.in_flight.is_empty() || self.copying_screenshot.is_some()
     }
 
     pub fn delete(&mut self, id: i64) -> anyhow::Result<()> {
@@ -598,6 +610,9 @@ impl BankState {
         self.dict_entries.remove(&id);
         if self.enlarged.as_ref().map_or(false, |(eid, _)| *eid == id) {
             self.enlarged = None;
+        }
+        if self.copying_screenshot == Some(id) {
+            self.copying_screenshot = None;
         }
         self.rebuild_keys();
         Ok(())
@@ -642,6 +657,19 @@ impl BankState {
         self.enlarged = bytes
             .and_then(|b| load_texture(ctx, format!("bank_full_{id}"), &b))
             .map(|t| (id, t));
+    }
+
+    /// Returns the raw JPEG screenshot bytes for an entry, if available.
+    pub fn screenshot_bytes(&self, id: i64) -> Option<Vec<u8>> {
+        self.db
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().and_then(|db| db.screenshot(id).ok().flatten()))
+    }
+
+    /// Clone of the event sender for background tasks.
+    pub fn event_sender(&self) -> Sender<BankEvent> {
+        self.event_tx.clone()
     }
 }
 
@@ -947,5 +975,71 @@ mod tests {
         assert!(bank.is_entry_mined("林檎", "りんご", 999));
         // different reading does not match
         assert!(!bank.is_entry_mined("林檎", "みかん", 0));
+    }
+
+    #[test]
+    fn test_clipboard_copy_events_and_screenshot_bytes() {
+        let mut bank = BankState::new();
+        let entry = TermEntry {
+            term: "本".into(),
+            reading: "ほん".into(),
+            definition_tags: None,
+            rules: String::new(),
+            score: 0.0,
+            glossary: vec![crate::dict::GlossaryEntry::Text("book".into())],
+            sequence: 42,
+            term_tags: None,
+            inflection_reasons: vec![],
+            frequency: None,
+        };
+        let req = MineRequest::from_lookup(&entry, "本を読む。", (0, 1), None);
+        assert!(bank.request_mine(req));
+        let handle = bank.capture_handle();
+        // Save with a fake screenshot (10x10 raw RGBA)
+        let pixels = vec![255; 10 * 10 * 4];
+        handle.save(handle.take_pending().unwrap(), Some((pixels, 10, 10)));
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while bank.is_busy() && Instant::now() < deadline {
+            bank.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let mined = bank.entries.iter().find(|e| e.term == "本").unwrap();
+        let id = mined.id;
+        assert!(mined.has_screenshot);
+
+        // Verify screenshot_bytes returns Some JPEG data
+        let bytes = bank.screenshot_bytes(id).expect("screenshot should exist");
+        assert!(!bytes.is_empty());
+
+        // Verify copying_screenshot tracking and is_busy()
+        bank.copying_screenshot = Some(id);
+        assert!(bank.is_busy());
+
+        // Test BankEvent::ClipboardCopied: silently clears copying_screenshot
+        let tx = bank.event_sender();
+        tx.send(BankEvent::ClipboardCopied).unwrap();
+        let msgs = bank.poll();
+        assert_eq!(bank.copying_screenshot, None);
+        assert!(msgs.is_empty(), "success should produce no notification");
+        assert!(!bank.is_busy());
+
+        // Test BankEvent::ClipboardFailed: clears copying_screenshot and produces error toast
+        bank.copying_screenshot = Some(id);
+        tx.send(BankEvent::ClipboardFailed("test error".into())).unwrap();
+        let msgs = bank.poll();
+        assert_eq!(bank.copying_screenshot, None);
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].is_err());
+        assert_eq!(
+            msgs[0].as_ref().unwrap_err(),
+            "Failed to copy screenshot: test error"
+        );
+
+        // Test delete clears copying_screenshot if matching
+        bank.copying_screenshot = Some(id);
+        bank.delete(id).unwrap();
+        assert_eq!(bank.copying_screenshot, None);
     }
 }

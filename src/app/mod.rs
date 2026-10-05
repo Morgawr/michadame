@@ -224,6 +224,38 @@ impl AppState {
             text: text.into().into(),
         });
     }
+
+    pub fn copy_bank_screenshot(&mut self, id: i64, ctx: &egui::Context) {
+        if self.bank.copying_screenshot.is_some() {
+            return;
+        }
+        let Some(bytes) = self.bank.screenshot_bytes(id) else {
+            self.error("Failed to load screenshot from database");
+            return;
+        };
+        self.bank.copying_screenshot = Some(id);
+        let clipboard = self.replay.clipboard();
+        let tx = self.bank.event_sender();
+        let ctx = ctx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("bank-clipboard-copy".into())
+            .spawn(move || {
+                let result = clipboard.publish_bytes("screenshot-", ".jpg", &bytes);
+                match result {
+                    Ok(_) => {
+                        let _ = tx.send(crate::bank::BankEvent::ClipboardCopied);
+                    }
+                    Err(e) => {
+                        let _ = tx.send(crate::bank::BankEvent::ClipboardFailed(e.to_string()));
+                    }
+                }
+                ctx.request_repaint();
+            });
+        if let Err(e) = spawned {
+            self.bank.copying_screenshot = None;
+            self.error(format!("Failed to start clipboard copy: {e}"));
+        }
+    }
 }
 
 impl eframe::App for AppState {

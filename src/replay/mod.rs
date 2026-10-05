@@ -1,4 +1,4 @@
-mod clipboard;
+pub mod clipboard;
 pub mod config;
 mod encoder;
 pub mod gpu;
@@ -248,6 +248,10 @@ pub struct Replay {
     last_notice: String,
 }
 impl Replay {
+    pub fn clipboard(&self) -> Arc<clipboard::Clipboard> {
+        self.clipboard.clone()
+    }
+
     pub fn enable(&mut self) -> anyhow::Result<()> {
         self.config.validate()?;
         anyhow::ensure!(self.runtime.is_none(), "Replay is already enabled");
