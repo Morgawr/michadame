@@ -92,6 +92,7 @@ impl From<LegacyConfig> for MichadameConfig {
             default_halo: legacy.default_halo,
             default_cathode_interference: legacy.default_cathode_interference,
             bank_current_tag: legacy.bank_current_tag,
+            bank_compact_mode: legacy.bank_compact_mode,
             profiles,
         }
     }
@@ -176,6 +177,7 @@ mod tests {
             cathode_lightbulb_effect: None,
             default_cathode_interference: None,
             bank_current_tag: None,
+            bank_compact_mode: None,
         };
 
         let config: MichadameConfig = MichadameConfig::from(legacy);
@@ -275,6 +277,7 @@ mod tests {
             cathode_lightbulb_effect: None,
             default_cathode_interference: None,
             bank_current_tag: None,
+            bank_compact_mode: None,
         };
 
         let config: MichadameConfig = MichadameConfig::from(legacy);

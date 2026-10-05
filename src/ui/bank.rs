@@ -77,21 +77,34 @@ fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label(RichText::new("🏷 Filter by tag:").color(COLOR_TAG));
-            let bank = &mut state.bank;
-            let out = tag_input(
-                ui,
-                "bank_tag_filter",
-                &mut bank.filter_tag,
-                &bank.known_tags,
-                "Type a tag (partial matches included)…",
-                320.0,
-                false,
-            );
-            if out.cancelled {
-                bank.filter_tag.clear();
+            let mut compact_changed = false;
+            {
+                let bank = &mut state.bank;
+                let out = tag_input(
+                    ui,
+                    "bank_tag_filter",
+                    &mut bank.filter_tag,
+                    &bank.known_tags,
+                    "Type a tag (partial matches included)…",
+                    320.0,
+                    false,
+                );
+                if out.cancelled {
+                    bank.filter_tag.clear();
+                }
+                if !bank.filter_tag.is_empty() && ui.button("✖").on_hover_text("Clear filter").clicked() {
+                    bank.filter_tag.clear();
+                }
+                ui.add_space(16.0);
+                let prev_compact = bank.compact_mode;
+                ui.checkbox(&mut bank.compact_mode, "Compact mode");
+                if bank.compact_mode != prev_compact {
+                    bank.expanded_entries.clear();
+                    compact_changed = true;
+                }
             }
-            if !bank.filter_tag.is_empty() && ui.button("✖").on_hover_text("Clear filter").clicked() {
-                bank.filter_tag.clear();
+            if compact_changed {
+                crate::config::save_config(state);
             }
         });
         ui.add_space(6.0);
@@ -100,6 +113,7 @@ fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
     let mut enlarge: Option<i64> = None;
     let mut delete: Option<i64> = None;
     let mut copy_screenshot: Option<i64> = None;
+    let mut toggle_expand: Option<i64> = None;
 
     egui::CentralPanel::default().show(ctx, |ui| {
         if let Some(err) = &state.bank.load_error {
@@ -142,13 +156,21 @@ fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
             .show(ui, |ui| {
                 for idx in visible {
                     let entry = state.bank.entries[idx].clone();
-                    match draw_row(ui, ctx, state, &entry, &mut loads_left) {
+                    let is_expanded = !state.bank.compact_mode
+                        || state.bank.expanded_entries.contains(&entry.id);
+                    let action = if is_expanded {
+                        draw_row(ui, ctx, state, &entry, &mut loads_left)
+                    } else {
+                        draw_compact_row(ui, &entry)
+                    };
+                    match action {
                         RowAction::None => {}
                         RowAction::Enlarge => enlarge = Some(entry.id),
                         RowAction::Delete => delete = Some(entry.id),
                         RowAction::CopyScreenshot => copy_screenshot = Some(entry.id),
+                        RowAction::ToggleExpand(id) => toggle_expand = Some(id),
                     }
-                    ui.add_space(8.0);
+                    ui.add_space(if is_expanded { 8.0 } else { 4.0 });
                 }
             });
         if loads_left == 0 {
@@ -172,15 +194,98 @@ fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
     if let Some(id) = copy_screenshot {
         state.copy_bank_screenshot(id, ctx);
     }
+    if let Some(id) = toggle_expand {
+        state.bank.toggle_entry_expanded(id);
+    }
 
     draw_enlarged(state, ctx);
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RowAction {
     None,
     Enlarge,
     Delete,
     CopyScreenshot,
+    ToggleExpand(i64),
+}
+
+fn draw_compact_row(ui: &mut egui::Ui, entry: &BankEntryMeta) -> RowAction {
+    let mut action = RowAction::None;
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), 38.0),
+        egui::Sense::click(),
+    );
+    let is_hovered = response.hovered();
+    if is_hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if response.on_hover_text("Click to expand entry").clicked() {
+        action = RowAction::ToggleExpand(entry.id);
+    }
+
+    let bg_color = if is_hovered {
+        Color32::from_rgb(33, 38, 48)
+    } else {
+        ROW_BG
+    };
+    let stroke_color = if is_hovered {
+        Color32::from_rgb(99, 102, 241)
+    } else {
+        ROW_STROKE
+    };
+
+    ui.painter().rect(
+        rect,
+        6.0,
+        bg_color,
+        egui::Stroke::new(1.0, stroke_color),
+    );
+
+    ui.allocate_ui_at_rect(rect.shrink2(egui::vec2(12.0, 0.0)), |ui| {
+        ui.with_layout(
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                let arrow_color = if is_hovered {
+                    Color32::from_rgb(148, 163, 184)
+                } else {
+                    COLOR_MUTED
+                };
+                ui.label(RichText::new("▶").size(11.0).color(arrow_color));
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(&entry.term)
+                        .font(dict_font(20.0))
+                        .strong()
+                        .color(COLOR_TERM),
+                );
+                if !entry.reading.is_empty() && entry.reading != entry.term {
+                    ui.label(
+                        RichText::new(format!("【{}】", entry.reading))
+                            .font(dict_font(16.0))
+                            .color(COLOR_READING),
+                    );
+                }
+                if let Some(tag) = &entry.tag {
+                    ui.add_space(8.0);
+                    let text = format!("🏷 {tag}");
+                    let font_id = egui::FontId::proportional(12.0);
+                    let galley = ui.painter().layout_no_wrap(text, font_id, COLOR_TAG);
+                    let chip_padding = egui::vec2(7.0, 3.0);
+                    let chip_size = galley.size() + chip_padding * 2.0;
+                    let (chip_rect, _) = ui.allocate_exact_size(chip_size, egui::Sense::hover());
+                    ui.painter().rect(
+                        chip_rect,
+                        6.0,
+                        COLOR_TAG_BG,
+                        egui::Stroke::new(1.0, Color32::from_rgb(88, 70, 130)),
+                    );
+                    ui.painter().galley(chip_rect.min + chip_padding, galley, COLOR_TAG);
+                }
+            },
+        );
+    });
+    action
 }
 
 fn draw_row(
@@ -191,7 +296,11 @@ fn draw_row(
     loads_left: &mut usize,
 ) -> RowAction {
     let mut action = RowAction::None;
-    egui::Frame::none()
+    let mut interactive_rects: Vec<egui::Rect> = Vec::new();
+    let mut delete_interacted = false;
+    let mut tag_interacted = false;
+
+    let frame_resp = egui::Frame::none()
         .fill(ROW_BG)
         .stroke(egui::Stroke::new(1.0, ROW_STROKE))
         .rounding(8.0)
@@ -199,6 +308,11 @@ fn draw_row(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal_top(|ui| {
+                if state.bank.compact_mode {
+                    ui.label(RichText::new("▼").size(11.0).color(COLOR_MUTED));
+                    ui.add_space(4.0);
+                }
+
                 // Screenshot preview
                 let sense = if entry.has_screenshot {
                     egui::Sense::click()
@@ -206,6 +320,9 @@ fn draw_row(
                     egui::Sense::hover()
                 };
                 let (rect, response) = ui.allocate_exact_size(THUMB_SIZE, sense);
+                if entry.has_screenshot {
+                    interactive_rects.push(rect);
+                }
                 if ui.is_rect_visible(rect) {
                     let cached = state.bank.thumbnails.contains_key(&entry.id);
                     let texture = if cached || *loads_left > 0 {
@@ -287,20 +404,23 @@ fn draw_row(
                                 }
                             },
                         );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                        let controls_resp = ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                             if state.bank.pending_delete == Some(entry.id) {
                                 if ui.button("Cancel").clicked() {
                                     state.bank.pending_delete = None;
+                                    delete_interacted = true;
                                 }
                                 if ui
                                     .button(RichText::new("Delete").color(Color32::from_rgb(248, 113, 113)))
                                     .clicked()
                                 {
                                     action = RowAction::Delete;
+                                    delete_interacted = true;
                                 }
                             } else {
                                 if ui.button("🗑").on_hover_text("Delete this entry").clicked() {
                                     state.bank.pending_delete = Some(entry.id);
+                                    delete_interacted = true;
                                 }
                                 ui.label(
                                     RichText::new(crate::bank::format_timestamp(entry.created_at))
@@ -309,11 +429,14 @@ fn draw_row(
                                 );
                             }
                         });
+                        interactive_rects.push(controls_resp.response.rect);
                     });
 
                     // Tag (click to edit)
                     ui.add_space(2.0);
-                    draw_tag_row(ui, state, entry);
+                    let (t_interacted, tag_rect) = draw_tag_row(ui, state, entry);
+                    tag_interacted = t_interacted;
+                    interactive_rects.push(tag_rect);
 
                     // Sentence, with the mined word highlighted
                     ui.add_space(4.0);
@@ -338,14 +461,47 @@ fn draw_row(
                 });
             });
         });
+
+    if state.bank.compact_mode {
+        let card_rect = frame_resp.response.rect;
+        let mut card_resp = ui.interact(
+            card_rect,
+            ui.id().with(("compact_card_click", entry.id)),
+            egui::Sense::click(),
+        );
+        let pointer_pos = ui.ctx().pointer_latest_pos();
+        let over_interactive = pointer_pos.map_or(false, |p| {
+            interactive_rects.iter().any(|r| r.contains(p))
+        });
+        if card_resp.hovered() && !over_interactive {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            card_resp = card_resp.on_hover_text("Click to collapse entry");
+        }
+        if card_resp.clicked() {
+            let click_pos = ui.ctx().input(|i| i.pointer.interact_pos());
+            let clicked_interactive = click_pos.map_or(false, |p| {
+                interactive_rects.iter().any(|r| r.contains(p))
+            });
+            if !clicked_interactive && action == RowAction::None && !delete_interacted && !tag_interacted {
+                action = RowAction::ToggleExpand(entry.id);
+            }
+        }
+    }
+
     action
 }
 
 /// Draws the entry's tag chip, or the inline tag editor if this entry is being edited.
-fn draw_tag_row(ui: &mut egui::Ui, state: &mut AppState, entry: &BankEntryMeta) {
-    ui.horizontal(|ui| {
-        let editing = state.bank.editing_tag.as_ref().map_or(false, |e| e.id == entry.id);
+fn draw_tag_row(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    entry: &BankEntryMeta,
+) -> (bool, egui::Rect) {
+    let mut interacted = false;
+    let editing = state.bank.editing_tag.as_ref().map_or(false, |e| e.id == entry.id);
+    let resp = ui.horizontal(|ui| {
         if editing {
+            interacted = true;
             let bank = &mut state.bank;
             let Some(edit) = bank.editing_tag.as_mut() else { return };
             let request_focus = !edit.focused;
@@ -383,11 +539,13 @@ fn draw_tag_row(ui: &mut egui::Ui, state: &mut AppState, entry: &BankEntryMeta) 
                     .rounding(10.0);
                 if ui.add(chip).on_hover_text("Click to edit the tag").clicked() {
                     start_edit(state, tag.clone());
+                    interacted = true;
                 }
                 if ui.small_button("✖").on_hover_text("Remove the tag").clicked() {
                     if let Err(e) = state.bank.set_tag(entry.id, "") {
                         state.error(format!("Failed to remove tag: {e}"));
                     }
+                    interacted = true;
                 }
             }
             None => {
@@ -395,10 +553,12 @@ fn draw_tag_row(ui: &mut egui::Ui, state: &mut AppState, entry: &BankEntryMeta) 
                     .frame(false);
                 if ui.add(add).on_hover_text("Add a tag to this word").clicked() {
                     start_edit(state, String::new());
+                    interacted = true;
                 }
             }
         }
     });
+    (interacted, resp.response.rect)
 }
 
 /// Settings-panel row for the tag applied to newly mined words (shown above "Appearance").

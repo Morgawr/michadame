@@ -349,6 +349,10 @@ pub struct BankState {
     pub editing_tag: Option<TagEdit>,
     /// Entry currently having its screenshot copied to the clipboard.
     pub copying_screenshot: Option<i64>,
+    /// Whether compact view is active in the bank window.
+    pub compact_mode: bool,
+    /// Mined word entry IDs expanded while in compact mode.
+    pub expanded_entries: HashSet<i64>,
 }
 
 /// In-progress edit of a bank entry's tag.
@@ -411,6 +415,8 @@ impl BankState {
             known_tags: Vec::new(),
             editing_tag: None,
             copying_screenshot: None,
+            compact_mode: false,
+            expanded_entries: HashSet::new(),
         };
         state.rebuild_keys();
         state
@@ -614,8 +620,16 @@ impl BankState {
         if self.copying_screenshot == Some(id) {
             self.copying_screenshot = None;
         }
+        self.expanded_entries.remove(&id);
         self.rebuild_keys();
         Ok(())
+    }
+
+    /// Toggles the expanded state of an entry in compact mode.
+    pub fn toggle_entry_expanded(&mut self, id: i64) {
+        if !self.expanded_entries.remove(&id) {
+            self.expanded_entries.insert(id);
+        }
     }
 
     /// Returns the (cached) renderable dictionary entry stored with a bank entry.
@@ -1041,5 +1055,28 @@ mod tests {
         bank.copying_screenshot = Some(id);
         bank.delete(id).unwrap();
         assert_eq!(bank.copying_screenshot, None);
+    }
+
+    #[test]
+    fn test_compact_mode_toggle_and_expansion() {
+        let mut bank = BankState::new();
+        assert!(!bank.compact_mode);
+        assert!(bank.expanded_entries.is_empty());
+
+        // Toggle entry expansion
+        bank.toggle_entry_expanded(10);
+        assert!(bank.expanded_entries.contains(&10));
+        bank.toggle_entry_expanded(20);
+        assert!(bank.expanded_entries.contains(&10));
+        assert!(bank.expanded_entries.contains(&20));
+
+        // Toggle again collapses
+        bank.toggle_entry_expanded(10);
+        assert!(!bank.expanded_entries.contains(&10));
+        assert!(bank.expanded_entries.contains(&20));
+
+        // Delete cleans up expanded_entries
+        bank.delete(20).unwrap();
+        assert!(!bank.expanded_entries.contains(&20));
     }
 }
