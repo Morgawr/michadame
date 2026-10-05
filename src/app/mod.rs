@@ -163,13 +163,22 @@ impl AppState {
         self.dict.popup = None;
     }
 
-    /// Returns true if the pointer is currently over an open dictionary popup window.
-    pub fn is_pointer_in_dict_popup(&self, ctx: &egui::Context) -> bool {
-        let Some(rect) = self.dict.popup.as_ref().and_then(|p| p.popup_rect) else {
-            return false;
-        };
-        ctx.input(|i| i.pointer.hover_pos())
-            .map_or(false, |pos| rect.contains(pos))
+    /// Checks OCR timeout and clears expired scans when no dictionary popup is open.
+    ///
+    /// If a dictionary popup is open (mouse hovering on a word or inside the popup),
+    /// the OCR expiration timer is paused so scans aren't cleared out from under the user.
+    /// Once the popup is dismissed, the expiration timer resumes/applies.
+    pub fn handle_ocr_timeout(&mut self, ctx: &egui::Context) -> bool {
+        let mut repaint_requested = false;
+        if self.dict.popup.is_none() {
+            if self.ocr.is_expired() {
+                self.clear_ocr();
+                repaint_requested = true;
+            } else if let Some(remaining) = self.ocr.remaining_time() {
+                ctx.request_repaint_after(remaining);
+            }
+        }
+        repaint_requested
     }
 
     pub fn update_fps_counters(&mut self, ctx: &egui::Context) {
@@ -453,18 +462,7 @@ impl eframe::App for AppState {
             self.ocr.last_scan_time = Some(Instant::now());
         }
 
-        if self.ocr.is_expired() {
-            // Don't dismiss the overlay out from under the user while they are reading the
-            // dictionary popup. Once the timer has run out, it gets dismissed as soon as the
-            // pointer leaves the popup (pointer movement / PointerGone triggers a repaint).
-            // Shift+Space still dismisses immediately (handled in ui::draw_main_ui).
-            if !self.is_pointer_in_dict_popup(ctx) {
-                self.clear_ocr();
-                repaint_requested = true;
-            }
-        } else if let Some(remaining) = self.ocr.remaining_time() {
-            ctx.request_repaint_after(remaining);
-        }
+        repaint_requested |= self.handle_ocr_timeout(ctx);
 
         let dict_events: Vec<crate::dict::DictEvent> = if let Some(rx) = &self.dict.event_rx {
             let mut events = Vec::new();
@@ -639,5 +637,93 @@ mod tests {
         let success = state.handle_device_scan_result(Err(error));
         assert!(!success);
         assert_eq!(state.hardware.video_devices.len(), 0);
+    }
+
+    #[test]
+    fn test_handle_ocr_timeout_pauses_when_dict_popup_open() {
+        let mut state = AppState::default();
+        let ctx = egui::Context::default();
+
+        state.ocr.timeout_seconds = 45;
+        state.ocr.boxes.push(crate::ocr::models::OcrBox {
+            text: "日本語".to_string(),
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.1,
+            height: 0.1,
+            lines: Vec::new(),
+        });
+        // Expired scan (50 seconds ago)
+        state.ocr.last_scan_time = Some(Instant::now() - std::time::Duration::from_secs(50));
+        assert!(state.ocr.is_expired());
+
+        // Simulate dictionary popup being open (e.g. mouse hovering on a word)
+        state.dict.popup = Some(crate::dict::models::DictPopupState {
+            matched_term: "日本".to_string(),
+            source_text: "日本語".to_string(),
+            char_range: (0, 2),
+            word_rect: egui::Rect::from_min_max(egui::pos2(10.0, 10.0), egui::pos2(50.0, 30.0)),
+            extra_word_rects: Vec::new(),
+            box_rect: egui::Rect::from_min_max(egui::pos2(5.0, 5.0), egui::pos2(60.0, 35.0)),
+            entries: Vec::new(),
+            is_popup_hovered: false,
+            popup_rect: None,
+            last_hover_time: Instant::now(),
+            last_word_hover_time: Instant::now(),
+        });
+
+        // While a popup is open, handle_ocr_timeout must NOT clear OCR scans regardless of pointer position
+        let repainted = state.handle_ocr_timeout(&ctx);
+        assert!(!repainted);
+        assert_eq!(state.ocr.boxes.len(), 1);
+        assert!(state.dict.popup.is_some());
+
+        // When the popup is closed, handle_ocr_timeout clears expired OCR scans
+        state.dict.popup = None;
+        let repainted = state.handle_ocr_timeout(&ctx);
+        assert!(repainted);
+        assert!(state.ocr.boxes.is_empty());
+    }
+
+    #[test]
+    fn test_handle_ocr_timeout_not_expired_requests_repaint() {
+        let mut state = AppState::default();
+        let ctx = egui::Context::default();
+
+        state.ocr.timeout_seconds = 45;
+        state.ocr.boxes.push(crate::ocr::models::OcrBox {
+            text: "日本語".to_string(),
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.1,
+            height: 0.1,
+            lines: Vec::new(),
+        });
+        // Scan was 10 seconds ago (35s remaining)
+        state.ocr.last_scan_time = Some(Instant::now() - std::time::Duration::from_secs(10));
+        assert!(!state.ocr.is_expired());
+
+        // Without popup, handle_ocr_timeout does not clear boxes (requests repaint for remaining time)
+        let repainted = state.handle_ocr_timeout(&ctx);
+        assert!(!repainted);
+        assert_eq!(state.ocr.boxes.len(), 1);
+
+        // With popup open, handle_ocr_timeout also does not clear boxes
+        state.dict.popup = Some(crate::dict::models::DictPopupState {
+            matched_term: "日本".to_string(),
+            source_text: "日本語".to_string(),
+            char_range: (0, 2),
+            word_rect: egui::Rect::from_min_max(egui::pos2(10.0, 10.0), egui::pos2(50.0, 30.0)),
+            extra_word_rects: Vec::new(),
+            box_rect: egui::Rect::from_min_max(egui::pos2(5.0, 5.0), egui::pos2(60.0, 35.0)),
+            entries: Vec::new(),
+            is_popup_hovered: false,
+            popup_rect: None,
+            last_hover_time: Instant::now(),
+            last_word_hover_time: Instant::now(),
+        });
+        let repainted = state.handle_ocr_timeout(&ctx);
+        assert!(!repainted);
+        assert_eq!(state.ocr.boxes.len(), 1);
     }
 }
