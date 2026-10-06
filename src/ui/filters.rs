@@ -262,6 +262,73 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 crate::config::save_config(state);
                 changed = true;
             }
+
+            ui.add_space(2.0);
+            if ui
+                .checkbox(
+                    &mut state.video.crt_glass_photographer_enabled,
+                    "Photographer Reflection",
+                )
+                .on_hover_text(
+                    "Simulates an anonymous, diffuse dark silhouette reflection of a person taking a photo with a smartphone.",
+                )
+                .changed()
+            {
+                crate::config::save_config(state);
+                changed = true;
+            }
+
+            if state.video.crt_glass_photographer_enabled {
+                if ui
+                    .add(
+                        egui::Slider::new(
+                            &mut state.video.crt_glass_photographer_intensity,
+                            0.0..=1.0,
+                        )
+                        .text("Photographer Intensity")
+                        .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
+                    )
+                    .on_hover_text(
+                        "Controls the opacity of the photographer silhouette reflection.",
+                    )
+                    .changed()
+                {
+                    crate::config::save_config(state);
+                    changed = true;
+                }
+            }
+
+            ui.add_space(2.0);
+            if ui
+                .checkbox(
+                    &mut state.video.crt_glass_flash_enabled,
+                    "Camera Flash Reflection",
+                )
+                .on_hover_text(
+                    "Simulates a warm diffuse camera flash reflection on the lower-right area of the screen.",
+                )
+                .changed()
+            {
+                crate::config::save_config(state);
+                changed = true;
+            }
+
+            if state.video.crt_glass_flash_enabled {
+                if ui
+                    .add(
+                        egui::Slider::new(&mut state.video.crt_glass_flash_intensity, 0.0..=1.0)
+                            .text("Flash Intensity")
+                            .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
+                    )
+                    .on_hover_text(
+                        "Controls the exposure and brightness of the camera flash reflection.",
+                    )
+                    .changed()
+                {
+                    crate::config::save_config(state);
+                    changed = true;
+                }
+            }
         }
 
         if ui

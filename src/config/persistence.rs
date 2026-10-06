@@ -151,6 +151,10 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         crt_glass_enabled: Some(state.video.crt_glass_enabled),
         crt_glass_intensity: Some(state.video.crt_glass_intensity),
         crt_glass_glossiness: Some(state.video.crt_glass_glossiness),
+        crt_glass_photographer_enabled: Some(state.video.crt_glass_photographer_enabled),
+        crt_glass_photographer_intensity: Some(state.video.crt_glass_photographer_intensity),
+        crt_glass_flash_enabled: Some(state.video.crt_glass_flash_enabled),
+        crt_glass_flash_intensity: Some(state.video.crt_glass_flash_intensity),
         horizontal_stretch: Some(state.video.horizontal_stretch),
         median_filter_enabled: Some(state.video.median_filter_enabled),
         median_mix: Some(state.video.median_mix),
@@ -368,6 +372,18 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) {
     }
     if let Some(val) = profile.crt_glass_glossiness {
         state.video.crt_glass_glossiness = val;
+    }
+    if let Some(val) = profile.crt_glass_photographer_enabled {
+        state.video.crt_glass_photographer_enabled = val;
+    }
+    if let Some(val) = profile.crt_glass_photographer_intensity {
+        state.video.crt_glass_photographer_intensity = val;
+    }
+    if let Some(val) = profile.crt_glass_flash_enabled {
+        state.video.crt_glass_flash_enabled = val;
+    }
+    if let Some(val) = profile.crt_glass_flash_intensity {
+        state.video.crt_glass_flash_intensity = val;
     }
     if let Some(val) = profile.horizontal_stretch {
         state.video.horizontal_stretch = val;
@@ -960,33 +976,61 @@ mod tests {
         assert!(!state.video.crt_glass_enabled);
         assert_eq!(state.video.crt_glass_intensity, 0.25);
         assert_eq!(state.video.crt_glass_glossiness, 0.50);
+        assert!(!state.video.crt_glass_photographer_enabled);
+        assert_eq!(state.video.crt_glass_photographer_intensity, 0.50);
+        assert!(!state.video.crt_glass_flash_enabled);
+        assert_eq!(state.video.crt_glass_flash_intensity, 0.70);
 
         state.video.crt_glass_enabled = true;
         state.video.crt_glass_intensity = 0.65;
         state.video.crt_glass_glossiness = 0.85;
+        state.video.crt_glass_photographer_enabled = true;
+        state.video.crt_glass_photographer_intensity = 0.80;
+        state.video.crt_glass_flash_enabled = true;
+        state.video.crt_glass_flash_intensity = 0.90;
         let profile = build_profile_from_state(&state);
         assert_eq!(profile.crt_glass_enabled, Some(true));
         assert_eq!(profile.crt_glass_intensity, Some(0.65));
         assert_eq!(profile.crt_glass_glossiness, Some(0.85));
+        assert_eq!(profile.crt_glass_photographer_enabled, Some(true));
+        assert_eq!(profile.crt_glass_photographer_intensity, Some(0.80));
+        assert_eq!(profile.crt_glass_flash_enabled, Some(true));
+        assert_eq!(profile.crt_glass_flash_intensity, Some(0.90));
 
         let mut new_state = AppState::default();
         apply_profile_to_state(&mut new_state, &profile);
         assert!(new_state.video.crt_glass_enabled);
         assert_eq!(new_state.video.crt_glass_intensity, 0.65);
         assert_eq!(new_state.video.crt_glass_glossiness, 0.85);
+        assert!(new_state.video.crt_glass_photographer_enabled);
+        assert_eq!(new_state.video.crt_glass_photographer_intensity, 0.80);
+        assert!(new_state.video.crt_glass_flash_enabled);
+        assert_eq!(new_state.video.crt_glass_flash_intensity, 0.90);
 
         state.video.crt_glass_enabled = false;
         state.video.crt_glass_intensity = 0.10;
         state.video.crt_glass_glossiness = 0.20;
+        state.video.crt_glass_photographer_enabled = false;
+        state.video.crt_glass_photographer_intensity = 0.30;
+        state.video.crt_glass_flash_enabled = false;
+        state.video.crt_glass_flash_intensity = 0.40;
         let profile = build_profile_from_state(&state);
         assert_eq!(profile.crt_glass_enabled, Some(false));
         assert_eq!(profile.crt_glass_intensity, Some(0.10));
         assert_eq!(profile.crt_glass_glossiness, Some(0.20));
+        assert_eq!(profile.crt_glass_photographer_enabled, Some(false));
+        assert_eq!(profile.crt_glass_photographer_intensity, Some(0.30));
+        assert_eq!(profile.crt_glass_flash_enabled, Some(false));
+        assert_eq!(profile.crt_glass_flash_intensity, Some(0.40));
 
         apply_profile_to_state(&mut new_state, &profile);
         assert!(!new_state.video.crt_glass_enabled);
         assert_eq!(new_state.video.crt_glass_intensity, 0.10);
         assert_eq!(new_state.video.crt_glass_glossiness, 0.20);
+        assert!(!new_state.video.crt_glass_photographer_enabled);
+        assert_eq!(new_state.video.crt_glass_photographer_intensity, 0.30);
+        assert!(!new_state.video.crt_glass_flash_enabled);
+        assert_eq!(new_state.video.crt_glass_flash_intensity, 0.40);
     }
 
     #[test]

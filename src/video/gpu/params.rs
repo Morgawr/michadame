@@ -182,6 +182,10 @@ pub struct GlassShaderParams {
     pub enabled: bool,
     pub intensity: f32,
     pub glossiness: f32,
+    pub photographer_enabled: bool,
+    pub photographer_intensity: f32,
+    pub flash_enabled: bool,
+    pub flash_intensity: f32,
     pub warp: [f32; 2],
     pub corner_size: f32,
     pub filter_type: i32,
@@ -200,6 +204,10 @@ impl GlassShaderParams {
             enabled: state.video.crt_glass_enabled,
             intensity: state.video.crt_glass_intensity,
             glossiness: state.video.crt_glass_glossiness,
+            photographer_enabled: state.video.crt_glass_photographer_enabled,
+            photographer_intensity: state.video.crt_glass_photographer_intensity,
+            flash_enabled: state.video.crt_glass_flash_enabled,
+            flash_intensity: state.video.crt_glass_flash_intensity,
             warp,
             corner_size,
             filter_type,
@@ -220,6 +228,10 @@ impl Default for GlassShaderParams {
             enabled: false,
             intensity: 0.25,
             glossiness: 0.50,
+            photographer_enabled: false,
+            photographer_intensity: 0.50,
+            flash_enabled: false,
+            flash_intensity: 0.70,
             warp: [0.0, 0.0],
             corner_size: 0.0,
             filter_type: 0,
@@ -427,6 +439,10 @@ mod tests {
         assert!(!default_params.enabled);
         assert_eq!(default_params.intensity, 0.25);
         assert_eq!(default_params.glossiness, 0.50);
+        assert!(!default_params.photographer_enabled);
+        assert_eq!(default_params.photographer_intensity, 0.50);
+        assert!(!default_params.flash_enabled);
+        assert_eq!(default_params.flash_intensity, 0.70);
         assert_eq!(default_params.warp, [0.0, 0.0]);
         assert_eq!(default_params.filter_type, 0);
 
@@ -434,12 +450,20 @@ mod tests {
         state.video.crt_glass_enabled = true;
         state.video.crt_glass_intensity = 0.8;
         state.video.crt_glass_glossiness = 0.75;
+        state.video.crt_glass_photographer_enabled = true;
+        state.video.crt_glass_photographer_intensity = 0.65;
+        state.video.crt_glass_flash_enabled = true;
+        state.video.crt_glass_flash_intensity = 0.85;
         state.video.horizontal_stretch = 1.2;
 
         let params = GlassShaderParams::from_state(&state, [0.031, 0.041], 0.05, 2);
         assert!(params.enabled);
         assert_eq!(params.intensity, 0.8);
         assert_eq!(params.glossiness, 0.75);
+        assert!(params.photographer_enabled);
+        assert_eq!(params.photographer_intensity, 0.65);
+        assert!(params.flash_enabled);
+        assert_eq!(params.flash_intensity, 0.85);
         assert_eq!(params.warp, [0.031, 0.041]);
         assert_eq!(params.corner_size, 0.05);
         assert_eq!(params.filter_type, 2);

@@ -3,6 +3,7 @@ in vec2 v_tc;
 out vec4 out_color;
 
 uniform sampler2D video_texture;
+uniform sampler2D silhouette_texture;
 
 uniform vec2 outputResolution;
 uniform vec2 source_size;
@@ -14,6 +15,11 @@ uniform int filter_type;  // 0 = Flat/Passthrough, 1 = Lottes, 2 = Halo
 uniform float intensity;   // 0.0 to 1.0
 uniform float glossiness;  // 0.0 (Matte / Diffuse) to 1.0 (Glossy / Crisp Ceiling Lights)
 uniform float time;
+
+uniform int photographer_enabled;
+uniform float photographer_intensity;
+uniform int flash_enabled;
+uniform float flash_intensity;
 
 float ToLinear1(float c) {
     return (c <= 0.04045) ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
@@ -207,6 +213,42 @@ void main() {
 
     vec3 glass_tint = vec3(0.92, 0.96, 1.0);
     vec3 ambient_specular = (glass_tint * (desk_sheen + fresnel_rim) + fluorescent_reflection) * (intensity * 0.45);
+
+    // 7b. Photographer Silhouette Reflection
+    if (photographer_enabled == 1 && photographer_intensity > 0.001) {
+        vec2 sil_uv = clamp(screen_tc + vec2(N.x, N.y) * (0.010 * (1.0 - glossiness * 0.40)), 0.0, 1.0);
+        float sil_mask = texture(silhouette_texture, sil_uv).r * photographer_intensity;
+        sil_mask = pow(sil_mask, mix(1.25, 0.85, glossiness));
+
+        // Silhouette blocks/occludes ambient ceiling and desk reflections behind the viewer
+        ambient_specular *= (1.0 - 0.75 * sil_mask);
+        // Softly deepens video content under the reflection shadow
+        col_lin *= (1.0 - 0.35 * sil_mask);
+
+        // Faint diffuse glass sheen reflection of the darkened silhouette figure
+        vec3 sil_sheen_color = vec3(0.035, 0.040, 0.048);
+        ambient_specular += sil_sheen_color * (sil_mask * (0.35 + 0.65 * glossiness) * intensity);
+    }
+
+    // 7c. Camera Flash Overexposure Reflection
+    if (flash_enabled == 1 && flash_intensity > 0.001) {
+        vec2 flash_pos = vec2(0.28, -0.22);
+        vec2 delta_f = p - flash_pos;
+        delta_f.x *= (outputResolution.x / max(outputResolution.y, 1.0));
+        float f_dist = length(delta_f);
+
+        // Warm, diffuse optical tone (amber/golden-white glow, less bright on specular spectrum)
+        vec3 warm_flash_color = vec3(1.0, 0.88, 0.70);
+        float core_rad = mix(0.18, 0.13, glossiness);
+        float f_core = exp(-0.5 * pow(f_dist / core_rad, 2.0)) * 0.40;
+        float f_bloom = exp(-0.5 * pow(f_dist / 0.42, 2.0)) * 0.26;
+        float f_veiling = 0.16 / (1.0 + pow(f_dist / 0.55, 1.4));
+        float f_streak = exp(-0.5 * pow(delta_f.x / 0.95, 2.0)) * exp(-0.5 * pow(delta_f.y / 0.09, 2.0)) * 0.10;
+
+        vec3 flash_lin = warm_flash_color * ((f_core + f_bloom + f_veiling + f_streak) * flash_intensity);
+        col_lin += flash_lin * 0.85;
+        ambient_specular += flash_lin * 0.50;
+    }
 
     // 8. Glass Patina & Micro-texture
     float patina_str = 0.015 * (1.0 - 0.50 * glossiness);

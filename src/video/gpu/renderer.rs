@@ -98,6 +98,11 @@ pub struct CrtFilterRenderer {
     glass_intensity_loc: Option<glow::UniformLocation>,
     glass_glossiness_loc: Option<glow::UniformLocation>,
     glass_time_loc: Option<glow::UniformLocation>,
+    glass_photographer_enabled_loc: Option<glow::UniformLocation>,
+    glass_photographer_intensity_loc: Option<glow::UniformLocation>,
+    glass_flash_enabled_loc: Option<glow::UniformLocation>,
+    glass_flash_intensity_loc: Option<glow::UniformLocation>,
+    silhouette_texture: glow::Texture,
 
     post_fbos: [glow::Framebuffer; 2],
     post_textures: [glow::Texture; 2],
@@ -187,10 +192,21 @@ impl CrtFilterRenderer {
             let glass_intensity_loc = gl.get_uniform_location(crt_glass_prog, "intensity");
             let glass_glossiness_loc = gl.get_uniform_location(crt_glass_prog, "glossiness");
             let glass_time_loc = gl.get_uniform_location(crt_glass_prog, "time");
+            let glass_photographer_enabled_loc =
+                gl.get_uniform_location(crt_glass_prog, "photographer_enabled");
+            let glass_photographer_intensity_loc =
+                gl.get_uniform_location(crt_glass_prog, "photographer_intensity");
+            let glass_flash_enabled_loc =
+                gl.get_uniform_location(crt_glass_prog, "flash_enabled");
+            let glass_flash_intensity_loc =
+                gl.get_uniform_location(crt_glass_prog, "flash_intensity");
 
             gl.use_program(Some(crt_glass_prog));
             if let Some(loc) = gl.get_uniform_location(crt_glass_prog, "video_texture") {
                 gl.uniform_1_i32(Some(&loc), 0);
+            }
+            if let Some(loc) = gl.get_uniform_location(crt_glass_prog, "silhouette_texture") {
+                gl.uniform_1_i32(Some(&loc), 1);
             }
             gl.use_program(None);
 
@@ -486,6 +502,47 @@ impl CrtFilterRenderer {
             );
             gl.bind_texture(glow::TEXTURE_2D, None);
 
+            let mut sil_img = image::load_from_memory(include_bytes!("../../../assets/crt_reflection_silhouette.png"))
+                .expect("Failed to load crt_reflection_silhouette.png")
+                .to_rgba8();
+            image::imageops::flip_vertical_in_place(&mut sil_img);
+            let (sw, sh) = (sil_img.width(), sil_img.height());
+            let silhouette_texture = gl.create_texture().unwrap();
+            gl.bind_texture(glow::TEXTURE_2D, Some(silhouette_texture));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA as i32,
+                sw as i32,
+                sh as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                Some(&sil_img.into_raw()),
+            );
+            gl.generate_mipmap(glow::TEXTURE_2D);
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR_MIPMAP_LINEAR as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            gl.bind_texture(glow::TEXTURE_2D, None);
+
             Self {
                 passthrough_prog,
                 retro_frame_prog,
@@ -560,6 +617,11 @@ impl CrtFilterRenderer {
                 glass_intensity_loc,
                 glass_glossiness_loc,
                 glass_time_loc,
+                glass_photographer_enabled_loc,
+                glass_photographer_intensity_loc,
+                glass_flash_enabled_loc,
+                glass_flash_intensity_loc,
+                silhouette_texture,
                 post_fbos,
                 post_textures,
                 last_post_size: (0, 0),
@@ -1661,15 +1723,37 @@ impl CrtFilterRenderer {
             self.glass_glossiness_loc.as_ref(),
             glass_params.glossiness,
         );
+        gl.active_texture(glow::TEXTURE1);
+        gl.bind_texture(glow::TEXTURE_2D, Some(self.silhouette_texture));
+
         gl.uniform_1_f32(
             self.glass_time_loc.as_ref(),
             time,
+        );
+        gl.uniform_1_i32(
+            self.glass_photographer_enabled_loc.as_ref(),
+            if glass_params.photographer_enabled { 1 } else { 0 },
+        );
+        gl.uniform_1_f32(
+            self.glass_photographer_intensity_loc.as_ref(),
+            glass_params.photographer_intensity,
+        );
+        gl.uniform_1_i32(
+            self.glass_flash_enabled_loc.as_ref(),
+            if glass_params.flash_enabled { 1 } else { 0 },
+        );
+        gl.uniform_1_f32(
+            self.glass_flash_intensity_loc.as_ref(),
+            glass_params.flash_intensity,
         );
 
         if scissor_enabled {
             gl.enable(glow::SCISSOR_TEST);
         }
         gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        gl.active_texture(glow::TEXTURE1);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        gl.active_texture(glow::TEXTURE0);
         gl.bind_texture(glow::TEXTURE_2D, None);
         gl.use_program(None);
     }
@@ -1763,6 +1847,7 @@ impl CrtFilterRenderer {
             gl.delete_program(self.passthrough_prog);
             gl.delete_program(self.retro_frame_prog);
             gl.delete_texture(self.bezel_texture);
+            gl.delete_texture(self.silhouette_texture);
             gl.delete_program(self.pixelate_prog);
             gl.delete_program(self.median_prog);
             gl.delete_program(self.final_prog);
