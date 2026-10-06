@@ -147,6 +147,7 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         crt_shape: Some(state.crt.shape),
         crt_hard_pix: Some(state.crt.hard_pix),
         use_magenta_background: Some(state.video.use_magenta_background),
+        retro_pc_frame: Some(state.video.retro_pc_frame),
         horizontal_stretch: Some(state.video.horizontal_stretch),
         median_filter_enabled: Some(state.video.median_filter_enabled),
         median_mix: Some(state.video.median_mix),
@@ -352,6 +353,9 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) {
     }
     if let Some(val) = profile.use_magenta_background {
         state.video.use_magenta_background = val;
+    }
+    if let Some(val) = profile.retro_pc_frame {
+        state.video.retro_pc_frame = val;
     }
     if let Some(val) = profile.horizontal_stretch {
         state.video.horizontal_stretch = val;
@@ -915,6 +919,27 @@ mod tests {
         assert_eq!(new_state.video.border_crop_right, 0.06);
         assert_eq!(new_state.video.border_crop_top, 0.07);
         assert_eq!(new_state.video.border_crop_bottom, 0.08);
+    }
+
+    #[test]
+    fn test_retro_pc_frame_profile_roundtrip() {
+        let mut state = AppState::default();
+        assert!(!state.video.retro_pc_frame);
+
+        state.video.retro_pc_frame = true;
+        let profile = build_profile_from_state(&state);
+        assert_eq!(profile.retro_pc_frame, Some(true));
+
+        let mut new_state = AppState::default();
+        apply_profile_to_state(&mut new_state, &profile);
+        assert!(new_state.video.retro_pc_frame);
+
+        state.video.retro_pc_frame = false;
+        let profile = build_profile_from_state(&state);
+        assert_eq!(profile.retro_pc_frame, Some(false));
+
+        apply_profile_to_state(&mut new_state, &profile);
+        assert!(!new_state.video.retro_pc_frame);
     }
 
     #[test]

@@ -74,6 +74,17 @@ pub struct CrtFilterRenderer {
     cathode_lightbulb_effect_loc: glow::UniformLocation,
     cathode_border_crop_loc: glow::UniformLocation,
 
+    retro_frame_prog: glow::Program,
+    bezel_texture: glow::Texture,
+    retro_output_res_loc: Option<glow::UniformLocation>,
+    retro_source_size_loc: Option<glow::UniformLocation>,
+    retro_horizontal_stretch_loc: Option<glow::UniformLocation>,
+    retro_border_crop_loc: Option<glow::UniformLocation>,
+    retro_warp_loc: Option<glow::UniformLocation>,
+    retro_corner_size_loc: Option<glow::UniformLocation>,
+    retro_filter_type_loc: Option<glow::UniformLocation>,
+    retro_time_loc: Option<glow::UniformLocation>,
+
     post_fbo: glow::Framebuffer,
     post_texture: glow::Texture,
     last_post_size: (u32, u32),
@@ -132,6 +143,23 @@ impl CrtFilterRenderer {
             let yuv_planar_prog = compile_program(gl, VS_SRC, FS_YUV_PLANAR);
             let yuyv_packed_prog = compile_program(gl, VS_SRC, FS_YUYV_PACKED);
             let cathode_prog = compile_program(gl, VS_SRC, FS_CATHODE_INTERFERENCE);
+            let retro_frame_prog = compile_program(gl, VS_SRC, FS_RETRO_FRAME);
+
+            let retro_output_res_loc = gl.get_uniform_location(retro_frame_prog, "outputResolution");
+            let retro_source_size_loc = gl.get_uniform_location(retro_frame_prog, "source_size");
+            let retro_horizontal_stretch_loc =
+                gl.get_uniform_location(retro_frame_prog, "horizontal_stretch");
+            let retro_border_crop_loc = gl.get_uniform_location(retro_frame_prog, "border_crop");
+            let retro_warp_loc = gl.get_uniform_location(retro_frame_prog, "warp");
+            let retro_corner_size_loc = gl.get_uniform_location(retro_frame_prog, "corner_size");
+            let retro_filter_type_loc = gl.get_uniform_location(retro_frame_prog, "filter_type");
+            let retro_time_loc = gl.get_uniform_location(retro_frame_prog, "time");
+
+            gl.use_program(Some(retro_frame_prog));
+            if let Some(loc) = gl.get_uniform_location(retro_frame_prog, "bezel_texture") {
+                gl.uniform_1_i32(Some(&loc), 0);
+            }
+            gl.use_program(None);
 
             let p_passthrough_output_res_loc = gl
                 .get_uniform_location(passthrough_prog, "outputResolution")
@@ -378,8 +406,59 @@ impl CrtFilterRenderer {
             gl.bind_buffer(glow::ARRAY_BUFFER, None);
             gl.bind_vertex_array(None);
 
+            let mut bezel_img = image::load_from_memory(include_bytes!("../../../assets/nec_pc98_bezel.png"))
+                .expect("Failed to load nec_pc98_bezel.png")
+                .to_rgba8();
+            image::imageops::flip_vertical_in_place(&mut bezel_img);
+            let (bw, bh) = (bezel_img.width(), bezel_img.height());
+            let bezel_texture = gl.create_texture().unwrap();
+            gl.bind_texture(glow::TEXTURE_2D, Some(bezel_texture));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA as i32,
+                bw as i32,
+                bh as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                Some(&bezel_img.into_raw()),
+            );
+            gl.generate_mipmap(glow::TEXTURE_2D);
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR_MIPMAP_LINEAR as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::REPEAT as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::REPEAT as i32,
+            );
+            gl.bind_texture(glow::TEXTURE_2D, None);
+
             Self {
                 passthrough_prog,
+                retro_frame_prog,
+                bezel_texture,
+                retro_output_res_loc,
+                retro_source_size_loc,
+                retro_horizontal_stretch_loc,
+                retro_border_crop_loc,
+                retro_warp_loc,
+                retro_corner_size_loc,
+                retro_filter_type_loc,
+                retro_time_loc,
                 pixelate_prog,
                 final_prog,
                 yuv_planar_prog,
@@ -1399,9 +1478,95 @@ impl CrtFilterRenderer {
         RenderedArea::fit(resolution, output_size, horizontal_stretch)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_retro_frame(
+        &self,
+        gl: &glow::Context,
+        resolution: (u32, u32),
+        output_size: (f32, f32),
+        horizontal_stretch: f32,
+        border_crop: [f32; 4],
+        warp: [f32; 2],
+        corner_size: f32,
+        filter_type: i32,
+        time: f32,
+    ) {
+        unsafe {
+            let old_vbo = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
+            let blend_enabled = gl.is_enabled(glow::BLEND);
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+
+            gl.bind_vertex_array(Some(self.vertex_array));
+            gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+
+            gl.use_program(Some(self.retro_frame_prog));
+
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.bezel_texture));
+
+            gl.uniform_2_f32(
+                self.retro_output_res_loc.as_ref(),
+                output_size.0,
+                output_size.1,
+            );
+            gl.uniform_2_f32(
+                self.retro_source_size_loc.as_ref(),
+                resolution.0 as f32,
+                resolution.1 as f32,
+            );
+            gl.uniform_1_f32(
+                self.retro_horizontal_stretch_loc.as_ref(),
+                horizontal_stretch,
+            );
+            gl.uniform_4_f32(
+                self.retro_border_crop_loc.as_ref(),
+                border_crop[0],
+                border_crop[1],
+                border_crop[2],
+                border_crop[3],
+            );
+            gl.uniform_2_f32(
+                self.retro_warp_loc.as_ref(),
+                warp[0],
+                warp[1],
+            );
+            gl.uniform_1_f32(
+                self.retro_corner_size_loc.as_ref(),
+                corner_size,
+            );
+            gl.uniform_1_i32(
+                self.retro_filter_type_loc.as_ref(),
+                filter_type,
+            );
+            gl.uniform_1_f32(
+                self.retro_time_loc.as_ref(),
+                time,
+            );
+
+            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.use_program(None);
+
+            if !blend_enabled {
+                gl.disable(glow::BLEND);
+            }
+
+            gl.bind_vertex_array(None);
+            if old_vbo != 0 {
+                gl.bind_vertex_array(Some(glow::VertexArray::from(glow::NativeVertexArray(
+                    NonZero::new(old_vbo as u32).unwrap(),
+                ))));
+            }
+        }
+    }
+
     pub fn destroy(&self, gl: &glow::Context) {
         unsafe {
             gl.delete_program(self.passthrough_prog);
+            gl.delete_program(self.retro_frame_prog);
+            gl.delete_texture(self.bezel_texture);
             gl.delete_program(self.pixelate_prog);
             gl.delete_program(self.median_prog);
             gl.delete_program(self.final_prog);

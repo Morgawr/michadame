@@ -205,6 +205,20 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         }
 
         if ui
+            .checkbox(
+                &mut state.video.retro_pc_frame,
+                "Retro PC Monitor Frame (Fullscreen)",
+            )
+            .on_hover_text(
+                "Displays a vintage NEC PC-98 CRT monitor casing in empty black bar areas when in fullscreen.",
+            )
+            .changed()
+        {
+            crate::config::save_config(state);
+            changed = true;
+        }
+
+        if ui
             .add(
                 egui::Slider::new(&mut state.video.vibrance, 0.0..=3.0)
                     .text("Vibrance (Saturation)")

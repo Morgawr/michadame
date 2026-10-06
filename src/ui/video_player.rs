@@ -190,7 +190,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
         let cathode_params = video::gpu::CathodeInterferenceShaderParams::from_state(state);
         let time = ui.input(|i| i.time) as f32;
-        if state.cathode_interference.enabled {
+        let is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        let retro_pc_frame = state.video.retro_pc_frame;
+        if state.cathode_interference.enabled || (retro_pc_frame && is_fullscreen) {
             ui.ctx().request_repaint();
         }
 
@@ -285,6 +287,35 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                             if let Some(request) = bank_capture_cb.take_pending() {
                                 let shot = capture_frame_pixels(painter.gl(), rendered_area);
                                 bank_capture_cb.save(request, shot);
+                            }
+
+                            if is_fullscreen && retro_pc_frame {
+                                let (warp, corner_size, filter_type) = if run_lottes {
+                                    ([params.warp_x, params.warp_y], 0.0, 1)
+                                } else if run_halo {
+                                    (
+                                        if halo_params.curvature {
+                                            [0.031, 0.041]
+                                        } else {
+                                            [0.0, 0.0]
+                                        },
+                                        halo_params.corner_size,
+                                        2,
+                                    )
+                                } else {
+                                    ([0.0, 0.0], 0.0, 0)
+                                };
+                                renderer.draw_retro_frame(
+                                    painter.gl(),
+                                    res,
+                                    output_size,
+                                    params.horizontal_stretch,
+                                    params.border_crop,
+                                    warp,
+                                    corner_size,
+                                    filter_type,
+                                    time,
+                                );
                             }
                         },
                     )),
@@ -397,6 +428,20 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     if let Some(request) = bank_capture_cb.take_pending() {
                         let shot = capture_frame_pixels(painter.gl(), rendered_area);
                         bank_capture_cb.save(request, shot);
+                    }
+
+                    if is_fullscreen && retro_pc_frame {
+                        renderer_clone.lock().unwrap().draw_retro_frame(
+                            painter.gl(),
+                            res,
+                            (rect.width() * ppp, rect.height() * ppp),
+                            horizontal_stretch,
+                            border_crop,
+                            [0.0, 0.0],
+                            0.0,
+                            0,
+                            time,
+                        );
                     }
                 })),
             };

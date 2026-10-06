@@ -141,6 +141,7 @@ impl Default for CathodeInterferenceSettings {
 pub struct VideoSettings {
     pub pixelate_filter_enabled: bool,
     pub use_magenta_background: bool,
+    pub retro_pc_frame: bool,
     pub horizontal_stretch: f32,
     pub median_filter_enabled: bool,
     pub median_mix: f32,

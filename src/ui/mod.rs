@@ -34,14 +34,8 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
         }
     }
 
-    let panel_frame = if state.ui.is_fullscreen {
-        egui::Frame::none()
-    } else {
-        egui::Frame::central_panel(&ctx.style())
-    };
-
     egui::CentralPanel::default()
-        .frame(panel_frame)
+        .frame(egui::Frame::central_panel(&ctx.style()))
         .show(ctx, |ui| {
             let mut repaint_requested = false;
             if state.config_load_error.is_some() && !state.ui.dismissed_config_error {

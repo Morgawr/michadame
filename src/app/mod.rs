@@ -68,6 +68,7 @@ impl Default for AppState {
             video: VideoSettings {
                 pixelate_filter_enabled: false,
                 use_magenta_background: false,
+                retro_pc_frame: false,
                 horizontal_stretch: 1.0,
                 median_filter_enabled: false,
                 median_mix: 1.0,
@@ -281,6 +282,7 @@ impl eframe::App for AppState {
         if self.replay.runtime.is_some() || self.replay.status().saving {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
+        self.ui.is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         self.replay.shortcuts(ctx);
         let mut repaint_requested = false;
 
