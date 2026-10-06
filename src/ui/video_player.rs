@@ -205,6 +205,27 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 let pixelate = state.video.pixelate_filter_enabled;
                 let run_lottes = filter == CrtFilter::Lottes;
                 let run_halo = filter == CrtFilter::Halo;
+                let (warp, corner_size, filter_type) = if run_lottes {
+                    ([params.warp_x, params.warp_y], 0.0, 1)
+                } else if run_halo {
+                    (
+                        if halo_params.curvature {
+                            [0.031, 0.041]
+                        } else {
+                            [0.0, 0.0]
+                        },
+                        halo_params.corner_size,
+                        2,
+                    )
+                } else {
+                    ([0.0, 0.0], 0.0, 0)
+                };
+                let glass_params = video::gpu::GlassShaderParams::from_state(
+                    state,
+                    warp,
+                    corner_size,
+                    filter_type,
+                );
                 let rect = response.rect;
                 let latest_frame = state.latest_frame.clone();
                 let video_texture_id = state.video_texture.as_ref().map(|t| t.id());
@@ -248,6 +269,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 &params,
                                 &halo_params,
                                 &cathode_params_cb,
+                                Some(&glass_params),
                                 time,
                                 pixelate,
                                 run_lottes,
@@ -354,6 +376,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             let fft_clone = fft_filter_ref.clone();
             let fft_threshold = state.fft_mask_threshold;
             let fft_black = state.fft_black_threshold;
+            let glass_params =
+                video::gpu::GlassShaderParams::from_state(state, [0.0, 0.0], 0.0, 0);
 
             let replay_gpu = state.replay.gpu.clone();
             let replay = state
@@ -395,6 +419,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         fft_threshold,
                         fft_black,
                         None,
+                        Some(&glass_params),
                         0.0,
                     );
                     let (at, rate) = latest_frame

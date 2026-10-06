@@ -23,6 +23,7 @@ pub const FS_HALO_COMPOSITE: &str = include_str!("../shaders/fs_halo_composite.g
 pub const FS_HALO_FINAL: &str = include_str!("../shaders/fs_halo_final.glsl");
 pub const FS_CATHODE_INTERFERENCE: &str = include_str!("../shaders/fs_cathode_interference.glsl");
 pub const FS_RETRO_FRAME: &str = include_str!("../shaders/fs_retro_frame.glsl");
+pub const FS_CRT_GLASS: &str = include_str!("../shaders/fs_crt_glass.glsl");
 
 pub unsafe fn compile_program(gl: &glow::Context, vs_src: &str, fs_src: &str) -> glow::Program {
     let program = gl.create_program().expect("Cannot create program");

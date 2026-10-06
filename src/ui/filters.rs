@@ -219,6 +219,52 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         }
 
         if ui
+            .checkbox(
+                &mut state.video.crt_glass_enabled,
+                "Glossy Screen Glass Effect",
+            )
+            .on_hover_text(
+                "Simulates a photorealistic curved CRT glass patina, refractions, and reflections reacting to screen light.",
+            )
+            .changed()
+        {
+            crate::config::save_config(state);
+            changed = true;
+        }
+
+        if state.video.crt_glass_enabled {
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.video.crt_glass_intensity, 0.0..=1.0)
+                        .text("Glass Intensity")
+                        .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
+                )
+                .on_hover_text(
+                    "Controls the intensity of the glass patina, refractions, and reflections.",
+                )
+                .changed()
+            {
+                crate::config::save_config(state);
+                changed = true;
+            }
+
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.video.crt_glass_glossiness, 0.0..=1.0)
+                        .text("Glossiness / Ceiling Light Reflections")
+                        .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
+                )
+                .on_hover_text(
+                    "Controls specular sharpness and the prominence of surrounding office ceiling fluorescent light reflections on the glass surface.",
+                )
+                .changed()
+            {
+                crate::config::save_config(state);
+                changed = true;
+            }
+        }
+
+        if ui
             .add(
                 egui::Slider::new(&mut state.video.vibrance, 0.0..=3.0)
                     .text("Vibrance (Saturation)")

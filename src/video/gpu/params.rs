@@ -177,6 +177,58 @@ impl Default for CathodeInterferenceShaderParams {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct GlassShaderParams {
+    pub enabled: bool,
+    pub intensity: f32,
+    pub glossiness: f32,
+    pub warp: [f32; 2],
+    pub corner_size: f32,
+    pub filter_type: i32,
+    pub border_crop: [f32; 4],
+    pub horizontal_stretch: f32,
+}
+
+impl GlassShaderParams {
+    pub fn from_state(
+        state: &AppState,
+        warp: [f32; 2],
+        corner_size: f32,
+        filter_type: i32,
+    ) -> Self {
+        Self {
+            enabled: state.video.crt_glass_enabled,
+            intensity: state.video.crt_glass_intensity,
+            glossiness: state.video.crt_glass_glossiness,
+            warp,
+            corner_size,
+            filter_type,
+            border_crop: [
+                state.video.border_crop_left,
+                state.video.border_crop_right,
+                state.video.border_crop_top,
+                state.video.border_crop_bottom,
+            ],
+            horizontal_stretch: state.video.horizontal_stretch,
+        }
+    }
+}
+
+impl Default for GlassShaderParams {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            intensity: 0.25,
+            glossiness: 0.50,
+            warp: [0.0, 0.0],
+            corner_size: 0.0,
+            filter_type: 0,
+            border_crop: [0.0, 0.0, 0.0, 0.0],
+            horizontal_stretch: 1.0,
+        }
+    }
+}
+
 impl ShaderParams {
     pub fn from_state(state: &AppState) -> Self {
         Self {
@@ -361,5 +413,36 @@ mod tests {
 
         let cathode_params = CathodeInterferenceShaderParams::from_state(&state);
         assert_eq!(cathode_params.border_crop, [0.05, 0.06, 0.07, 0.08]);
+
+        let glass_params = GlassShaderParams::from_state(&state, [0.03, 0.04], 0.02, 1);
+        assert_eq!(glass_params.border_crop, [0.05, 0.06, 0.07, 0.08]);
+        assert_eq!(glass_params.warp, [0.03, 0.04]);
+        assert_eq!(glass_params.corner_size, 0.02);
+        assert_eq!(glass_params.filter_type, 1);
+    }
+
+    #[test]
+    fn test_glass_shader_params_default_and_from_state() {
+        let default_params = GlassShaderParams::default();
+        assert!(!default_params.enabled);
+        assert_eq!(default_params.intensity, 0.25);
+        assert_eq!(default_params.glossiness, 0.50);
+        assert_eq!(default_params.warp, [0.0, 0.0]);
+        assert_eq!(default_params.filter_type, 0);
+
+        let mut state = AppState::default();
+        state.video.crt_glass_enabled = true;
+        state.video.crt_glass_intensity = 0.8;
+        state.video.crt_glass_glossiness = 0.75;
+        state.video.horizontal_stretch = 1.2;
+
+        let params = GlassShaderParams::from_state(&state, [0.031, 0.041], 0.05, 2);
+        assert!(params.enabled);
+        assert_eq!(params.intensity, 0.8);
+        assert_eq!(params.glossiness, 0.75);
+        assert_eq!(params.warp, [0.031, 0.041]);
+        assert_eq!(params.corner_size, 0.05);
+        assert_eq!(params.filter_type, 2);
+        assert_eq!(params.horizontal_stretch, 1.2);
     }
 }

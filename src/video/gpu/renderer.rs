@@ -2,7 +2,9 @@ use super::anime4k::{Anime4kUpscaler, Anime4kVariant};
 use super::fft_filter::FftFilter;
 use super::geometry::RenderedArea;
 use super::halo::HaloRenderer;
-use super::params::{CathodeInterferenceShaderParams, HaloShaderParams, ShaderParams};
+use super::params::{
+    CathodeInterferenceShaderParams, GlassShaderParams, HaloShaderParams, ShaderParams,
+};
 use super::programs::*;
 use crate::video::types::{RawFrame, ScalerFilter};
 use eframe::glow::{self, HasContext};
@@ -85,8 +87,20 @@ pub struct CrtFilterRenderer {
     retro_filter_type_loc: Option<glow::UniformLocation>,
     retro_time_loc: Option<glow::UniformLocation>,
 
-    post_fbo: glow::Framebuffer,
-    post_texture: glow::Texture,
+    crt_glass_prog: glow::Program,
+    glass_output_res_loc: Option<glow::UniformLocation>,
+    glass_source_size_loc: Option<glow::UniformLocation>,
+    glass_horizontal_stretch_loc: Option<glow::UniformLocation>,
+    glass_border_crop_loc: Option<glow::UniformLocation>,
+    glass_warp_loc: Option<glow::UniformLocation>,
+    glass_corner_size_loc: Option<glow::UniformLocation>,
+    glass_filter_type_loc: Option<glow::UniformLocation>,
+    glass_intensity_loc: Option<glow::UniformLocation>,
+    glass_glossiness_loc: Option<glow::UniformLocation>,
+    glass_time_loc: Option<glow::UniformLocation>,
+
+    post_fbos: [glow::Framebuffer; 2],
+    post_textures: [glow::Texture; 2],
     last_post_size: (u32, u32),
 
     last_size: (u32, u32),
@@ -157,6 +171,25 @@ impl CrtFilterRenderer {
 
             gl.use_program(Some(retro_frame_prog));
             if let Some(loc) = gl.get_uniform_location(retro_frame_prog, "bezel_texture") {
+                gl.uniform_1_i32(Some(&loc), 0);
+            }
+            gl.use_program(None);
+
+            let crt_glass_prog = compile_program(gl, VS_SRC, FS_CRT_GLASS);
+            let glass_output_res_loc = gl.get_uniform_location(crt_glass_prog, "outputResolution");
+            let glass_source_size_loc = gl.get_uniform_location(crt_glass_prog, "source_size");
+            let glass_horizontal_stretch_loc =
+                gl.get_uniform_location(crt_glass_prog, "horizontal_stretch");
+            let glass_border_crop_loc = gl.get_uniform_location(crt_glass_prog, "border_crop");
+            let glass_warp_loc = gl.get_uniform_location(crt_glass_prog, "warp");
+            let glass_corner_size_loc = gl.get_uniform_location(crt_glass_prog, "corner_size");
+            let glass_filter_type_loc = gl.get_uniform_location(crt_glass_prog, "filter_type");
+            let glass_intensity_loc = gl.get_uniform_location(crt_glass_prog, "intensity");
+            let glass_glossiness_loc = gl.get_uniform_location(crt_glass_prog, "glossiness");
+            let glass_time_loc = gl.get_uniform_location(crt_glass_prog, "time");
+
+            gl.use_program(Some(crt_glass_prog));
+            if let Some(loc) = gl.get_uniform_location(crt_glass_prog, "video_texture") {
                 gl.uniform_1_i32(Some(&loc), 0);
             }
             gl.use_program(None);
@@ -366,8 +399,14 @@ impl CrtFilterRenderer {
                 gl.create_buffer().unwrap(),
             ];
 
-            let post_fbo = gl.create_framebuffer().unwrap();
-            let post_texture = gl.create_texture().unwrap();
+            let post_fbos = [
+                gl.create_framebuffer().unwrap(),
+                gl.create_framebuffer().unwrap(),
+            ];
+            let post_textures = [
+                gl.create_texture().unwrap(),
+                gl.create_texture().unwrap(),
+            ];
 
             let vertex_array = gl
                 .create_vertex_array()
@@ -510,8 +549,19 @@ impl CrtFilterRenderer {
                 cathode_interference_loc,
                 cathode_lightbulb_effect_loc,
                 cathode_border_crop_loc,
-                post_fbo,
-                post_texture,
+                crt_glass_prog,
+                glass_output_res_loc,
+                glass_source_size_loc,
+                glass_horizontal_stretch_loc,
+                glass_border_crop_loc,
+                glass_warp_loc,
+                glass_corner_size_loc,
+                glass_filter_type_loc,
+                glass_intensity_loc,
+                glass_glossiness_loc,
+                glass_time_loc,
+                post_fbos,
+                post_textures,
                 last_post_size: (0, 0),
                 anime4k_small: Anime4kUpscaler::new(gl, Anime4kVariant::Small),
                 anime4k_medium: Anime4kUpscaler::new(gl, Anime4kVariant::Medium),
@@ -806,32 +856,34 @@ impl CrtFilterRenderer {
         let w = target_width.max(1);
         let h = target_height.max(1);
         if (w, h) != self.last_post_size {
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.post_texture));
-            gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                glow::RGBA8 as i32,
-                w as i32,
-                h as i32,
-                0,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                None,
-            );
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbo));
-            gl.framebuffer_texture_2d(
-                glow::FRAMEBUFFER,
-                glow::COLOR_ATTACHMENT0,
-                glow::TEXTURE_2D,
-                Some(self.post_texture),
-                0,
-            );
-            gl.bind_texture(glow::TEXTURE_2D, None);
-            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            for i in 0..2 {
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.post_textures[i]));
+                gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGBA8 as i32,
+                    w as i32,
+                    h as i32,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    None,
+                );
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[i]));
+                gl.framebuffer_texture_2d(
+                    glow::FRAMEBUFFER,
+                    glow::COLOR_ATTACHMENT0,
+                    glow::TEXTURE_2D,
+                    Some(self.post_textures[i]),
+                    0,
+                );
+                gl.bind_texture(glow::TEXTURE_2D, None);
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            }
             self.last_post_size = (w, h);
         }
     }
@@ -847,6 +899,7 @@ impl CrtFilterRenderer {
         params: &ShaderParams,
         halo_params: &HaloShaderParams,
         cathode_params: &CathodeInterferenceShaderParams,
+        glass_params: Option<&GlassShaderParams>,
         time: f32,
         run_pixelate: bool,
         run_lottes: bool,
@@ -1007,15 +1060,30 @@ impl CrtFilterRenderer {
             }
 
             let run_cathode = cathode_params.enabled && cathode_params.intensity > 0.001;
-            let target_fbo = if run_cathode {
-                self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
-                Some(self.post_fbo)
-            } else {
-                None
-            };
+            let run_glass = glass_params
+                .map(|g| g.enabled && g.intensity > 0.001)
+                .unwrap_or(false);
+            let has_post = run_cathode || run_glass;
+
+            let (upstream_target_fbo, cathode_target_fbo, glass_target_fbo) =
+                match (run_cathode, run_glass) {
+                    (true, true) => {
+                        self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
+                        (Some(self.post_fbos[0]), Some(self.post_fbos[1]), None)
+                    }
+                    (true, false) => {
+                        self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
+                        (Some(self.post_fbos[0]), None, None)
+                    }
+                    (false, true) => {
+                        self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
+                        (Some(self.post_fbos[0]), None, None)
+                    }
+                    (false, false) => (None, None, None),
+                };
 
             if run_lottes {
-                gl.bind_framebuffer(glow::FRAMEBUFFER, target_fbo);
+                gl.bind_framebuffer(glow::FRAMEBUFFER, upstream_target_fbo);
                 gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
                 gl.use_program(Some(self.final_prog));
                 gl.active_texture(glow::TEXTURE0);
@@ -1057,7 +1125,7 @@ impl CrtFilterRenderer {
                     params.border_crop[2],
                     params.border_crop[3],
                 );
-                if scissor_enabled && !run_cathode {
+                if scissor_enabled && !has_post {
                     gl.enable(glow::SCISSOR_TEST);
                 }
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
@@ -1068,11 +1136,11 @@ impl CrtFilterRenderer {
                     final_input_res,
                     output_size,
                     halo_params,
-                    scissor_enabled && !run_cathode,
-                    target_fbo,
+                    scissor_enabled && !has_post,
+                    upstream_target_fbo,
                 );
             } else if run_pixelate {
-                gl.bind_framebuffer(glow::FRAMEBUFFER, target_fbo);
+                gl.bind_framebuffer(glow::FRAMEBUFFER, upstream_target_fbo);
                 gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
                 gl.use_program(Some(self.passthrough_prog));
                 gl.active_texture(glow::TEXTURE0);
@@ -1104,7 +1172,7 @@ impl CrtFilterRenderer {
                     params.border_crop[2],
                     params.border_crop[3],
                 );
-                if scissor_enabled && !run_cathode {
+                if scissor_enabled && !has_post {
                     gl.enable(glow::SCISSOR_TEST);
                 }
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
@@ -1120,53 +1188,44 @@ impl CrtFilterRenderer {
                     params.vibrance,
                     params.scaler_filter,
                     params.border_crop,
-                    target_fbo,
+                    upstream_target_fbo,
                 );
             }
 
             if run_cathode {
-                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-                gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
-                gl.use_program(Some(self.cathode_prog));
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(self.post_texture));
-
-                gl.uniform_2_f32(
-                    Some(&self.cathode_output_res_loc),
-                    output_size.0,
-                    output_size.1,
-                );
-                gl.uniform_2_f32(
-                    Some(&self.cathode_source_size_loc),
-                    final_input_res.0 as f32,
-                    final_input_res.1 as f32,
-                );
-                gl.uniform_1_f32(
-                    Some(&self.cathode_horizontal_stretch_loc),
+                let cathode_input = self.post_textures[0];
+                let scissor_cathode = scissor_enabled && !run_glass;
+                self.draw_cathode_pass(
+                    gl,
+                    cathode_input,
+                    output_size,
+                    final_input_res,
                     params.horizontal_stretch,
+                    time,
+                    cathode_params,
+                    cathode_target_fbo,
+                    scissor_cathode,
                 );
-                gl.uniform_1_f32(Some(&self.cathode_time_loc), time);
-                gl.uniform_1_f32(Some(&self.cathode_intensity_loc), cathode_params.intensity);
-                gl.uniform_1_f32(Some(&self.cathode_frequency_loc), cathode_params.frequency);
-                gl.uniform_1_f32(Some(&self.cathode_randomization_loc), cathode_params.randomization);
-                gl.uniform_1_f32(Some(&self.cathode_electricity_glow_loc), cathode_params.electricity_glow);
-                gl.uniform_1_f32(Some(&self.cathode_flicker_depth_loc), cathode_params.flicker_depth);
-                gl.uniform_1_f32(Some(&self.cathode_interference_loc), cathode_params.interference);
-                gl.uniform_1_f32(Some(&self.cathode_lightbulb_effect_loc), cathode_params.lightbulb_effect);
-                gl.uniform_4_f32(
-                    Some(&self.cathode_border_crop_loc),
-                    cathode_params.border_crop[0],
-                    cathode_params.border_crop[1],
-                    cathode_params.border_crop[2],
-                    cathode_params.border_crop[3],
-                );
+            }
 
-                if scissor_enabled {
-                    gl.enable(glow::SCISSOR_TEST);
-                }
-                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                gl.bind_texture(glow::TEXTURE_2D, None);
-                gl.use_program(None);
+            if run_glass {
+                let gp = glass_params.unwrap();
+                let glass_input = if run_cathode {
+                    self.post_textures[1]
+                } else {
+                    self.post_textures[0]
+                };
+                let scissor_glass = scissor_enabled;
+                self.draw_glass_pass(
+                    gl,
+                    glass_input,
+                    output_size,
+                    final_input_res,
+                    gp,
+                    time,
+                    glass_target_fbo,
+                    scissor_glass,
+                );
             }
 
             if blend_enabled {
@@ -1206,6 +1265,7 @@ impl CrtFilterRenderer {
         fft_mask_threshold: f32,
         fft_black_threshold: f32,
         cathode_params: Option<&CathodeInterferenceShaderParams>,
+        glass_params: Option<&GlassShaderParams>,
         time: f32,
     ) -> RenderedArea {
         let mut video_texture = fallback_texture;
@@ -1341,14 +1401,29 @@ impl CrtFilterRenderer {
             let run_cathode = cathode_params
                 .map(|c| c.enabled && c.intensity > 0.001)
                 .unwrap_or(false);
-            let target_fbo = if run_cathode {
-                self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
-                Some(self.post_fbo)
-            } else {
-                None
-            };
+            let run_glass = glass_params
+                .map(|g| g.enabled && g.intensity > 0.001)
+                .unwrap_or(false);
+            let has_post = run_cathode || run_glass;
 
-            if scissor_enabled && !run_cathode {
+            let (upstream_target_fbo, cathode_target_fbo, glass_target_fbo) =
+                match (run_cathode, run_glass) {
+                    (true, true) => {
+                        self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
+                        (Some(self.post_fbos[0]), Some(self.post_fbos[1]), None)
+                    }
+                    (true, false) => {
+                        self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
+                        (Some(self.post_fbos[0]), None, None)
+                    }
+                    (false, true) => {
+                        self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
+                        (Some(self.post_fbos[0]), None, None)
+                    }
+                    (false, false) => (None, None, None),
+                };
+
+            if scissor_enabled && !has_post {
                 gl.enable(glow::SCISSOR_TEST);
             }
             let rendered_area = self.draw_passthrough_internal(
@@ -1361,53 +1436,44 @@ impl CrtFilterRenderer {
                 vibrance,
                 scaler_filter,
                 border_crop,
-                target_fbo,
+                upstream_target_fbo,
             );
 
             if run_cathode {
                 let cp = cathode_params.unwrap();
-                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-                gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
-                gl.use_program(Some(self.cathode_prog));
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(self.post_texture));
-
-                gl.uniform_2_f32(
-                    Some(&self.cathode_output_res_loc),
-                    output_size.0,
-                    output_size.1,
-                );
-                gl.uniform_2_f32(
-                    Some(&self.cathode_source_size_loc),
-                    current_res.0 as f32,
-                    current_res.1 as f32,
-                );
-                gl.uniform_1_f32(
-                    Some(&self.cathode_horizontal_stretch_loc),
+                let cathode_input = self.post_textures[0];
+                let scissor_cathode = scissor_enabled && !run_glass;
+                self.draw_cathode_pass(
+                    gl,
+                    cathode_input,
+                    output_size,
+                    current_res,
                     horizontal_stretch,
+                    time,
+                    cp,
+                    cathode_target_fbo,
+                    scissor_cathode,
                 );
-                gl.uniform_1_f32(Some(&self.cathode_time_loc), time);
-                gl.uniform_1_f32(Some(&self.cathode_intensity_loc), cp.intensity);
-                gl.uniform_1_f32(Some(&self.cathode_frequency_loc), cp.frequency);
-                gl.uniform_1_f32(Some(&self.cathode_randomization_loc), cp.randomization);
-                gl.uniform_1_f32(Some(&self.cathode_electricity_glow_loc), cp.electricity_glow);
-                gl.uniform_1_f32(Some(&self.cathode_flicker_depth_loc), cp.flicker_depth);
-                gl.uniform_1_f32(Some(&self.cathode_interference_loc), cp.interference);
-                gl.uniform_1_f32(Some(&self.cathode_lightbulb_effect_loc), cp.lightbulb_effect);
-                gl.uniform_4_f32(
-                    Some(&self.cathode_border_crop_loc),
-                    cp.border_crop[0],
-                    cp.border_crop[1],
-                    cp.border_crop[2],
-                    cp.border_crop[3],
-                );
+            }
 
-                if scissor_enabled {
-                    gl.enable(glow::SCISSOR_TEST);
-                }
-                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                gl.bind_texture(glow::TEXTURE_2D, None);
-                gl.use_program(None);
+            if run_glass {
+                let gp = glass_params.unwrap();
+                let glass_input = if run_cathode {
+                    self.post_textures[1]
+                } else {
+                    self.post_textures[0]
+                };
+                let scissor_glass = scissor_enabled;
+                self.draw_glass_pass(
+                    gl,
+                    glass_input,
+                    output_size,
+                    current_res,
+                    gp,
+                    time,
+                    glass_target_fbo,
+                    scissor_glass,
+                );
             }
 
             if blend_enabled {
@@ -1476,6 +1542,136 @@ impl CrtFilterRenderer {
 
         gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         RenderedArea::fit(resolution, output_size, horizontal_stretch)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_cathode_pass(
+        &self,
+        gl: &glow::Context,
+        input_texture: glow::Texture,
+        output_size: (f32, f32),
+        resolution: (u32, u32),
+        horizontal_stretch: f32,
+        time: f32,
+        cp: &CathodeInterferenceShaderParams,
+        target_fbo: Option<glow::Framebuffer>,
+        scissor_enabled: bool,
+    ) {
+        gl.bind_framebuffer(glow::FRAMEBUFFER, target_fbo);
+        gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+        gl.use_program(Some(self.cathode_prog));
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(glow::TEXTURE_2D, Some(input_texture));
+
+        gl.uniform_2_f32(
+            Some(&self.cathode_output_res_loc),
+            output_size.0,
+            output_size.1,
+        );
+        gl.uniform_2_f32(
+            Some(&self.cathode_source_size_loc),
+            resolution.0 as f32,
+            resolution.1 as f32,
+        );
+        gl.uniform_1_f32(
+            Some(&self.cathode_horizontal_stretch_loc),
+            horizontal_stretch,
+        );
+        gl.uniform_1_f32(Some(&self.cathode_time_loc), time);
+        gl.uniform_1_f32(Some(&self.cathode_intensity_loc), cp.intensity);
+        gl.uniform_1_f32(Some(&self.cathode_frequency_loc), cp.frequency);
+        gl.uniform_1_f32(Some(&self.cathode_randomization_loc), cp.randomization);
+        gl.uniform_1_f32(Some(&self.cathode_electricity_glow_loc), cp.electricity_glow);
+        gl.uniform_1_f32(Some(&self.cathode_flicker_depth_loc), cp.flicker_depth);
+        gl.uniform_1_f32(Some(&self.cathode_interference_loc), cp.interference);
+        gl.uniform_1_f32(Some(&self.cathode_lightbulb_effect_loc), cp.lightbulb_effect);
+        gl.uniform_4_f32(
+            Some(&self.cathode_border_crop_loc),
+            cp.border_crop[0],
+            cp.border_crop[1],
+            cp.border_crop[2],
+            cp.border_crop[3],
+        );
+
+        if scissor_enabled {
+            gl.enable(glow::SCISSOR_TEST);
+        }
+        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        gl.use_program(None);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_glass_pass(
+        &self,
+        gl: &glow::Context,
+        input_texture: glow::Texture,
+        output_size: (f32, f32),
+        resolution: (u32, u32),
+        glass_params: &GlassShaderParams,
+        time: f32,
+        target_fbo: Option<glow::Framebuffer>,
+        scissor_enabled: bool,
+    ) {
+        gl.bind_framebuffer(glow::FRAMEBUFFER, target_fbo);
+        gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+        gl.use_program(Some(self.crt_glass_prog));
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(glow::TEXTURE_2D, Some(input_texture));
+
+        gl.uniform_2_f32(
+            self.glass_output_res_loc.as_ref(),
+            output_size.0,
+            output_size.1,
+        );
+        gl.uniform_2_f32(
+            self.glass_source_size_loc.as_ref(),
+            resolution.0 as f32,
+            resolution.1 as f32,
+        );
+        gl.uniform_1_f32(
+            self.glass_horizontal_stretch_loc.as_ref(),
+            glass_params.horizontal_stretch,
+        );
+        gl.uniform_4_f32(
+            self.glass_border_crop_loc.as_ref(),
+            glass_params.border_crop[0],
+            glass_params.border_crop[1],
+            glass_params.border_crop[2],
+            glass_params.border_crop[3],
+        );
+        gl.uniform_2_f32(
+            self.glass_warp_loc.as_ref(),
+            glass_params.warp[0],
+            glass_params.warp[1],
+        );
+        gl.uniform_1_f32(
+            self.glass_corner_size_loc.as_ref(),
+            glass_params.corner_size,
+        );
+        gl.uniform_1_i32(
+            self.glass_filter_type_loc.as_ref(),
+            glass_params.filter_type,
+        );
+        gl.uniform_1_f32(
+            self.glass_intensity_loc.as_ref(),
+            glass_params.intensity,
+        );
+        gl.uniform_1_f32(
+            self.glass_glossiness_loc.as_ref(),
+            glass_params.glossiness,
+        );
+        gl.uniform_1_f32(
+            self.glass_time_loc.as_ref(),
+            time,
+        );
+
+        if scissor_enabled {
+            gl.enable(glow::SCISSOR_TEST);
+        }
+        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        gl.use_program(None);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1573,8 +1769,13 @@ impl CrtFilterRenderer {
             gl.delete_program(self.yuv_planar_prog);
             gl.delete_program(self.yuyv_packed_prog);
             gl.delete_program(self.cathode_prog);
-            gl.delete_framebuffer(self.post_fbo);
-            gl.delete_texture(self.post_texture);
+            gl.delete_program(self.crt_glass_prog);
+            for fbo in self.post_fbos {
+                gl.delete_framebuffer(fbo);
+            }
+            for tex in self.post_textures {
+                gl.delete_texture(tex);
+            }
             self.anime4k_small.destroy(gl);
             self.anime4k_medium.destroy(gl);
             self.anime4k_large.destroy(gl);

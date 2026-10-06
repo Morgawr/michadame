@@ -148,6 +148,9 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         crt_hard_pix: Some(state.crt.hard_pix),
         use_magenta_background: Some(state.video.use_magenta_background),
         retro_pc_frame: Some(state.video.retro_pc_frame),
+        crt_glass_enabled: Some(state.video.crt_glass_enabled),
+        crt_glass_intensity: Some(state.video.crt_glass_intensity),
+        crt_glass_glossiness: Some(state.video.crt_glass_glossiness),
         horizontal_stretch: Some(state.video.horizontal_stretch),
         median_filter_enabled: Some(state.video.median_filter_enabled),
         median_mix: Some(state.video.median_mix),
@@ -356,6 +359,15 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) {
     }
     if let Some(val) = profile.retro_pc_frame {
         state.video.retro_pc_frame = val;
+    }
+    if let Some(val) = profile.crt_glass_enabled {
+        state.video.crt_glass_enabled = val;
+    }
+    if let Some(val) = profile.crt_glass_intensity {
+        state.video.crt_glass_intensity = val;
+    }
+    if let Some(val) = profile.crt_glass_glossiness {
+        state.video.crt_glass_glossiness = val;
     }
     if let Some(val) = profile.horizontal_stretch {
         state.video.horizontal_stretch = val;
@@ -940,6 +952,41 @@ mod tests {
 
         apply_profile_to_state(&mut new_state, &profile);
         assert!(!new_state.video.retro_pc_frame);
+    }
+
+    #[test]
+    fn test_crt_glass_profile_roundtrip() {
+        let mut state = AppState::default();
+        assert!(!state.video.crt_glass_enabled);
+        assert_eq!(state.video.crt_glass_intensity, 0.25);
+        assert_eq!(state.video.crt_glass_glossiness, 0.50);
+
+        state.video.crt_glass_enabled = true;
+        state.video.crt_glass_intensity = 0.65;
+        state.video.crt_glass_glossiness = 0.85;
+        let profile = build_profile_from_state(&state);
+        assert_eq!(profile.crt_glass_enabled, Some(true));
+        assert_eq!(profile.crt_glass_intensity, Some(0.65));
+        assert_eq!(profile.crt_glass_glossiness, Some(0.85));
+
+        let mut new_state = AppState::default();
+        apply_profile_to_state(&mut new_state, &profile);
+        assert!(new_state.video.crt_glass_enabled);
+        assert_eq!(new_state.video.crt_glass_intensity, 0.65);
+        assert_eq!(new_state.video.crt_glass_glossiness, 0.85);
+
+        state.video.crt_glass_enabled = false;
+        state.video.crt_glass_intensity = 0.10;
+        state.video.crt_glass_glossiness = 0.20;
+        let profile = build_profile_from_state(&state);
+        assert_eq!(profile.crt_glass_enabled, Some(false));
+        assert_eq!(profile.crt_glass_intensity, Some(0.10));
+        assert_eq!(profile.crt_glass_glossiness, Some(0.20));
+
+        apply_profile_to_state(&mut new_state, &profile);
+        assert!(!new_state.video.crt_glass_enabled);
+        assert_eq!(new_state.video.crt_glass_intensity, 0.10);
+        assert_eq!(new_state.video.crt_glass_glossiness, 0.20);
     }
 
     #[test]
