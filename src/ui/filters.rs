@@ -285,11 +285,26 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 if ui
                     .add(
                         egui::Slider::new(&mut state.video.crt_glass_glossiness, 0.0..=1.0)
-                            .text("Glossiness / Ceiling Light Reflections")
+                            .text("Glass Glossiness")
                             .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
                     )
                     .on_hover_text(
-                        "Controls specular sharpness and the prominence of surrounding office ceiling fluorescent light reflections on the glass surface.",
+                        "Controls specular sharpness and surface glossiness of the glass patina.",
+                    )
+                    .changed()
+                {
+                    crate::config::save_config(state);
+                    changed = true;
+                }
+
+                ui.add_space(2.0);
+                if ui
+                    .checkbox(
+                        &mut state.video.crt_glass_ceiling_light_enabled,
+                        "Ceiling Light Reflections",
+                    )
+                    .on_hover_text(
+                        "Simulates overhead twin-tube fluorescent office light reflections on the glass surface.",
                     )
                     .changed()
                 {

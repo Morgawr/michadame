@@ -152,6 +152,7 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         crt_glass_enabled: Some(state.video.crt_glass_enabled),
         crt_glass_intensity: Some(state.video.crt_glass_intensity),
         crt_glass_glossiness: Some(state.video.crt_glass_glossiness),
+        crt_glass_ceiling_light_enabled: Some(state.video.crt_glass_ceiling_light_enabled),
         crt_glass_photographer_enabled: Some(state.video.crt_glass_photographer_enabled),
         crt_glass_photographer_intensity: Some(state.video.crt_glass_photographer_intensity),
         crt_glass_flash_enabled: Some(state.video.crt_glass_flash_enabled),
@@ -376,6 +377,9 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) {
     }
     if let Some(val) = profile.crt_glass_glossiness {
         state.video.crt_glass_glossiness = val;
+    }
+    if let Some(val) = profile.crt_glass_ceiling_light_enabled {
+        state.video.crt_glass_ceiling_light_enabled = val;
     }
     if let Some(val) = profile.crt_glass_photographer_enabled {
         state.video.crt_glass_photographer_enabled = val;
@@ -987,6 +991,7 @@ mod tests {
         assert!(!state.video.crt_glass_enabled);
         assert_eq!(state.video.crt_glass_intensity, 0.25);
         assert_eq!(state.video.crt_glass_glossiness, 0.50);
+        assert!(state.video.crt_glass_ceiling_light_enabled);
         assert!(!state.video.crt_glass_photographer_enabled);
         assert_eq!(state.video.crt_glass_photographer_intensity, 0.50);
         assert!(!state.video.crt_glass_flash_enabled);
@@ -995,6 +1000,7 @@ mod tests {
         state.video.crt_glass_enabled = true;
         state.video.crt_glass_intensity = 0.65;
         state.video.crt_glass_glossiness = 0.85;
+        state.video.crt_glass_ceiling_light_enabled = true;
         state.video.crt_glass_photographer_enabled = true;
         state.video.crt_glass_photographer_intensity = 0.80;
         state.video.crt_glass_flash_enabled = true;
@@ -1003,6 +1009,7 @@ mod tests {
         assert_eq!(profile.crt_glass_enabled, Some(true));
         assert_eq!(profile.crt_glass_intensity, Some(0.65));
         assert_eq!(profile.crt_glass_glossiness, Some(0.85));
+        assert_eq!(profile.crt_glass_ceiling_light_enabled, Some(true));
         assert_eq!(profile.crt_glass_photographer_enabled, Some(true));
         assert_eq!(profile.crt_glass_photographer_intensity, Some(0.80));
         assert_eq!(profile.crt_glass_flash_enabled, Some(true));
@@ -1013,6 +1020,7 @@ mod tests {
         assert!(new_state.video.crt_glass_enabled);
         assert_eq!(new_state.video.crt_glass_intensity, 0.65);
         assert_eq!(new_state.video.crt_glass_glossiness, 0.85);
+        assert!(new_state.video.crt_glass_ceiling_light_enabled);
         assert!(new_state.video.crt_glass_photographer_enabled);
         assert_eq!(new_state.video.crt_glass_photographer_intensity, 0.80);
         assert!(new_state.video.crt_glass_flash_enabled);
@@ -1021,6 +1029,7 @@ mod tests {
         state.video.crt_glass_enabled = false;
         state.video.crt_glass_intensity = 0.10;
         state.video.crt_glass_glossiness = 0.20;
+        state.video.crt_glass_ceiling_light_enabled = false;
         state.video.crt_glass_photographer_enabled = false;
         state.video.crt_glass_photographer_intensity = 0.30;
         state.video.crt_glass_flash_enabled = false;
@@ -1029,6 +1038,7 @@ mod tests {
         assert_eq!(profile.crt_glass_enabled, Some(false));
         assert_eq!(profile.crt_glass_intensity, Some(0.10));
         assert_eq!(profile.crt_glass_glossiness, Some(0.20));
+        assert_eq!(profile.crt_glass_ceiling_light_enabled, Some(false));
         assert_eq!(profile.crt_glass_photographer_enabled, Some(false));
         assert_eq!(profile.crt_glass_photographer_intensity, Some(0.30));
         assert_eq!(profile.crt_glass_flash_enabled, Some(false));
@@ -1038,6 +1048,7 @@ mod tests {
         assert!(!new_state.video.crt_glass_enabled);
         assert_eq!(new_state.video.crt_glass_intensity, 0.10);
         assert_eq!(new_state.video.crt_glass_glossiness, 0.20);
+        assert!(!new_state.video.crt_glass_ceiling_light_enabled);
         assert!(!new_state.video.crt_glass_photographer_enabled);
         assert_eq!(new_state.video.crt_glass_photographer_intensity, 0.30);
         assert!(!new_state.video.crt_glass_flash_enabled);

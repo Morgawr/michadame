@@ -146,6 +146,7 @@ pub struct VideoSettings {
     pub crt_glass_enabled: bool,
     pub crt_glass_intensity: f32,
     pub crt_glass_glossiness: f32,
+    pub crt_glass_ceiling_light_enabled: bool,
     pub crt_glass_photographer_enabled: bool,
     pub crt_glass_photographer_intensity: f32,
     pub crt_glass_flash_enabled: bool,

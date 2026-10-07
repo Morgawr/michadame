@@ -182,6 +182,7 @@ pub struct GlassShaderParams {
     pub enabled: bool,
     pub intensity: f32,
     pub glossiness: f32,
+    pub ceiling_light_enabled: bool,
     pub photographer_enabled: bool,
     pub photographer_intensity: f32,
     pub flash_enabled: bool,
@@ -205,6 +206,7 @@ impl GlassShaderParams {
             enabled: crt_active && state.video.crt_glass_enabled,
             intensity: state.video.crt_glass_intensity,
             glossiness: state.video.crt_glass_glossiness,
+            ceiling_light_enabled: crt_active && state.video.crt_glass_ceiling_light_enabled,
             photographer_enabled: crt_active && state.video.crt_glass_photographer_enabled,
             photographer_intensity: state.video.crt_glass_photographer_intensity,
             flash_enabled: crt_active && state.video.crt_glass_flash_enabled,
@@ -229,6 +231,7 @@ impl Default for GlassShaderParams {
             enabled: false,
             intensity: 0.25,
             glossiness: 0.50,
+            ceiling_light_enabled: true,
             photographer_enabled: false,
             photographer_intensity: 0.50,
             flash_enabled: false,
@@ -440,6 +443,7 @@ mod tests {
         assert!(!default_params.enabled);
         assert_eq!(default_params.intensity, 0.25);
         assert_eq!(default_params.glossiness, 0.50);
+        assert!(default_params.ceiling_light_enabled);
         assert!(!default_params.photographer_enabled);
         assert_eq!(default_params.photographer_intensity, 0.50);
         assert!(!default_params.flash_enabled);
@@ -451,6 +455,7 @@ mod tests {
         state.video.crt_glass_enabled = true;
         state.video.crt_glass_intensity = 0.8;
         state.video.crt_glass_glossiness = 0.75;
+        state.video.crt_glass_ceiling_light_enabled = true;
         state.video.crt_glass_photographer_enabled = true;
         state.video.crt_glass_photographer_intensity = 0.65;
         state.video.crt_glass_flash_enabled = true;
@@ -461,6 +466,7 @@ mod tests {
         assert!(params.enabled);
         assert_eq!(params.intensity, 0.8);
         assert_eq!(params.glossiness, 0.75);
+        assert!(params.ceiling_light_enabled);
         assert!(params.photographer_enabled);
         assert_eq!(params.photographer_intensity, 0.65);
         assert!(params.flash_enabled);
@@ -470,9 +476,15 @@ mod tests {
         assert_eq!(params.filter_type, 2);
         assert_eq!(params.horizontal_stretch, 1.2);
 
+        // When ceiling light is toggled off in state
+        state.video.crt_glass_ceiling_light_enabled = false;
+        let params_no_ceiling = GlassShaderParams::from_state(&state, [0.031, 0.041], 0.05, 2);
+        assert!(!params_no_ceiling.ceiling_light_enabled);
+
         // When CRT is Off (filter_type = 0), glass and reflections must not be active
         let params_off = GlassShaderParams::from_state(&state, [0.0, 0.0], 0.0, 0);
         assert!(!params_off.enabled);
+        assert!(!params_off.ceiling_light_enabled);
         assert!(!params_off.photographer_enabled);
         assert!(!params_off.flash_enabled);
     }

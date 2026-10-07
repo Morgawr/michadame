@@ -100,6 +100,7 @@ pub struct CrtFilterRenderer {
     glass_intensity_loc: Option<glow::UniformLocation>,
     glass_glossiness_loc: Option<glow::UniformLocation>,
     glass_time_loc: Option<glow::UniformLocation>,
+    glass_ceiling_light_enabled_loc: Option<glow::UniformLocation>,
     glass_photographer_enabled_loc: Option<glow::UniformLocation>,
     glass_photographer_intensity_loc: Option<glow::UniformLocation>,
     glass_flash_enabled_loc: Option<glow::UniformLocation>,
@@ -198,6 +199,8 @@ impl CrtFilterRenderer {
             let glass_intensity_loc = gl.get_uniform_location(crt_glass_prog, "intensity");
             let glass_glossiness_loc = gl.get_uniform_location(crt_glass_prog, "glossiness");
             let glass_time_loc = gl.get_uniform_location(crt_glass_prog, "time");
+            let glass_ceiling_light_enabled_loc =
+                gl.get_uniform_location(crt_glass_prog, "ceiling_light_enabled");
             let glass_photographer_enabled_loc =
                 gl.get_uniform_location(crt_glass_prog, "photographer_enabled");
             let glass_photographer_intensity_loc =
@@ -625,6 +628,7 @@ impl CrtFilterRenderer {
                 glass_intensity_loc,
                 glass_glossiness_loc,
                 glass_time_loc,
+                glass_ceiling_light_enabled_loc,
                 glass_photographer_enabled_loc,
                 glass_photographer_intensity_loc,
                 glass_flash_enabled_loc,
@@ -1739,6 +1743,10 @@ impl CrtFilterRenderer {
         gl.uniform_1_f32(
             self.glass_time_loc.as_ref(),
             time,
+        );
+        gl.uniform_1_i32(
+            self.glass_ceiling_light_enabled_loc.as_ref(),
+            if glass_params.ceiling_light_enabled { 1 } else { 0 },
         );
         gl.uniform_1_i32(
             self.glass_photographer_enabled_loc.as_ref(),

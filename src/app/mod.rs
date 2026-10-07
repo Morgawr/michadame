@@ -73,6 +73,7 @@ impl Default for AppState {
                 crt_glass_enabled: false,
                 crt_glass_intensity: 0.25,
                 crt_glass_glossiness: 0.50,
+                crt_glass_ceiling_light_enabled: true,
                 crt_glass_photographer_enabled: false,
                 crt_glass_photographer_intensity: 0.50,
                 crt_glass_flash_enabled: false,

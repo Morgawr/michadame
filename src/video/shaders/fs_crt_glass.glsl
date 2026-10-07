@@ -16,6 +16,7 @@ uniform float intensity;   // 0.0 to 1.0
 uniform float glossiness;  // 0.0 (Matte / Diffuse) to 1.0 (Glossy / Crisp Ceiling Lights)
 uniform float time;
 
+uniform int ceiling_light_enabled;
 uniform int photographer_enabled;
 uniform float photographer_intensity;
 uniform int flash_enabled;
@@ -183,24 +184,27 @@ void main() {
     vec3 perimeter_catch = scatter_lin * edge_catch_factor * (scatter_lum * 0.50 + 0.12) * (intensity * 0.30);
 
     // 7. Ambient Room Specular Reflections & 90s Japanese Office Ceiling Fluorescent Lights
-    float tilt = 0.040;
-    vec2 rot_r = vec2(R.x - tilt * R.y, R.y + tilt * R.x);
+    vec3 fluorescent_reflection = vec3(0.0);
+    if (ceiling_light_enabled == 1) {
+        float tilt = 0.040;
+        vec2 rot_r = vec2(R.x - tilt * R.y, R.y + tilt * R.x);
 
-    // Primary twin-tube modular troffer in upper area (lowered by ~6% screenspace)
-    float fix_1 = eval_troffer(-0.24, 0.44, 0.34, 0.046, rot_r, glossiness);
+        // Primary twin-tube modular troffer in upper area (lowered by ~6% screenspace)
+        float fix_1 = eval_troffer(-0.24, 0.44, 0.34, 0.046, rot_r, glossiness);
 
-    // Secondary modular troffer further up on the ceiling grid (lowered by ~6% screenspace)
-    float fix_2 = eval_troffer(0.18, 0.60, 0.25, 0.038, rot_r, glossiness) * 0.35;
+        // Secondary modular troffer further up on the ceiling grid (lowered by ~6% screenspace)
+        float fix_2 = eval_troffer(0.18, 0.60, 0.25, 0.038, rot_r, glossiness) * 0.35;
 
-    float tubes_total = fix_1 + fix_2;
-    float tubes_glow = tubes_total * (0.16 + 0.52 * glossiness);
+        float tubes_total = fix_1 + fix_2;
+        float tubes_glow = tubes_total * (0.16 + 0.52 * glossiness);
 
-    // Soft localized diffuse ambient envelope around fixtures
-    float diffuse_env = exp(-0.5 * (pow((rot_r.y - 0.44) / 0.20, 2.0) + pow((rot_r.x + 0.24) / 0.50, 2.0))) * (0.10 * (1.0 - 0.60 * glossiness));
+        // Soft localized diffuse ambient envelope around fixtures
+        float diffuse_env = exp(-0.5 * (pow((rot_r.y - 0.44) / 0.20, 2.0) + pow((rot_r.x + 0.24) / 0.50, 2.0))) * (0.10 * (1.0 - 0.60 * glossiness));
 
-    // Cold daylight-white fluorescent tube tint (昼光色 ~6500K - cold, crisp, subtle cyan-blue cast, NOT electric/neon blue)
-    vec3 fl_color = vec3(0.88, 0.94, 1.02);
-    vec3 fluorescent_reflection = fl_color * (tubes_glow + diffuse_env);
+        // Cold daylight-white fluorescent tube tint (昼光色 ~6500K - cold, crisp, subtle cyan-blue cast, NOT electric/neon blue)
+        vec3 fl_color = vec3(0.88, 0.94, 1.02);
+        fluorescent_reflection = fl_color * (tubes_glow + diffuse_env);
+    }
 
     // Secondary ambient desk bounce on lower quadrant
     vec3 L2 = normalize(vec3(0.35, -0.28, 0.88));
