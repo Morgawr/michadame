@@ -86,6 +86,8 @@ pub struct CrtFilterRenderer {
     retro_corner_size_loc: Option<glow::UniformLocation>,
     retro_filter_type_loc: Option<glow::UniformLocation>,
     retro_time_loc: Option<glow::UniformLocation>,
+    retro_ambient_glow_loc: Option<glow::UniformLocation>,
+    last_video_texture: Option<glow::Texture>,
 
     crt_glass_prog: glow::Program,
     glass_output_res_loc: Option<glow::UniformLocation>,
@@ -173,10 +175,14 @@ impl CrtFilterRenderer {
             let retro_corner_size_loc = gl.get_uniform_location(retro_frame_prog, "corner_size");
             let retro_filter_type_loc = gl.get_uniform_location(retro_frame_prog, "filter_type");
             let retro_time_loc = gl.get_uniform_location(retro_frame_prog, "time");
+            let retro_ambient_glow_loc = gl.get_uniform_location(retro_frame_prog, "ambient_glow");
 
             gl.use_program(Some(retro_frame_prog));
             if let Some(loc) = gl.get_uniform_location(retro_frame_prog, "bezel_texture") {
                 gl.uniform_1_i32(Some(&loc), 0);
+            }
+            if let Some(loc) = gl.get_uniform_location(retro_frame_prog, "video_texture") {
+                gl.uniform_1_i32(Some(&loc), 1);
             }
             gl.use_program(None);
 
@@ -555,6 +561,8 @@ impl CrtFilterRenderer {
                 retro_corner_size_loc,
                 retro_filter_type_loc,
                 retro_time_loc,
+                retro_ambient_glow_loc,
+                last_video_texture: None,
                 pixelate_prog,
                 final_prog,
                 yuv_planar_prog,
@@ -1120,6 +1128,7 @@ impl CrtFilterRenderer {
                 final_input_texture = self.pass_textures[4];
                 final_input_res = pixelate_res;
             }
+            self.last_video_texture = Some(final_input_texture);
 
             let run_cathode = cathode_params.enabled && cathode_params.intensity > 0.001;
             let run_glass = glass_params
@@ -1459,6 +1468,7 @@ impl CrtFilterRenderer {
                 current_video_texture = upscaled.0;
                 current_res = (upscaled.1, upscaled.2);
             }
+            self.last_video_texture = Some(current_video_texture);
 
             let run_cathode = cathode_params
                 .map(|c| c.enabled && c.intensity > 0.001)
@@ -1770,12 +1780,18 @@ impl CrtFilterRenderer {
         corner_size: f32,
         filter_type: i32,
         time: f32,
+        ambient_glow: f32,
     ) {
         unsafe {
             let old_vbo = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
             let blend_enabled = gl.is_enabled(glow::BLEND);
             gl.enable(glow::BLEND);
-            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+            gl.blend_func_separate(
+                glow::SRC_ALPHA,
+                glow::ONE_MINUS_SRC_ALPHA,
+                glow::ZERO,
+                glow::ONE,
+            );
 
             gl.bind_vertex_array(Some(self.vertex_array));
             gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
@@ -1784,6 +1800,12 @@ impl CrtFilterRenderer {
 
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.bezel_texture));
+
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(
+                glow::TEXTURE_2D,
+                Some(self.last_video_texture.unwrap_or(self.pass_textures[6])),
+            );
 
             gl.uniform_2_f32(
                 self.retro_output_res_loc.as_ref(),
@@ -1823,9 +1845,16 @@ impl CrtFilterRenderer {
                 self.retro_time_loc.as_ref(),
                 time,
             );
+            gl.uniform_1_f32(
+                self.retro_ambient_glow_loc.as_ref(),
+                ambient_glow,
+            );
 
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.use_program(None);
 

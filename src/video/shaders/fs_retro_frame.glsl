@@ -3,6 +3,7 @@ in vec2 v_tc;
 out vec4 out_color;
 
 uniform sampler2D bezel_texture;
+uniform sampler2D video_texture;
 uniform vec2 outputResolution;
 uniform vec2 source_size;
 uniform float horizontal_stretch;
@@ -11,6 +12,16 @@ uniform vec2 warp;        // warpX, warpY
 uniform float corner_size;
 uniform int filter_type;  // 0 = None, 1 = Lottes, 2 = Halo
 uniform float time;
+uniform float ambient_glow;
+
+// Convert from linear to sRGB color space for video samples
+float ToSrgb1(float c) {
+    c = clamp(c, 0.0, 1.0);
+    return (c < 0.0031308 ? c * 12.92 : 1.055 * pow(c, 0.41666) - 0.055);
+}
+vec3 ToSrgb(vec3 c) {
+    return vec3(ToSrgb1(c.r), ToSrgb1(c.g), ToSrgb1(c.b));
+}
 
 // Atlas sub-texture UV rectangles (texture flipped vertically so V=0 is bottom, V=1 is top):
 // 1. Left Pillar:     [0.0000, 0.0000] to [0.2500, 1.0000] (512x2048)
@@ -128,6 +139,58 @@ void main() {
     float crest_dir = clamp(n_ap.x * 0.40 - n_ap.y * 0.75, 0.0, 1.0);
     vec3 crest_col = vec3(0.14, 0.14, 0.11) * (crest_ridge * crest_dir);
 
+    // Dynamic refracted ambient halo glow from active video feed bouncing on deep inner cowl
+    vec3 ambient_glow_col = vec3(0.0);
+    if (ambient_glow > 0.001 && d_ap > gasket_w - 0.75 && d_ap < bevel_w + 1.2) {
+        vec2 min_crop_uv = vec2(crop.x + 0.015, crop.z + 0.015);
+        vec2 max_crop_uv = vec2(1.0 - crop.y - 0.015, 1.0 - crop.w - 0.015);
+        vec2 edge_tc = clamp(screen_tc, min_crop_uv, max_crop_uv);
+
+        // Tangent unit vector along aperture perimeter
+        vec2 t_ap = vec2(-n_ap.y, n_ap.x);
+
+        // Direction pointing toward video center for corner ambient bounce
+        vec2 diag_dir = -sign(p_vid);
+
+        // Conical dispersion scaling: light spreads wider and penetrates deeper as distance from screen increases
+        float cone_spread = 0.16 + 0.38 * t_bevel;
+        float depth_base = 0.05 + 0.12 * t_bevel;
+
+        // 17-tap balanced 2D hemispherical diffuse bounce kernel:
+        // Tier 1: Near-surface diffuse core
+        vec3 vid_acc = texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 0.60), min_crop_uv, max_crop_uv)).rgb * 0.130;
+        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 0.70) - t_ap * (cone_spread * 0.28), min_crop_uv, max_crop_uv)).rgb * 0.095;
+        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 0.70) + t_ap * (cone_spread * 0.28), min_crop_uv, max_crop_uv)).rgb * 0.095;
+        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 1.00) - t_ap * (cone_spread * 0.60), min_crop_uv, max_crop_uv)).rgb * 0.075;
+        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 1.00) + t_ap * (cone_spread * 0.60), min_crop_uv, max_crop_uv)).rgb * 0.075;
+
+        // Tier 2: Mid-range diffuse body
+        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 1.20), min_crop_uv, max_crop_uv)).rgb * 0.095;
+        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 1.40) - t_ap * (cone_spread * 0.98), min_crop_uv, max_crop_uv)).rgb * 0.055;
+        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 1.40) + t_ap * (cone_spread * 0.98), min_crop_uv, max_crop_uv)).rgb * 0.055;
+        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 1.80) - t_ap * (cone_spread * 1.40), min_crop_uv, max_crop_uv)).rgb * 0.035;
+        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 1.80) + t_ap * (cone_spread * 1.40), min_crop_uv, max_crop_uv)).rgb * 0.035;
+
+        // Tier 3: Diagonal corner cross-bounce (scatters light around rounded corners and into content)
+        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 1.00) + diag_dir * 0.030, min_crop_uv, max_crop_uv)).rgb * 0.065;
+        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 1.60) + diag_dir * 0.060, min_crop_uv, max_crop_uv)).rgb * 0.050;
+        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 2.20) - t_ap * (cone_spread * 0.50) + diag_dir * 0.050, min_crop_uv, max_crop_uv)).rgb * 0.040;
+        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 2.20) + t_ap * (cone_spread * 0.50) + diag_dir * 0.050, min_crop_uv, max_crop_uv)).rgb * 0.040;
+
+        // Tier 4: Deep ambient cavity field
+        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 2.00), min_crop_uv, max_crop_uv)).rgb * 0.060;
+        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 2.80) + diag_dir * 0.080, min_crop_uv, max_crop_uv)).rgb * 0.025;
+        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 3.20), min_crop_uv, max_crop_uv)).rgb * 0.020;
+
+        vec3 vid_glow_col = ToSrgb(vid_acc);
+
+        // Ambient glow is STRICTLY contained inside the deep bevel border:
+        // Starts at rubber gasket (t_bevel = 0.0), peaks in deep cowl, and smoothly falls off to 0.0 at the outer crest (t_bevel = 1.0)
+        // Never bleeds onto the outer chassis faceplate or side pillars.
+        float glow_profile = sin(t_bevel * 3.14159265) * pow(1.0 - t_bevel, 0.85);
+        ambient_glow_col = vid_glow_col * (glow_profile * (ambient_glow * 0.40));
+    }
+
     // 7. Chassis Faceplate Texturing & Vintage ABS Aging
     vec2 chassis_uv = gl_FragCoord.xy / outputResolution;
 
@@ -183,7 +246,7 @@ void main() {
     // 9. Multi-Stage Subpixel Anti-Aliased Composition
     // Transition from inner bevel to chassis faceplate
     float t_bevel_blend = smoothstep(bevel_w - 1.2, bevel_w + 1.2, d_ap);
-    vec3 bevel_col = base_putty * (bevel_lighting + bottom_shelf) * (0.75 + 0.25 * t_bevel) + crest_col;
+    vec3 bevel_col = base_putty * (bevel_lighting + bottom_shelf) * (0.75 + 0.25 * t_bevel) + crest_col + ambient_glow_col;
     vec3 frame_plastic = mix(bevel_col, chassis_color, t_bevel_blend);
 
     // Transition from dark rubber gasket to plastic bevel

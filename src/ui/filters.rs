@@ -218,6 +218,29 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             changed = true;
         }
 
+        if state.video.retro_pc_frame {
+            if ui
+                .add(
+                    egui::Slider::new(&mut state.video.retro_pc_ambient_glow, 0.0..=1.0)
+                        .text("Bezel Ambient Glow")
+                        .custom_formatter(|n, _| {
+                            if n <= 0.001 {
+                                "Off".to_string()
+                            } else {
+                                format!("{:.0}%", n * 100.0)
+                            }
+                        }),
+                )
+                .on_hover_text(
+                    "Controls the intensity of the real-time diffuse halo glow reflecting from the active video feed onto the deep inner bezel sides (0% = Off).",
+                )
+                .changed()
+            {
+                crate::config::save_config(state);
+                changed = true;
+            }
+        }
+
         if ui
             .checkbox(
                 &mut state.video.crt_glass_enabled,

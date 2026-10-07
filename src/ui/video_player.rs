@@ -190,8 +190,10 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
         let cathode_params = video::gpu::CathodeInterferenceShaderParams::from_state(state);
         let time = ui.input(|i| i.time) as f32;
-        let is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        let is_fullscreen =
+            state.ui.is_fullscreen || ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         let retro_pc_frame = state.video.retro_pc_frame;
+        let retro_pc_ambient_glow = state.video.retro_pc_ambient_glow;
         if state.cathode_interference.enabled || (retro_pc_frame && is_fullscreen) {
             ui.ctx().request_repaint();
         }
@@ -337,6 +339,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                     corner_size,
                                     filter_type,
                                     time,
+                                    retro_pc_ambient_glow,
                                 );
                             }
                         },
@@ -368,6 +371,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 state.video.border_crop_top,
                 state.video.border_crop_bottom,
             ];
+            let retro_pc_ambient_glow = state.video.retro_pc_ambient_glow;
             let scaler_filter = state
                 .scaler_filter
                 .load(Ordering::Relaxed);
@@ -466,6 +470,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                             0.0,
                             0,
                             time,
+                            retro_pc_ambient_glow,
                         );
                     }
                 })),

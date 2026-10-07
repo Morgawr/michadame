@@ -69,6 +69,7 @@ impl Default for AppState {
                 pixelate_filter_enabled: false,
                 use_magenta_background: false,
                 retro_pc_frame: false,
+                retro_pc_ambient_glow: 0.55,
                 crt_glass_enabled: false,
                 crt_glass_intensity: 0.25,
                 crt_glass_glossiness: 0.50,
@@ -267,6 +268,10 @@ impl AppState {
 }
 
 impl eframe::App for AppState {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 1.0]
+    }
+
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.replay.disable();
         if let Some(gl) = _gl {
@@ -766,5 +771,13 @@ mod tests {
         let repainted = state.handle_ocr_timeout(&ctx);
         assert!(!repainted);
         assert_eq!(state.ocr.boxes.len(), 1);
+    }
+
+    #[test]
+    fn test_app_state_clear_color_is_opaque_black() {
+        let state = AppState::default();
+        let visuals = egui::Visuals::default();
+        let color = eframe::App::clear_color(&state, &visuals);
+        assert_eq!(color, [0.0, 0.0, 0.0, 1.0]);
     }
 }

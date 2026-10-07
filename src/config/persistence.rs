@@ -148,6 +148,7 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         crt_hard_pix: Some(state.crt.hard_pix),
         use_magenta_background: Some(state.video.use_magenta_background),
         retro_pc_frame: Some(state.video.retro_pc_frame),
+        retro_pc_ambient_glow: Some(state.video.retro_pc_ambient_glow),
         crt_glass_enabled: Some(state.video.crt_glass_enabled),
         crt_glass_intensity: Some(state.video.crt_glass_intensity),
         crt_glass_glossiness: Some(state.video.crt_glass_glossiness),
@@ -363,6 +364,9 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) {
     }
     if let Some(val) = profile.retro_pc_frame {
         state.video.retro_pc_frame = val;
+    }
+    if let Some(val) = profile.retro_pc_ambient_glow {
+        state.video.retro_pc_ambient_glow = val;
     }
     if let Some(val) = profile.crt_glass_enabled {
         state.video.crt_glass_enabled = val;
@@ -953,21 +957,28 @@ mod tests {
     fn test_retro_pc_frame_profile_roundtrip() {
         let mut state = AppState::default();
         assert!(!state.video.retro_pc_frame);
+        assert_eq!(state.video.retro_pc_ambient_glow, 0.55);
 
         state.video.retro_pc_frame = true;
+        state.video.retro_pc_ambient_glow = 0.80;
         let profile = build_profile_from_state(&state);
         assert_eq!(profile.retro_pc_frame, Some(true));
+        assert_eq!(profile.retro_pc_ambient_glow, Some(0.80));
 
         let mut new_state = AppState::default();
         apply_profile_to_state(&mut new_state, &profile);
         assert!(new_state.video.retro_pc_frame);
+        assert_eq!(new_state.video.retro_pc_ambient_glow, 0.80);
 
         state.video.retro_pc_frame = false;
+        state.video.retro_pc_ambient_glow = 0.0;
         let profile = build_profile_from_state(&state);
         assert_eq!(profile.retro_pc_frame, Some(false));
+        assert_eq!(profile.retro_pc_ambient_glow, Some(0.0));
 
         apply_profile_to_state(&mut new_state, &profile);
         assert!(!new_state.video.retro_pc_frame);
+        assert_eq!(new_state.video.retro_pc_ambient_glow, 0.0);
     }
 
     #[test]
