@@ -32,6 +32,21 @@ vec3 ToSrgb(vec3 c) {
 // 6. Power Section:   [0.7500, 0.5000] to [1.0000, 0.6250] (512x256, 2:1)
 // 7. NEC Badge:       [0.7500, 0.6250] to [1.0000, 0.7500] (512x256, 2:1)
 
+// High-precision pseudo-random procedural hash (stable across all GPU architectures)
+float hash21(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+// 2D Value Noise for non-repeating organic variation
+float value_noise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash21(i + vec2(0.0, 0.0)), hash21(i + vec2(1.0, 0.0)), u.x),
+               mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), u.x), u.y);
+}
 
 void main() {
     // 1. Calculate active video coordinate mapping
@@ -141,6 +156,7 @@ void main() {
 
     // Dynamic refracted ambient halo glow from active video feed bouncing on deep inner cowl
     vec3 ambient_glow_col = vec3(0.0);
+    vec3 vid_glow_col = vec3(0.0);
     if (ambient_glow > 0.001 && d_ap > gasket_w - 0.75 && d_ap < bevel_w + 1.2) {
         vec2 min_crop_uv = vec2(crop.x + 0.015, crop.z + 0.015);
         vec2 max_crop_uv = vec2(1.0 - crop.y - 0.015, 1.0 - crop.w - 0.015);
@@ -182,7 +198,7 @@ void main() {
         vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 2.80) + diag_dir * 0.080, min_crop_uv, max_crop_uv)).rgb * 0.025;
         vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 3.20), min_crop_uv, max_crop_uv)).rgb * 0.020;
 
-        vec3 vid_glow_col = ToSrgb(vid_acc);
+        vid_glow_col = ToSrgb(vid_acc);
 
         // Ambient glow is STRICTLY contained inside the deep bevel border:
         // Starts at rubber gasket (t_bevel = 0.0), peaks in deep cowl, and smoothly falls off to 0.0 at the outer crest (t_bevel = 1.0)
@@ -191,63 +207,140 @@ void main() {
         ambient_glow_col = vid_glow_col * (glow_profile * (ambient_glow * 0.40));
     }
 
-    // 7. Chassis Faceplate Texturing & Vintage ABS Aging
-    vec2 chassis_uv = gl_FragCoord.xy / outputResolution;
+    // 7. Authentic Chassis & Bevel Aging, Grime Accumulation & Material Patina
+    // Non-repeating multi-octave organic noise evaluated in physical screen coordinates
+    float n_coarse = value_noise(gl_FragCoord.xy / 220.0);
+    float n_med    = value_noise(gl_FragCoord.xy / 65.0);
+    float n_fine   = value_noise(gl_FragCoord.xy / 18.0);
+    float n_micro  = value_noise(gl_FragCoord.xy / 5.5);
 
-    // Directional UV exposure (top-left ceiling light bias)
-    float uv_exposure = clamp(pow(chassis_uv.y, 1.3) * 0.75 + (1.0 - chassis_uv.x) * 0.25, 0.0, 1.0);
-
-    // Non-repeating multi-octave organic variation across chassis dimensions
-    float n1 = sin(chassis_uv.x * 11.31 + 0.9) * cos(chassis_uv.y * 13.82 + 1.4);
-    float n2 = sin(chassis_uv.x * 29.53 + 3.1) * sin(chassis_uv.y * 23.88 + 0.6) * 0.5;
-    float n3 = cos(chassis_uv.x * 59.69) * cos(chassis_uv.y * 50.89) * 0.25;
-    float organic_var = (n1 + n2 + n3) * 0.09;
+    float organic_stain = n_coarse * 0.50 + n_med * 0.35 + n_fine * 0.15;
 
     vec3 base_putty = vec3(0.67, 0.64, 0.57);
-    vec3 aged_yellow = vec3(0.76, 0.70, 0.50);
-    float yellowing = clamp(uv_exposure * 0.60 + organic_var + 0.15, 0.0, 1.0);
-    vec3 chassis_plastic = mix(base_putty, aged_yellow, yellowing);
+    vec3 aged_yellow = vec3(0.76, 0.70, 0.48);
+    vec3 tobacco_tar = vec3(0.52, 0.40, 0.22);
+    vec3 crevice_soot = vec3(0.14, 0.13, 0.11);
 
-    // Dual-scale stochastic ABS pebble grain: eliminates repeating grid artifacts at any resolution
+    // Directional UV exposure (top-left ceiling light bias)
+    vec2 chassis_uv = gl_FragCoord.xy / outputResolution;
+    float uv_exposure = clamp(pow(chassis_uv.y, 1.3) * 0.75 + (1.0 - chassis_uv.x) * 0.25, 0.0, 1.0);
+
+    // ABS plastic aging and patchy discoloration
+    float yellowing = clamp(uv_exposure * 0.45 + organic_stain * 0.35 + 0.10, 0.0, 1.0);
+    vec3 aged_plastic = mix(base_putty, aged_yellow, yellowing);
+
+    // Tobacco smoke / nicotine tar condensation (uneven pooling on upward shelves and corners)
+    float smoke_condense = clamp((organic_stain - 0.40) * 2.0, 0.0, 1.0);
+    float smoke_shelf_bias = 0.50 + 0.50 * clamp(n_ap.y, 0.0, 1.0);
+    float smoke_amount = smoke_condense * smoke_shelf_bias * 0.28;
+    aged_plastic = mix(aged_plastic, tobacco_tar, smoke_amount);
+
+    // Crevice grime accumulation (dust/soot in seams and corners)
+    float seam_dist = abs(d_ap - gasket_w);
+    float seam_grime = exp(-0.5 * pow(seam_dist / 3.2, 2.0)) * 0.55;
+    float cowl_grime = clamp((1.0 - t_bevel) * 0.35 + clamp(n_ap.y, 0.0, 1.0) * pow(1.0 - t_bevel, 2.0) * 0.25, 0.0, 0.60);
+    float corner_grime = clamp(len_max_q / r_corner, 0.0, 1.0) * (1.0 - t_bevel) * 0.35;
+    float total_grime = clamp(seam_grime + cowl_grime * (0.60 + 0.40 * n_fine) + corner_grime, 0.0, 0.85);
+
+    // Handling oil & sebum smudges on lower chin and outer corners
+    float corner_dist = length(vec2(min(gl_FragCoord.x, outputResolution.x - gl_FragCoord.x), gl_FragCoord.y));
+    float handling_patina = exp(-0.5 * pow(corner_dist / 140.0, 2.0)) * (0.12 + 0.08 * n_med);
+    float chin_patina = exp(-0.5 * pow((gl_FragCoord.y - 28.0) / 20.0, 2.0)) * exp(-0.5 * pow((gl_FragCoord.x - outputResolution.x * 0.72) / 120.0, 2.0)) * 0.18;
+    float oil_level = clamp(handling_patina + chin_patina, 0.0, 0.35);
+    aged_plastic *= (1.0 - oil_level * 0.40);
+
+    // Dual-scale stochastic ABS pebble grain and micro-surface roughness
     vec2 uv_grain1 = vec2(0.50, 0.50) + fract(gl_FragCoord.xy * (0.50 / 512.0)) * 0.25;
     vec2 uv_grain2 = vec2(0.50, 0.50) + fract(vec2(
         gl_FragCoord.x * 0.31 + gl_FragCoord.y * 0.21,
         -gl_FragCoord.x * 0.21 + gl_FragCoord.y * 0.31
     ) / 512.0) * 0.25;
-    vec3 sample1 = texture(bezel_texture, uv_grain1).rgb;
-    vec3 sample2 = texture(bezel_texture, uv_grain2).rgb;
-    vec3 grain = (sample1 + sample2) * 0.5;
-    vec3 grain_mod = (grain - vec3(0.60, 0.58, 0.50)) * 0.38;
-    chassis_plastic = clamp(chassis_plastic + grain_mod, 0.0, 1.0);
-
-    // Handling patina / burnishing on outer lower corners
-    float corner_dist = length(vec2(min(gl_FragCoord.x, outputResolution.x - gl_FragCoord.x), gl_FragCoord.y));
-    float handling_patina = exp(-0.5 * pow(corner_dist / 120.0, 2.0)) * 0.07;
-    chassis_plastic *= (1.0 + handling_patina);
+    vec3 grain = (texture(bezel_texture, uv_grain1).rgb + texture(bezel_texture, uv_grain2).rgb) * 0.5;
+    vec3 grain_mod = (grain - vec3(0.60, 0.58, 0.50)) * 0.35;
+    float grit_mod = (n_micro - 0.5) * 0.06;
+    aged_plastic = clamp(aged_plastic + grain_mod + vec3(grit_mod), 0.0, 1.0);
 
     // 8. Natural Asymmetric Chassis Structural Moldings
-    // Vertical structural panel groove on the side pillars (outside the deep bevel)
     float pillar_dist_l = abs(gl_FragCoord.x - (outputResolution.x * 0.5 - b_vid.x - bevel_w - 20.0));
     float pillar_dist_r = abs(gl_FragCoord.x - (outputResolution.x * 0.5 + b_vid.x + bevel_w + 20.0));
     float pillar_step = exp(-0.5 * pow(min(pillar_dist_l, pillar_dist_r) / 1.6, 2.0)) * 0.20;
     float pillar_molding = (d_ap > bevel_w && abs(gl_FragCoord.x - outputResolution.x * 0.5) > b_vid.x) ? pillar_step : 0.0;
 
-    // Subtle molded shelf line on the bottom chin only
     float chin_step = exp(-0.5 * pow((gl_FragCoord.y - 20.0) / 1.8, 2.0)) * 0.16;
     float chin_molding = (d_ap > bevel_w && gl_FragCoord.y < outputResolution.y * 0.25) ? chin_step : 0.0;
 
-    // Outer chassis chamfer vignette
     float edge_dist = min(min(gl_FragCoord.x, outputResolution.x - gl_FragCoord.x), min(gl_FragCoord.y, outputResolution.y - gl_FragCoord.y));
     float outer_chamfer = clamp(edge_dist / 22.0, 0.0, 1.0);
     float outer_vignette = 0.75 + 0.25 * sqrt(outer_chamfer);
 
-    vec3 chassis_color = chassis_plastic * outer_vignette * (1.0 - pillar_molding) * (1.0 - chin_molding);
+    vec3 chassis_color = aged_plastic * outer_vignette * (1.0 - pillar_molding) * (1.0 - chin_molding);
 
-    // 9. Multi-Stage Subpixel Anti-Aliased Composition
-    // Transition from inner bevel to chassis faceplate
+    // 9. Inner Bevel Cowl with Grime Accumulation
+    vec3 bevel_base = aged_plastic * (bevel_lighting + bottom_shelf) * (0.75 + 0.25 * t_bevel) + crest_col + ambient_glow_col;
+    vec3 bevel_col = mix(bevel_base, crevice_soot, total_grime);
+
+    // 10. Blend Bevel and Chassis Plastic
     float t_bevel_blend = smoothstep(bevel_w - 1.2, bevel_w + 1.2, d_ap);
-    vec3 bevel_col = base_putty * (bevel_lighting + bottom_shelf) * (0.75 + 0.25 * t_bevel) + crest_col + ambient_glow_col;
     vec3 frame_plastic = mix(bevel_col, chassis_color, t_bevel_blend);
+
+    // 11. Authentic Continuous Velvety Dust Bed Deposited on the 3D Bezel Inlet Shelf
+    // Gravity pulls airborne dust strictly onto the upward-facing bottom cowl inlet shelf:
+    // - Along the bottom arc: n_ap.y > 0.15 (peaks at bottom center n_ap.y = 1.0, smoothly fades to 0 at side pillars)
+    // - Inside the 3D inlet: d_ap between gasket_w and bevel_w
+    // - ZERO dust on the vertical outer chassis faceplate or vertical side pillars
+    if (n_ap.y > 0.15 && d_ap > gasket_w - 0.5 && d_ap < bevel_w) {
+        float in_bevel_inlet = clamp((d_ap - gasket_w) / 2.0, 0.0, 1.0) * clamp((bevel_w - d_ap) / 2.0, 0.0, 1.0);
+        float shelf_gravity = pow(clamp(n_ap.y, 0.0, 1.0), 1.9);
+        float inlet_shelf_profile = clamp(t_bevel / 0.09, 0.0, 1.0) * pow(clamp((1.0 - t_bevel) / 0.16, 0.0, 1.0), 0.55);
+
+        // Continuous multi-frequency organic fractal noise (completely continuous, ZERO cellular grid or tile lines)
+        float n_drift = value_noise(gl_FragCoord.xy / 40.0);
+        float n_silt  = value_noise((gl_FragCoord.xy + vec2(85.3, 32.7)) / 12.0);
+
+        // Rotated non-axis-aligned coordinates (30 degrees) eliminate any possibility of Cartesian grid artifacts
+        vec2 rot_coord = vec2(gl_FragCoord.x * 0.866 - gl_FragCoord.y * 0.500, gl_FragCoord.x * 0.500 + gl_FragCoord.y * 0.866);
+        float n_grain = value_noise(rot_coord / 3.2);
+        float n_micro = value_noise(vec2(-rot_coord.y, rot_coord.x) * 1.3 / 1.8);
+
+        float dust_bed_density = in_bevel_inlet * shelf_gravity * inlet_shelf_profile * (0.65 + 0.25 * n_drift + 0.10 * n_silt) * 1.60;
+
+        if (dust_bed_density > 0.002) {
+            // Continuous micro-facet normal perturbation from smooth analytical noise gradient
+            float eps = 0.8;
+            float gn_x = value_noise((rot_coord + vec2(eps, 0.0)) / 3.2) - value_noise((rot_coord - vec2(eps, 0.0)) / 3.2);
+            float gn_y = value_noise((rot_coord + vec2(0.0, eps)) / 3.2) - value_noise((rot_coord - vec2(0.0, eps)) / 3.2);
+
+            vec3 N_dust = normalize(N_bevel + vec3(gn_x * 0.40, gn_y * 0.40, 0.0));
+
+            // Velvety Lambertian diffuse scattering from room ceiling light (completely matte, zero specular gloss)
+            float diff_dust = clamp(dot(N_dust, L), 0.0, 1.0);
+            float dust_ao = 0.45 + 0.55 * pow(t_bevel, 0.55);
+
+            // Diffuse light scattering from the active CRT screen phosphors
+            vec3 L_crt = normalize(vec3(-n_ap.x, -n_ap.y, 0.50));
+            float diff_crt = clamp(dot(N_dust, L_crt), 0.0, 1.0);
+            vec3 crt_scatter_col = ambient_glow_col * 1.5;
+            if (ambient_glow > 0.001) {
+                if (length(vid_glow_col) > 0.001) {
+                    crt_scatter_col = vid_glow_col * (ambient_glow * 0.45);
+                } else {
+                    vec2 min_crop_uv = vec2(crop.x + 0.02, crop.z + 0.02);
+                    vec2 max_crop_uv = vec2(1.0 - crop.y - 0.02, 1.0 - crop.w - 0.02);
+                    vec2 edge_tc_sample = clamp(screen_tc, min_crop_uv, max_crop_uv);
+                    crt_scatter_col = ToSrgb(texture(video_texture, edge_tc_sample).rgb) * (ambient_glow * 0.22);
+                }
+            }
+            vec3 crt_light_scatter = crt_scatter_col * diff_crt;
+
+            // Natural pale warm-gray chalky dust tone matching real CRT reference photograph
+            vec3 dust_albedo = vec3(0.70, 0.68, 0.63) + vec3((n_silt - 0.5) * 0.05 + (n_micro - 0.5) * 0.04);
+            vec3 dust_lit = dust_albedo * (0.40 + 0.60 * diff_dust) * dust_ao + crt_light_scatter;
+
+            // Smooth velvety blending onto shelf plastic
+            float dust_alpha = clamp(dust_bed_density * (0.80 + 0.20 * n_grain), 0.0, 0.92);
+            frame_plastic = mix(frame_plastic, dust_lit, dust_alpha);
+        }
+    }
 
     // Transition from dark rubber gasket to plastic bevel
     float t_gasket = smoothstep(gasket_w - 0.75, gasket_w + 0.75, d_ap);
