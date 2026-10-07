@@ -204,96 +204,24 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             changed = true;
         }
 
-        if ui
-            .checkbox(
-                &mut state.video.retro_pc_frame,
-                "Retro PC Monitor Frame (Fullscreen)",
-            )
-            .on_hover_text(
-                "Displays a vintage NEC PC-98 CRT monitor casing in empty black bar areas when in fullscreen.",
-            )
-            .changed()
-        {
-            crate::config::save_config(state);
-            changed = true;
-        }
+        let is_crt_on = state.crt_filter.load(std::sync::atomic::Ordering::Relaxed) != 0;
 
-        if state.video.retro_pc_frame {
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.video.retro_pc_ambient_glow, 0.0..=1.0)
-                        .text("Bezel Ambient Glow")
-                        .custom_formatter(|n, _| {
-                            if n <= 0.001 {
-                                "Off".to_string()
-                            } else {
-                                format!("{:.0}%", n * 100.0)
-                            }
-                        }),
-                )
-                .on_hover_text(
-                    "Controls the intensity of the real-time diffuse halo glow reflecting from the active video feed onto the deep inner bezel sides (0% = Off).",
-                )
-                .changed()
-            {
-                crate::config::save_config(state);
-                changed = true;
-            }
-        }
-
-        if ui
-            .checkbox(
-                &mut state.video.crt_glass_enabled,
-                "Glossy Screen Glass Effect",
-            )
-            .on_hover_text(
-                "Simulates a photorealistic curved CRT glass patina, refractions, and reflections reacting to screen light.",
-            )
-            .changed()
-        {
-            crate::config::save_config(state);
-            changed = true;
-        }
-
-        if state.video.crt_glass_enabled {
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.video.crt_glass_intensity, 0.0..=1.0)
-                        .text("Glass Intensity")
-                        .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
-                )
-                .on_hover_text(
-                    "Controls the intensity of the glass patina, refractions, and reflections.",
-                )
-                .changed()
-            {
-                crate::config::save_config(state);
-                changed = true;
+        ui.add_enabled_ui(is_crt_on, |ui| {
+            if !is_crt_on {
+                ui.label(
+                    egui::RichText::new("ℹ The frame and glass reflection effects require CRT filter to be enabled (press 'C').")
+                        .weak()
+                        .small(),
+                );
             }
 
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.video.crt_glass_glossiness, 0.0..=1.0)
-                        .text("Glossiness / Ceiling Light Reflections")
-                        .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
-                )
-                .on_hover_text(
-                    "Controls specular sharpness and the prominence of surrounding office ceiling fluorescent light reflections on the glass surface.",
-                )
-                .changed()
-            {
-                crate::config::save_config(state);
-                changed = true;
-            }
-
-            ui.add_space(2.0);
             if ui
                 .checkbox(
-                    &mut state.video.crt_glass_photographer_enabled,
-                    "Photographer Reflection",
+                    &mut state.video.retro_pc_frame,
+                    "Retro PC Monitor Frame (Fullscreen)",
                 )
                 .on_hover_text(
-                    "Simulates an anonymous, diffuse dark silhouette reflection of a person taking a photo with a smartphone.",
+                    "Displays a vintage NEC PC-98 CRT monitor casing in empty black bar areas when in fullscreen (requires CRT shader).",
                 )
                 .changed()
             {
@@ -301,18 +229,21 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 changed = true;
             }
 
-            if state.video.crt_glass_photographer_enabled {
+            if state.video.retro_pc_frame {
                 if ui
                     .add(
-                        egui::Slider::new(
-                            &mut state.video.crt_glass_photographer_intensity,
-                            0.0..=1.0,
-                        )
-                        .text("Photographer Intensity")
-                        .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
+                        egui::Slider::new(&mut state.video.retro_pc_ambient_glow, 0.0..=1.0)
+                            .text("Bezel Ambient Glow")
+                            .custom_formatter(|n, _| {
+                                if n <= 0.001 {
+                                    "Off".to_string()
+                                } else {
+                                    format!("{:.0}%", n * 100.0)
+                                }
+                            }),
                     )
                     .on_hover_text(
-                        "Controls the opacity of the photographer silhouette reflection.",
+                        "Controls the intensity of the real-time diffuse halo glow reflecting from the active video feed onto the deep inner bezel sides (0% = Off).",
                     )
                     .changed()
                 {
@@ -321,14 +252,13 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 }
             }
 
-            ui.add_space(2.0);
             if ui
                 .checkbox(
-                    &mut state.video.crt_glass_flash_enabled,
-                    "Camera Flash Reflection",
+                    &mut state.video.crt_glass_enabled,
+                    "Glossy Screen Glass Effect",
                 )
                 .on_hover_text(
-                    "Simulates a warm diffuse camera flash reflection on the lower-right area of the screen.",
+                    "Simulates a photorealistic curved CRT glass patina, refractions, and reflections reacting to screen light (requires CRT shader).",
                 )
                 .changed()
             {
@@ -336,23 +266,105 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 changed = true;
             }
 
-            if state.video.crt_glass_flash_enabled {
+            if state.video.crt_glass_enabled {
                 if ui
                     .add(
-                        egui::Slider::new(&mut state.video.crt_glass_flash_intensity, 0.0..=1.0)
-                            .text("Flash Intensity")
+                        egui::Slider::new(&mut state.video.crt_glass_intensity, 0.0..=1.0)
+                            .text("Glass Intensity")
                             .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
                     )
                     .on_hover_text(
-                        "Controls the exposure and brightness of the camera flash reflection.",
+                        "Controls the intensity of the glass patina, refractions, and reflections.",
                     )
                     .changed()
                 {
                     crate::config::save_config(state);
                     changed = true;
                 }
+
+                if ui
+                    .add(
+                        egui::Slider::new(&mut state.video.crt_glass_glossiness, 0.0..=1.0)
+                            .text("Glossiness / Ceiling Light Reflections")
+                            .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
+                    )
+                    .on_hover_text(
+                        "Controls specular sharpness and the prominence of surrounding office ceiling fluorescent light reflections on the glass surface.",
+                    )
+                    .changed()
+                {
+                    crate::config::save_config(state);
+                    changed = true;
+                }
+
+                ui.add_space(2.0);
+                if ui
+                    .checkbox(
+                        &mut state.video.crt_glass_photographer_enabled,
+                        "Photographer Reflection",
+                    )
+                    .on_hover_text(
+                        "Simulates an anonymous, diffuse dark silhouette reflection of a person taking a photo with a smartphone.",
+                    )
+                    .changed()
+                {
+                    crate::config::save_config(state);
+                    changed = true;
+                }
+
+                if state.video.crt_glass_photographer_enabled {
+                    if ui
+                        .add(
+                            egui::Slider::new(
+                                &mut state.video.crt_glass_photographer_intensity,
+                                0.0..=1.0,
+                            )
+                            .text("Photographer Intensity")
+                            .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
+                        )
+                        .on_hover_text(
+                            "Controls the opacity of the photographer silhouette reflection.",
+                        )
+                        .changed()
+                    {
+                        crate::config::save_config(state);
+                        changed = true;
+                    }
+                }
+
+                ui.add_space(2.0);
+                if ui
+                    .checkbox(
+                        &mut state.video.crt_glass_flash_enabled,
+                        "Camera Flash Reflection",
+                    )
+                    .on_hover_text(
+                        "Simulates a warm diffuse camera flash reflection on the lower-right area of the screen.",
+                    )
+                    .changed()
+                {
+                    crate::config::save_config(state);
+                    changed = true;
+                }
+
+                if state.video.crt_glass_flash_enabled {
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut state.video.crt_glass_flash_intensity, 0.0..=1.0)
+                                .text("Flash Intensity")
+                                .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
+                        )
+                        .on_hover_text(
+                            "Controls the exposure and brightness of the camera flash reflection.",
+                        )
+                        .changed()
+                    {
+                        crate::config::save_config(state);
+                        changed = true;
+                    }
+                }
             }
-        }
+        });
 
         if ui
             .add(

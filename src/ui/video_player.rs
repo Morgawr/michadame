@@ -192,7 +192,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         let time = ui.input(|i| i.time) as f32;
         let is_fullscreen =
             state.ui.is_fullscreen || ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-        let retro_pc_frame = state.video.retro_pc_frame;
+        let is_crt_on = filter != CrtFilter::Off;
+        let retro_pc_frame = is_crt_on && state.video.retro_pc_frame;
         let retro_pc_ambient_glow = state.video.retro_pc_ambient_glow;
         if state.cathode_interference.enabled || (retro_pc_frame && is_fullscreen) {
             ui.ctx().request_repaint();

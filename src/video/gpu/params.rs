@@ -200,13 +200,14 @@ impl GlassShaderParams {
         corner_size: f32,
         filter_type: i32,
     ) -> Self {
+        let crt_active = filter_type != 0;
         Self {
-            enabled: state.video.crt_glass_enabled,
+            enabled: crt_active && state.video.crt_glass_enabled,
             intensity: state.video.crt_glass_intensity,
             glossiness: state.video.crt_glass_glossiness,
-            photographer_enabled: state.video.crt_glass_photographer_enabled,
+            photographer_enabled: crt_active && state.video.crt_glass_photographer_enabled,
             photographer_intensity: state.video.crt_glass_photographer_intensity,
-            flash_enabled: state.video.crt_glass_flash_enabled,
+            flash_enabled: crt_active && state.video.crt_glass_flash_enabled,
             flash_intensity: state.video.crt_glass_flash_intensity,
             warp,
             corner_size,
@@ -468,5 +469,11 @@ mod tests {
         assert_eq!(params.corner_size, 0.05);
         assert_eq!(params.filter_type, 2);
         assert_eq!(params.horizontal_stretch, 1.2);
+
+        // When CRT is Off (filter_type = 0), glass and reflections must not be active
+        let params_off = GlassShaderParams::from_state(&state, [0.0, 0.0], 0.0, 0);
+        assert!(!params_off.enabled);
+        assert!(!params_off.photographer_enabled);
+        assert!(!params_off.flash_enabled);
     }
 }

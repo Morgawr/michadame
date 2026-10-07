@@ -376,6 +376,7 @@ impl eframe::App for AppState {
             self.crt_filter.store(next_filter as u8, Ordering::Relaxed);
             config::save_config(self);
             self.info(format!("CRT filter set to: {}", next_filter));
+            ctx.request_repaint();
         }
         if ctx.input(|i| i.key_pressed(egui::Key::G)) {
             self.video.pixelate_filter_enabled = !self.video.pixelate_filter_enabled;
