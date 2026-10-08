@@ -13,6 +13,7 @@ uniform float corner_size;
 uniform int filter_type;  // 0 = None, 1 = Lottes, 2 = Halo
 uniform float time;
 uniform float ambient_glow;
+uniform int dark_mode; // 0 = normal room light, 1 = dark room mode
 
 // Convert from linear to sRGB color space for video samples
 float ToSrgb1(float c) {
@@ -21,6 +22,17 @@ float ToSrgb1(float c) {
 }
 vec3 ToSrgb(vec3 c) {
     return vec3(ToSrgb1(c.r), ToSrgb1(c.g), ToSrgb1(c.b));
+}
+
+// Video texture is an OpenGL FBO where (0,0) is bottom-left.
+// In screen_tc space, (0,0) is top-left, so we vertically invert Y when sampling video_texture.
+// Hardware mipmapped LOD 4.2 dissolves all high-frequency scanlines, text, and UI icons into silky diffuse ambient light.
+vec3 sample_video_linear(vec2 tc) {
+    vec4 crop = border_crop;
+    vec2 min_crop_uv = vec2(crop.x + 0.015, crop.z + 0.015);
+    vec2 max_crop_uv = vec2(1.0 - crop.y - 0.015, 1.0 - crop.w - 0.015);
+    vec2 clamped = clamp(tc, min_crop_uv, max_crop_uv);
+    return textureLod(video_texture, vec2(clamped.x, 1.0 - clamped.y), 4.2).rgb;
 }
 
 // Atlas sub-texture UV rectangles (texture flipped vertically so V=0 is bottom, V=1 is top):
@@ -144,20 +156,23 @@ void main() {
     float diffuse = clamp(dot(N_bevel, L), 0.0, 1.0);
     // Cavity depth shading: deeper inside the cowl is darker
     float cavity_ao = 0.45 + 0.55 * pow(t_bevel, 0.75);
-    float bevel_lighting = (0.35 + diffuse * 0.85) * cavity_ao;
+    float bevel_lighting = (dark_mode == 1)
+        ? (0.12 + diffuse * 0.12)
+        : (0.35 + diffuse * 0.85) * cavity_ao;
 
     // Bottom shelf catch-light
-    float bottom_shelf = clamp(n_ap.y, 0.0, 1.0) * pow(t_bevel, 2.0) * 0.35;
+    float bottom_shelf_factor = (dark_mode == 1) ? 0.18 : 0.35;
+    float bottom_shelf = clamp(n_ap.y, 0.0, 1.0) * pow(t_bevel, 2.0) * bottom_shelf_factor;
 
     // Specular crest line on bottom and right ridge
     float crest_ridge = exp(-0.5 * pow((t_bevel - 0.97) / 0.028, 2.0));
     float crest_dir = clamp(n_ap.x * 0.40 - n_ap.y * 0.75, 0.0, 1.0);
-    vec3 crest_col = vec3(0.14, 0.14, 0.11) * (crest_ridge * crest_dir);
+    float crest_mult = (dark_mode == 1) ? 0.45 : 1.0;
+    vec3 crest_col = vec3(0.14, 0.14, 0.11) * (crest_ridge * crest_dir * crest_mult);
 
-    // Dynamic refracted ambient halo glow from active video feed bouncing on deep inner cowl
+    // Physically-grounded diffuse light reflection from active video feed bouncing on inner cowl
     vec3 ambient_glow_col = vec3(0.0);
-    vec3 vid_glow_col = vec3(0.0);
-    if (ambient_glow > 0.001 && d_ap > gasket_w - 0.75 && d_ap < bevel_w + 1.2) {
+    if (ambient_glow > 0.001 && d_ap > gasket_w - 0.5 && d_ap < bevel_w) {
         vec2 min_crop_uv = vec2(crop.x + 0.015, crop.z + 0.015);
         vec2 max_crop_uv = vec2(1.0 - crop.y - 0.015, 1.0 - crop.w - 0.015);
         vec2 edge_tc = clamp(screen_tc, min_crop_uv, max_crop_uv);
@@ -168,43 +183,54 @@ void main() {
         // Direction pointing toward video center for corner ambient bounce
         vec2 diag_dir = -sign(p_vid);
 
-        // Conical dispersion scaling: light spreads wider and penetrates deeper as distance from screen increases
-        float cone_spread = 0.16 + 0.38 * t_bevel;
-        float depth_base = 0.05 + 0.12 * t_bevel;
+        // Conical dispersion scaling: light spreads wider near the edge
+        float cone_spread = 0.06 + 0.20 * t_bevel;
+        float depth_base = 0.03 + 0.06 * t_bevel;
 
-        // 17-tap balanced 2D hemispherical diffuse bounce kernel:
-        // Tier 1: Near-surface diffuse core
-        vec3 vid_acc = texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 0.60), min_crop_uv, max_crop_uv)).rgb * 0.130;
-        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 0.70) - t_ap * (cone_spread * 0.28), min_crop_uv, max_crop_uv)).rgb * 0.095;
-        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 0.70) + t_ap * (cone_spread * 0.28), min_crop_uv, max_crop_uv)).rgb * 0.095;
-        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 1.00) - t_ap * (cone_spread * 0.60), min_crop_uv, max_crop_uv)).rgb * 0.075;
-        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 1.00) + t_ap * (cone_spread * 0.60), min_crop_uv, max_crop_uv)).rgb * 0.075;
+        // Continuous multi-scale Gaussian tangential fan merging neighboring rays into soft diffuse bounce
+        vec3 vid_acc = vec3(0.0);
+        float tot_w = 0.0;
 
-        // Tier 2: Mid-range diffuse body
-        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 1.20), min_crop_uv, max_crop_uv)).rgb * 0.095;
-        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 1.40) - t_ap * (cone_spread * 0.98), min_crop_uv, max_crop_uv)).rgb * 0.055;
-        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 1.40) + t_ap * (cone_spread * 0.98), min_crop_uv, max_crop_uv)).rgb * 0.055;
-        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 1.80) - t_ap * (cone_spread * 1.40), min_crop_uv, max_crop_uv)).rgb * 0.035;
-        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 1.80) + t_ap * (cone_spread * 1.40), min_crop_uv, max_crop_uv)).rgb * 0.035;
+        const float t_offs[6] = float[6](0.012, 0.030, 0.055, 0.090, 0.140, 0.200);
+        const float t_wts[6]  = float[6](0.240, 0.200, 0.160, 0.120, 0.080, 0.040);
 
-        // Tier 3: Diagonal corner cross-bounce (scatters light around rounded corners and into content)
-        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 1.00) + diag_dir * 0.030, min_crop_uv, max_crop_uv)).rgb * 0.065;
-        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 1.60) + diag_dir * 0.060, min_crop_uv, max_crop_uv)).rgb * 0.050;
-        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 2.20) - t_ap * (cone_spread * 0.50) + diag_dir * 0.050, min_crop_uv, max_crop_uv)).rgb * 0.040;
-        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 2.20) + t_ap * (cone_spread * 0.50) + diag_dir * 0.050, min_crop_uv, max_crop_uv)).rgb * 0.040;
+        // Core near-edge center taps across depth
+        vec3 c_depth1 = sample_video_linear(edge_tc - n_ap * (depth_base * 0.85));
+        vec3 c_depth2 = sample_video_linear(edge_tc - n_ap * (depth_base * 1.60));
+        vid_acc += c_depth1 * 0.35; tot_w += 0.35;
+        vid_acc += c_depth2 * 0.20; tot_w += 0.20;
 
-        // Tier 4: Deep ambient cavity field
-        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 2.00), min_crop_uv, max_crop_uv)).rgb * 0.060;
-        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 2.80) + diag_dir * 0.080, min_crop_uv, max_crop_uv)).rgb * 0.025;
-        vid_acc += texture(video_texture, clamp(edge_tc - n_ap * (depth_base * 3.20), min_crop_uv, max_crop_uv)).rgb * 0.020;
+        // Symmetric tangential Gaussian fan merging neighboring rays
+        for (int k = 0; k < 6; k++) {
+            float off = t_offs[k] * cone_spread * 2.0;
+            float wt  = t_wts[k];
 
-        vid_glow_col = ToSrgb(vid_acc);
+            vid_acc += sample_video_linear(edge_tc - n_ap * depth_base - t_ap * off) * wt;
+            vid_acc += sample_video_linear(edge_tc - n_ap * depth_base + t_ap * off) * wt;
+            tot_w += 2.0 * wt;
+        }
 
-        // Ambient glow is STRICTLY contained inside the deep bevel border:
-        // Starts at rubber gasket (t_bevel = 0.0), peaks in deep cowl, and smoothly falls off to 0.0 at the outer crest (t_bevel = 1.0)
-        // Never bleeds onto the outer chassis faceplate or side pillars.
-        float glow_profile = sin(t_bevel * 3.14159265) * pow(1.0 - t_bevel, 0.85);
-        ambient_glow_col = vid_glow_col * (glow_profile * (ambient_glow * 0.40));
+        // Deep cavity & corner cross-bounce
+        vid_acc += sample_video_linear(edge_tc - n_ap * (depth_base * 1.50) + diag_dir * 0.060) * 0.08;
+        tot_w += 0.08;
+
+        vec3 vid_glow_col = ToSrgb(vid_acc / tot_w);
+        float vid_lum = dot(vid_glow_col, vec3(0.2126, 0.7152, 0.0722));
+
+        // Responsive dynamic energy scaling with screen luminance
+        float vid_energy = clamp(0.60 + 1.20 * vid_lum, 0.60, 1.80);
+
+        // Natural phosphor color blend: white light luminance punch with subtle phosphor color tint
+        vec3 bounce_col = mix(vec3(vid_lum), vid_glow_col, 0.40);
+        vec3 incident_light = bounce_col * vid_energy;
+
+        // Cowl slope falloff: generously illuminates the inner cowl cavity,
+        // smoothly feathering towards the crest and strictly cutting off before outer chassis
+        float cowl_falloff = pow(1.0 - t_bevel * 0.70, 1.5) * smoothstep(bevel_w, bevel_w - 2.0, d_ap);
+
+        // Responsive, luminous diffuse reflection scaling across slider
+        float bounce_mult = (dark_mode == 1) ? 1.50 : 0.95;
+        ambient_glow_col = incident_light * (bounce_mult * ambient_glow * cowl_falloff);
     }
 
     // 7. Authentic Chassis & Bevel Aging, Grime Accumulation & Material Patina
@@ -240,7 +266,9 @@ void main() {
     float seam_grime = exp(-0.5 * pow(seam_dist / 3.2, 2.0)) * 0.55;
     float cowl_grime = clamp((1.0 - t_bevel) * 0.35 + clamp(n_ap.y, 0.0, 1.0) * pow(1.0 - t_bevel, 2.0) * 0.25, 0.0, 0.60);
     float corner_grime = clamp(len_max_q / r_corner, 0.0, 1.0) * (1.0 - t_bevel) * 0.35;
-    float total_grime = clamp(seam_grime + cowl_grime * (0.60 + 0.40 * n_fine) + corner_grime, 0.0, 0.85);
+    float total_grime = (dark_mode == 1)
+        ? clamp(seam_grime * 0.20 + (1.0 - t_bevel) * 0.10, 0.0, 0.30)
+        : clamp(seam_grime + cowl_grime * (0.60 + 0.40 * n_fine) + corner_grime, 0.0, 0.85);
 
     // Handling oil & sebum smudges on lower chin and outer corners
     float corner_dist = length(vec2(min(gl_FragCoord.x, outputResolution.x - gl_FragCoord.x), gl_FragCoord.y));
@@ -258,7 +286,8 @@ void main() {
     vec3 grain = (texture(bezel_texture, uv_grain1).rgb + texture(bezel_texture, uv_grain2).rgb) * 0.5;
     vec3 grain_mod = (grain - vec3(0.60, 0.58, 0.50)) * 0.35;
     float grit_mod = (n_micro - 0.5) * 0.06;
-    aged_plastic = clamp(aged_plastic + grain_mod + vec3(grit_mod), 0.0, 1.0);
+    float grain_scale = (dark_mode == 1) ? 0.85 : 1.0;
+    aged_plastic = clamp(aged_plastic + grain_mod * grain_scale + vec3(grit_mod * grain_scale), 0.0, 1.0);
 
     // 8. Natural Asymmetric Chassis Structural Moldings
     float pillar_dist_l = abs(gl_FragCoord.x - (outputResolution.x * 0.5 - b_vid.x - bevel_w - 20.0));
@@ -274,10 +303,25 @@ void main() {
     float outer_vignette = 0.75 + 0.25 * sqrt(outer_chamfer);
 
     vec3 chassis_color = aged_plastic * outer_vignette * (1.0 - pillar_molding) * (1.0 - chin_molding);
+    if (dark_mode == 1) {
+        chassis_color *= 0.022;
+    }
 
     // 9. Inner Bevel Cowl with Grime Accumulation
-    vec3 bevel_base = aged_plastic * (bevel_lighting + bottom_shelf) * (0.75 + 0.25 * t_bevel) + crest_col + ambient_glow_col;
-    vec3 bevel_col = mix(bevel_base, crevice_soot, total_grime);
+    vec3 plastic_bevel = (dark_mode == 1) ? aged_plastic * 0.22 : aged_plastic;
+    vec3 soot_col = (dark_mode == 1) ? crevice_soot * 0.20 : crevice_soot;
+    float grime_factor = (dark_mode == 1) ? total_grime * 0.15 : total_grime;
+    vec3 surface_plastic = mix(
+        plastic_bevel * (bevel_lighting + bottom_shelf) * (0.75 + 0.25 * t_bevel) + crest_col,
+        soot_col,
+        grime_factor
+    );
+
+    // Physically-based velvety diffuse reflection:
+    // Screen light illuminates the plastic surface with realistic material reflectance
+    vec3 surface_refl = (dark_mode == 1) ? (aged_plastic * 0.75 + vec3(0.25)) : (aged_plastic * 0.85 + vec3(0.15));
+    vec3 diffuse_illum = ambient_glow_col * surface_refl;
+    vec3 bevel_col = surface_plastic + diffuse_illum;
 
     // 10. Blend Bevel and Chassis Plastic
     float t_bevel_blend = smoothstep(bevel_w - 1.2, bevel_w + 1.2, d_ap);
@@ -318,33 +362,38 @@ void main() {
 
             // Diffuse light scattering from the active CRT screen phosphors
             vec3 L_crt = normalize(vec3(-n_ap.x, -n_ap.y, 0.50));
-            float diff_crt = clamp(dot(N_dust, L_crt), 0.0, 1.0);
-            vec3 crt_scatter_col = ambient_glow_col * 1.5;
+            float diff_crt = (dark_mode == 1) ? clamp(dot(N_bevel, L_crt), 0.0, 1.0) : clamp(dot(N_dust, L_crt), 0.0, 1.0);
+            float crt_dust_mult = (dark_mode == 1) ? 0.95 : 0.45;
+            vec3 crt_scatter_col = vec3(0.0);
             if (ambient_glow > 0.001) {
-                if (length(vid_glow_col) > 0.001) {
-                    crt_scatter_col = vid_glow_col * (ambient_glow * 0.45);
-                } else {
-                    vec2 min_crop_uv = vec2(crop.x + 0.02, crop.z + 0.02);
-                    vec2 max_crop_uv = vec2(1.0 - crop.y - 0.02, 1.0 - crop.w - 0.02);
-                    vec2 edge_tc_sample = clamp(screen_tc, min_crop_uv, max_crop_uv);
-                    crt_scatter_col = ToSrgb(texture(video_texture, edge_tc_sample).rgb) * (ambient_glow * 0.22);
-                }
+                vec3 raw_col = ToSrgb(sample_video_linear(screen_tc));
+                float raw_lum = dot(raw_col, vec3(0.2126, 0.7152, 0.0722));
+                vec3 desat_raw = mix(vec3(raw_lum), raw_col, 0.28);
+                crt_scatter_col = desat_raw * pow(raw_lum, 1.45) * (ambient_glow * (crt_dust_mult * 0.35));
             }
             vec3 crt_light_scatter = crt_scatter_col * diff_crt;
 
             // Natural pale warm-gray chalky dust tone matching real CRT reference photograph
-            vec3 dust_albedo = vec3(0.70, 0.68, 0.63) + vec3((n_silt - 0.5) * 0.05 + (n_micro - 0.5) * 0.04);
-            vec3 dust_lit = dust_albedo * (0.40 + 0.60 * diff_dust) * dust_ao + crt_light_scatter;
+            vec3 dust_albedo = (dark_mode == 1)
+                ? vec3(0.68, 0.66, 0.61)
+                : vec3(0.70, 0.68, 0.63) + vec3((n_silt - 0.5) * 0.05 + (n_micro - 0.5) * 0.04);
+            vec3 dust_room_light = (dark_mode == 1)
+                ? dust_albedo * (0.06 + 0.08 * diff_dust) * dust_ao
+                : dust_albedo * (0.40 + 0.60 * diff_dust) * dust_ao;
+            vec3 dust_lit = dust_room_light + crt_light_scatter;
 
             // Smooth velvety blending onto shelf plastic
-            float dust_alpha = clamp(dust_bed_density * (0.80 + 0.20 * n_grain), 0.0, 0.92);
+            float dust_alpha = (dark_mode == 1)
+                ? clamp(dust_bed_density * 0.75, 0.0, 0.85)
+                : clamp(dust_bed_density * (0.80 + 0.20 * n_grain), 0.0, 0.92);
             frame_plastic = mix(frame_plastic, dust_lit, dust_alpha);
         }
     }
 
     // Transition from dark rubber gasket to plastic bevel
     float t_gasket = smoothstep(gasket_w - 0.75, gasket_w + 0.75, d_ap);
-    vec3 frame_solid = mix(gasket_col, frame_plastic, t_gasket);
+    vec3 gasket_toned = (dark_mode == 1) ? gasket_col * 0.60 : gasket_col;
+    vec3 frame_solid = mix(gasket_toned, frame_plastic, t_gasket);
 
     // Subpixel coverage anti-aliasing across aperture boundary (eliminates jaggies)
     float coverage = smoothstep(-0.75, 0.75, d_ap);

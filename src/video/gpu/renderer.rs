@@ -87,6 +87,7 @@ pub struct CrtFilterRenderer {
     retro_filter_type_loc: Option<glow::UniformLocation>,
     retro_time_loc: Option<glow::UniformLocation>,
     retro_ambient_glow_loc: Option<glow::UniformLocation>,
+    retro_dark_mode_loc: Option<glow::UniformLocation>,
     last_video_texture: Option<glow::Texture>,
 
     crt_glass_prog: glow::Program,
@@ -106,6 +107,16 @@ pub struct CrtFilterRenderer {
     glass_flash_enabled_loc: Option<glow::UniformLocation>,
     glass_flash_intensity_loc: Option<glow::UniformLocation>,
     silhouette_texture: glow::Texture,
+
+    night_glow_prog: glow::Program,
+    night_glow_output_res_loc: Option<glow::UniformLocation>,
+    night_glow_source_size_loc: Option<glow::UniformLocation>,
+    night_glow_horizontal_stretch_loc: Option<glow::UniformLocation>,
+    night_glow_border_crop_loc: Option<glow::UniformLocation>,
+    night_glow_warp_loc: Option<glow::UniformLocation>,
+    night_glow_corner_size_loc: Option<glow::UniformLocation>,
+    night_glow_filter_type_loc: Option<glow::UniformLocation>,
+    night_glow_intensity_loc: Option<glow::UniformLocation>,
 
     post_fbos: [glow::Framebuffer; 2],
     post_textures: [glow::Texture; 2],
@@ -177,6 +188,7 @@ impl CrtFilterRenderer {
             let retro_filter_type_loc = gl.get_uniform_location(retro_frame_prog, "filter_type");
             let retro_time_loc = gl.get_uniform_location(retro_frame_prog, "time");
             let retro_ambient_glow_loc = gl.get_uniform_location(retro_frame_prog, "ambient_glow");
+            let retro_dark_mode_loc = gl.get_uniform_location(retro_frame_prog, "dark_mode");
 
             gl.use_program(Some(retro_frame_prog));
             if let Some(loc) = gl.get_uniform_location(retro_frame_prog, "bezel_texture") {
@@ -216,6 +228,29 @@ impl CrtFilterRenderer {
             }
             if let Some(loc) = gl.get_uniform_location(crt_glass_prog, "silhouette_texture") {
                 gl.uniform_1_i32(Some(&loc), 1);
+            }
+            gl.use_program(None);
+
+            let night_glow_prog = compile_program(gl, VS_SRC, FS_NIGHT_GLOW);
+            let night_glow_output_res_loc =
+                gl.get_uniform_location(night_glow_prog, "outputResolution");
+            let night_glow_source_size_loc =
+                gl.get_uniform_location(night_glow_prog, "source_size");
+            let night_glow_horizontal_stretch_loc =
+                gl.get_uniform_location(night_glow_prog, "horizontal_stretch");
+            let night_glow_border_crop_loc =
+                gl.get_uniform_location(night_glow_prog, "border_crop");
+            let night_glow_warp_loc = gl.get_uniform_location(night_glow_prog, "warp");
+            let night_glow_corner_size_loc =
+                gl.get_uniform_location(night_glow_prog, "corner_size");
+            let night_glow_filter_type_loc =
+                gl.get_uniform_location(night_glow_prog, "filter_type");
+            let night_glow_intensity_loc =
+                gl.get_uniform_location(night_glow_prog, "glow_intensity");
+
+            gl.use_program(Some(night_glow_prog));
+            if let Some(loc) = gl.get_uniform_location(night_glow_prog, "video_texture") {
+                gl.uniform_1_i32(Some(&loc), 0);
             }
             gl.use_program(None);
 
@@ -565,6 +600,7 @@ impl CrtFilterRenderer {
                 retro_filter_type_loc,
                 retro_time_loc,
                 retro_ambient_glow_loc,
+                retro_dark_mode_loc,
                 last_video_texture: None,
                 pixelate_prog,
                 final_prog,
@@ -634,6 +670,15 @@ impl CrtFilterRenderer {
                 glass_flash_enabled_loc,
                 glass_flash_intensity_loc,
                 silhouette_texture,
+                night_glow_prog,
+                night_glow_output_res_loc,
+                night_glow_source_size_loc,
+                night_glow_horizontal_stretch_loc,
+                night_glow_border_crop_loc,
+                night_glow_warp_loc,
+                night_glow_corner_size_loc,
+                night_glow_filter_type_loc,
+                night_glow_intensity_loc,
                 post_fbos,
                 post_textures,
                 last_post_size: (0, 0),
@@ -1789,6 +1834,7 @@ impl CrtFilterRenderer {
         filter_type: i32,
         time: f32,
         ambient_glow: f32,
+        dark_mode: bool,
     ) {
         unsafe {
             let old_vbo = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
@@ -1810,9 +1856,13 @@ impl CrtFilterRenderer {
             gl.bind_texture(glow::TEXTURE_2D, Some(self.bezel_texture));
 
             gl.active_texture(glow::TEXTURE1);
-            gl.bind_texture(
+            let video_tex = self.last_video_texture.unwrap_or(self.pass_textures[6]);
+            gl.bind_texture(glow::TEXTURE_2D, Some(video_tex));
+            gl.generate_mipmap(glow::TEXTURE_2D);
+            gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
-                Some(self.last_video_texture.unwrap_or(self.pass_textures[6])),
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR_MIPMAP_LINEAR as i32,
             );
 
             gl.uniform_2_f32(
@@ -1857,12 +1907,119 @@ impl CrtFilterRenderer {
                 self.retro_ambient_glow_loc.as_ref(),
                 ambient_glow,
             );
+            gl.uniform_1_i32(
+                self.retro_dark_mode_loc.as_ref(),
+                if dark_mode { 1 } else { 0 },
+            );
 
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-            gl.active_texture(glow::TEXTURE1);
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR as i32,
+            );
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.use_program(None);
+
+            if !blend_enabled {
+                gl.disable(glow::BLEND);
+            }
+
+            gl.bind_vertex_array(None);
+            if old_vbo != 0 {
+                gl.bind_vertex_array(Some(glow::VertexArray::from(glow::NativeVertexArray(
+                    NonZero::new(old_vbo as u32).unwrap(),
+                ))));
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_night_mode_glow(
+        &self,
+        gl: &glow::Context,
+        resolution: (u32, u32),
+        output_size: (f32, f32),
+        horizontal_stretch: f32,
+        border_crop: [f32; 4],
+        warp: [f32; 2],
+        corner_size: f32,
+        filter_type: i32,
+        glow_intensity: f32,
+    ) {
+        if glow_intensity <= 0.001 {
+            return;
+        }
+        unsafe {
+            let old_vbo = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
+            let blend_enabled = gl.is_enabled(glow::BLEND);
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::ONE, glow::ONE);
+
+            gl.bind_vertex_array(Some(self.vertex_array));
+            gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+
+            gl.use_program(Some(self.night_glow_prog));
+
+            gl.active_texture(glow::TEXTURE0);
+            let video_tex = self.last_video_texture.unwrap_or(self.pass_textures[6]);
+            gl.bind_texture(glow::TEXTURE_2D, Some(video_tex));
+            gl.generate_mipmap(glow::TEXTURE_2D);
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR_MIPMAP_LINEAR as i32,
+            );
+
+            gl.uniform_2_f32(
+                self.night_glow_output_res_loc.as_ref(),
+                output_size.0,
+                output_size.1,
+            );
+            gl.uniform_2_f32(
+                self.night_glow_source_size_loc.as_ref(),
+                resolution.0 as f32,
+                resolution.1 as f32,
+            );
+            gl.uniform_1_f32(
+                self.night_glow_horizontal_stretch_loc.as_ref(),
+                horizontal_stretch,
+            );
+            gl.uniform_4_f32(
+                self.night_glow_border_crop_loc.as_ref(),
+                border_crop[0],
+                border_crop[1],
+                border_crop[2],
+                border_crop[3],
+            );
+            gl.uniform_2_f32(
+                self.night_glow_warp_loc.as_ref(),
+                warp[0],
+                warp[1],
+            );
+            gl.uniform_1_f32(
+                self.night_glow_corner_size_loc.as_ref(),
+                corner_size,
+            );
+            gl.uniform_1_i32(
+                self.night_glow_filter_type_loc.as_ref(),
+                filter_type,
+            );
+            gl.uniform_1_f32(
+                self.night_glow_intensity_loc.as_ref(),
+                glow_intensity,
+            );
+
+            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR as i32,
+            );
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.use_program(None);
 
@@ -1892,6 +2049,7 @@ impl CrtFilterRenderer {
             gl.delete_program(self.yuyv_packed_prog);
             gl.delete_program(self.cathode_prog);
             gl.delete_program(self.crt_glass_prog);
+            gl.delete_program(self.night_glow_prog);
             for fbo in self.post_fbos {
                 gl.delete_framebuffer(fbo);
             }

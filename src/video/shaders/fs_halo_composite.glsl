@@ -152,7 +152,12 @@ void main() {
 
     // Brightboost
     float bb = mix(brightboost, brightboost1, colmx);
-    color *= bb;
+    if (bb > 1.80) {
+        vec3 lifted = pow(max(color, vec3(0.0)), vec3(0.72));
+        color = mix(color * bb, lifted * (bb * 0.95), 0.65);
+    } else {
+        color *= bb;
+    }
 
     // Sample Bloom and Glow
     vec3 bloom_val = texture(BloomPass, clamp(warped, 0.0, 1.0)).rgb;

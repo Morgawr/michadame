@@ -148,7 +148,10 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         crt_hard_pix: Some(state.crt.hard_pix),
         use_magenta_background: Some(state.video.use_magenta_background),
         retro_pc_frame: Some(state.video.retro_pc_frame),
+        retro_pc_frame_dark_mode: Some(state.video.retro_pc_frame_dark_mode),
         retro_pc_ambient_glow: Some(state.video.retro_pc_ambient_glow),
+        lights_off_night_mode: Some(state.video.lights_off_night_mode),
+        night_mode_glow_intensity: Some(state.video.night_mode_glow_intensity),
         crt_glass_enabled: Some(state.video.crt_glass_enabled),
         crt_glass_intensity: Some(state.video.crt_glass_intensity),
         crt_glass_glossiness: Some(state.video.crt_glass_glossiness),
@@ -366,8 +369,17 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) {
     if let Some(val) = profile.retro_pc_frame {
         state.video.retro_pc_frame = val;
     }
+    if let Some(val) = profile.retro_pc_frame_dark_mode {
+        state.video.retro_pc_frame_dark_mode = val;
+    }
     if let Some(val) = profile.retro_pc_ambient_glow {
         state.video.retro_pc_ambient_glow = val;
+    }
+    if let Some(val) = profile.lights_off_night_mode {
+        state.video.lights_off_night_mode = val;
+    }
+    if let Some(val) = profile.night_mode_glow_intensity {
+        state.video.night_mode_glow_intensity = val;
     }
     if let Some(val) = profile.crt_glass_enabled {
         state.video.crt_glass_enabled = val;
@@ -961,28 +973,49 @@ mod tests {
     fn test_retro_pc_frame_profile_roundtrip() {
         let mut state = AppState::default();
         assert!(!state.video.retro_pc_frame);
+        assert!(!state.video.retro_pc_frame_dark_mode);
         assert_eq!(state.video.retro_pc_ambient_glow, 0.55);
+        assert!(!state.video.lights_off_night_mode);
+        assert_eq!(state.video.night_mode_glow_intensity, 0.0);
 
         state.video.retro_pc_frame = true;
+        state.video.retro_pc_frame_dark_mode = true;
         state.video.retro_pc_ambient_glow = 0.80;
+        state.video.lights_off_night_mode = true;
+        state.video.night_mode_glow_intensity = 0.75;
         let profile = build_profile_from_state(&state);
         assert_eq!(profile.retro_pc_frame, Some(true));
+        assert_eq!(profile.retro_pc_frame_dark_mode, Some(true));
         assert_eq!(profile.retro_pc_ambient_glow, Some(0.80));
+        assert_eq!(profile.lights_off_night_mode, Some(true));
+        assert_eq!(profile.night_mode_glow_intensity, Some(0.75));
 
         let mut new_state = AppState::default();
         apply_profile_to_state(&mut new_state, &profile);
         assert!(new_state.video.retro_pc_frame);
+        assert!(new_state.video.retro_pc_frame_dark_mode);
         assert_eq!(new_state.video.retro_pc_ambient_glow, 0.80);
+        assert!(new_state.video.lights_off_night_mode);
+        assert_eq!(new_state.video.night_mode_glow_intensity, 0.75);
 
         state.video.retro_pc_frame = false;
+        state.video.retro_pc_frame_dark_mode = false;
         state.video.retro_pc_ambient_glow = 0.0;
+        state.video.lights_off_night_mode = false;
+        state.video.night_mode_glow_intensity = 0.0;
         let profile = build_profile_from_state(&state);
         assert_eq!(profile.retro_pc_frame, Some(false));
+        assert_eq!(profile.retro_pc_frame_dark_mode, Some(false));
         assert_eq!(profile.retro_pc_ambient_glow, Some(0.0));
+        assert_eq!(profile.lights_off_night_mode, Some(false));
+        assert_eq!(profile.night_mode_glow_intensity, Some(0.0));
 
         apply_profile_to_state(&mut new_state, &profile);
         assert!(!new_state.video.retro_pc_frame);
+        assert!(!new_state.video.retro_pc_frame_dark_mode);
         assert_eq!(new_state.video.retro_pc_ambient_glow, 0.0);
+        assert!(!new_state.video.lights_off_night_mode);
+        assert_eq!(new_state.video.night_mode_glow_intensity, 0.0);
     }
 
     #[test]

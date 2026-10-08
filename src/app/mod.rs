@@ -69,7 +69,10 @@ impl Default for AppState {
                 pixelate_filter_enabled: false,
                 use_magenta_background: false,
                 retro_pc_frame: false,
+                retro_pc_frame_dark_mode: false,
                 retro_pc_ambient_glow: 0.55,
+                lights_off_night_mode: false,
+                night_mode_glow_intensity: 0.0,
                 crt_glass_enabled: false,
                 crt_glass_intensity: 0.25,
                 crt_glass_glossiness: 0.50,
@@ -378,6 +381,16 @@ impl eframe::App for AppState {
             config::save_config(self);
             self.info(format!("CRT filter set to: {}", next_filter));
             ctx.request_repaint();
+        }
+        if !ctx.wants_keyboard_input()
+            && ctx.input(|i| i.focused && i.modifiers.is_none() && i.key_pressed(egui::Key::K))
+        {
+            let current_filter = CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed));
+            if current_filter != CrtFilter::Off {
+                self.video.lights_off_night_mode = !self.video.lights_off_night_mode;
+                config::save_config(self);
+                ctx.request_repaint();
+            }
         }
         if ctx.input(|i| i.key_pressed(egui::Key::G)) {
             self.video.pixelate_filter_enabled = !self.video.pixelate_filter_enabled;

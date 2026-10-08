@@ -193,9 +193,24 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         let is_fullscreen =
             state.ui.is_fullscreen || ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         let is_crt_on = filter != CrtFilter::Off;
+        let night_mode_active = is_crt_on && state.video.lights_off_night_mode;
         let retro_pc_frame = is_crt_on && state.video.retro_pc_frame;
-        let retro_pc_ambient_glow = state.video.retro_pc_ambient_glow;
-        if state.cathode_interference.enabled || (retro_pc_frame && is_fullscreen) {
+        let effective_dark_mode =
+            is_crt_on && (state.video.retro_pc_frame_dark_mode || night_mode_active);
+        let retro_pc_ambient_glow = if night_mode_active {
+            (state.video.retro_pc_ambient_glow * 1.50).min(1.0)
+        } else {
+            state.video.retro_pc_ambient_glow
+        };
+        let night_mode_glow_intensity = if night_mode_active {
+            state.video.night_mode_glow_intensity
+        } else {
+            0.0
+        };
+        if state.cathode_interference.enabled
+            || (retro_pc_frame && is_fullscreen)
+            || (night_mode_glow_intensity > 0.001)
+        {
             ui.ctx().request_repaint();
         }
 
@@ -341,6 +356,36 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                     filter_type,
                                     time,
                                     retro_pc_ambient_glow,
+                                    effective_dark_mode,
+                                );
+                            }
+
+                            if night_mode_glow_intensity > 0.001 {
+                                let (warp, corner_size, filter_type) = if run_lottes {
+                                    ([params.warp_x, params.warp_y], 0.0, 1)
+                                } else if run_halo {
+                                    (
+                                        if halo_params.curvature {
+                                            [0.031, 0.041]
+                                        } else {
+                                            [0.0, 0.0]
+                                        },
+                                        halo_params.corner_size,
+                                        2,
+                                    )
+                                } else {
+                                    ([0.0, 0.0], 0.0, 0)
+                                };
+                                renderer.draw_night_mode_glow(
+                                    painter.gl(),
+                                    res,
+                                    output_size,
+                                    params.horizontal_stretch,
+                                    params.border_crop,
+                                    warp,
+                                    corner_size,
+                                    filter_type,
+                                    night_mode_glow_intensity,
                                 );
                             }
                         },
@@ -472,6 +517,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                             0,
                             time,
                             retro_pc_ambient_glow,
+                            false,
                         );
                     }
                 })),

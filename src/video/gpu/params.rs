@@ -1,4 +1,5 @@
 use crate::app::AppState;
+use crate::devices::filter_type::CrtFilter;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
 
@@ -56,9 +57,12 @@ pub struct HaloShaderParams {
 
 impl HaloShaderParams {
     pub fn from_state(state: &AppState) -> Self {
+        let crt_active = state.crt_filter.load(Ordering::Relaxed) != CrtFilter::Off as u8;
+        let night_mode = crt_active && state.video.lights_off_night_mode;
+        let bb_mult = if night_mode { 1.70 } else { 1.0 };
         Self {
-            brightboost: state.halo.brightboost,
-            brightboost1: state.halo.brightboost1,
+            brightboost: state.halo.brightboost * bb_mult,
+            brightboost1: state.halo.brightboost1 * bb_mult,
             beam_min: state.halo.beam_min,
             beam_max: state.halo.beam_max,
             beam_size: state.halo.beam_size,
@@ -202,14 +206,15 @@ impl GlassShaderParams {
         filter_type: i32,
     ) -> Self {
         let crt_active = filter_type != 0;
+        let night_mode = crt_active && state.video.lights_off_night_mode;
         Self {
             enabled: crt_active && state.video.crt_glass_enabled,
             intensity: state.video.crt_glass_intensity,
             glossiness: state.video.crt_glass_glossiness,
-            ceiling_light_enabled: crt_active && state.video.crt_glass_ceiling_light_enabled,
-            photographer_enabled: crt_active && state.video.crt_glass_photographer_enabled,
+            ceiling_light_enabled: crt_active && !night_mode && state.video.crt_glass_ceiling_light_enabled,
+            photographer_enabled: crt_active && !night_mode && state.video.crt_glass_photographer_enabled,
             photographer_intensity: state.video.crt_glass_photographer_intensity,
-            flash_enabled: crt_active && state.video.crt_glass_flash_enabled,
+            flash_enabled: crt_active && !night_mode && state.video.crt_glass_flash_enabled,
             flash_intensity: state.video.crt_glass_flash_intensity,
             warp,
             corner_size,
@@ -247,12 +252,19 @@ impl Default for GlassShaderParams {
 
 impl ShaderParams {
     pub fn from_state(state: &AppState) -> Self {
+        let crt_active = state.crt_filter.load(Ordering::Relaxed) != CrtFilter::Off as u8;
+        let night_mode = crt_active && state.video.lights_off_night_mode;
+        let brightboost = if night_mode {
+            state.crt.brightboost * 1.70
+        } else {
+            state.crt.brightboost
+        };
         Self {
             hard_scan: state.crt.hard_scan,
             warp_x: state.crt.warp_x,
             warp_y: state.crt.warp_y,
             shadow_mask: state.crt.shadow_mask,
-            brightboost: state.crt.brightboost,
+            brightboost,
             hard_bloom_pix: state.crt.hard_bloom_pix,
             hard_bloom_scan: state.crt.hard_bloom_scan,
             bloom_amount: state.crt.bloom_amount,
@@ -481,11 +493,59 @@ mod tests {
         let params_no_ceiling = GlassShaderParams::from_state(&state, [0.031, 0.041], 0.05, 2);
         assert!(!params_no_ceiling.ceiling_light_enabled);
 
+        // When night mode is enabled (lights off), ceiling and camera/flash reflections are suppressed
+        state.video.crt_glass_ceiling_light_enabled = true;
+        state.video.lights_off_night_mode = true;
+        let params_night = GlassShaderParams::from_state(&state, [0.031, 0.041], 0.05, 2);
+        assert!(params_night.enabled);
+        assert!(!params_night.ceiling_light_enabled);
+        assert!(!params_night.photographer_enabled);
+        assert!(!params_night.flash_enabled);
+
+        // When night mode is disabled, reflections are restored
+        state.video.lights_off_night_mode = false;
+        let params_restored = GlassShaderParams::from_state(&state, [0.031, 0.041], 0.05, 2);
+        assert!(params_restored.ceiling_light_enabled);
+        assert!(params_restored.photographer_enabled);
+        assert!(params_restored.flash_enabled);
+
         // When CRT is Off (filter_type = 0), glass and reflections must not be active
         let params_off = GlassShaderParams::from_state(&state, [0.0, 0.0], 0.0, 0);
         assert!(!params_off.enabled);
         assert!(!params_off.ceiling_light_enabled);
         assert!(!params_off.photographer_enabled);
         assert!(!params_off.flash_enabled);
+    }
+
+    #[test]
+    fn test_night_mode_brightness_boost() {
+        let mut state = AppState::default();
+        state.crt_filter.store(crate::devices::filter_type::CrtFilter::Lottes as u8, Ordering::Relaxed);
+        state.crt.brightboost = 1.0;
+        state.halo.brightboost = 1.30;
+        state.halo.brightboost1 = 1.65;
+
+        // Normal mode: unboosted
+        let p_norm = ShaderParams::from_state(&state);
+        let hp_norm = HaloShaderParams::from_state(&state);
+        assert_eq!(p_norm.brightboost, 1.0);
+        assert_eq!(hp_norm.brightboost, 1.30);
+        assert_eq!(hp_norm.brightboost1, 1.65);
+
+        // Night mode on: boosted
+        state.video.lights_off_night_mode = true;
+        let p_night = ShaderParams::from_state(&state);
+        let hp_night = HaloShaderParams::from_state(&state);
+        assert!((p_night.brightboost - 1.70).abs() < 1e-4);
+        assert!((hp_night.brightboost - (1.30 * 1.70)).abs() < 1e-4);
+        assert!((hp_night.brightboost1 - (1.65 * 1.70)).abs() < 1e-4);
+
+        // If CRT filter is turned off, night mode boost is inactive
+        state.crt_filter.store(crate::devices::filter_type::CrtFilter::Off as u8, Ordering::Relaxed);
+        let p_off = ShaderParams::from_state(&state);
+        let hp_off = HaloShaderParams::from_state(&state);
+        assert_eq!(p_off.brightboost, 1.0);
+        assert_eq!(hp_off.brightboost, 1.30);
+        assert_eq!(hp_off.brightboost1, 1.65);
     }
 }

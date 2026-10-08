@@ -250,6 +250,20 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     crate::config::save_config(state);
                     changed = true;
                 }
+
+                if ui
+                    .checkbox(
+                        &mut state.video.retro_pc_frame_dark_mode,
+                        "Dark Room Bezel",
+                    )
+                    .on_hover_text(
+                        "Tones down bezel brightness as if room lights are turned off (automatically enabled during Lights Off Night Mode).",
+                    )
+                    .changed()
+                {
+                    crate::config::save_config(state);
+                    changed = true;
+                }
             }
 
             if ui
@@ -377,6 +391,54 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         crate::config::save_config(state);
                         changed = true;
                     }
+                }
+
+                if state.video.lights_off_night_mode {
+                    ui.label(
+                        egui::RichText::new(
+                            "🌙 Ceiling & camera reflections are suspended by Lights Off Night Mode.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                }
+            }
+
+            ui.add_space(2.0);
+            if ui
+                .checkbox(
+                    &mut state.video.lights_off_night_mode,
+                    "Lights Off Night Mode (K)",
+                )
+                .on_hover_text(
+                    "Simulates turning off room lights: darkens CRT bezels, boosts screen brightness and diffusion, and disables ceiling/camera flash reflections (press 'K').",
+                )
+                .changed()
+            {
+                crate::config::save_config(state);
+                changed = true;
+            }
+
+            if state.video.lights_off_night_mode {
+                if ui
+                    .add(
+                        egui::Slider::new(&mut state.video.night_mode_glow_intensity, 0.0..=1.0)
+                            .text("Night Mode Halo Glow")
+                            .custom_formatter(|n, _| {
+                                if n <= 0.001 {
+                                    "Off".to_string()
+                                } else {
+                                    format!("{:.0}%", n * 100.0)
+                                }
+                            }),
+                    )
+                    .on_hover_text(
+                        "Controls the intensity of the atmospheric CRT halo glow layer cast across the entire picture and borders during Night Mode (0% = Off).",
+                    )
+                    .changed()
+                {
+                    crate::config::save_config(state);
+                    changed = true;
                 }
             }
         });
