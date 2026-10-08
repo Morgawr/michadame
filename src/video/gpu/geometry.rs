@@ -43,6 +43,22 @@ impl RenderedArea {
             height,
         }
     }
+
+    pub fn full(output: (f32, f32)) -> Self {
+        if !output.0.is_finite()
+            || !output.1.is_finite()
+            || output.0 < 1.
+            || output.1 < 1.
+        {
+            return Self::default();
+        }
+        Self {
+            x: 0,
+            y: 0,
+            width: output.0 as u32,
+            height: output.1 as u32,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -156,5 +172,32 @@ mod tests {
                 RenderedArea::default()
             );
         }
+    }
+
+    #[test]
+    fn full_window_uses_entire_output_dimensions() {
+        assert_eq!(
+            RenderedArea::full((1920., 1080.)),
+            RenderedArea {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            }
+        );
+        assert_eq!(
+            RenderedArea::full((1280.7, 720.2)),
+            RenderedArea {
+                x: 0,
+                y: 0,
+                width: 1280,
+                height: 720,
+            }
+        );
+        assert_eq!(RenderedArea::full((0., 1080.)), RenderedArea::default());
+        assert_eq!(
+            RenderedArea::full((1920., f32::NAN)),
+            RenderedArea::default()
+        );
     }
 }

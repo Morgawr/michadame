@@ -218,10 +218,10 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             if ui
                 .checkbox(
                     &mut state.video.retro_pc_frame,
-                    "Retro PC Monitor Frame (Fullscreen)",
+                    "Retro PC Monitor Frame",
                 )
                 .on_hover_text(
-                    "Displays a vintage NEC PC-98 CRT monitor casing in empty black bar areas when in fullscreen (requires CRT shader).",
+                    "Displays a vintage NEC PC-98 CRT monitor casing in empty areas around the screen (requires CRT shader).",
                 )
                 .changed()
             {
