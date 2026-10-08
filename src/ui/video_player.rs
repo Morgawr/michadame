@@ -312,11 +312,6 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 }
                             }
 
-                            if let Some(request) = bank_capture_cb.take_pending() {
-                                let shot = capture_frame_pixels(painter.gl(), rendered_area);
-                                bank_capture_cb.save(request, shot);
-                            }
-
                             if retro_pc_frame {
                                 let (warp, corner_size, filter_type) = if run_lottes {
                                     ([params.warp_x, params.warp_y], 0.0, 1)
@@ -377,16 +372,25 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 );
                             }
 
+                            let full_window_effects =
+                                retro_pc_frame || night_mode_glow_intensity > 0.001;
+                            let full_or_rendered_area = if full_window_effects {
+                                crate::video::gpu::geometry::RenderedArea::full(output_size)
+                            } else {
+                                rendered_area
+                            };
+
+                            if let Some(request) = bank_capture_cb.take_pending() {
+                                let shot =
+                                    capture_frame_pixels(painter.gl(), full_or_rendered_area);
+                                bank_capture_cb.save(request, shot);
+                            }
+
                             if !capture_overlays {
-                                let replay_area = if retro_pc_frame {
-                                    crate::video::gpu::geometry::RenderedArea::full(output_size)
-                                } else {
-                                    rendered_area
-                                };
                                 replay_gpu.lock().unwrap().capture(
                                     painter.gl(),
                                     replay.as_ref(),
-                                    replay_area,
+                                    full_or_rendered_area,
                                     at,
                                     rate,
                                 );
@@ -497,11 +501,6 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         }
                     }
 
-                    if let Some(request) = bank_capture_cb.take_pending() {
-                        let shot = capture_frame_pixels(painter.gl(), rendered_area);
-                        bank_capture_cb.save(request, shot);
-                    }
-
                     if retro_pc_frame {
                         renderer_clone.lock().unwrap().draw_retro_frame(
                             painter.gl(),
@@ -518,19 +517,26 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         );
                     }
 
+                    let full_or_rendered_area = if retro_pc_frame {
+                        crate::video::gpu::geometry::RenderedArea::full((
+                            rect.width() * ppp,
+                            rect.height() * ppp,
+                        ))
+                    } else {
+                        rendered_area
+                    };
+
+                    if let Some(request) = bank_capture_cb.take_pending() {
+                        let shot =
+                            capture_frame_pixels(painter.gl(), full_or_rendered_area);
+                        bank_capture_cb.save(request, shot);
+                    }
+
                     if !capture_overlays {
-                        let replay_area = if retro_pc_frame {
-                            crate::video::gpu::geometry::RenderedArea::full((
-                                rect.width() * ppp,
-                                rect.height() * ppp,
-                            ))
-                        } else {
-                            rendered_area
-                        };
                         replay_gpu.lock().unwrap().capture(
                             painter.gl(),
                             replay.as_ref(),
-                            replay_area,
+                            full_or_rendered_area,
                             at,
                             rate,
                         );
@@ -568,7 +574,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 .as_ref()
                 .map(|f| (f.captured_at, f.rate))
                 .unwrap_or((0, crate::replay::config::Rate::new(60, 1)));
-            let rendered_area = if retro_pc_frame {
+            let full_window_effects =
+                retro_pc_frame || night_mode_glow_intensity > 0.001;
+            let rendered_area = if full_window_effects {
                 crate::video::gpu::geometry::RenderedArea::full(output_size)
             } else {
                 rendered_area_geom
