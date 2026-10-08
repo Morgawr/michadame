@@ -8,6 +8,163 @@ pub const OUTPUT_FPS: u32 = 60;
 pub const AUDIO_BITRATE: usize = 160_000;
 pub const AUDIO_FRAME_SIZE: usize = 1024;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DenoiseBackend {
+    #[default]
+    Afftdn,       // Realtime adaptive FFT spectral tracking (lapped windows, ideal for game audio)
+    Rnnoise,      // Realtime neural network noise suppression (nnnoiseless)
+    Disabled,     // No spectral denoiser (only notch filters / gate)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum HumFilterMode {
+    #[default]
+    SingleNotch60Hz, // Single notch at 60.0 Hz (NTSC console / 60 Hz mains)
+    SingleNotch50Hz, // Single notch at 50.0 Hz (PAL console / 50 Hz mains)
+    Custom,          // Single notch at custom frequency
+    Disabled,        // No hum notch
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum FilterPreset {
+    #[default]
+    DreamcastNtsc,
+    ConsolePal,
+    MainsHum60,
+    VoiceChat,
+    Custom,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioFilterConfig {
+    pub enabled: bool,
+    pub preset: FilterPreset,
+    pub denoise_backend: DenoiseBackend,
+    pub denoise_reduction_db: f32, // for afftdn (e.g. 25.0)
+    pub hum_filter: HumFilterMode,
+    pub hum_freq: f32,             // for Custom hum notch (default 60.0)
+    pub crt_notch: bool,           // 15.734 kHz flyback notch
+    pub crt_freq: f32,             // default 15734.26
+    pub rumble_filter: bool,       // 40 Hz highpass
+    pub treble_bypass: bool,       // Retain high frequencies above crossover (prevents muffled/underwater sound)
+    pub treble_crossover_hz: f32,  // Cutoff frequency for treble bypass (default 4000.0)
+    pub gate: bool,                // downward expander
+    pub gate_threshold_db: f32,    // default -50.0
+}
+
+impl Default for AudioFilterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            preset: FilterPreset::DreamcastNtsc,
+            denoise_backend: DenoiseBackend::Afftdn,
+            denoise_reduction_db: 25.0,
+            hum_filter: HumFilterMode::SingleNotch60Hz,
+            hum_freq: 60.0,
+            crt_notch: true,
+            crt_freq: 15734.26,
+            rumble_filter: true,
+            treble_bypass: true,
+            treble_crossover_hz: 4000.0,
+            gate: true,
+            gate_threshold_db: -50.0,
+        }
+    }
+}
+
+impl AudioFilterConfig {
+    pub fn apply_preset(&mut self, preset: FilterPreset) {
+        self.preset = preset;
+        match preset {
+            FilterPreset::DreamcastNtsc => {
+                self.denoise_backend = DenoiseBackend::Afftdn;
+                self.hum_filter = HumFilterMode::SingleNotch60Hz;
+                self.crt_notch = true;
+                self.crt_freq = 15734.26;
+                self.rumble_filter = true;
+                self.treble_bypass = true;
+                self.treble_crossover_hz = 4000.0;
+                self.gate = true;
+            }
+            FilterPreset::ConsolePal => {
+                self.denoise_backend = DenoiseBackend::Afftdn;
+                self.hum_filter = HumFilterMode::SingleNotch50Hz;
+                self.crt_notch = true;
+                self.crt_freq = 15625.0;
+                self.rumble_filter = true;
+                self.treble_bypass = true;
+                self.treble_crossover_hz = 4000.0;
+                self.gate = true;
+            }
+            FilterPreset::MainsHum60 => {
+                self.denoise_backend = DenoiseBackend::Disabled;
+                self.hum_filter = HumFilterMode::SingleNotch60Hz;
+                self.crt_notch = false;
+                self.rumble_filter = true;
+                self.treble_bypass = false;
+                self.gate = false;
+            }
+            FilterPreset::VoiceChat => {
+                self.denoise_backend = DenoiseBackend::Rnnoise;
+                self.hum_filter = HumFilterMode::Disabled;
+                self.crt_notch = false;
+                self.rumble_filter = true;
+                self.treble_bypass = false;
+                self.gate = true;
+            }
+            FilterPreset::Custom => {}
+        }
+    }
+
+    pub fn build_filter_spec(&self) -> Option<String> {
+        if !self.enabled {
+            return None;
+        }
+        let mut stages = Vec::new();
+        if self.rumble_filter {
+            stages.push("40 Hz HPF".to_string());
+        }
+        match self.hum_filter {
+            HumFilterMode::SingleNotch60Hz => stages.push("60 Hz Single Notch".to_string()),
+            HumFilterMode::SingleNotch50Hz => stages.push("50 Hz Single Notch".to_string()),
+            HumFilterMode::Custom => stages.push(format!("{:.1} Hz Single Notch", self.hum_freq)),
+            HumFilterMode::Disabled => {}
+        }
+        if self.crt_notch {
+            stages.push(format!("{:.0} Hz CRT Notch", self.crt_freq));
+        }
+        match self.denoise_backend {
+            DenoiseBackend::Afftdn => {
+                if self.treble_bypass {
+                    stages.push(format!("FFmpeg afftdn (-{:.0}dB, <{:.0}Hz)", self.denoise_reduction_db, self.treble_crossover_hz));
+                } else {
+                    stages.push(format!("FFmpeg afftdn (-{:.0}dB)", self.denoise_reduction_db));
+                }
+            }
+            DenoiseBackend::Rnnoise => {
+                if self.treble_bypass {
+                    stages.push(format!("RNNoise (<{:.0}Hz)", self.treble_crossover_hz));
+                } else {
+                    stages.push("RNNoise (nnnoiseless)".to_string());
+                }
+            }
+            DenoiseBackend::Disabled => {}
+        }
+        if self.treble_bypass && self.denoise_backend != DenoiseBackend::Disabled {
+            stages.push(format!("Treble Bypass (>{:.0}Hz Retained)", self.treble_crossover_hz));
+        }
+        if self.gate {
+            stages.push(format!("Gate ({:.0} dBFS)", self.gate_threshold_db));
+        }
+        if stages.is_empty() {
+            Some("Bypass".to_string())
+        } else {
+            Some(stages.join(" + "))
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ReplayConfig {
@@ -21,6 +178,7 @@ pub struct ReplayConfig {
     /// Function key numbers; zero disables a binding.
     pub keys: [u8; 6],
     pub capture_overlays: bool,
+    pub audio_filter: AudioFilterConfig,
 }
 
 impl Default for ReplayConfig {
@@ -39,6 +197,7 @@ impl Default for ReplayConfig {
             custom_seconds: 120,
             keys: [5, 6, 7, 8, 9, 10],
             capture_overlays: false,
+            audio_filter: AudioFilterConfig::default(),
         }
     }
 }
@@ -173,5 +332,26 @@ mod tests {
             Some(2097152)
         );
         assert_eq!(parse_available("MemFree: 12 kB"), None);
+    }
+    #[test]
+    fn audio_filter_presets() {
+        let mut filter = AudioFilterConfig::default();
+        assert_eq!(filter.preset, FilterPreset::DreamcastNtsc);
+        assert_eq!(filter.hum_filter, HumFilterMode::SingleNotch60Hz);
+        assert_eq!(filter.denoise_backend, DenoiseBackend::Afftdn);
+        assert!(filter.crt_notch);
+
+        filter.apply_preset(FilterPreset::ConsolePal);
+        assert_eq!(filter.hum_filter, HumFilterMode::SingleNotch50Hz);
+        assert_eq!(filter.crt_freq, 15625.0);
+
+        filter.apply_preset(FilterPreset::MainsHum60);
+        assert_eq!(filter.hum_filter, HumFilterMode::SingleNotch60Hz);
+        assert!(!filter.crt_notch);
+        assert_eq!(filter.denoise_backend, DenoiseBackend::Disabled);
+
+        filter.apply_preset(FilterPreset::VoiceChat);
+        assert_eq!(filter.denoise_backend, DenoiseBackend::Rnnoise);
+        assert_eq!(filter.hum_filter, HumFilterMode::Disabled);
     }
 }

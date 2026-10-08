@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod dsp_filter;
 pub mod filter_type;
 pub mod usb;
 pub mod video;

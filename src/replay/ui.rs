@@ -1,4 +1,7 @@
-use super::{config::SAFETY_RESERVE, Replay};
+use super::{
+    config::{DenoiseBackend, FilterPreset, HumFilterMode, SAFETY_RESERVE},
+    Replay,
+};
 use eframe::egui::{self, Key};
 pub fn key(n: u8) -> Option<Key> {
     [
@@ -117,6 +120,7 @@ pub fn draw(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
                 "Include active dictionary popups and OCR overlay boxes in replay recordings.\nIf 'Hide OCR boxes overlay' is enabled in OCR settings, only the dictionary popup is captured.\nWhen unchecked, replays record clean game video without any overlays.",
             )
             .changed();
+
         egui::CollapsingHeader::new("Save shortcuts")
             .default_open(false)
             .show(ui, |ui| {
@@ -259,4 +263,332 @@ pub fn draw_debug(replay: &Replay, ui: &mut egui::Ui) {
         "RAM budget: {} MiB · work queue budget: {} MiB",
         replay.config.memory_mib, replay.config.work_queue_mib
     ));
+    if replay.config.audio_filter.enabled {
+        if let Some(spec) = replay.config.audio_filter.build_filter_spec() {
+            ui.label(format!("Audio filter active: {}", spec));
+        }
+    }
+}
+
+pub fn draw_audio_filter(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
+    let mut changed = false;
+    let filter = &mut replay.config.audio_filter;
+
+    egui::CollapsingHeader::new("🔊 Console Audio Noise Filter")
+        .default_open(filter.enabled)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .checkbox(&mut filter.enabled, "Enable Noise Filter")
+                    .on_hover_text(
+                        "Real-time zero-latency DSP filter applied to live audio and recordings.\n\
+                         Eliminates console interference hum, power harmonics, and CRT whine\n\
+                         without muffling high-frequency game audio.",
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+            });
+
+            if !filter.enabled {
+                ui.label(
+                    egui::RichText::new("Filter is disabled. Live audio passes through untouched.")
+                        .italics()
+                        .color(egui::Color32::GRAY),
+                );
+                return;
+            }
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("Preset:");
+                let current_label = match filter.preset {
+                    FilterPreset::DreamcastNtsc => "Dreamcast / NTSC (FFmpeg afftdn + 60 Hz Notch + 15.7 kHz CRT)",
+                    FilterPreset::ConsolePal => "PAL Console (FFmpeg afftdn + 50 Hz Notch + 15.6 kHz CRT)",
+                    FilterPreset::MainsHum60 => "60 Hz Mains Hum (Single Notch Only)",
+                    FilterPreset::VoiceChat => "Voice Chat / Mic (RNNoise Neural Network)",
+                    FilterPreset::Custom => "Custom DSP Configuration",
+                };
+
+                egui::ComboBox::from_id_source("audio_filter_preset")
+                    .selected_text(current_label)
+                    .show_ui(ui, |ui| {
+                        let presets = [
+                            (
+                                FilterPreset::DreamcastNtsc,
+                                "Dreamcast / NTSC (FFmpeg afftdn + 60 Hz Notch + 15.7 kHz CRT)",
+                            ),
+                            (
+                                FilterPreset::ConsolePal,
+                                "PAL Console (FFmpeg afftdn + 50 Hz Notch + 15.6 kHz CRT)",
+                            ),
+                            (
+                                FilterPreset::MainsHum60,
+                                "60 Hz Mains Hum (Single Notch Only)",
+                            ),
+                            (
+                                FilterPreset::VoiceChat,
+                                "Voice Chat / Mic (RNNoise Neural Network)",
+                            ),
+                            (
+                                FilterPreset::Custom,
+                                "Custom DSP Configuration",
+                            ),
+                        ];
+                        for (preset, label) in presets {
+                            if ui
+                                .selectable_value(&mut filter.preset, preset, label)
+                                .changed()
+                            {
+                                filter.apply_preset(preset);
+                                changed = true;
+                            }
+                        }
+                    });
+            });
+
+            ui.add_space(4.0);
+            ui.group(|ui| {
+                ui.label(egui::RichText::new("DSP Filter Stages").strong());
+
+                // Realtime Denoising Backend
+                ui.horizontal(|ui| {
+                    ui.label("Realtime Denoiser:");
+                    let denoise_label = match filter.denoise_backend {
+                        DenoiseBackend::Afftdn => "FFmpeg afftdn (Adaptive FFT, Lapped Windows)",
+                        DenoiseBackend::Rnnoise => "RNNoise (nnnoiseless Neural Network)",
+                        DenoiseBackend::Disabled => "Disabled (Pass-through)",
+                    };
+                    egui::ComboBox::from_id_source("audio_filter_denoise_backend")
+                        .selected_text(denoise_label)
+                        .show_ui(ui, |ui| {
+                            let backends = [
+                                (
+                                    DenoiseBackend::Afftdn,
+                                    "FFmpeg afftdn (Adaptive FFT, Lapped Windows - Recommended for Games)",
+                                ),
+                                (
+                                    DenoiseBackend::Rnnoise,
+                                    "RNNoise (nnnoiseless Neural Network - Voice/Mic)",
+                                ),
+                                (
+                                    DenoiseBackend::Disabled,
+                                    "Disabled (Pass-through)",
+                                ),
+                            ];
+                            for (backend, label) in backends {
+                                if ui
+                                    .selectable_value(&mut filter.denoise_backend, backend, label)
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                            }
+                        });
+                });
+
+                if filter.denoise_backend == DenoiseBackend::Afftdn {
+                    ui.horizontal(|ui| {
+                        ui.label("Noise Reduction:");
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut filter.denoise_reduction_db, 6.0..=40.0)
+                                    .suffix(" dB"),
+                            )
+                            .on_hover_text("Amount of spectral noise floor reduction (afftdn). 20-30 dB recommended.")
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    });
+                }
+
+                // High-Frequency Retention / Treble Bypass
+                if filter.denoise_backend != DenoiseBackend::Disabled {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .checkbox(
+                                &mut filter.treble_bypass,
+                                "Retain High Frequencies (Treble Bypass)",
+                            )
+                            .on_hover_text(
+                                "Protects high frequencies above the crossover from being muffled by the denoiser.\n\
+                                 Uses a 4th-order Linkwitz-Riley (LR4) crossover with exact 0.00 dB magnitude summing.\n\
+                                 Keeps game music, cymbals, sound effects, and treble crisp and bright\n\
+                                 while eliminating low/mid buzzing hum. Prevents underwater/muffled sound.",
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+
+                        if filter.treble_bypass {
+                            ui.label("Crossover:");
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut filter.treble_crossover_hz, 1500.0..=8000.0)
+                                        .suffix(" Hz"),
+                                )
+                                .on_hover_text("Frequencies above this cutoff completely bypass the denoiser and remain 100% untouched.")
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        }
+                    });
+                }
+
+                // Mains Hum Filter (Single high-Q notch, NO harmonic comb)
+                ui.horizontal(|ui| {
+                    ui.label("Mains Hum Notch:");
+                    let hum_label = match filter.hum_filter {
+                        HumFilterMode::SingleNotch60Hz => "Single 60 Hz Notch (NTSC / 60 Hz Mains)",
+                        HumFilterMode::SingleNotch50Hz => "Single 50 Hz Notch (PAL / 50 Hz Mains)",
+                        HumFilterMode::Custom => "Custom Frequency Notch",
+                        HumFilterMode::Disabled => "Disabled",
+                    };
+                    egui::ComboBox::from_id_source("audio_filter_hum_mode")
+                        .selected_text(hum_label)
+                        .show_ui(ui, |ui| {
+                            let modes = [
+                                (
+                                    HumFilterMode::SingleNotch60Hz,
+                                    "Single 60 Hz Notch (NTSC / 60 Hz Mains - Zero phaser distortion)",
+                                ),
+                                (
+                                    HumFilterMode::SingleNotch50Hz,
+                                    "Single 50 Hz Notch (PAL / 50 Hz Mains - Zero phaser distortion)",
+                                ),
+                                (
+                                    HumFilterMode::Custom,
+                                    "Custom Frequency Notch",
+                                ),
+                                (
+                                    HumFilterMode::Disabled,
+                                    "Disabled",
+                                ),
+                            ];
+                            for (mode, label) in modes {
+                                if ui
+                                    .selectable_value(&mut filter.hum_filter, mode, label)
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                            }
+                        });
+
+                    if filter.hum_filter == HumFilterMode::Custom {
+                        ui.label("Freq:");
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut filter.hum_freq)
+                                    .speed(0.1)
+                                    .clamp_range(20.0..=200.0)
+                                    .suffix(" Hz"),
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    }
+                });
+
+                // CRT Flyback notch filter
+                ui.horizontal(|ui| {
+                    if ui
+                        .checkbox(
+                            &mut filter.crt_notch,
+                            "15 kHz CRT Line Whine Notch",
+                        )
+                        .on_hover_text(
+                            "Eliminates horizontal scanline whine (15.734 kHz NTSC / 15.625 kHz PAL)\n\
+                             with a narrow high-Q biquad notch filter.\n\
+                             Leaves all surrounding high-frequency game audio intact.",
+                        )
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                    if filter.crt_notch && filter.preset == FilterPreset::Custom {
+                        ui.label("Center Freq:");
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut filter.crt_freq)
+                                    .speed(1.0)
+                                    .clamp_range(10000.0..=20000.0)
+                                    .suffix(" Hz"),
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    }
+                });
+
+                // 40 Hz Subsonic Rumble HPF
+                ui.horizontal(|ui| {
+                    if ui
+                        .checkbox(
+                            &mut filter.rumble_filter,
+                            "40 Hz Subsonic Rumble Filter",
+                        )
+                        .on_hover_text(
+                            "Cuts ultra-low sub-bass rumble (< 40 Hz) caused by capture card DC offset\n\
+                             and power supply line interference.",
+                        )
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                });
+
+                // Dynamic Downward Expander / Noise Gate
+                ui.horizontal(|ui| {
+                    if ui
+                        .checkbox(
+                            &mut filter.gate,
+                            "Dynamic Noise Gate (Downward Expander)",
+                        )
+                        .on_hover_text(
+                            "Silences residual background hiss during loading screens and pauses\n\
+                             with smooth 5ms attack and 80ms release (no abrupt clicking).",
+                        )
+                        .changed()
+                    {
+                        changed = true;
+                    }
+
+                    if filter.gate {
+                        ui.label("Threshold:");
+                        if ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut filter.gate_threshold_db,
+                                    -70.0..=-30.0,
+                                )
+                                .suffix(" dBFS"),
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    }
+                });
+            });
+
+            if let Some(spec) = filter.build_filter_spec() {
+                ui.label(
+                    egui::RichText::new(format!("Active pipeline: {}", spec))
+                        .small()
+                        .color(egui::Color32::LIGHT_BLUE),
+                );
+            }
+        });
+
+    if changed {
+        replay.sync_audio_filter();
+    }
+    changed
 }

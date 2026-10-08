@@ -56,15 +56,32 @@ struct AudioRoute {
     format: Option<(u32, u16)>,
 }
 /// Only the ALSA capture thread touches this tap; the playback callback is unchanged.
-#[derive(Default)]
 pub struct AudioTap {
     enabled: AtomicBool,
     discontinuity: AtomicBool,
     route: Mutex<Option<AudioRoute>>,
+    pub filter: std::sync::RwLock<crate::replay::config::AudioFilterConfig>,
 }
+
+impl Default for AudioTap {
+    fn default() -> Self {
+        Self {
+            enabled: AtomicBool::new(false),
+            discontinuity: AtomicBool::new(false),
+            route: Mutex::new(None),
+            filter: std::sync::RwLock::new(crate::replay::config::AudioFilterConfig::default()),
+        }
+    }
+}
+
 impl AudioTap {
     pub fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
+    }
+    pub fn set_filter_config(&self, config: crate::replay::config::AudioFilterConfig) {
+        if let Ok(mut w) = self.filter.write() {
+            *w = config;
+        }
     }
     /// Called on ALSA restart/recovery, independently of whether replay is enabled.
     pub fn mark_discontinuity(&self) {
@@ -251,6 +268,10 @@ pub struct Replay {
 impl Replay {
     pub fn clipboard(&self) -> Arc<clipboard::Clipboard> {
         self.clipboard.clone()
+    }
+
+    pub fn sync_audio_filter(&self) {
+        self.audio.set_filter_config(self.config.audio_filter.clone());
     }
 
     pub fn enable(&mut self) -> anyhow::Result<()> {

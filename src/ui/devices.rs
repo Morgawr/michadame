@@ -327,6 +327,13 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     }
                 });
         });
+
+        ui.separator();
+        if crate::replay::ui::draw_audio_filter(&mut state.replay, ui) {
+            crate::config::save_global_hardware_config(state);
+            let _ = crate::config::save_replay_config(&state.replay.config);
+            changed = true;
+        }
     });
 
     changed

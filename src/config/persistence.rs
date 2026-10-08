@@ -645,6 +645,7 @@ mod tests {
             capture_overlays: true,
             directory: "/tmp/my replays".into(),
             render_device: "/dev/dri/renderD129".into(),
+            ..Default::default()
         };
         save_replay_config_at(&path, &settings).unwrap();
         let loaded: MichadameConfig = confy::load_path(&path).unwrap();

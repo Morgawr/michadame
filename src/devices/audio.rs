@@ -622,6 +622,9 @@ where
     F: Fn(S) -> f32,
 {
     replay.mark_discontinuity();
+    let initial_filter = replay.filter.read().map(|c| c.clone()).unwrap_or_default();
+    let mut dsp = crate::devices::dsp_filter::LiveAudioDsp::new(&initial_filter, rate);
+
     let buffer_samples = buffer_size as usize * channels as usize;
     let mut input_buf = vec![S::default(); buffer_samples];
     let mut converted_buf = vec![0.0f32; buffer_samples];
@@ -645,22 +648,33 @@ where
                         Ok(_) => {}
                         Err(wait_error) => {
                             replay.mark_discontinuity();
+                            dsp.reset();
                             recover_alsa_capture(pcm, wait_error)?;
                         }
                     }
                     continue;
                 }
                 capture_progress.mark_samples();
-                let mut local_max = 0.0f32;
                 for (output, input) in converted_buf
                     .iter_mut()
                     .zip(input_buf.iter())
                     .take(sample_count)
                 {
-                    let sample = convert(*input);
-                    local_max = local_max.max(sample.abs());
-                    *output = sample;
+                    *output = convert(*input);
                 }
+
+                if let Ok(filter_config) = replay.filter.try_read() {
+                    dsp.reconfigure(&filter_config, rate);
+                }
+                if dsp.enabled {
+                    dsp.process_interleaved(&mut converted_buf[..sample_count], channels as usize);
+                }
+
+                let mut local_max = 0.0f32;
+                for sample in &converted_buf[..sample_count] {
+                    local_max = local_max.max(sample.abs());
+                }
+
                 push_to_ring(
                     producer,
                     &converted_buf,
