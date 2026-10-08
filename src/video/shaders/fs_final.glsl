@@ -216,12 +216,7 @@ void main() {
 
     vec3 final_color = Tri(warped_tc, source_size);
     final_color += Bloom(warped_tc, source_size) * bloomAmount;
-    if (brightboost > 1.25) {
-        vec3 lifted = pow(max(final_color, vec3(0.0)), vec3(0.72));
-        final_color = mix(final_color * brightboost, lifted * (brightboost * 0.95), 0.65);
-    } else {
-        final_color *= brightboost;
-    }
+    final_color *= brightboost;
 
     if (shadowMask > 0.0) {
         final_color *= Mask(gl_FragCoord.xy * 1.000001);

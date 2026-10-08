@@ -1,5 +1,4 @@
 use crate::app::AppState;
-use crate::devices::filter_type::CrtFilter;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
 
@@ -59,12 +58,9 @@ pub struct HaloShaderParams {
 
 impl HaloShaderParams {
     pub fn from_state(state: &AppState) -> Self {
-        let crt_active = state.crt_filter.load(Ordering::Relaxed) != CrtFilter::Off as u8;
-        let night_mode = crt_active && state.video.lights_off_night_mode;
-        let bb_mult = if night_mode { 1.70 } else { 1.0 };
         Self {
-            brightboost: state.halo.brightboost * bb_mult,
-            brightboost1: state.halo.brightboost1 * bb_mult,
+            brightboost: state.halo.brightboost,
+            brightboost1: state.halo.brightboost1,
             beam_min: state.halo.beam_min,
             beam_max: state.halo.beam_max,
             beam_size: state.halo.beam_size,
@@ -254,19 +250,12 @@ impl Default for GlassShaderParams {
 
 impl ShaderParams {
     pub fn from_state(state: &AppState) -> Self {
-        let crt_active = state.crt_filter.load(Ordering::Relaxed) != CrtFilter::Off as u8;
-        let night_mode = crt_active && state.video.lights_off_night_mode;
-        let brightboost = if night_mode {
-            state.crt.brightboost * 1.70
-        } else {
-            state.crt.brightboost
-        };
         Self {
             hard_scan: state.crt.hard_scan,
             warp_x: state.crt.warp_x,
             warp_y: state.crt.warp_y,
             shadow_mask: state.crt.shadow_mask,
-            brightboost,
+            brightboost: state.crt.brightboost,
             hard_bloom_pix: state.crt.hard_bloom_pix,
             hard_bloom_scan: state.crt.hard_bloom_scan,
             bloom_amount: state.crt.bloom_amount,
@@ -535,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn test_night_mode_brightness_boost() {
+    fn test_night_mode_preserves_brightboost() {
         let mut state = AppState::default();
         state.crt_filter.store(crate::devices::filter_type::CrtFilter::Lottes as u8, Ordering::Relaxed);
         state.crt.brightboost = 1.0;
@@ -549,15 +538,15 @@ mod tests {
         assert_eq!(hp_norm.brightboost, 1.30);
         assert_eq!(hp_norm.brightboost1, 1.65);
 
-        // Night mode on: boosted
+        // Night mode on: preserves calibrated values without artificial boost
         state.video.lights_off_night_mode = true;
         let p_night = ShaderParams::from_state(&state);
         let hp_night = HaloShaderParams::from_state(&state);
-        assert!((p_night.brightboost - 1.70).abs() < 1e-4);
-        assert!((hp_night.brightboost - (1.30 * 1.70)).abs() < 1e-4);
-        assert!((hp_night.brightboost1 - (1.65 * 1.70)).abs() < 1e-4);
+        assert_eq!(p_night.brightboost, 1.0);
+        assert_eq!(hp_night.brightboost, 1.30);
+        assert_eq!(hp_night.brightboost1, 1.65);
 
-        // If CRT filter is turned off, night mode boost is inactive
+        // If CRT filter is turned off, values remain clean
         state.crt_filter.store(crate::devices::filter_type::CrtFilter::Off as u8, Ordering::Relaxed);
         let p_off = ShaderParams::from_state(&state);
         let hp_off = HaloShaderParams::from_state(&state);

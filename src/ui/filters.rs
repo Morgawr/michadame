@@ -411,7 +411,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     "Lights Off Night Mode (K)",
                 )
                 .on_hover_text(
-                    "Simulates turning off room lights: darkens CRT bezels, boosts screen brightness and diffusion, and disables ceiling/camera flash reflections (press 'K').",
+                    "Simulates turning off room lights: darkens CRT bezels, enhances ambient glow reflections, and disables ceiling/camera flash reflections (press 'K').",
                 )
                 .changed()
             {
