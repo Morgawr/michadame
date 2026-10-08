@@ -87,6 +87,8 @@ impl Default for AppState {
                 vibrance: 1.0,
                 overscan_x: 0.0,
                 overscan_y: 0.0,
+                underscan_x: 0.0,
+                underscan_y: 0.0,
                 border_crop_left: 0.0,
                 border_crop_right: 0.0,
                 border_crop_top: 0.0,

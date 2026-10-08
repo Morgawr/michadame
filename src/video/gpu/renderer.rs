@@ -25,6 +25,8 @@ pub struct CrtFilterRenderer {
     yuyv_range_loc: glow::UniformLocation,
     yuv_overscan_loc: glow::UniformLocation,
     yuyv_overscan_loc: glow::UniformLocation,
+    yuv_underscan_loc: glow::UniformLocation,
+    yuyv_underscan_loc: glow::UniformLocation,
     median_mix_loc: glow::UniformLocation,
     anime4k_small: Anime4kUpscaler,
     anime4k_medium: Anime4kUpscaler,
@@ -419,6 +421,9 @@ impl CrtFilterRenderer {
             let yuyv_overscan_loc = gl
                 .get_uniform_location(yuyv_packed_prog, "overscan_offset")
                 .unwrap();
+            let yuyv_underscan_loc = gl
+                .get_uniform_location(yuyv_packed_prog, "underscan_stretch")
+                .unwrap();
 
             gl.use_program(Some(yuv_planar_prog));
             let yuv_range_loc = gl
@@ -426,6 +431,9 @@ impl CrtFilterRenderer {
                 .unwrap();
             let yuv_overscan_loc = gl
                 .get_uniform_location(yuv_planar_prog, "overscan_offset")
+                .unwrap();
+            let yuv_underscan_loc = gl
+                .get_uniform_location(yuv_planar_prog, "underscan_stretch")
                 .unwrap();
 
             gl.use_program(None);
@@ -610,6 +618,8 @@ impl CrtFilterRenderer {
                 yuyv_range_loc,
                 yuv_overscan_loc,
                 yuyv_overscan_loc,
+                yuv_underscan_loc,
+                yuyv_underscan_loc,
                 fbos,
                 pass_textures,
                 yuv_planes,
@@ -706,6 +716,8 @@ impl CrtFilterRenderer {
         target_height: u32,
         overscan_x: f32,
         overscan_y: f32,
+        underscan_x: f32,
+        underscan_y: f32,
         fft_filter: Option<&Arc<Mutex<FftFilter>>>,
         fft_mask_threshold: f32,
         fft_black_threshold: f32,
@@ -862,6 +874,11 @@ impl CrtFilterRenderer {
             gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
             gl.uniform_1_i32(Some(&self.yuv_range_loc), frame.color_range as i32);
             gl.uniform_2_f32(Some(&self.yuv_overscan_loc), overscan_x, overscan_y);
+            gl.uniform_2_f32(
+                Some(&self.yuv_underscan_loc),
+                (1.0 + underscan_x).max(0.01),
+                (1.0 + underscan_y).max(0.01),
+            );
             if needs_realloc {
                 self.last_frame_size = (frame.width, frame.height);
                 self.last_frame_format = Some(frame.format);
@@ -924,6 +941,11 @@ impl CrtFilterRenderer {
             }
             gl.uniform_1_i32(Some(&self.yuyv_range_loc), frame.color_range as i32);
             gl.uniform_2_f32(Some(&self.yuyv_overscan_loc), overscan_x, overscan_y);
+            gl.uniform_2_f32(
+                Some(&self.yuyv_underscan_loc),
+                (1.0 + underscan_x).max(0.01),
+                (1.0 + underscan_y).max(0.01),
+            );
             rendered_input = true;
         } else {
             tracing::warn!("Skipping unsupported pixel format: {:?}", frame.format);
@@ -1095,6 +1117,8 @@ impl CrtFilterRenderer {
                     resolution.1,
                     params.overscan_x,
                     params.overscan_y,
+                    params.underscan_x,
+                    params.underscan_y,
                     fft_filter,
                     fft_mask_threshold,
                     fft_black_threshold,
@@ -1380,6 +1404,8 @@ impl CrtFilterRenderer {
         scaler_filter: u8,
         overscan_x: f32,
         overscan_y: f32,
+        underscan_x: f32,
+        underscan_y: f32,
         border_crop: [f32; 4],
         fft_filter: Option<&Arc<Mutex<FftFilter>>>,
         fft_mask_threshold: f32,
@@ -1455,6 +1481,8 @@ impl CrtFilterRenderer {
                     resolution.1,
                     overscan_x,
                     overscan_y,
+                    underscan_x,
+                    underscan_y,
                     fft_filter,
                     fft_mask_threshold,
                     fft_black_threshold,

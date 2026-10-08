@@ -160,6 +160,8 @@ pub struct VideoSettings {
     pub vibrance: f32,
     pub overscan_x: f32,
     pub overscan_y: f32,
+    pub underscan_x: f32,
+    pub underscan_y: f32,
     pub border_crop_left: f32,
     pub border_crop_right: f32,
     pub border_crop_top: f32,

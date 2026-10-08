@@ -166,6 +166,8 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         vibrance: Some(state.video.vibrance),
         overscan_x: Some(state.video.overscan_x),
         overscan_y: Some(state.video.overscan_y),
+        underscan_x: Some(state.video.underscan_x),
+        underscan_y: Some(state.video.underscan_y),
         border_crop_left: Some(state.video.border_crop_left),
         border_crop_right: Some(state.video.border_crop_right),
         border_crop_top: Some(state.video.border_crop_top),
@@ -422,6 +424,12 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) {
     }
     if let Some(val) = profile.overscan_y {
         state.video.overscan_y = val;
+    }
+    if let Some(val) = profile.underscan_x {
+        state.video.underscan_x = val;
+    }
+    if let Some(val) = profile.underscan_y {
+        state.video.underscan_y = val;
     }
     if let Some(val) = profile.border_crop_left {
         state.video.border_crop_left = val;
@@ -967,6 +975,22 @@ mod tests {
         assert_eq!(new_state.video.border_crop_right, 0.06);
         assert_eq!(new_state.video.border_crop_top, 0.07);
         assert_eq!(new_state.video.border_crop_bottom, 0.08);
+    }
+
+    #[test]
+    fn test_underscan_profile_roundtrip() {
+        let mut state = AppState::default();
+        state.video.underscan_x = 0.045;
+        state.video.underscan_y = -0.025;
+
+        let profile = build_profile_from_state(&state);
+        assert_eq!(profile.underscan_x, Some(0.045));
+        assert_eq!(profile.underscan_y, Some(-0.025));
+
+        let mut new_state = AppState::default();
+        apply_profile_to_state(&mut new_state, &profile);
+        assert_eq!(new_state.video.underscan_x, 0.045);
+        assert_eq!(new_state.video.underscan_y, -0.025);
     }
 
     #[test]

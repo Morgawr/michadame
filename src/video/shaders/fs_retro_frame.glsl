@@ -24,15 +24,24 @@ vec3 ToSrgb(vec3 c) {
     return vec3(ToSrgb1(c.r), ToSrgb1(c.g), ToSrgb1(c.b));
 }
 
-// Video texture is an OpenGL FBO where (0,0) is bottom-left.
-// In screen_tc space, (0,0) is top-left, so we vertically invert Y when sampling video_texture.
+// Video texture is an OpenGL FBO where (0,0) is top-left in screen_tc space.
 // Hardware mipmapped LOD 4.2 dissolves all high-frequency scanlines, text, and UI icons into silky diffuse ambient light.
 vec3 sample_video_linear(vec2 tc) {
     vec4 crop = border_crop;
     vec2 min_crop_uv = vec2(crop.x + 0.015, crop.z + 0.015);
     vec2 max_crop_uv = vec2(1.0 - crop.y - 0.015, 1.0 - crop.w - 0.015);
     vec2 clamped = clamp(tc, min_crop_uv, max_crop_uv);
-    return textureLod(video_texture, vec2(clamped.x, 1.0 - clamped.y), 4.2).rgb;
+    return textureLod(video_texture, clamped, 4.2).rgb;
+}
+
+// High-fidelity near-field edge sample.
+// LOD 1.2 smooths individual CRT raster lines while preserving the full peak luminance and hue of adjacent phosphors.
+vec3 sample_video_edge(vec2 tc) {
+    vec4 crop = border_crop;
+    vec2 min_crop_uv = vec2(crop.x + 0.005, crop.z + 0.005);
+    vec2 max_crop_uv = vec2(1.0 - crop.y - 0.005, 1.0 - crop.w - 0.005);
+    vec2 clamped = clamp(tc, min_crop_uv, max_crop_uv);
+    return textureLod(video_texture, clamped, 1.2).rgb;
 }
 
 // Atlas sub-texture UV rectangles (texture flipped vertically so V=0 is bottom, V=1 is top):
@@ -129,7 +138,10 @@ void main() {
     float top_bias = clamp(-n_ap.y * 0.5 + 0.5, 0.0, 1.0);
     float left_bias = clamp(-n_ap.x * 0.5 + 0.5, 0.0, 1.0);
     float dir_shadow_factor = 0.65 + 0.35 * (top_bias * 0.65 + left_bias * 0.35);
-    float shadow_alpha = pow(shadow_falloff, 1.6) * 0.65 * dir_shadow_factor;
+    // In dark mode, no overhead ceiling fixtures exist; CRT is the sole light emitter in the room.
+    float shadow_alpha = (dark_mode == 1)
+        ? 0.0
+        : pow(shadow_falloff, 1.6) * 0.65 * dir_shadow_factor;
 
     // Early exit for deep interior video area
     if (d_ap < -shadow_w) {
@@ -170,13 +182,30 @@ void main() {
     float crest_mult = (dark_mode == 1) ? 0.45 : 1.0;
     vec3 crest_col = vec3(0.14, 0.14, 0.11) * (crest_ridge * crest_dir * crest_mult);
 
+    // Nearest perimeter contact coordinate on the active aperture in screen_tc space
+    vec2 edge_tc = screen_tc - (n_ap * max(d_ap, 0.0)) / video_pixels;
+    vec2 min_crop_uv = vec2(crop.x + 0.005, crop.z + 0.005);
+    vec2 max_crop_uv = vec2(1.0 - crop.y - 0.005, 1.0 - crop.w - 0.005);
+    edge_tc = clamp(edge_tc, min_crop_uv, max_crop_uv);
+
+    vec3 panel_edge_col = ToSrgb(sample_video_edge(edge_tc));
+    float panel_edge_lum = dot(panel_edge_col, vec3(0.2126, 0.7152, 0.0722));
+
+    // Near-field contact halation:
+    // Radiative transfer and optical PSF across a half-plane emitter converges to roughly half (0.50)
+    // the brightness of the active phosphor panel directly at the contact interface (d_ap = 0).
+    float halation_lambda = clamp(min_vid_dim * 0.010, 8.0, 14.0);
+    float halation_falloff = exp(-max(d_ap, 0.0) / halation_lambda);
+    vec3 halation_col = mix(vec3(panel_edge_lum), panel_edge_col, 0.60);
+    float glow_response = (dark_mode == 1)
+        ? clamp(ambient_glow / 0.825, 0.0, 1.25)
+        : clamp(ambient_glow * 0.90, 0.0, 1.0);
+    float halation_edge_ratio = (dark_mode == 1) ? 0.45 : 0.25;
+    vec3 contact_halation = halation_col * (halation_edge_ratio * halation_falloff * glow_response);
+
     // Physically-grounded diffuse light reflection from active video feed bouncing on inner cowl
     vec3 ambient_glow_col = vec3(0.0);
-    if (ambient_glow > 0.001 && d_ap > gasket_w - 0.5 && d_ap < bevel_w) {
-        vec2 min_crop_uv = vec2(crop.x + 0.015, crop.z + 0.015);
-        vec2 max_crop_uv = vec2(1.0 - crop.y - 0.015, 1.0 - crop.w - 0.015);
-        vec2 edge_tc = clamp(screen_tc, min_crop_uv, max_crop_uv);
-
+    if (ambient_glow > 0.001 && d_ap > 0.0 && d_ap < bevel_w) {
         // Tangent unit vector along aperture perimeter
         vec2 t_ap = vec2(-n_ap.y, n_ap.x);
 
@@ -224,12 +253,11 @@ void main() {
         vec3 bounce_col = mix(vec3(vid_lum), vid_glow_col, 0.40);
         vec3 incident_light = bounce_col * vid_energy;
 
-        // Cowl slope falloff: generously illuminates the inner cowl cavity,
-        // smoothly feathering towards the crest and strictly cutting off before outer chassis
-        float cowl_falloff = pow(1.0 - t_bevel * 0.70, 1.5) * smoothstep(bevel_w, bevel_w - 2.0, d_ap);
+        // Tightened cowl slope falloff: gracefully decays towards crest, terminating cleanly at bevel_w
+        float cowl_falloff = pow(1.0 - t_bevel, 2.2);
 
         // Responsive, luminous diffuse reflection scaling across slider
-        float bounce_mult = (dark_mode == 1) ? 1.50 : 0.95;
+        float bounce_mult = (dark_mode == 1) ? 0.65 : 0.95;
         ambient_glow_col = incident_light * (bounce_mult * ambient_glow * cowl_falloff);
     }
 
@@ -321,7 +349,7 @@ void main() {
     // Screen light illuminates the plastic surface with realistic material reflectance
     vec3 surface_refl = (dark_mode == 1) ? (aged_plastic * 0.75 + vec3(0.25)) : (aged_plastic * 0.85 + vec3(0.15));
     vec3 diffuse_illum = ambient_glow_col * surface_refl;
-    vec3 bevel_col = surface_plastic + diffuse_illum;
+    vec3 bevel_col = surface_plastic + diffuse_illum + contact_halation;
 
     // 10. Blend Bevel and Chassis Plastic
     float t_bevel_blend = smoothstep(bevel_w - 1.2, bevel_w + 1.2, d_ap);
@@ -393,7 +421,8 @@ void main() {
     // Transition from dark rubber gasket to plastic bevel
     float t_gasket = smoothstep(gasket_w - 0.75, gasket_w + 0.75, d_ap);
     vec3 gasket_toned = (dark_mode == 1) ? gasket_col * 0.60 : gasket_col;
-    vec3 frame_solid = mix(gasket_toned, frame_plastic, t_gasket);
+    vec3 gasket_lit = gasket_toned + contact_halation;
+    vec3 frame_solid = mix(gasket_lit, frame_plastic, t_gasket);
 
     // Subpixel coverage anti-aliasing across aperture boundary (eliminates jaggies)
     float coverage = smoothstep(-0.75, 0.75, d_ap);

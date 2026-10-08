@@ -121,11 +121,13 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                 ScalerFilter::from_u8(state.scaler_filter.load(Ordering::Relaxed))
             ));
             ui.label(format!(
-                "Color range: {} · stretch: {:.3} · X/Y: {:.3} / {:.3}",
+                "Color range: {} · stretch: {:.3} · overscan X/Y: {:.3} / {:.3} · underscan X/Y: {:.3} / {:.3}",
                 ColorRange::from_u8(state.color_range.load(Ordering::Relaxed)),
                 state.video.horizontal_stretch,
                 state.video.overscan_x,
-                state.video.overscan_y
+                state.video.overscan_y,
+                state.video.underscan_x,
+                state.video.underscan_y,
             ));
             ui.label(format!(
                 "Border cut-off (T/B/L/R): {:.1}% / {:.1}% / {:.1}% / {:.1}%",

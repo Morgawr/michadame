@@ -411,6 +411,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             let vibrance = state.video.vibrance;
             let overscan_x = state.video.overscan_x;
             let overscan_y = state.video.overscan_y;
+            let underscan_x = state.video.underscan_x;
+            let underscan_y = state.video.underscan_y;
             let border_crop = [
                 state.video.border_crop_left,
                 state.video.border_crop_right,
@@ -464,6 +466,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         scaler_filter,
                         overscan_x,
                         overscan_y,
+                        underscan_x,
+                        underscan_y,
                         border_crop,
                         fft_clone.as_ref(),
                         fft_threshold,

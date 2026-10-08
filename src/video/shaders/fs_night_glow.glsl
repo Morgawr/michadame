@@ -62,7 +62,8 @@ void main() {
         scale.x = video_aspect / output_aspect;
     }
 
-    vec2 centered_tc = (v_tc - 0.5) / scale + 0.5;
+    vec2 corrected_tc = vec2(v_tc.x, 1.0 - v_tc.y);
+    vec2 centered_tc = (corrected_tc - 0.5) / scale + 0.5;
 
     // Apply CRT curvature warp matching active CRT filter
     vec2 screen_tc = centered_tc;
@@ -82,35 +83,61 @@ void main() {
         screen_tc = pos * 0.5 + 0.5;
     }
 
-    // Active screen area within border crops
-    vec2 min_uv = vec2(border_crop.x + 0.015, border_crop.w + 0.015);
-    vec2 max_uv = vec2(1.0 - border_crop.y - 0.015, 1.0 - border_crop.z - 0.015);
-    vec2 screen_center = (min_uv + max_uv) * 0.5;
+    // Active screen area matching bezel opening
+    vec2 ap_half = vec2(0.5 * (1.0 - border_crop.x - border_crop.y), 0.5 * (1.0 - border_crop.z - border_crop.w));
+    vec2 ap_center = vec2(0.5 * (border_crop.x + (1.0 - border_crop.y)), 0.5 * (border_crop.z + (1.0 - border_crop.w)));
+    vec2 min_uv = ap_center - ap_half;
+    vec2 max_uv = ap_center + ap_half;
+    vec2 screen_center = ap_center;
 
-    // Nearest emitter point on screen
-    vec2 s0 = clamp(screen_tc, min_uv, max_uv);
+    vec2 video_pixels = outputResolution * scale;
+    float min_vid_dim = max(min(video_pixels.x, video_pixels.y), 1.0);
 
-    // Aspect-ratio-adjusted Euclidean screenspace metrics
+    vec2 p_vid = (screen_tc - ap_center) * video_pixels;
+    vec2 b_vid = ap_half * video_pixels;
+
+    // Molded corner radius in physical screen pixels (matching fs_retro_frame.glsl)
+    float r_corner = (filter_type == 2 && corner_size > 0.001)
+        ? max(corner_size * min_vid_dim, 22.0)
+        : clamp(min_vid_dim * 0.038, 20.0, 32.0);
+
+    // Exact Euclidean rounded box SDF matching the CRT aperture opening:
+    vec2 q = abs(p_vid) - (b_vid - vec2(r_corner));
+    vec2 max_q = max(q, vec2(0.0));
+    float len_max_q = length(max_q);
+    float d_ap = min(max(q.x, q.y), 0.0) + len_max_q - r_corner;
+
+    // Continuous 2D unit normal pointing outward from the rounded aperture
+    vec2 n_dir = (len_max_q > 0.0001) ? (max_q / len_max_q) : ((q.x > q.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0));
+    vec2 n_ap = n_dir * sign(p_vid);
+
+    // Nearest emitter point on active screen aperture
+    vec2 s0 = screen_tc - (n_ap * max(d_ap, 0.0)) / video_pixels;
+    s0 = clamp(s0, min_uv + 0.002, max_uv - 0.002);
+
+    // Euclidean distance outside the rounded aperture in normalized screenspace
+    float dist_outside = max(d_ap, 0.0) / min_vid_dim;
+
+    // Fade halo inside active video feed so it doesn't overexpose internal screen pixels,
+    // while blooming outward immediately at the aperture boundary (no dead band)
+    float gate = smoothstep(0.000, 0.003, dist_outside);
+
+    // Aspect-ratio-adjusted Euclidean screenspace metrics for radial sampling
     vec2 aspect_scale = vec2(outputResolution.x / max(outputResolution.y, 1.0), 1.0);
-    float dist_outside = length((screen_tc - s0) * scale * aspect_scale);
-
-    // Fade halo inside active video feed so it doesn't overexpose screen pixels
-    float gate = smoothstep(0.000, 0.030, dist_outside);
 
     // True radial optical PSF convolution:
     // Samples local screen emitters in concentric radial circles around s0.
-    // Because each sample's contribution falls off with TRUE 2D Euclidean distance,
-    // the halo naturally expands in a CIRCULAR, isotropic motion centered on bright objects!
+    // Each sample represents calibrated optical irradiance that drops off steeply with 2D Euclidean distance,
+    // naturally expanding in an isotropic circle around bright features without overblowing full-white scenes.
     vec3 glow_acc = vec3(0.0);
-    float tot_w = 0.0;
 
     // Center emitter tap (screen boundary near fragment)
     vec3 c0 = ToSrgb(textureLod(video_texture, s0, 3.5).rgb);
     float lum0 = dot(c0, vec3(0.2126, 0.7152, 0.0722));
-    float e0 = pow(lum0, 1.35);
+    float e0 = pow(lum0, 1.25);
     vec3 p0 = mix(c0, vec3(lum0), clamp((lum0 - 0.40) * 1.5, 0.0, 0.70)) * e0;
-    float w0 = exp(-dist_outside * 10.0) * 0.40;
-    glow_acc += p0 * w0; tot_w += w0;
+    float w0 = exp(-dist_outside * 22.0) * 0.45;
+    glow_acc += p0 * w0;
 
     // Ring 1: Near-field bloom (8 directions, radius 0.065, LOD 4.0)
     for (int k = 0; k < 8; k++) {
@@ -118,22 +145,22 @@ void main() {
         float dk = length((screen_tc - sk) * scale * aspect_scale);
         vec3 ck = ToSrgb(textureLod(video_texture, sk, 4.0).rgb);
         float lumk = dot(ck, vec3(0.2126, 0.7152, 0.0722));
-        float ek = pow(lumk, 1.35);
+        float ek = pow(lumk, 1.25);
         vec3 pk = mix(ck, vec3(lumk), clamp((lumk - 0.40) * 1.5, 0.0, 0.70)) * ek;
-        float wk = exp(-dk * 8.0) * 0.22;
-        glow_acc += pk * wk; tot_w += wk;
+        float wk = exp(-dk * 16.0) * 0.045;
+        glow_acc += pk * wk;
     }
 
-    // Ring 2: Mid-field room halo (8 directions, radius 0.160, LOD 5.2)
+    // Ring 2: Mid-field room halo (8 directions, radius 0.150, LOD 5.2)
     for (int m = 0; m < 8; m++) {
-        vec2 sm = clamp(s0 + ring2_dirs[m] * 0.160, min_uv, max_uv);
+        vec2 sm = clamp(s0 + ring2_dirs[m] * 0.150, min_uv, max_uv);
         float dm = length((screen_tc - sm) * scale * aspect_scale);
         vec3 cm = ToSrgb(textureLod(video_texture, sm, 5.2).rgb);
         float lumm = dot(cm, vec3(0.2126, 0.7152, 0.0722));
-        float em = pow(lumm, 1.35);
+        float em = pow(lumm, 1.25);
         vec3 pm = mix(cm, vec3(lumm), clamp((lumm - 0.40) * 1.5, 0.0, 0.70)) * em;
-        float wm = exp(-dm * 4.2) * 0.14;
-        glow_acc += pm * wm; tot_w += wm;
+        float wm = exp(-dm * 10.0) * 0.025;
+        glow_acc += pm * wm;
     }
 
     // Deep interior tap: pulling general room illumination from deeper in the active frame
@@ -141,16 +168,16 @@ void main() {
     float d_deep = length((screen_tc - s_deep) * scale * aspect_scale);
     vec3 c_deep = ToSrgb(textureLod(video_texture, s_deep, 6.2).rgb);
     float lum_deep = dot(c_deep, vec3(0.2126, 0.7152, 0.0722));
-    float e_deep = pow(lum_deep, 1.35);
+    float e_deep = pow(lum_deep, 1.25);
     vec3 p_deep = mix(c_deep, vec3(lum_deep), clamp((lum_deep - 0.40) * 1.5, 0.0, 0.70)) * e_deep;
-    float w_deep = exp(-d_deep * 2.2) * 0.08;
-    glow_acc += p_deep * w_deep; tot_w += w_deep;
+    float w_deep = exp(-d_deep * 7.0) * 0.040;
+    glow_acc += p_deep * w_deep;
 
-    vec3 raw_halo = (tot_w > 0.0001) ? (glow_acc / tot_w) : vec3(0.0);
-    float room_presence = min(tot_w, 1.25);
-
-    // Silky, feathery circular optical halo bloom scaling with user slider
-    vec3 final_halo = clamp(raw_halo * room_presence * (gate * glow_intensity * 2.00), 0.0, 1.0);
+    // Energy-conserving optical halo with soft-knee saturation compression:
+    // Prevents parameter runaway or washouts in high-exposure scenes while preserving
+    // delicate, atmospheric halos around textboxes and high-contrast features.
+    vec3 raw_halo = glow_acc * (gate * glow_intensity);
+    vec3 final_halo = raw_halo / (vec3(1.0) + raw_halo * 0.50);
 
     out_color = vec4(final_halo, 1.0);
 }

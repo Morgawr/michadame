@@ -23,6 +23,8 @@ pub struct ShaderParams {
     pub scaler_filter: u8,
     pub overscan_x: f32,
     pub overscan_y: f32,
+    pub underscan_x: f32,
+    pub underscan_y: f32,
     pub border_crop: [f32; 4],
 }
 
@@ -282,6 +284,8 @@ impl ShaderParams {
             scaler_filter: state.scaler_filter.load(Ordering::Relaxed),
             overscan_x: state.video.overscan_x,
             overscan_y: state.video.overscan_y,
+            underscan_x: state.video.underscan_x,
+            underscan_y: state.video.underscan_y,
             border_crop: [
                 state.video.border_crop_left,
                 state.video.border_crop_right,
@@ -313,6 +317,8 @@ impl Default for ShaderParams {
             scaler_filter: crate::video::types::ScalerFilter::FastBilinear as u8,
             overscan_x: 0.0,
             overscan_y: 0.0,
+            underscan_x: 0.0,
+            underscan_y: 0.0,
             border_crop: [0.0, 0.0, 0.0, 0.0],
         }
     }
@@ -367,6 +373,17 @@ mod tests {
             params.scaler_filter,
             crate::video::types::ScalerFilter::Lanczos as u8
         );
+    }
+
+    #[test]
+    fn test_shader_params_underscan() {
+        let mut state = AppState::default();
+        state.video.underscan_x = 0.05;
+        state.video.underscan_y = -0.03;
+
+        let params = ShaderParams::from_state(&state);
+        assert_eq!(params.underscan_x, 0.05);
+        assert_eq!(params.underscan_y, -0.03);
     }
 
     #[test]

@@ -41,6 +41,8 @@ pub struct Profile {
     pub vibrance: Option<f32>,
     pub overscan_x: Option<f32>,
     pub overscan_y: Option<f32>,
+    pub underscan_x: Option<f32>,
+    pub underscan_y: Option<f32>,
     pub border_crop_left: Option<f32>,
     pub border_crop_right: Option<f32>,
     pub border_crop_top: Option<f32>,
@@ -139,6 +141,8 @@ pub struct LegacyConfig {
     pub vibrance: Option<f32>,
     pub overscan_x: Option<f32>,
     pub overscan_y: Option<f32>,
+    pub underscan_x: Option<f32>,
+    pub underscan_y: Option<f32>,
 
     // Halo params
     pub halo_brightboost: Option<f32>,
@@ -231,6 +235,8 @@ impl Default for LegacyConfig {
             vibrance: None,
             overscan_x: None,
             overscan_y: None,
+            underscan_x: None,
+            underscan_y: None,
             halo_brightboost: None,
             halo_brightboost1: None,
             halo_beam_min: None,

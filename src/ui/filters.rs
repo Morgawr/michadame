@@ -488,6 +488,39 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             changed = true;
         }
 
+        if ui
+            .add(
+                egui::Slider::new(&mut state.video.underscan_x, -0.2..=0.3)
+                    .text("Underscan Stretch X")
+                    .step_by(0.0005)
+                    .custom_formatter(|n, _| format!("{:.1}%", (1.0 + n) * 100.0))
+                    .custom_parser(|s| {
+                        let s = s.trim_end_matches('%').trim();
+                        s.parse::<f64>().ok().map(|p| if p > 50.0 { p / 100.0 - 1.0 } else { p })
+                    }),
+            )
+            .on_hover_text("Stretches the image raster horizontally inside the rendering surface without changing screen boundaries, cutting off excess edges.")
+            .changed()
+        {
+            changed = true;
+        }
+        if ui
+            .add(
+                egui::Slider::new(&mut state.video.underscan_y, -0.2..=0.3)
+                    .text("Underscan Stretch Y")
+                    .step_by(0.001)
+                    .custom_formatter(|n, _| format!("{:.1}%", (1.0 + n) * 100.0))
+                    .custom_parser(|s| {
+                        let s = s.trim_end_matches('%').trim();
+                        s.parse::<f64>().ok().map(|p| if p > 50.0 { p / 100.0 - 1.0 } else { p })
+                    }),
+            )
+            .on_hover_text("Stretches the image raster vertically inside the rendering surface without changing screen boundaries, cutting off excess edges.")
+            .changed()
+        {
+            changed = true;
+        }
+
         ui.separator();
         ui.label("Border Cut-off (Pillowing Mask):");
         if ui
@@ -656,6 +689,8 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 state.video.median_mix = 1.0;
                 state.video.overscan_x = 0.0;
                 state.video.overscan_y = 0.0;
+                state.video.underscan_x = 0.0;
+                state.video.underscan_y = 0.0;
                 state.video.border_crop_left = 0.0;
                 state.video.border_crop_right = 0.0;
                 state.video.border_crop_top = 0.0;
