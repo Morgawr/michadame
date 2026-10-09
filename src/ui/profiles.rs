@@ -22,20 +22,23 @@ pub fn draw_profile_management(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                 });
 
             if combo_changed && pre_selected != state.active_profile {
+                let outgoing_profile = config::build_profile_from_state(state);
+                state.profiles.insert(pre_selected, outgoing_profile);
+
                 let profile_to_apply = state.profiles.get(&state.active_profile).cloned();
+                let mut audio_changed = false;
                 if let Some(profile) = profile_to_apply {
-                    config::apply_profile_to_state(state, &profile);
+                    audio_changed = config::apply_profile_to_state(state, &profile);
                 }
                 config::save_config(state);
+                if audio_changed && state.hardware.active_audio_stream.is_some() {
+                    state.restart_audio_stream(ui.ctx());
+                }
                 state.info(format!("Switched to profile: {}", state.active_profile));
                 changed = true;
             }
 
             if ui.button("Save Config").clicked() {
-                let current_profile_data = config::build_profile_from_state(state);
-                state
-                    .profiles
-                    .insert(state.active_profile.clone(), current_profile_data);
                 config::save_config(state);
                 state.info(format!(
                     "Saved configuration to profile: {}",
@@ -57,6 +60,9 @@ pub fn draw_profile_management(ui: &mut egui::Ui, state: &mut AppState) -> bool 
             {
                 let new_profile_name = state.new_profile_name.trim().to_string();
                 let current_profile_data = config::build_profile_from_state(state);
+                state
+                    .profiles
+                    .insert(state.active_profile.clone(), current_profile_data.clone());
                 state
                     .profiles
                     .insert(new_profile_name.clone(), current_profile_data);
@@ -85,11 +91,15 @@ pub fn draw_profile_management(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                     state.active_profile = state.profiles.keys().next().unwrap().clone();
                 }
                 let profile_to_apply = state.profiles.get(&state.active_profile).cloned();
+                let mut audio_changed = false;
                 if let Some(profile) = profile_to_apply {
-                    config::apply_profile_to_state(state, &profile);
+                    audio_changed = config::apply_profile_to_state(state, &profile);
                 }
 
                 config::save_config(state); // Save immediately on profile deletion
+                if audio_changed && state.hardware.active_audio_stream.is_some() {
+                    state.restart_audio_stream(ui.ctx());
+                }
                 changed = true;
                 state.info(format!(
                     "Deleted profile. Switched to: {}",

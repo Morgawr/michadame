@@ -204,10 +204,35 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         cathode_flicker_depth: Some(state.cathode_interference.flicker_depth),
         cathode_interference: Some(state.cathode_interference.interference),
         cathode_lightbulb_effect: Some(state.cathode_interference.lightbulb_effect),
+
+        video_resolution: if state.hardware.selected_resolution.0 > 0 {
+            Some(state.hardware.selected_resolution)
+        } else {
+            None
+        },
+        video_framerate: if state.hardware.selected_framerate > 0 {
+            Some(state.hardware.selected_framerate)
+        } else {
+            None
+        },
+
+        fft_filter_enabled: Some(state.video.fft_filter_enabled),
+        fft_mask_save_name: if state.fft_mask_save_name.is_empty() {
+            None
+        } else {
+            Some(state.fft_mask_save_name.clone())
+        },
+
+        audio_source: state.hardware.selected_audio_source_name.clone(),
+        audio_buffer_size: Some(state.hardware.audio_buffer_size),
+        audio_sample_rate: Some(state.hardware.audio_sample_rate),
+        audio_sample_format: Some(state.hardware.audio_sample_format.clone()),
+
+        audio_filter: Some(state.replay.config.audio_filter.clone()),
     }
 }
 
-pub fn save_config(state: &AppState) {
+pub fn save_config(state: &mut AppState) {
     let Ok(path) = confy::get_configuration_file_path("michadame", None) else {
         tracing::error!("Failed to get configuration file path for save_config");
         return;
@@ -217,7 +242,7 @@ pub fn save_config(state: &AppState) {
     }
 }
 
-pub fn save_config_at(path: &Path, state: &AppState) -> Result<(), confy::ConfyError> {
+pub fn save_config_at(path: &Path, state: &mut AppState) -> Result<(), confy::ConfyError> {
     if let Some(err) = &state.config_load_error {
         tracing::error!(
             "ABORTING save_config: Configuration loading failed at startup ({}). Overwriting is blocked to protect existing data.",
@@ -257,12 +282,13 @@ pub fn save_config_at(path: &Path, state: &AppState) -> Result<(), confy::ConfyE
     cfg.default_halo = Some(state.halo_defaults.clone());
     cfg.default_cathode_interference = Some(state.cathode_interference_defaults.clone());
 
+    let current_profile_data = build_profile_from_state(state);
+    state
+        .profiles
+        .insert(state.active_profile.clone(), current_profile_data);
+
     cfg.active_profile = state.active_profile.clone();
     cfg.profiles = state.profiles.clone();
-
-    let current_profile_data = build_profile_from_state(state);
-    cfg.profiles
-        .insert(state.active_profile.clone(), current_profile_data);
 
     store_config_atomic_at(path, &cfg)
 }
@@ -322,217 +348,212 @@ pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(
     store_config_atomic_at(path, &cfg)
 }
 
-pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) {
-    if let Some(filter) = profile.crt_filter {
-        state.crt_filter.store(filter, Ordering::Relaxed);
-    }
-    if let Some(s) = profile.scaler_filter {
-        state.scaler_filter.store(s, Ordering::Relaxed);
-    }
-    if let Some(c) = profile.color_range {
-        state.color_range.store(c, Ordering::Relaxed);
-    }
-    if let Some(val) = profile.pixelate_filter_enabled {
-        state.video.pixelate_filter_enabled = val;
-    }
-    if let Some(val) = profile.crt_hard_scan {
-        state.crt.hard_scan = val;
-    }
-    if let Some(val) = profile.crt_hard_pix {
-        state.crt.hard_pix = val;
-    }
-    if let Some(val) = profile.crt_brightboost {
-        state.crt.brightboost = val;
-    }
-    if let Some(val) = profile.crt_warp_x {
-        state.crt.warp_x = val;
-    }
-    if let Some(val) = profile.crt_warp_y {
-        state.crt.warp_y = val;
-    }
-    if let Some(val) = profile.crt_shadow_mask {
-        state.crt.shadow_mask = val;
-    }
-    if let Some(val) = profile.crt_hard_bloom_pix {
-        state.crt.hard_bloom_pix = val;
-    }
-    if let Some(val) = profile.crt_hard_bloom_scan {
-        state.crt.hard_bloom_scan = val;
-    }
-    if let Some(val) = profile.crt_bloom_amount {
-        state.crt.bloom_amount = val;
-    }
-    if let Some(val) = profile.crt_shape {
-        state.crt.shape = val;
-    }
-    if let Some(val) = profile.use_magenta_background {
-        state.video.use_magenta_background = val;
-    }
-    if let Some(val) = profile.retro_pc_frame {
-        state.video.retro_pc_frame = val;
-    }
-    if let Some(val) = profile.retro_pc_frame_dark_mode {
-        state.video.retro_pc_frame_dark_mode = val;
-    }
-    if let Some(val) = profile.retro_pc_ambient_glow {
-        state.video.retro_pc_ambient_glow = val;
-    }
-    if let Some(val) = profile.lights_off_night_mode {
-        state.video.lights_off_night_mode = val;
-    }
-    if let Some(val) = profile.night_mode_glow_intensity {
-        state.video.night_mode_glow_intensity = val;
-    }
-    if let Some(val) = profile.crt_glass_enabled {
-        state.video.crt_glass_enabled = val;
-    }
-    if let Some(val) = profile.crt_glass_intensity {
-        state.video.crt_glass_intensity = val;
-    }
-    if let Some(val) = profile.crt_glass_glossiness {
-        state.video.crt_glass_glossiness = val;
-    }
-    if let Some(val) = profile.crt_glass_ceiling_light_enabled {
-        state.video.crt_glass_ceiling_light_enabled = val;
-    }
-    if let Some(val) = profile.crt_glass_photographer_enabled {
-        state.video.crt_glass_photographer_enabled = val;
-    }
-    if let Some(val) = profile.crt_glass_photographer_intensity {
-        state.video.crt_glass_photographer_intensity = val;
-    }
-    if let Some(val) = profile.crt_glass_flash_enabled {
-        state.video.crt_glass_flash_enabled = val;
-    }
-    if let Some(val) = profile.crt_glass_flash_intensity {
-        state.video.crt_glass_flash_intensity = val;
-    }
-    if let Some(val) = profile.horizontal_stretch {
-        state.video.horizontal_stretch = val;
-    }
-    if let Some(val) = profile.median_filter_enabled {
-        state.video.median_filter_enabled = val;
-    }
-    if let Some(val) = profile.median_mix {
-        state.video.median_mix = val;
-    }
-    if let Some(val) = profile.vibrance {
-        state.video.vibrance = val;
-    }
-    if let Some(val) = profile.overscan_x {
-        state.video.overscan_x = val;
-    }
-    if let Some(val) = profile.overscan_y {
-        state.video.overscan_y = val;
-    }
-    if let Some(val) = profile.underscan_x {
-        state.video.underscan_x = val;
-    }
-    if let Some(val) = profile.underscan_y {
-        state.video.underscan_y = val;
-    }
-    if let Some(val) = profile.border_crop_left {
-        state.video.border_crop_left = val;
-    }
-    if let Some(val) = profile.border_crop_right {
-        state.video.border_crop_right = val;
-    }
-    if let Some(val) = profile.border_crop_top {
-        state.video.border_crop_top = val;
-    }
-    if let Some(val) = profile.border_crop_bottom {
-        state.video.border_crop_bottom = val;
-    }
-    if let Some(val) = profile.selected_crt_filter {
-        state.selected_crt_filter = crate::devices::filter_type::CrtFilter::from_u8(val);
-    }
-    if let Some(val) = profile.halo_brightboost {
-        state.halo.brightboost = val;
-    }
-    if let Some(val) = profile.halo_brightboost1 {
-        state.halo.brightboost1 = val;
-    }
-    if let Some(val) = profile.halo_beam_min {
-        state.halo.beam_min = val;
-    }
-    if let Some(val) = profile.halo_beam_max {
-        state.halo.beam_max = val;
-    }
-    if let Some(val) = profile.halo_beam_size {
-        state.halo.beam_size = val;
-    }
-    if let Some(val) = profile.halo_h_sharp {
-        state.halo.h_sharp = val;
-    }
-    if let Some(val) = profile.halo_glow {
-        state.halo.glow = val;
-    }
-    if let Some(val) = profile.halo_bloom {
-        state.halo.bloom = val;
-    }
-    if let Some(val) = profile.halo_halation {
-        state.halo.halation = val;
-    }
-    if let Some(val) = profile.halo_shadow_mask {
-        state.halo.shadow_mask = val;
-    }
-    if let Some(val) = profile.halo_masksize {
-        state.halo.masksize = val;
-    }
-    if let Some(val) = profile.halo_maskstr {
-        state.halo.maskstr = val;
-    }
-    if let Some(val) = profile.halo_mcut {
-        state.halo.mcut = val;
-    }
-    if let Some(val) = profile.halo_slotmask {
-        state.halo.slotmask = val;
-    }
-    if let Some(val) = profile.halo_slotmask1 {
-        state.halo.slotmask1 = val;
-    }
-    if let Some(val) = profile.halo_double_slot {
-        state.halo.double_slot = val;
-    }
-    if let Some(val) = profile.halo_smoothmask {
-        state.halo.smoothmask = val;
-    }
-    if let Some(val) = profile.halo_zoom {
-        state.halo.halo_zoom = val;
-    }
-    if let Some(val) = profile.halo_intensity {
-        state.halo.halo_intensity = val;
-    }
-    if let Some(val) = profile.halo_corner_size {
-        state.halo.corner_size = val;
-    }
-    if let Some(val) = profile.halo_curvature {
-        state.halo.curvature = val;
-    }
-    if let Some(val) = profile.cathode_interference_enabled {
-        state.cathode_interference.enabled = val;
-    }
-    if let Some(val) = profile.cathode_intensity {
-        state.cathode_interference.intensity = val;
-    }
-    if let Some(val) = profile.cathode_frequency {
-        state.cathode_interference.frequency = val;
-    }
-    if let Some(val) = profile.cathode_randomization {
-        state.cathode_interference.randomization = val;
-    }
-    if let Some(val) = profile.cathode_electricity_glow {
-        state.cathode_interference.electricity_glow = val;
-    }
-    if let Some(val) = profile.cathode_flicker_depth {
-        state.cathode_interference.flicker_depth = val;
-    }
-    if let Some(val) = profile.cathode_interference {
-        state.cathode_interference.interference = val;
-    }
-    if let Some(val) = profile.cathode_lightbulb_effect {
-        state.cathode_interference.lightbulb_effect = val;
-    }
+pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) -> bool {
+    state
+        .crt_filter
+        .store(profile.crt_filter.unwrap_or(0), Ordering::Relaxed);
+    state.selected_crt_filter =
+        crate::devices::filter_type::CrtFilter::from_u8(profile.selected_crt_filter.unwrap_or(1));
+    state.scaler_filter.store(
+        profile
+            .scaler_filter
+            .unwrap_or(crate::video::types::ScalerFilter::Bicubic as u8),
+        Ordering::Relaxed,
+    );
+    state.color_range.store(
+        profile
+            .color_range
+            .unwrap_or(crate::video::types::ColorRange::Full as u8),
+        Ordering::Relaxed,
+    );
+    state.video.pixelate_filter_enabled = profile.pixelate_filter_enabled.unwrap_or(false);
+
+    state.crt.hard_scan = profile.crt_hard_scan.unwrap_or(-8.0);
+    state.crt.hard_pix = profile.crt_hard_pix.unwrap_or(-3.0);
+    state.crt.brightboost = profile.crt_brightboost.unwrap_or(1.0);
+    state.crt.warp_x = profile.crt_warp_x.unwrap_or(0.031);
+    state.crt.warp_y = profile.crt_warp_y.unwrap_or(0.041);
+    state.crt.shadow_mask = profile.crt_shadow_mask.unwrap_or(3.0);
+    state.crt.hard_bloom_pix = profile.crt_hard_bloom_pix.unwrap_or(-1.5);
+    state.crt.hard_bloom_scan = profile.crt_hard_bloom_scan.unwrap_or(-2.0);
+    state.crt.bloom_amount = profile.crt_bloom_amount.unwrap_or(0.15);
+    state.crt.shape = profile.crt_shape.unwrap_or(2.0);
+
+    state.video.use_magenta_background = profile.use_magenta_background.unwrap_or(false);
+    state.video.retro_pc_frame = profile.retro_pc_frame.unwrap_or(false);
+    state.video.retro_pc_frame_dark_mode = profile.retro_pc_frame_dark_mode.unwrap_or(false);
+    state.video.retro_pc_ambient_glow = profile.retro_pc_ambient_glow.unwrap_or(0.55);
+    state.video.lights_off_night_mode = profile.lights_off_night_mode.unwrap_or(false);
+    state.video.night_mode_glow_intensity = profile.night_mode_glow_intensity.unwrap_or(0.0);
+
+    state.video.crt_glass_enabled = profile.crt_glass_enabled.unwrap_or(false);
+    state.video.crt_glass_intensity = profile.crt_glass_intensity.unwrap_or(0.25);
+    state.video.crt_glass_glossiness = profile.crt_glass_glossiness.unwrap_or(0.50);
+    state.video.crt_glass_ceiling_light_enabled =
+        profile.crt_glass_ceiling_light_enabled.unwrap_or(true);
+    state.video.crt_glass_photographer_enabled =
+        profile.crt_glass_photographer_enabled.unwrap_or(false);
+    state.video.crt_glass_photographer_intensity =
+        profile.crt_glass_photographer_intensity.unwrap_or(0.50);
+    state.video.crt_glass_flash_enabled = profile.crt_glass_flash_enabled.unwrap_or(false);
+    state.video.crt_glass_flash_intensity = profile.crt_glass_flash_intensity.unwrap_or(0.70);
+
+    state.video.horizontal_stretch = profile.horizontal_stretch.unwrap_or(1.0);
+    state.video.median_filter_enabled = profile.median_filter_enabled.unwrap_or(false);
+    state.video.median_mix = profile.median_mix.unwrap_or(1.0);
+    state.video.vibrance = profile.vibrance.unwrap_or(1.0);
+    state.video.overscan_x = profile.overscan_x.unwrap_or(0.0);
+    state.video.overscan_y = profile.overscan_y.unwrap_or(0.0);
+    state.video.underscan_x = profile.underscan_x.unwrap_or(0.0);
+    state.video.underscan_y = profile.underscan_y.unwrap_or(0.0);
+    state.video.border_crop_left = profile.border_crop_left.unwrap_or(0.0);
+    state.video.border_crop_right = profile.border_crop_right.unwrap_or(0.0);
+    state.video.border_crop_top = profile.border_crop_top.unwrap_or(0.0);
+    state.video.border_crop_bottom = profile.border_crop_bottom.unwrap_or(0.0);
+
+    let def_halo = state.halo_defaults.clone();
+    state.halo.brightboost = profile.halo_brightboost.unwrap_or(def_halo.brightboost);
+    state.halo.brightboost1 = profile.halo_brightboost1.unwrap_or(def_halo.brightboost1);
+    state.halo.beam_min = profile.halo_beam_min.unwrap_or(def_halo.beam_min);
+    state.halo.beam_max = profile.halo_beam_max.unwrap_or(def_halo.beam_max);
+    state.halo.beam_size = profile.halo_beam_size.unwrap_or(def_halo.beam_size);
+    state.halo.h_sharp = profile.halo_h_sharp.unwrap_or(def_halo.h_sharp);
+    state.halo.glow = profile.halo_glow.unwrap_or(def_halo.glow);
+    state.halo.bloom = profile.halo_bloom.unwrap_or(def_halo.bloom);
+    state.halo.halation = profile.halo_halation.unwrap_or(def_halo.halation);
+    state.halo.shadow_mask = profile.halo_shadow_mask.unwrap_or(def_halo.shadow_mask);
+    state.halo.masksize = profile.halo_masksize.unwrap_or(def_halo.masksize);
+    state.halo.maskstr = profile.halo_maskstr.unwrap_or(def_halo.maskstr);
+    state.halo.mcut = profile.halo_mcut.unwrap_or(def_halo.mcut);
+    state.halo.slotmask = profile.halo_slotmask.unwrap_or(def_halo.slotmask);
+    state.halo.slotmask1 = profile.halo_slotmask1.unwrap_or(def_halo.slotmask1);
+    state.halo.double_slot = profile.halo_double_slot.unwrap_or(def_halo.double_slot);
+    state.halo.smoothmask = profile.halo_smoothmask.unwrap_or(def_halo.smoothmask);
+    state.halo.halo_zoom = profile.halo_zoom.unwrap_or(def_halo.halo_zoom);
+    state.halo.halo_intensity = profile.halo_intensity.unwrap_or(def_halo.halo_intensity);
+    state.halo.corner_size = profile.halo_corner_size.unwrap_or(def_halo.corner_size);
+    state.halo.curvature = profile.halo_curvature.unwrap_or(def_halo.curvature);
+
+    let def_cathode = state.cathode_interference_defaults.clone();
+    state.cathode_interference.enabled = profile
+        .cathode_interference_enabled
+        .unwrap_or(def_cathode.enabled);
+    state.cathode_interference.intensity =
+        profile.cathode_intensity.unwrap_or(def_cathode.intensity);
+    state.cathode_interference.frequency =
+        profile.cathode_frequency.unwrap_or(def_cathode.frequency);
+    state.cathode_interference.randomization = profile
+        .cathode_randomization
+        .unwrap_or(def_cathode.randomization);
+    state.cathode_interference.electricity_glow = profile
+        .cathode_electricity_glow
+        .unwrap_or(def_cathode.electricity_glow);
+    state.cathode_interference.flicker_depth = profile
+        .cathode_flicker_depth
+        .unwrap_or(def_cathode.flicker_depth);
+    state.cathode_interference.interference = profile
+        .cathode_interference
+        .unwrap_or(def_cathode.interference);
+    state.cathode_interference.lightbulb_effect = profile
+        .cathode_lightbulb_effect
+        .unwrap_or(def_cathode.lightbulb_effect);
+
+    // Video format / resolution / framerate
+    if !state.hardware.supported_formats.is_empty() {
+        if let Some(fourcc) = &profile.video_format_fourcc {
+            if let Some(idx) = state
+                .hardware
+                .supported_formats
+                .iter()
+                .position(|f| f.fourcc == *fourcc)
+            {
+                state.hardware.selected_format_index = idx;
+                if let Some(res) = profile.video_resolution {
+                    if state.hardware.supported_formats[idx]
+                        .resolutions
+                        .iter()
+                        .any(|r| (r.width, r.height) == res)
+                    {
+                        state.hardware.selected_resolution = res;
+                        if let Some(fps) = profile.video_framerate {
+                            if let Some(res_info) = state.hardware.supported_formats[idx]
+                                .resolutions
+                                .iter()
+                                .find(|r| (r.width, r.height) == res)
+                            {
+                                if res_info.framerates.contains(&fps) {
+                                    state.hardware.selected_framerate = fps;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // FFT mask filter
+    state.video.fft_filter_enabled = profile.fft_filter_enabled.unwrap_or(false);
+    if let Some(mask_name) = &profile.fft_mask_save_name {
+        state.fft_mask_save_name = mask_name.clone();
+        if state.video.fft_filter_enabled && !mask_name.is_empty() {
+            let stream_res = state
+                .latest_frame
+                .as_ref()
+                .map(|f| (f.width, f.height))
+                .unwrap_or(state.hardware.selected_resolution);
+            if stream_res.0 > 0 && stream_res.1 > 0 {
+                if let Ok((data, fft_res, mask_thresh, black_thresh)) =
+                    crate::config::fft_masks::load_mask(mask_name, stream_res)
+                {
+                    state.fft_mask_data = data;
+                    state.fft_mask_resolution = fft_res;
+                    state.fft_mask_threshold = mask_thresh;
+                    state.fft_black_threshold = black_thresh;
+                    state.fft_mask_dirty = true;
+                }
+            }
+        }
+    } else {
+        state.fft_mask_save_name.clear();
+    }
+
+    // Audio filter
+    if let Some(ref filter) = profile.audio_filter {
+        state.replay.config.audio_filter = filter.clone();
+        state.replay.sync_audio_filter();
+    }
+
+    // Audio device settings
+    let mut audio_hardware_changed = false;
+    if let Some(ref source) = profile.audio_source {
+        if state.hardware.selected_audio_source_name.as_ref() != Some(source) {
+            if state.hardware.audio_sources.iter().any(|(_, name)| name == source) {
+                state.hardware.selected_audio_source_name = Some(source.clone());
+                audio_hardware_changed = true;
+            }
+        }
+    }
+    if let Some(buf) = profile.audio_buffer_size {
+        if state.hardware.audio_buffer_size != buf {
+            state.hardware.audio_buffer_size = buf;
+            audio_hardware_changed = true;
+        }
+    }
+    if let Some(rate) = profile.audio_sample_rate {
+        if state.hardware.audio_sample_rate != rate {
+            state.hardware.audio_sample_rate = rate;
+            audio_hardware_changed = true;
+        }
+    }
+    if let Some(ref fmt) = profile.audio_sample_format {
+        if &state.hardware.audio_sample_format != fmt {
+            state.hardware.audio_sample_format = fmt.clone();
+            audio_hardware_changed = true;
+        }
+    }
+
+    audio_hardware_changed
 }
 
 pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
@@ -868,11 +889,11 @@ mod tests {
 
         // Saving from state writes the (trimmed) tag back; an empty tag is omitted.
         state.bank.current_tag = "  Grandia 2 ".into();
-        save_config_at(&path, &state).unwrap();
+        save_config_at(&path, &mut state).unwrap();
         let loaded: MichadameConfig = confy::load_path(&path).unwrap();
         assert_eq!(loaded.bank_current_tag.as_deref(), Some("Grandia 2"));
         state.bank.current_tag.clear();
-        save_config_at(&path, &state).unwrap();
+        save_config_at(&path, &mut state).unwrap();
         let loaded: MichadameConfig = confy::load_path(&path).unwrap();
         assert_eq!(loaded.bank_current_tag, None);
 
@@ -905,7 +926,7 @@ mod tests {
         assert!(state.bank.compact_mode);
 
         state.bank.compact_mode = false;
-        save_config_at(&path, &state).unwrap();
+        save_config_at(&path, &mut state).unwrap();
         let loaded: MichadameConfig = confy::load_path(&path).unwrap();
         assert_eq!(loaded.bank_compact_mode, Some(false));
 
@@ -1171,7 +1192,7 @@ mod tests {
         let mut state = AppState::default();
         state.config_load_error = Some("Failed to parse TOML".to_string());
 
-        let result = save_config_at(&path, &state);
+        let result = save_config_at(&path, &mut state);
         assert!(result.is_err(), "save_config_at must return an Err when config_load_error is set");
 
         // Verify the original file on disk was NOT touched or overwritten
@@ -1188,8 +1209,8 @@ mod tests {
         let path = dir.join("test-config.toml");
         std::fs::write(&path, "invalid = [[[\n").unwrap();
 
-        let state = AppState::default();
-        let result = save_config_at(&path, &state);
+        let mut state = AppState::default();
+        let result = save_config_at(&path, &mut state);
         assert!(result.is_err(), "save_config_at must refuse to overwrite corrupt config on disk");
 
         let current_content = std::fs::read_to_string(&path).unwrap();
@@ -1299,5 +1320,208 @@ crt_brightboost = 1.6
         assert!(audio_filter.enabled);
         assert_eq!(audio_filter.denoise_reduction_db, 18.0);
         assert_eq!(audio_filter.hum_freq, 60.0);
+    }
+
+    #[test]
+    fn test_profile_switch_preserves_distinct_crt_and_glass_settings() {
+        let mut state = AppState::default();
+
+        // 1. Configure Dreamcast profile with CRT Lottes, Glass ON, custom glass intensity
+        state.active_profile = "Dreamcast".to_string();
+        state.crt_filter.store(1, Ordering::Relaxed);
+        state.selected_crt_filter = crate::devices::filter_type::CrtFilter::Lottes;
+        state.video.crt_glass_enabled = true;
+        state.video.crt_glass_intensity = 0.85;
+
+        let dreamcast_profile = build_profile_from_state(&state);
+        state.profiles.insert("Dreamcast".to_string(), dreamcast_profile);
+
+        // 2. Configure PS2 profile with CRT Off, Glass OFF
+        let mut ps2_profile = Profile::default();
+        ps2_profile.crt_filter = Some(0);
+        ps2_profile.crt_glass_enabled = Some(false);
+        state.profiles.insert("PS2".to_string(), ps2_profile);
+
+        // 3. Switch to PS2 profile
+        let outgoing = build_profile_from_state(&state);
+        state.profiles.insert("Dreamcast".to_string(), outgoing);
+        state.active_profile = "PS2".to_string();
+        let ps2_data = state.profiles.get("PS2").unwrap().clone();
+        apply_profile_to_state(&mut state, &ps2_data);
+
+        // Verify PS2 settings
+        assert_eq!(state.crt_filter.load(Ordering::Relaxed), 0);
+        assert!(!state.video.crt_glass_enabled);
+
+        // 4. Switch back to Dreamcast
+        let outgoing_ps2 = build_profile_from_state(&state);
+        state.profiles.insert("PS2".to_string(), outgoing_ps2);
+        state.active_profile = "Dreamcast".to_string();
+        let dreamcast_data = state.profiles.get("Dreamcast").unwrap().clone();
+        apply_profile_to_state(&mut state, &dreamcast_data);
+
+        // Verify Dreamcast settings restored
+        assert_eq!(state.crt_filter.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            state.selected_crt_filter,
+            crate::devices::filter_type::CrtFilter::Lottes
+        );
+        assert!(state.video.crt_glass_enabled);
+        assert_eq!(state.video.crt_glass_intensity, 0.85);
+    }
+
+    #[test]
+    fn test_profile_switch_preserves_audio_filter_and_settings() {
+        let mut state = AppState::default();
+
+        // Dreamcast audio filter settings
+        let mut dc_filter = crate::replay::config::AudioFilterConfig::default();
+        dc_filter.enabled = true;
+        dc_filter.apply_preset(crate::replay::config::FilterPreset::DreamcastNtsc);
+
+        let mut dc_profile = Profile::default();
+        dc_profile.audio_filter = Some(dc_filter.clone());
+        dc_profile.audio_buffer_size = Some(512);
+        dc_profile.audio_sample_rate = Some(48000);
+        state.profiles.insert("Dreamcast".to_string(), dc_profile);
+
+        // PS2 audio filter settings
+        let mut ps2_filter = crate::replay::config::AudioFilterConfig::default();
+        ps2_filter.enabled = false;
+        ps2_filter.preset = crate::replay::config::FilterPreset::ConsolePal;
+
+        let mut ps2_profile = Profile::default();
+        ps2_profile.audio_filter = Some(ps2_filter.clone());
+        ps2_profile.audio_buffer_size = Some(2048);
+        ps2_profile.audio_sample_rate = Some(44100);
+        state.profiles.insert("PS2".to_string(), ps2_profile);
+
+        // Switch to Dreamcast
+        let dc_data = state.profiles.get("Dreamcast").unwrap().clone();
+        apply_profile_to_state(&mut state, &dc_data);
+
+        assert!(state.replay.config.audio_filter.enabled);
+        assert_eq!(
+            state.replay.config.audio_filter.preset,
+            crate::replay::config::FilterPreset::DreamcastNtsc
+        );
+        assert_eq!(state.hardware.audio_buffer_size, 512);
+        assert_eq!(state.hardware.audio_sample_rate, 48000);
+        assert!(state.replay.audio.filter.read().unwrap().enabled);
+
+        // Switch to PS2
+        let ps2_data = state.profiles.get("PS2").unwrap().clone();
+        apply_profile_to_state(&mut state, &ps2_data);
+
+        assert!(!state.replay.config.audio_filter.enabled);
+        assert_eq!(
+            state.replay.config.audio_filter.preset,
+            crate::replay::config::FilterPreset::ConsolePal
+        );
+        assert_eq!(state.hardware.audio_buffer_size, 2048);
+        assert_eq!(state.hardware.audio_sample_rate, 44100);
+        assert!(!state.replay.audio.filter.read().unwrap().enabled);
+    }
+
+    #[test]
+    fn test_profile_switch_resets_unspecified_settings_to_prevent_leakage() {
+        let mut state = AppState::default();
+
+        // Profile A has glass and pixelate enabled
+        state.video.crt_glass_enabled = true;
+        state.video.pixelate_filter_enabled = true;
+        state.crt_filter.store(2, Ordering::Relaxed);
+
+        // Profile B is default (all None)
+        let profile_b = Profile::default();
+        apply_profile_to_state(&mut state, &profile_b);
+
+        // Settings should be reset to defaults and not leak from Profile A
+        assert_eq!(state.crt_filter.load(Ordering::Relaxed), 0);
+        assert!(!state.video.crt_glass_enabled);
+        assert!(!state.video.pixelate_filter_enabled);
+    }
+
+    #[test]
+    fn test_profile_switching_without_explicit_save_persists_modifications() {
+        let dir = std::env::temp_dir().join(format!(
+            "michadame-test-prof-switch-{}",
+            crate::replay::now_us()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test-config.toml");
+
+        let mut state = AppState::default();
+        state.active_profile = "Dreamcast".to_string();
+        state
+            .profiles
+            .insert("Dreamcast".to_string(), Profile::default());
+        state
+            .profiles
+            .insert("PS2".to_string(), Profile::default());
+
+        save_config_at(&path, &mut state).unwrap();
+
+        // 1. User tweaks settings on Dreamcast (toggles CRT filter and glass shader)
+        state.crt_filter.store(1, Ordering::Relaxed);
+        state.video.crt_glass_enabled = true;
+        state.replay.config.audio_filter.enabled = true;
+        state.replay.config.audio_filter.preset =
+            crate::replay::config::FilterPreset::DreamcastNtsc;
+
+        // 2. User switches to PS2 WITHOUT clicking "Save Config"
+        let pre_selected = state.active_profile.clone();
+        let outgoing = build_profile_from_state(&state);
+        state.profiles.insert(pre_selected, outgoing);
+
+        state.active_profile = "PS2".to_string();
+        let ps2_profile = state.profiles.get("PS2").unwrap().clone();
+        apply_profile_to_state(&mut state, &ps2_profile);
+        save_config_at(&path, &mut state).unwrap();
+
+        // On PS2, CRT filter is 0, glass is false, audio filter is disabled
+        assert_eq!(state.crt_filter.load(Ordering::Relaxed), 0);
+        assert!(!state.video.crt_glass_enabled);
+
+        // 3. User tweaks settings on PS2
+        state.crt_filter.store(2, Ordering::Relaxed);
+        state.selected_crt_filter = crate::devices::filter_type::CrtFilter::Halo;
+
+        // 4. User switches back to Dreamcast WITHOUT clicking "Save Config"
+        let pre_selected = state.active_profile.clone();
+        let outgoing = build_profile_from_state(&state);
+        state.profiles.insert(pre_selected, outgoing);
+
+        state.active_profile = "Dreamcast".to_string();
+        let dc_profile = state.profiles.get("Dreamcast").unwrap().clone();
+        apply_profile_to_state(&mut state, &dc_profile);
+        save_config_at(&path, &mut state).unwrap();
+
+        // Verify Dreamcast retained its tweaked settings
+        assert_eq!(state.crt_filter.load(Ordering::Relaxed), 1);
+        assert!(state.video.crt_glass_enabled);
+        assert!(state.replay.config.audio_filter.enabled);
+        assert_eq!(
+            state.replay.config.audio_filter.preset,
+            crate::replay::config::FilterPreset::DreamcastNtsc
+        );
+
+        // 5. User switches back to PS2
+        let pre_selected = state.active_profile.clone();
+        let outgoing = build_profile_from_state(&state);
+        state.profiles.insert(pre_selected, outgoing);
+
+        state.active_profile = "PS2".to_string();
+        let ps2_profile = state.profiles.get("PS2").unwrap().clone();
+        apply_profile_to_state(&mut state, &ps2_profile);
+
+        // Verify PS2 retained its tweaked settings
+        assert_eq!(state.crt_filter.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            state.selected_crt_filter,
+            crate::devices::filter_type::CrtFilter::Halo
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

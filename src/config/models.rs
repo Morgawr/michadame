@@ -82,6 +82,23 @@ pub struct Profile {
     pub cathode_flicker_depth: Option<f32>,
     pub cathode_interference: Option<f32>,
     pub cathode_lightbulb_effect: Option<f32>,
+
+    // Video resolution & framerate
+    pub video_resolution: Option<(u32, u32)>,
+    pub video_framerate: Option<u32>,
+
+    // FFT mask filter
+    pub fft_filter_enabled: Option<bool>,
+    pub fft_mask_save_name: Option<String>,
+
+    // Audio device settings
+    pub audio_source: Option<String>,
+    pub audio_buffer_size: Option<u32>,
+    pub audio_sample_rate: Option<u32>,
+    pub audio_sample_format: Option<String>,
+
+    // Audio filter
+    pub audio_filter: Option<crate::replay::config::AudioFilterConfig>,
 }
 
 #[derive(Deserialize, Clone)]

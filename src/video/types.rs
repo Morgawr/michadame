@@ -40,10 +40,14 @@ pub fn apply_saved_format_config(state: &mut AppState, cfg: &MichadameConfig) {
     {
         state.hardware.supported_formats = formats;
 
-        let saved_fourcc = cfg
-            .profiles
-            .get(&cfg.active_profile)
-            .and_then(|p| p.video_format_fourcc.as_ref());
+        let active_profile = cfg.profiles.get(&cfg.active_profile);
+        let saved_fourcc = active_profile.and_then(|p| p.video_format_fourcc.as_ref());
+        let saved_res = active_profile
+            .and_then(|p| p.video_resolution)
+            .or(cfg.video_resolution);
+        let saved_fps = active_profile
+            .and_then(|p| p.video_framerate)
+            .or(cfg.video_framerate);
 
         if let Some(saved_fourcc) = saved_fourcc {
             if let Some(idx) = state
@@ -53,14 +57,14 @@ pub fn apply_saved_format_config(state: &mut AppState, cfg: &MichadameConfig) {
                 .position(|f| f.fourcc == *saved_fourcc)
             {
                 state.hardware.selected_format_index = idx;
-                if let Some(saved_res) = cfg.video_resolution {
+                if let Some(saved_res) = saved_res {
                     if state.hardware.supported_formats[idx]
                         .resolutions
                         .iter()
                         .any(|r| r.width == saved_res.0 && r.height == saved_res.1)
                     {
                         state.hardware.selected_resolution = saved_res;
-                        if let Some(saved_fps) = cfg.video_framerate {
+                        if let Some(saved_fps) = saved_fps {
                             if let Some(res_info) = state.hardware.supported_formats[idx]
                                 .resolutions
                                 .iter()

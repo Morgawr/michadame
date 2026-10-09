@@ -128,16 +128,24 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 .resolutions
                 .clone();
 
+            let format_descriptions: Vec<(usize, String)> = state
+                .hardware
+                .supported_formats
+                .iter()
+                .enumerate()
+                .map(|(i, f)| (i, f.description.clone()))
+                .collect();
+
             ui.label("Format:");
             egui::ComboBox::from_id_source("format_selector")
                 .selected_text(selected_format_description)
                 .show_ui(ui, |ui| {
-                    for (i, format) in state.hardware.supported_formats.iter().enumerate() {
+                    for (i, desc) in format_descriptions {
                         if ui
                             .selectable_value(
                                 &mut state.hardware.selected_format_index,
                                 i,
-                                &format.description,
+                                desc,
                             )
                             .changed()
                         {
@@ -148,6 +156,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                 state.hardware.selected_framerate =
                                     res.framerates.first().cloned().unwrap_or(0);
                             }
+                            crate::config::save_config(state);
                             crate::config::save_global_hardware_config(state);
                             changed = true;
                         }
@@ -172,6 +181,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         {
                             state.hardware.selected_framerate =
                                 res.framerates.first().cloned().unwrap_or(0);
+                            crate::config::save_config(state);
                             crate::config::save_global_hardware_config(state);
                             changed = true;
                         }
@@ -196,6 +206,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                     )
                                     .changed()
                                 {
+                                    crate::config::save_config(state);
                                     crate::config::save_global_hardware_config(state);
                                     changed = true;
                                 }
@@ -240,6 +251,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         .changed();
                 }
                 if combo_changed {
+                    crate::config::save_config(state);
                     crate::config::save_global_hardware_config(state);
                     if state.hardware.active_audio_stream.is_some() {
                         state.restart_audio_stream(ui.ctx());
@@ -267,6 +279,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             .changed();
                     }
                     if combo_changed {
+                        crate::config::save_config(state);
                         crate::config::save_global_hardware_config(state);
                         if state.hardware.active_audio_stream.is_some() {
                             state.restart_audio_stream(ui.ctx());
@@ -293,6 +306,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             .changed();
                     }
                     if combo_changed {
+                        crate::config::save_config(state);
                         crate::config::save_global_hardware_config(state);
                         if state.hardware.active_audio_stream.is_some() {
                             state.restart_audio_stream(ui.ctx());
@@ -319,6 +333,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             .changed();
                     }
                     if combo_changed {
+                        crate::config::save_config(state);
                         crate::config::save_global_hardware_config(state);
                         if state.hardware.active_audio_stream.is_some() {
                             state.restart_audio_stream(ui.ctx());
@@ -330,6 +345,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
         ui.separator();
         if crate::replay::ui::draw_audio_filter(&mut state.replay, ui) {
+            crate::config::save_config(state);
             crate::config::save_global_hardware_config(state);
             let _ = crate::config::save_replay_config(&state.replay.config);
             changed = true;

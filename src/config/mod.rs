@@ -83,6 +83,15 @@ impl From<LegacyConfig> for MichadameConfig {
                 cathode_flicker_depth: legacy.cathode_flicker_depth,
                 cathode_interference: legacy.cathode_interference,
                 cathode_lightbulb_effect: legacy.cathode_lightbulb_effect,
+                video_resolution: legacy.video_resolution,
+                video_framerate: legacy.video_framerate,
+                fft_filter_enabled: None,
+                fft_mask_save_name: None,
+                audio_source: legacy.audio_source.clone(),
+                audio_buffer_size: legacy.audio_buffer_size,
+                audio_sample_rate: legacy.audio_sample_rate,
+                audio_sample_format: legacy.audio_sample_format.clone(),
+                audio_filter: Some(legacy.replay.audio_filter.clone()),
             };
             profiles.insert("Default".to_string(), legacy_profile);
             active_profile = "Default".to_string();
@@ -222,6 +231,12 @@ mod tests {
         assert_eq!(profile.pixelate_filter_enabled, Some(true));
         assert_eq!(profile.crt_hard_scan, Some(-8.0));
         assert_eq!(profile.crt_warp_x, Some(0.031));
+        assert_eq!(profile.video_resolution, Some((640, 480)));
+        assert_eq!(profile.video_framerate, Some(60));
+        assert_eq!(profile.audio_source, Some("mic".to_string()));
+        assert_eq!(profile.audio_buffer_size, Some(1024));
+        assert_eq!(profile.audio_sample_rate, Some(48000));
+        assert!(profile.audio_filter.is_some());
     }
 
     #[test]

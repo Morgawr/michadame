@@ -22,6 +22,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         state
                             .crt_filter
                             .store(0, std::sync::atomic::Ordering::Relaxed);
+                        crate::config::save_config(state);
                         changed = true;
                     }
                     if ui
@@ -32,6 +33,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         state
                             .crt_filter
                             .store(1, std::sync::atomic::Ordering::Relaxed);
+                        crate::config::save_config(state);
                         changed = true;
                     }
                     if ui
@@ -42,6 +44,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         state
                             .crt_filter
                             .store(2, std::sync::atomic::Ordering::Relaxed);
+                        crate::config::save_config(state);
                         changed = true;
                     }
                 });
@@ -66,6 +69,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             state
                                 .scaler_filter
                                 .store(i, std::sync::atomic::Ordering::Relaxed);
+                            crate::config::save_config(state);
                             changed = true;
                         }
                     }
@@ -79,10 +83,12 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 .show_ui(ui, |ui| {
                     if ui.selectable_value(&mut current_range.clone(), 0, "Full (PC)").clicked() {
                         state.color_range.store(0, std::sync::atomic::Ordering::Relaxed);
+                        crate::config::save_config(state);
                         changed = true;
                     }
                     if ui.selectable_value(&mut current_range.clone(), 1, "Limited (TV)").clicked() {
                         state.color_range.store(1, std::sync::atomic::Ordering::Relaxed);
+                        crate::config::save_config(state);
                         changed = true;
                     }
                 });
@@ -93,12 +99,14 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 .checkbox(&mut state.video.pixelate_filter_enabled, "Pixelate")
                 .changed()
             {
+                crate::config::save_config(state);
                 changed = true;
             }
             if ui
                 .checkbox(&mut state.video.median_filter_enabled, "Median Filter 3x1")
                 .changed()
             {
+                crate::config::save_config(state);
                 changed = true;
             }
             if state.video.median_filter_enabled
@@ -110,6 +118,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     )
                     .changed()
             {
+                crate::config::save_config(state);
                 changed = true;
             }
         });
@@ -118,6 +127,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 .checkbox(&mut state.video.fft_filter_enabled, "FFT Mask Filter")
                 .changed()
             {
+                crate::config::save_config(state);
                 changed = true;
             }
             if state.video.fft_filter_enabled && ui.button("Edit Mask…").clicked() {
@@ -201,6 +211,7 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             .on_hover_text("Uses a magenta background around the video stream instead of black.")
             .changed()
         {
+            crate::config::save_config(state);
             changed = true;
         }
 
