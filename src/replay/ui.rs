@@ -356,8 +356,8 @@ pub fn draw_audio_filter(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
                 ui.horizontal(|ui| {
                     ui.label("Realtime Denoiser:");
                     let denoise_label = match filter.denoise_backend {
-                        DenoiseBackend::Afftdn => "FFmpeg afftdn (Adaptive FFT, Lapped Windows)",
-                        DenoiseBackend::Rnnoise => "RNNoise (nnnoiseless Neural Network)",
+                        DenoiseBackend::Afftdn => "FFmpeg afftdn (Adaptive FFT - Recommended for Games)",
+                        DenoiseBackend::Rnnoise => "RNNoise (Voice / Mic Only - Mutes Music)",
                         DenoiseBackend::Disabled => "Disabled (Pass-through)",
                     };
                     egui::ComboBox::from_id_source("audio_filter_denoise_backend")
@@ -366,11 +366,11 @@ pub fn draw_audio_filter(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
                             let backends = [
                                 (
                                     DenoiseBackend::Afftdn,
-                                    "FFmpeg afftdn (Adaptive FFT, Lapped Windows - Recommended for Games)",
+                                    "FFmpeg afftdn (Adaptive FFT - Recommended for Games)",
                                 ),
                                 (
                                     DenoiseBackend::Rnnoise,
-                                    "RNNoise (nnnoiseless Neural Network - Voice/Mic)",
+                                    "RNNoise (AI Voice / Mic Only - Mutes Game Music)",
                                 ),
                                 (
                                     DenoiseBackend::Disabled,
@@ -388,6 +388,18 @@ pub fn draw_audio_filter(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
                         });
                 });
 
+                if filter.denoise_backend == DenoiseBackend::Rnnoise {
+                    ui.label(
+                        egui::RichText::new(
+                            "⚠ RNNoise is trained strictly to isolate human speech. It classifies \
+                             video game music, synthesizer tracks, and sound effects as noise and \
+                             will mute them. For console gaming, use FFmpeg afftdn.",
+                        )
+                        .small()
+                        .color(egui::Color32::from_rgb(230, 160, 40)),
+                    );
+                }
+
                 if filter.denoise_backend == DenoiseBackend::Afftdn {
                     ui.horizontal(|ui| {
                         ui.label("Noise Reduction:");
@@ -396,7 +408,61 @@ pub fn draw_audio_filter(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
                                 egui::Slider::new(&mut filter.denoise_reduction_db, 6.0..=40.0)
                                     .suffix(" dB"),
                             )
-                            .on_hover_text("Amount of spectral noise floor reduction (afftdn). 20-30 dB recommended.")
+                            .on_hover_text(
+                                "Amount of spectral noise floor reduction (afftdn).\n\
+                                 12-20 dB is recommended for transparent filtering without phase smearing.\n\
+                                 Values above 25 dB can cause underwater sound.",
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+
+                        ui.label("Noise Floor:");
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut filter.denoise_noise_floor_db, -70.0..=-25.0)
+                                    .suffix(" dBFS"),
+                            )
+                            .on_hover_text(
+                                "Expected background noise floor level.\n\
+                                 Setting this to -45 to -40 dBFS matches console AV cable ground buzz,\n\
+                                 allowing modest noise reduction (15-20 dB) to completely eliminate buzz\n\
+                                 without requiring aggressive reduction that causes artifacts.",
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Smoothing:");
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut filter.denoise_gain_smooth, 0..=10)
+                                    .suffix(" bins"),
+                            )
+                            .on_hover_text(
+                                "FFT bin gain smoothing radius (default 0).\n\
+                                 Set to 0 for pure point-wise filtering without bin smearing.\n\
+                                 Values > 0 smear gain across neighboring bins.",
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+
+                        if ui
+                            .checkbox(
+                                &mut filter.denoise_track_noise,
+                                "Track Bright-Scene Surges",
+                            )
+                            .on_hover_text(
+                                "Dynamically tracks fluctuating noise levels in real time.\n\
+                                 Adapts when bright video scenes draw higher current through\n\
+                                 shared video ground cables and cause the buzz to intensify.",
+                            )
                             .changed()
                         {
                             changed = true;
@@ -439,12 +505,18 @@ pub fn draw_audio_filter(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
                     });
                 }
 
-                // Mains Hum Filter (Single high-Q notch, NO harmonic comb)
+                // Hum & Ground Return Buzz Notches
                 ui.horizontal(|ui| {
-                    ui.label("Mains Hum Notch:");
+                    ui.label("Hum / Buzz Notch:");
                     let hum_label = match filter.hum_filter {
-                        HumFilterMode::SingleNotch60Hz => "Single 60 Hz Notch (NTSC / 60 Hz Mains)",
-                        HumFilterMode::SingleNotch50Hz => "Single 50 Hz Notch (PAL / 50 Hz Mains)",
+                        HumFilterMode::HarmonicNotch60Hz => {
+                            "Harmonic Buzz Filter (59.94 Hz NTSC / Dreamcast Harmonics to 1.5 kHz)"
+                        }
+                        HumFilterMode::HarmonicNotch50Hz => {
+                            "Harmonic Buzz Filter (50.00 Hz PAL Harmonics to 1.5 kHz)"
+                        }
+                        HumFilterMode::SingleNotch60Hz => "Single 60 Hz Notch (Sub-bass hum only)",
+                        HumFilterMode::SingleNotch50Hz => "Single 50 Hz Notch (Sub-bass hum only)",
                         HumFilterMode::Custom => "Custom Frequency Notch",
                         HumFilterMode::Disabled => "Disabled",
                     };
@@ -453,12 +525,20 @@ pub fn draw_audio_filter(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
                         .show_ui(ui, |ui| {
                             let modes = [
                                 (
+                                    HumFilterMode::HarmonicNotch60Hz,
+                                    "Harmonic Buzz Filter (59.94 Hz NTSC / Dreamcast Harmonics to 1.5 kHz - 24 surgical notches)",
+                                ),
+                                (
+                                    HumFilterMode::HarmonicNotch50Hz,
+                                    "Harmonic Buzz Filter (50.00 Hz PAL Harmonics to 1.5 kHz - 30 surgical notches)",
+                                ),
+                                (
                                     HumFilterMode::SingleNotch60Hz,
-                                    "Single 60 Hz Notch (NTSC / 60 Hz Mains - Zero phaser distortion)",
+                                    "Single 60 Hz Notch (Sub-bass hum only)",
                                 ),
                                 (
                                     HumFilterMode::SingleNotch50Hz,
-                                    "Single 50 Hz Notch (PAL / 50 Hz Mains - Zero phaser distortion)",
+                                    "Single 50 Hz Notch (Sub-bass hum only)",
                                 ),
                                 (
                                     HumFilterMode::Custom,

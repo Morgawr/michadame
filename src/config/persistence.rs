@@ -537,6 +537,7 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) {
 
 pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     state.replay.config = cfg.replay.clone();
+    state.replay.sync_audio_filter();
     state.profiles = cfg.profiles.clone();
     state.active_profile = cfg.active_profile.clone();
 
@@ -1279,5 +1280,24 @@ crt_brightboost = 1.6
         assert_eq!(saturn.cathode_interference_enabled, None);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_audio_filter_config_synced_on_startup_and_apply() {
+        let mut state = AppState::default();
+        assert!(!state.replay.audio.filter.read().unwrap().enabled);
+
+        let mut cfg = MichadameConfig::default();
+        cfg.replay.audio_filter.enabled = true;
+        cfg.replay.audio_filter.denoise_reduction_db = 18.0;
+        cfg.replay.audio_filter.hum_freq = 60.0;
+
+        apply_config(&mut state, &cfg);
+
+        // Verify that state.replay.audio.filter (read by ALSA thread) is immediately enabled and synced!
+        let audio_filter = state.replay.audio.filter.read().unwrap();
+        assert!(audio_filter.enabled);
+        assert_eq!(audio_filter.denoise_reduction_db, 18.0);
+        assert_eq!(audio_filter.hum_freq, 60.0);
     }
 }

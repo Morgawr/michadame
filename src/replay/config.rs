@@ -19,10 +19,12 @@ pub enum DenoiseBackend {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum HumFilterMode {
     #[default]
-    SingleNotch60Hz, // Single notch at 60.0 Hz (NTSC console / 60 Hz mains)
-    SingleNotch50Hz, // Single notch at 50.0 Hz (PAL console / 50 Hz mains)
-    Custom,          // Single notch at custom frequency
-    Disabled,        // No hum notch
+    HarmonicNotch60Hz, // Multi-notch: 60 Hz + Harmonics (60, 120, 180, 240, 300 Hz)
+    HarmonicNotch50Hz, // Multi-notch: 50 Hz + Harmonics (50, 100, 150, 200, 250 Hz)
+    SingleNotch60Hz,   // Single notch at 60.0 Hz (NTSC console / 60 Hz mains)
+    SingleNotch50Hz,   // Single notch at 50.0 Hz (PAL console / 50 Hz mains)
+    Custom,            // Single notch at custom frequency
+    Disabled,          // No hum notch
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -41,14 +43,17 @@ pub struct AudioFilterConfig {
     pub enabled: bool,
     pub preset: FilterPreset,
     pub denoise_backend: DenoiseBackend,
-    pub denoise_reduction_db: f32, // for afftdn (e.g. 25.0)
+    pub denoise_reduction_db: f32, // for afftdn (default 18.0)
+    pub denoise_noise_floor_db: f32, // baseline noise floor for afftdn (default -42.0)
+    pub denoise_track_noise: bool, // dynamically track noise fluctuations (e.g. bright scenes)
+    pub denoise_gain_smooth: u32,  // gain smooth radius across FFT bins (prevents underwater sound)
     pub hum_filter: HumFilterMode,
     pub hum_freq: f32,             // for Custom hum notch (default 60.0)
     pub crt_notch: bool,           // 15.734 kHz flyback notch
     pub crt_freq: f32,             // default 15734.26
     pub rumble_filter: bool,       // 40 Hz highpass
     pub treble_bypass: bool,       // Retain high frequencies above crossover (prevents muffled/underwater sound)
-    pub treble_crossover_hz: f32,  // Cutoff frequency for treble bypass (default 4000.0)
+    pub treble_crossover_hz: f32,  // Cutoff frequency for treble bypass (default 5000.0)
     pub gate: bool,                // downward expander
     pub gate_threshold_db: f32,    // default -50.0
 }
@@ -59,8 +64,11 @@ impl Default for AudioFilterConfig {
             enabled: false,
             preset: FilterPreset::DreamcastNtsc,
             denoise_backend: DenoiseBackend::Afftdn,
-            denoise_reduction_db: 25.0,
-            hum_filter: HumFilterMode::SingleNotch60Hz,
+            denoise_reduction_db: 12.0,
+            denoise_noise_floor_db: -50.0,
+            denoise_track_noise: false,
+            denoise_gain_smooth: 0,
+            hum_filter: HumFilterMode::HarmonicNotch60Hz,
             hum_freq: 60.0,
             crt_notch: true,
             crt_freq: 15734.26,
@@ -79,23 +87,33 @@ impl AudioFilterConfig {
         match preset {
             FilterPreset::DreamcastNtsc => {
                 self.denoise_backend = DenoiseBackend::Afftdn;
-                self.hum_filter = HumFilterMode::SingleNotch60Hz;
+                self.denoise_reduction_db = 12.0;
+                self.denoise_noise_floor_db = -50.0;
+                self.denoise_track_noise = false;
+                self.denoise_gain_smooth = 0;
+                self.hum_filter = HumFilterMode::HarmonicNotch60Hz;
                 self.crt_notch = true;
                 self.crt_freq = 15734.26;
                 self.rumble_filter = true;
                 self.treble_bypass = true;
                 self.treble_crossover_hz = 4000.0;
                 self.gate = true;
+                self.gate_threshold_db = -50.0;
             }
             FilterPreset::ConsolePal => {
                 self.denoise_backend = DenoiseBackend::Afftdn;
-                self.hum_filter = HumFilterMode::SingleNotch50Hz;
+                self.denoise_reduction_db = 12.0;
+                self.denoise_noise_floor_db = -50.0;
+                self.denoise_track_noise = false;
+                self.denoise_gain_smooth = 0;
+                self.hum_filter = HumFilterMode::HarmonicNotch50Hz;
                 self.crt_notch = true;
                 self.crt_freq = 15625.0;
                 self.rumble_filter = true;
                 self.treble_bypass = true;
                 self.treble_crossover_hz = 4000.0;
                 self.gate = true;
+                self.gate_threshold_db = -50.0;
             }
             FilterPreset::MainsHum60 => {
                 self.denoise_backend = DenoiseBackend::Disabled;
@@ -112,6 +130,7 @@ impl AudioFilterConfig {
                 self.rumble_filter = true;
                 self.treble_bypass = false;
                 self.gate = true;
+                self.gate_threshold_db = -50.0;
             }
             FilterPreset::Custom => {}
         }
@@ -126,6 +145,12 @@ impl AudioFilterConfig {
             stages.push("40 Hz HPF".to_string());
         }
         match self.hum_filter {
+            HumFilterMode::HarmonicNotch60Hz => {
+                stages.push("60 Hz Multi-Notch (Harmonics)".to_string())
+            }
+            HumFilterMode::HarmonicNotch50Hz => {
+                stages.push("50 Hz Multi-Notch (Harmonics)".to_string())
+            }
             HumFilterMode::SingleNotch60Hz => stages.push("60 Hz Single Notch".to_string()),
             HumFilterMode::SingleNotch50Hz => stages.push("50 Hz Single Notch".to_string()),
             HumFilterMode::Custom => stages.push(format!("{:.1} Hz Single Notch", self.hum_freq)),
@@ -136,10 +161,28 @@ impl AudioFilterConfig {
         }
         match self.denoise_backend {
             DenoiseBackend::Afftdn => {
-                if self.treble_bypass {
-                    stages.push(format!("FFmpeg afftdn (-{:.0}dB, <{:.0}Hz)", self.denoise_reduction_db, self.treble_crossover_hz));
+                let track_str = if self.denoise_track_noise {
+                    ", tracking"
                 } else {
-                    stages.push(format!("FFmpeg afftdn (-{:.0}dB)", self.denoise_reduction_db));
+                    ""
+                };
+                if self.treble_bypass {
+                    stages.push(format!(
+                        "FFmpeg afftdn (-{:.0}dB, nf={:.0}dB, gs={}{}, <{:.0}Hz)",
+                        self.denoise_reduction_db,
+                        self.denoise_noise_floor_db,
+                        self.denoise_gain_smooth,
+                        track_str,
+                        self.treble_crossover_hz
+                    ));
+                } else {
+                    stages.push(format!(
+                        "FFmpeg afftdn (-{:.0}dB, nf={:.0}dB, gs={}{})",
+                        self.denoise_reduction_db,
+                        self.denoise_noise_floor_db,
+                        self.denoise_gain_smooth,
+                        track_str
+                    ));
                 }
             }
             DenoiseBackend::Rnnoise => {
@@ -152,7 +195,10 @@ impl AudioFilterConfig {
             DenoiseBackend::Disabled => {}
         }
         if self.treble_bypass && self.denoise_backend != DenoiseBackend::Disabled {
-            stages.push(format!("Treble Bypass (>{:.0}Hz Retained)", self.treble_crossover_hz));
+            stages.push(format!(
+                "Treble Bypass (>{:.0}Hz Retained)",
+                self.treble_crossover_hz
+            ));
         }
         if self.gate {
             stages.push(format!("Gate ({:.0} dBFS)", self.gate_threshold_db));
@@ -337,12 +383,15 @@ mod tests {
     fn audio_filter_presets() {
         let mut filter = AudioFilterConfig::default();
         assert_eq!(filter.preset, FilterPreset::DreamcastNtsc);
-        assert_eq!(filter.hum_filter, HumFilterMode::SingleNotch60Hz);
+        assert_eq!(filter.hum_filter, HumFilterMode::HarmonicNotch60Hz);
         assert_eq!(filter.denoise_backend, DenoiseBackend::Afftdn);
+        assert_eq!(filter.denoise_noise_floor_db, -50.0);
+        assert_eq!(filter.denoise_gain_smooth, 0);
+        assert!(!filter.denoise_track_noise);
         assert!(filter.crt_notch);
 
         filter.apply_preset(FilterPreset::ConsolePal);
-        assert_eq!(filter.hum_filter, HumFilterMode::SingleNotch50Hz);
+        assert_eq!(filter.hum_filter, HumFilterMode::HarmonicNotch50Hz);
         assert_eq!(filter.crt_freq, 15625.0);
 
         filter.apply_preset(FilterPreset::MainsHum60);

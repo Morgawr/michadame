@@ -205,7 +205,7 @@ pub struct RnnoiseStream {
 
 impl RnnoiseStream {
     pub const FRAME_SIZE: usize = nnnoiseless::DenoiseState::FRAME_SIZE;
-    pub const DELAY_SAMPLES: usize = Self::FRAME_SIZE;
+    pub const DELAY_SAMPLES: usize = Self::FRAME_SIZE * 2;
 
     pub fn new() -> Self {
         let mut stream = Self {
@@ -221,21 +221,17 @@ impl RnnoiseStream {
     }
 
     fn prime(&mut self) {
-        for _ in 0..Self::FRAME_SIZE {
-            self.in_l.push_back(0.0);
-            self.in_r.push_back(0.0);
-            self.out_l.push_back(0.0);
-            self.out_r.push_back(0.0);
-        }
+        self.in_l.clear();
+        self.in_r.clear();
+        self.out_l.clear();
+        self.out_r.clear();
+        self.out_l.resize(Self::FRAME_SIZE, 0.0);
+        self.out_r.resize(Self::FRAME_SIZE, 0.0);
     }
 
     pub fn reset(&mut self) {
         self.left = nnnoiseless::DenoiseState::new();
         self.right = nnnoiseless::DenoiseState::new();
-        self.in_l.clear();
-        self.in_r.clear();
-        self.out_l.clear();
-        self.out_r.clear();
         self.prime();
     }
 
@@ -286,9 +282,8 @@ impl RnnoiseStream {
 
         if channels == 1 {
             for s in samples.iter_mut() {
-                if let Some(val) = self.out_l.pop_front() {
-                    *s = (val / 32767.0).clamp(-1.0, 1.0);
-                }
+                let val = self.out_l.pop_front().unwrap_or(0.0);
+                *s = (val / 32767.0).clamp(-1.0, 1.0);
             }
         } else {
             for frame in samples.chunks_exact_mut(channels) {
@@ -305,12 +300,35 @@ pub struct FfmpegAfftdnStream {
     graph: ff::filter::Graph,
     sample_rate: u32,
     pts: i64,
+    frame_size: usize,
+    in_l: VecDeque<f32>,
+    in_r: VecDeque<f32>,
     out_l: VecDeque<f32>,
     out_r: VecDeque<f32>,
 }
 
 impl FfmpegAfftdnStream {
-    pub fn new(sample_rate: u32, nr_db: f32, nf_db: f32) -> Result<Self> {
+    pub fn frame_size_for(sample_rate: u32) -> usize {
+        (sample_rate as usize * 125) / 10000 // exact 12.5 ms (600 at 48000 Hz)
+    }
+
+    pub fn delay_samples_for(sample_rate: u32) -> usize {
+        // Algorithmic filter delay (2 * frame_size) + FIFO pre-buffer (1 * frame_size) = 3 * frame_size
+        Self::frame_size_for(sample_rate) * 3
+    }
+
+    #[allow(dead_code)]
+    pub fn delay_samples(&self) -> usize {
+        Self::delay_samples_for(self.sample_rate)
+    }
+
+    pub fn new(
+        sample_rate: u32,
+        nr_db: f32,
+        nf_db: f32,
+        track_noise: bool,
+        gain_smooth: u32,
+    ) -> Result<Self> {
         let _ = ff::init();
         let mut graph = ff::filter::Graph::new();
         let abuffer = ff::filter::find("abuffer").context("abuffer filter not found")?;
@@ -325,7 +343,9 @@ impl FfmpegAfftdnStream {
 
         let nr = nr_db.clamp(1.0, 60.0);
         let nf = nf_db.clamp(-90.0, -20.0);
-        let spec = format!("afftdn=nr={:.1}:nf={:.1}:tn=0:tr=0", nr, nf);
+        let tn = if track_noise { 1 } else { 0 };
+        let gs = gain_smooth.min(50);
+        let spec = format!("afftdn=nr={:.1}:nf={:.1}:tn={}:tr=0:gs={}", nr, nf, tn, gs);
 
         graph
             .output("in", 0)
@@ -337,12 +357,16 @@ impl FfmpegAfftdnStream {
 
         graph.validate().context("validate graph")?;
 
+        let frame_size = Self::frame_size_for(sample_rate);
         let mut stream = Self {
             graph,
             sample_rate,
             pts: 0,
-            out_l: VecDeque::with_capacity(4096),
-            out_r: VecDeque::with_capacity(4096),
+            frame_size,
+            in_l: VecDeque::with_capacity(frame_size * 4),
+            in_r: VecDeque::with_capacity(frame_size * 4),
+            out_l: VecDeque::with_capacity(frame_size * 4),
+            out_r: VecDeque::with_capacity(frame_size * 4),
         };
 
         stream.prime();
@@ -350,29 +374,15 @@ impl FfmpegAfftdnStream {
     }
 
     fn prime(&mut self) {
-        let num_prime = 1024;
-        let mut input_frame = frame::Audio::new(
-            format::Sample::F32(format::sample::Type::Planar),
-            num_prime,
-            ff::ChannelLayout::STEREO,
-        );
-        input_frame.set_rate(self.sample_rate);
-        input_frame.set_pts(Some(self.pts));
-        self.pts += num_prime as i64;
-        for ch in 0..2 {
-            input_frame.plane_mut::<f32>(ch).fill(0.0);
-        }
-
-        if let Some(mut in_ctx) = self.graph.get("in") {
-            let _ = in_ctx.source().add(&input_frame);
-        }
-
-        self.drain_into_buffers();
-
-        while self.out_l.len() < num_prime {
-            self.out_l.push_back(0.0);
-            self.out_r.push_back(0.0);
-        }
+        self.in_l.clear();
+        self.in_r.clear();
+        self.out_l.clear();
+        self.out_r.clear();
+        // Pre-fill output FIFO with exactly frame_size zeros.
+        // in_l/in_r start empty.
+        // This ensures every sample experiences a fixed, deterministic delay of 3 * frame_size.
+        self.out_l.resize(self.frame_size, 0.0);
+        self.out_r.resize(self.frame_size, 0.0);
     }
 
     fn drain_into_buffers(&mut self) {
@@ -402,46 +412,46 @@ impl FfmpegAfftdnStream {
             return;
         }
 
-        let num_frames = samples.len() / channels;
-
-        let mut input_frame = frame::Audio::new(
-            format::Sample::F32(format::sample::Type::Planar),
-            num_frames,
-            ff::ChannelLayout::STEREO,
-        );
-        input_frame.set_rate(self.sample_rate);
-        input_frame.set_pts(Some(self.pts));
-        self.pts += num_frames as i64;
-
         if channels == 1 {
-            input_frame.plane_mut::<f32>(0)[..samples.len()].copy_from_slice(samples);
-            input_frame.plane_mut::<f32>(1)[..samples.len()].copy_from_slice(samples);
-        } else {
-            {
-                let plane_0 = input_frame.plane_mut::<f32>(0);
-                for (i, frame) in samples.chunks_exact(channels).enumerate() {
-                    plane_0[i] = frame[0];
-                }
+            for &s in samples.iter() {
+                self.in_l.push_back(s);
+                self.in_r.push_back(s);
             }
-            {
-                let plane_1 = input_frame.plane_mut::<f32>(1);
-                for (i, frame) in samples.chunks_exact(channels).enumerate() {
-                    plane_1[i] = frame[1];
-                }
+        } else {
+            for frame in samples.chunks_exact(channels) {
+                self.in_l.push_back(frame[0]);
+                self.in_r.push_back(frame[1]);
             }
         }
 
-        if let Some(mut in_ctx) = self.graph.get("in") {
-            if in_ctx.source().add(&input_frame).is_ok() {
-                self.drain_into_buffers();
+        while self.in_l.len() >= self.frame_size {
+            let mut input_frame = frame::Audio::new(
+                format::Sample::F32(format::sample::Type::Planar),
+                self.frame_size,
+                ff::ChannelLayout::STEREO,
+            );
+            input_frame.set_rate(self.sample_rate);
+            input_frame.set_pts(Some(self.pts));
+            self.pts += self.frame_size as i64;
+
+            for i in 0..self.frame_size {
+                let l = self.in_l.pop_front().unwrap_or(0.0);
+                let r = self.in_r.pop_front().unwrap_or(0.0);
+                input_frame.plane_mut::<f32>(0)[i] = l;
+                input_frame.plane_mut::<f32>(1)[i] = r;
+            }
+
+            if let Some(mut in_ctx) = self.graph.get("in") {
+                if in_ctx.source().add(&input_frame).is_ok() {
+                    self.drain_into_buffers();
+                }
             }
         }
 
         if channels == 1 {
             for s in samples.iter_mut() {
-                if let Some(val) = self.out_l.pop_front() {
-                    *s = val.clamp(-1.0, 1.0);
-                }
+                let val = self.out_l.pop_front().unwrap_or(0.0);
+                *s = val.clamp(-1.0, 1.0);
             }
         } else {
             for frame in samples.chunks_exact_mut(channels) {
@@ -457,7 +467,7 @@ impl FfmpegAfftdnStream {
 pub struct LiveAudioDsp {
     pub enabled: bool,
     rumble_filter: Option<Biquad>,
-    hum_notch: Option<Biquad>,   // ONLY A SINGLE NOTCH (no comb, no harmonics)
+    hum_notches: Vec<Biquad>,
     crossover: Option<Lr4Crossover>,
     high_delay_l: VecDeque<f32>,
     high_delay_r: VecDeque<f32>,
@@ -474,7 +484,7 @@ impl LiveAudioDsp {
         let mut dsp = Self {
             enabled: false,
             rumble_filter: None,
-            hum_notch: None,
+            hum_notches: Vec::new(),
             crossover: None,
             high_delay_l: VecDeque::new(),
             high_delay_r: VecDeque::new(),
@@ -503,7 +513,7 @@ impl LiveAudioDsp {
 
         if !self.enabled {
             self.rumble_filter = None;
-            self.hum_notch = None;
+            self.hum_notches.clear();
             self.crossover = None;
             self.high_delay_l.clear();
             self.high_delay_r.clear();
@@ -523,19 +533,41 @@ impl LiveAudioDsp {
             None
         };
 
-        // ONLY A SINGLE NOTCH FOR 50/60HZ HUM (no comb, no harmonics, no phaser)
-        self.hum_notch = match config.hum_filter {
+        // Hum & Video Ground Return Buzz Notches (high-Q biquad notches, Q=35)
+        self.hum_notches = match config.hum_filter {
             crate::replay::config::HumFilterMode::SingleNotch60Hz => {
-                Some(Biquad::notch(60.0, 30.0, fs))
+                vec![Biquad::notch(60.0, 35.0, fs)]
             }
             crate::replay::config::HumFilterMode::SingleNotch50Hz => {
-                Some(Biquad::notch(50.0, 30.0, fs))
+                vec![Biquad::notch(50.0, 35.0, fs)]
+            }
+            crate::replay::config::HumFilterMode::HarmonicNotch60Hz => {
+                // Cascaded narrow constant-bandwidth (3 Hz) notches at Dreamcast NTSC 59.94 Hz harmonics up to 1500 Hz (24 harmonics)
+                let f0 = 59.938;
+                (1..=24)
+                    .map(|k| {
+                        let fk = f0 * (k as f32);
+                        let q = (fk / 3.0).max(15.0);
+                        Biquad::notch(fk, q, fs)
+                    })
+                    .collect()
+            }
+            crate::replay::config::HumFilterMode::HarmonicNotch50Hz => {
+                // Cascaded narrow constant-bandwidth (3 Hz) notches at PAL 50.00 Hz harmonics up to 1500 Hz (30 harmonics)
+                let f0 = 50.0;
+                (1..=30)
+                    .map(|k| {
+                        let fk = f0 * (k as f32);
+                        let q = (fk / 3.0).max(15.0);
+                        Biquad::notch(fk, q, fs)
+                    })
+                    .collect()
             }
             crate::replay::config::HumFilterMode::Custom => {
                 let freq = config.hum_freq.clamp(20.0, 1000.0);
-                Some(Biquad::notch(freq, 30.0, fs))
+                vec![Biquad::notch(freq, 35.0, fs)]
             }
-            crate::replay::config::HumFilterMode::Disabled => None,
+            crate::replay::config::HumFilterMode::Disabled => Vec::new(),
         };
 
         // Crossover for Treble Bypass / High-Frequency Retention
@@ -545,7 +577,7 @@ impl LiveAudioDsp {
             self.crossover = Some(Lr4Crossover::new(fc, fs));
             let delay_frames = match config.denoise_backend {
                 crate::replay::config::DenoiseBackend::Rnnoise => RnnoiseStream::DELAY_SAMPLES,
-                crate::replay::config::DenoiseBackend::Afftdn => 1024,
+                crate::replay::config::DenoiseBackend::Afftdn => FfmpegAfftdnStream::delay_samples_for(sample_rate),
                 crate::replay::config::DenoiseBackend::Disabled => 0,
             };
             self.high_delay_l.clear();
@@ -570,9 +602,15 @@ impl LiveAudioDsp {
         match config.denoise_backend {
             crate::replay::config::DenoiseBackend::Afftdn => {
                 self.rnnoise = None;
-                self.afftdn = FfmpegAfftdnStream::new(sample_rate, config.denoise_reduction_db, -65.0)
-                    .map_err(|e| tracing::warn!("Failed to init afftdn: {}", e))
-                    .ok();
+                self.afftdn = FfmpegAfftdnStream::new(
+                    sample_rate,
+                    config.denoise_reduction_db,
+                    config.denoise_noise_floor_db,
+                    config.denoise_track_noise,
+                    config.denoise_gain_smooth,
+                )
+                .map_err(|e| tracing::warn!("Failed to init afftdn: {}", e))
+                .ok();
             }
             crate::replay::config::DenoiseBackend::Rnnoise => {
                 self.afftdn = None;
@@ -608,7 +646,7 @@ impl LiveAudioDsp {
 
         let num_ch = channels.min(2);
 
-        // Stage 1: Rumble HPF and Single Hum Notch (both operate in low frequencies)
+        // Stage 1: Rumble HPF and Hum / Buzz Notches (both operate in low frequencies)
         for frame in samples.chunks_exact_mut(channels) {
             for (ch, sample) in frame[..num_ch].iter_mut().enumerate() {
                 let mut x = *sample;
@@ -617,7 +655,7 @@ impl LiveAudioDsp {
                     x = rf.tick(ch, x);
                 }
 
-                if let Some(hn) = &mut self.hum_notch {
+                for hn in &mut self.hum_notches {
                     x = hn.tick(ch, x);
                 }
 
@@ -682,14 +720,14 @@ impl LiveAudioDsp {
         if let Some(rf) = &mut self.rumble_filter {
             rf.reset();
         }
-        if let Some(hn) = &mut self.hum_notch {
+        for hn in &mut self.hum_notches {
             hn.reset();
         }
         if let Some(xo) = &mut self.crossover {
             xo.reset();
             let delay_frames = match self.current_config.denoise_backend {
                 crate::replay::config::DenoiseBackend::Rnnoise => RnnoiseStream::DELAY_SAMPLES,
-                crate::replay::config::DenoiseBackend::Afftdn => 1024,
+                crate::replay::config::DenoiseBackend::Afftdn => FfmpegAfftdnStream::delay_samples_for(self.sample_rate),
                 crate::replay::config::DenoiseBackend::Disabled => 0,
             };
             self.high_delay_l.clear();
@@ -803,15 +841,179 @@ mod tests {
     }
 
     #[test]
-    fn test_live_audio_dsp_afftdn_pipeline() {
-        let mut cfg = AudioFilterConfig::default();
-        cfg.enabled = true;
-        cfg.denoise_backend = DenoiseBackend::Afftdn;
-        cfg.treble_bypass = true;
-        let mut dsp = LiveAudioDsp::new(&cfg, 48000);
-        let mut samples = vec![0.1f32; 1024 * 2];
-        dsp.process_interleaved(&mut samples, 2);
-        assert_eq!(samples.len(), 1024 * 2);
+    fn test_live_dsp_crossover_variable_chunks() {
+        for backend in [DenoiseBackend::Afftdn, DenoiseBackend::Rnnoise] {
+            let mut cfg = AudioFilterConfig::default();
+            cfg.enabled = true;
+            cfg.denoise_backend = backend;
+            cfg.treble_bypass = true;
+            cfg.treble_crossover_hz = 4000.0;
+            let mut dsp = LiveAudioDsp::new(&cfg, 48000);
+
+            // Feed arbitrary variable chunk sizes
+            let chunk_sizes = [256, 128, 512, 384, 1024, 64, 480, 256, 512];
+            for &sz in &chunk_sizes {
+                let mut buf = vec![0.1f32; sz * 2];
+                dsp.process_interleaved(&mut buf, 2);
+                assert_eq!(buf.len(), sz * 2);
+                // Verify no NaNs or Infinities
+                for &s in &buf {
+                    assert!(s.is_finite());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_harmonic_notch_attenuation_and_transparency() {
+        let fs = 48000.0;
+        let f0 = 59.938;
+        let mut notches: Vec<Biquad> = (1..=24)
+            .map(|k| {
+                let fk = f0 * (k as f32);
+                let q = (fk / 3.0).max(15.0);
+                Biquad::notch(fk, q, fs)
+            })
+            .collect();
+
+        // 1. Check attenuation at harmonics (e.g. 59.94, 179.8, 359.6, 719.3, 1198.8 Hz)
+        for &k in &[1, 3, 6, 12, 20] {
+            let fk = f0 * (k as f32);
+            for n in &mut notches {
+                n.reset();
+            }
+            let mut sum_sq_in = 0.0;
+            let mut sum_sq_out = 0.0;
+            for i in 0..96000 {
+                let t = i as f32 / fs;
+                let x = (2.0 * std::f32::consts::PI * fk * t).sin();
+                let mut y = x;
+                for n in &mut notches {
+                    y = n.tick(0, y);
+                }
+                if i >= 48000 {
+                    sum_sq_in += x * x;
+                    sum_sq_out += y * y;
+                }
+            }
+            let atten_db = 10.0 * (sum_sq_in / sum_sq_out).log10();
+            assert!(
+                atten_db > 15.0,
+                "Harmonic notch at {:.1} Hz attenuation was {:.1} dB (expected > 15 dB)",
+                fk,
+                atten_db
+            );
+        }
+
+        // 2. Check transparency at off-notch frequencies (90 Hz, 150 Hz, 710.5 Hz, 1000 Hz)
+        for &f_pass in &[90.0, 150.0, 710.5, 1000.0] {
+            for n in &mut notches {
+                n.reset();
+            }
+            let mut sum_sq_in = 0.0;
+            let mut sum_sq_out = 0.0;
+            for i in 0..96000 {
+                let t = i as f32 / fs;
+                let x = (2.0 * std::f32::consts::PI * f_pass * t).sin();
+                let mut y = x;
+                for n in &mut notches {
+                    y = n.tick(0, y);
+                }
+                if i >= 48000 {
+                    sum_sq_in += x * x;
+                    sum_sq_out += y * y;
+                }
+            }
+            let delta_db = 10.0 * (sum_sq_in / sum_sq_out).log10().abs();
+            assert!(
+                delta_db < 0.25,
+                "Harmonic notch affected passband {:.1} Hz by {:.3} dB (expected < 0.25 dB)",
+                f_pass,
+                delta_db
+            );
+        }
+    }
+
+    #[test]
+    fn test_afftdn_exact_constant_delay_and_streaming() {
+        for spike_at in [0, 50, 255, 256, 300, 599, 600, 750, 1000] {
+            let mut stream = FfmpegAfftdnStream::new(48000, 12.0, -50.0, false, 0).unwrap();
+            let chunk_sizes = [256, 256, 128, 384, 512, 1024, 256, 512, 128, 64, 480, 512];
+            let mut total_fed = 0;
+            let mut detected_at = None;
+            let mut total_out = 0;
+
+            for &sz in &chunk_sizes {
+                let mut buf = vec![0.0f32; sz * 2];
+                for i in 0..sz {
+                    if total_fed + i == spike_at {
+                        buf[i * 2] = 1.0;
+                        buf[i * 2 + 1] = 1.0;
+                    }
+                }
+                total_fed += sz;
+                stream.process_interleaved(&mut buf, 2);
+                for i in 0..sz {
+                    let val = buf[i * 2];
+                    if val.abs() > 0.05 && detected_at.is_none() {
+                        detected_at = Some(total_out + i);
+                    }
+                }
+                total_out += sz;
+            }
+
+            let delay = detected_at.unwrap() as i64 - spike_at as i64;
+            assert_eq!(
+                delay,
+                stream.delay_samples() as i64,
+                "Afftdn spike at {} had delay {} (expected {})",
+                spike_at,
+                delay,
+                stream.delay_samples()
+            );
+        }
+    }
+
+    #[test]
+    fn test_rnnoise_exact_constant_delay_and_streaming() {
+        for spike_at in [0, 50, 255, 256, 300, 479, 480, 750, 1000] {
+            let mut stream = RnnoiseStream::new();
+            let chunk_sizes = [256, 256, 128, 384, 512, 1024, 256, 512, 128, 64, 480, 512];
+            let mut total_fed = 0;
+            let mut max_val = 0.0f32;
+            let mut peak_at = 0;
+            let mut total_out = 0;
+
+            for &sz in &chunk_sizes {
+                let mut buf = vec![0.0f32; sz * 2];
+                for i in 0..sz {
+                    if total_fed + i == spike_at {
+                        buf[i * 2] = 0.5;
+                        buf[i * 2 + 1] = 0.5;
+                    }
+                }
+                total_fed += sz;
+                stream.process_interleaved(&mut buf, 2);
+                for i in 0..sz {
+                    let val = buf[i * 2].abs();
+                    if val > max_val {
+                        max_val = val;
+                        peak_at = total_out + i;
+                    }
+                }
+                total_out += sz;
+            }
+
+            let delay = peak_at as i64 - spike_at as i64;
+            assert_eq!(
+                delay,
+                RnnoiseStream::DELAY_SAMPLES as i64,
+                "RNNoise spike at {} had delay {} (expected {})",
+                spike_at,
+                delay,
+                RnnoiseStream::DELAY_SAMPLES
+            );
+        }
     }
 
     fn write_wav_i16(path: &str, samples: &[f32], channels: usize, sample_rate: u32) {

@@ -152,6 +152,7 @@ impl AppState {
     }
 
     fn finish_stream_start(&mut self, ctx: &egui::Context) {
+        self.replay.sync_audio_filter();
         let Some(audio) = self.pending_audio_stream.take() else {
             return;
         };
@@ -262,6 +263,7 @@ impl AppState {
 
     pub fn restart_audio_stream(&mut self, ctx: &egui::Context) {
         self.replay.disable();
+        self.replay.sync_audio_filter();
         self.hardware.active_audio_stream = None;
 
         if let Some(mic) = &self.hardware.selected_audio_source_name {
