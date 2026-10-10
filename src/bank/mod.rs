@@ -204,6 +204,11 @@ pub struct BankCaptureHandle {
 }
 
 impl BankCaptureHandle {
+    /// Returns true if there is a pending mining request waiting for a screenshot capture.
+    pub fn has_pending(&self) -> bool {
+        self.pending.lock().map(|p| p.is_some()).unwrap_or(false)
+    }
+
     /// Takes the pending mining request, if any.
     pub fn take_pending(&self) -> Option<MineRequest> {
         self.pending.lock().ok()?.take()
@@ -641,6 +646,11 @@ impl BankState {
         true
     }
 
+    /// Returns true if there is a pending mining request waiting for a screenshot capture.
+    pub fn has_pending(&self) -> bool {
+        self.pending.lock().map(|p| p.is_some()).unwrap_or(false)
+    }
+
     /// Processes finished saves and capture timeouts. Returns toast messages:
     /// `Ok(info)` or `Err(error)`.
     pub fn poll(&mut self) -> Vec<Result<String, String>> {
@@ -925,7 +935,11 @@ mod tests {
         assert!(!bank.request_mine(request), "duplicates are rejected while in flight");
 
         let handle = bank.capture_handle();
+        assert!(handle.has_pending());
+        assert!(bank.has_pending());
         let req = handle.take_pending().unwrap();
+        assert!(!handle.has_pending());
+        assert!(!bank.has_pending());
         handle.save(req, Some((vec![255u8; 64 * 48 * 4], 64, 48)));
 
         let deadline = Instant::now() + Duration::from_secs(10);

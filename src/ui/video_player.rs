@@ -116,6 +116,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
         let ocr_capture = state.ocr.capture_requested.clone();
         let ocr_req_sender = state.ocr.ocr_request_sender.clone();
+        if state.bank.has_pending() {
+            ctx.request_repaint();
+        }
         let bank_capture = state.bank.capture_handle();
 
         let ppp = ctx.pixels_per_point();
@@ -267,6 +270,18 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 .map(|f| (f.width, f.height))
                                 .unwrap_or((texture_size.x as u32, texture_size.y as u32));
 
+                            let is_mining_capture = bank_capture_cb.has_pending();
+                            let current_software_mouse_pos = if is_mining_capture {
+                                None
+                            } else {
+                                software_mouse_pos
+                            };
+                            let current_software_mouse_clip = if is_mining_capture {
+                                None
+                            } else {
+                                software_mouse_clip
+                            };
+
                             let rendered_area = renderer.paint(
                                 painter.gl(),
                                 painter,
@@ -286,8 +301,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 fft_clone.as_ref(),
                                 fft_threshold,
                                 fft_black,
-                                software_mouse_pos,
-                                software_mouse_clip,
+                                current_software_mouse_pos,
+                                current_software_mouse_clip,
+                                is_mining_capture,
                             );
                             let (at, rate) = latest_frame
                                 .as_ref()

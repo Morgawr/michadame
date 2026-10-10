@@ -1383,6 +1383,7 @@ impl CrtFilterRenderer {
         fft_black_threshold: f32,
         software_mouse_pos: Option<(f32, f32)>,
         software_mouse_clip: Option<[i32; 4]>,
+        skip_popup: bool,
     ) -> RenderedArea {
         let mut video_texture = fallback_texture;
 
@@ -1591,7 +1592,7 @@ impl CrtFilterRenderer {
             let run_glass = glass_params
                 .map(|g| g.enabled && g.intensity > 0.001)
                 .unwrap_or(false);
-            let has_popup = !self.popup_primitives.is_empty();
+            let has_popup = !skip_popup && !self.popup_primitives.is_empty();
             let has_mouse = software_mouse_pos.is_some();
             let has_post = run_cathode || run_glass || has_popup || has_mouse;
 
