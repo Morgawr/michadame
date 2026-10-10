@@ -26,6 +26,14 @@ pub struct ParsedLine {
     pub paragraph_idx: usize,
 }
 
+/// Encapsulates raw captured screen pixels from OpenGL to be processed by the background OCR worker.
+#[derive(Clone, Debug)]
+pub struct OcrCaptureRequest {
+    pub raw_rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// State of the OCR system in the application.
 pub struct OcrState {
     /// Atomic flag set by the UI when an OCR screenshot capture is requested.
@@ -52,6 +60,8 @@ pub struct OcrState {
     pub copy_feedback_time: Option<Instant>,
     /// Last error message, if any.
     pub last_error: Option<String>,
+    /// Channel sender for dispatching raw frame captures to the persistent OCR background worker.
+    pub ocr_request_sender: Option<crossbeam_channel::Sender<OcrCaptureRequest>>,
     /// Sender for OCR worker results.
     pub ocr_sender: Option<crossbeam_channel::Sender<Result<Vec<ParsedLine>, String>>>,
     /// Channel receiver for completed OCR results from the background worker.
@@ -59,6 +69,84 @@ pub struct OcrState {
 }
 
 impl OcrState {
+    /// Starts the persistent background worker thread if not already running.
+    /// The worker manages connection pooling, warmup keep-alives, single-pass downscaling,
+    /// fast JPEG compression, and direct UI notification upon result readiness.
+    pub fn start_worker(&mut self, egui_ctx: Option<eframe::egui::Context>) {
+        if self.ocr_request_sender.is_some() {
+            return;
+        }
+
+        let (req_tx, req_rx) = crossbeam_channel::unbounded::<OcrCaptureRequest>();
+        self.ocr_request_sender = Some(req_tx);
+
+        let res_tx = self.ocr_sender.as_ref().unwrap().clone();
+        let is_processing = self.is_processing.clone();
+
+        let _ = std::thread::Builder::new()
+            .name("lens-ocr-worker".into())
+            .spawn(move || {
+                let agent = crate::ocr::lens::create_lens_agent();
+                // Initial background warmup to establish TCP+TLS connection early
+                crate::ocr::lens::ping_warmup(&agent);
+
+                let mut rgb_buffer = Vec::new();
+                let mut jpeg_buffer = Vec::new();
+
+                loop {
+                    // Wait for capture request or send periodic keep-alive probe after 45s
+                    match req_rx.recv_timeout(std::time::Duration::from_secs(45)) {
+                        Ok(req) => {
+                            is_processing.store(true, std::sync::atomic::Ordering::Release);
+
+                            let (target_w, target_h) =
+                                crate::ocr::lens::calculate_720p_target_dimensions(req.width, req.height);
+
+                            crate::ocr::lens::convert_and_scale_gl_rgba_to_rgb(
+                                &req.raw_rgba,
+                                req.width,
+                                req.height,
+                                target_w,
+                                target_h,
+                                &mut rgb_buffer,
+                            );
+
+                            let enc_res = crate::ocr::lens::encode_jpeg_for_ocr(
+                                &rgb_buffer,
+                                target_w,
+                                target_h,
+                                &mut jpeg_buffer,
+                            );
+
+                            let result = match enc_res {
+                                Ok(()) => {
+                                    crate::ocr::lens::execute_lens_ocr_with_agent(
+                                        &agent,
+                                        jpeg_buffer.clone(),
+                                        target_w,
+                                        target_h,
+                                    )
+                                }
+                                Err(e) => Err(e),
+                            };
+
+                            let _ = res_tx.send(result);
+                            if let Some(ctx) = &egui_ctx {
+                                ctx.request_repaint();
+                            }
+                        }
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                            // Maintain keepalive on idle connection
+                            crate::ocr::lens::ping_warmup(&agent);
+                        }
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                            break;
+                        }
+                    }
+                }
+            });
+    }
+
     /// Recomputes merged `boxes` from `raw_lines` using the current `sticky_distance`.
     pub fn recompute_boxes(&mut self) {
         self.boxes = crate::ocr::lens::group_lines_into_blocks(&self.raw_lines, self.sticky_distance);
@@ -111,6 +199,7 @@ impl Default for OcrState {
             last_copied_index: None,
             copy_feedback_time: None,
             last_error: None,
+            ocr_request_sender: None,
             ocr_sender: Some(tx),
             result_receiver: Some(rx),
         }
@@ -435,5 +524,19 @@ mod tests {
 
         assert!(!state.is_expired());
         assert_eq!(state.remaining_time(), None);
+    }
+
+    #[test]
+    fn test_ocr_worker_lifecycle() {
+        let mut state = OcrState::default();
+        assert!(state.ocr_request_sender.is_none());
+
+        // Starting worker initializes channel
+        state.start_worker(None);
+        assert!(state.ocr_request_sender.is_some());
+
+        // Calling start_worker again is idempotent
+        state.start_worker(None);
+        assert!(state.ocr_request_sender.is_some());
     }
 }

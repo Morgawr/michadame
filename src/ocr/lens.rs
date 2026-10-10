@@ -9,13 +9,53 @@ const LENS_API_KEY: &str = "AIzaSyDr2UxVnv_U85AbhhY8XSHSIavUW0DC-sY";
 const CHROME_USER_AGENT: &str =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36";
 
-/// Sends PNG image bytes to Google Lens and returns detected OCR boxes for Japanese text.
+pub fn create_lens_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(5))
+        .timeout_read(Duration::from_secs(15))
+        .timeout_write(Duration::from_secs(15))
+        .max_idle_connections(5)
+        .max_idle_connections_per_host(2)
+        .build()
+}
+
+pub fn ping_warmup(agent: &ureq::Agent) {
+    let _ = agent
+        .request("HEAD", LENS_ENDPOINT)
+        .set("User-Agent", CHROME_USER_AGENT)
+        .call();
+}
+
+pub fn encode_jpeg_for_ocr(
+    rgb: &[u8],
+    width: u32,
+    height: u32,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    use image::ImageEncoder;
+    out.clear();
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut *out, 80);
+    encoder
+        .write_image(rgb, width, height, image::ExtendedColorType::Rgb8)
+        .map_err(|e| format!("Failed to encode JPEG for OCR: {e}"))
+}
+
+#[allow(dead_code)]
 pub fn execute_lens_ocr(
-    png_bytes: Vec<u8>,
+    image_bytes: Vec<u8>,
     width: u32,
     height: u32,
 ) -> Result<Vec<ParsedLine>, String> {
-    if png_bytes.is_empty() || width == 0 || height == 0 {
+    execute_lens_ocr_with_agent(&ureq::agent(), image_bytes, width, height)
+}
+
+pub fn execute_lens_ocr_with_agent(
+    agent: &ureq::Agent,
+    image_bytes: Vec<u8>,
+    width: u32,
+    height: u32,
+) -> Result<Vec<ParsedLine>, String> {
+    if image_bytes.is_empty() || width == 0 || height == 0 {
         return Err("Invalid image data provided for OCR".to_string());
     }
 
@@ -50,7 +90,7 @@ pub fn execute_lens_ocr(
             }),
             image_data: Some(ImageData {
                 payload: Some(ImagePayload {
-                    image_bytes: png_bytes,
+                    image_bytes,
                 }),
                 image_metadata: Some(ImageMetadata {
                     width: width as i32,
@@ -65,7 +105,8 @@ pub fn execute_lens_ocr(
         .encode(&mut payload)
         .map_err(|e| format!("Failed to encode Lens protobuf request: {}", e))?;
 
-    let response = ureq::post(LENS_ENDPOINT)
+    let response = agent
+        .post(LENS_ENDPOINT)
         .set("Content-Type", "application/x-protobuf")
         .set("X-Goog-Api-Key", LENS_API_KEY)
         .set("Sec-Fetch-Mode", "no-cors")
@@ -383,6 +424,97 @@ pub fn calculate_720p_target_dimensions(width: u32, height: u32) -> (u32, u32) {
     (target_w, target_h)
 }
 
+/// Converts OpenGL RGBA pixel buffer (bottom-left origin) to RGB8 (top-left origin),
+/// scaling to `(dst_w, dst_h)` in a single pass using bilinear filtering.
+///
+/// Reuses the provided `out` buffer without reallocating if capacity allows.
+pub fn convert_and_scale_gl_rgba_to_rgb(
+    raw_rgba: &[u8],
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+    out: &mut Vec<u8>,
+) {
+    let dst_len = (dst_w * dst_h * 3) as usize;
+    out.clear();
+    out.resize(dst_len, 0);
+
+    if src_w == dst_w && src_h == dst_h {
+        // Direct row-by-row flip and strip alpha
+        for y in 0..dst_h {
+            let src_y = src_h - 1 - y;
+            let src_row = (src_y * src_w * 4) as usize;
+            let dst_row = (y * dst_w * 3) as usize;
+            let src_slice = &raw_rgba[src_row..src_row + (src_w * 4) as usize];
+            let dst_slice = &mut out[dst_row..dst_row + (dst_w * 3) as usize];
+
+            for (p_src, p_dst) in src_slice.chunks_exact(4).zip(dst_slice.chunks_exact_mut(3)) {
+                p_dst[0] = p_src[0];
+                p_dst[1] = p_src[1];
+                p_dst[2] = p_src[2];
+            }
+        }
+        return;
+    }
+
+    // High quality bilinear downsampling + flip + strip alpha in one pass
+    let x_scale = src_w as f32 / dst_w as f32;
+    let y_scale = src_h as f32 / dst_h as f32;
+
+    // Precalculate X mapping
+    let mut x_map = Vec::with_capacity(dst_w as usize);
+    for dx in 0..dst_w {
+        let sx = (dx as f32 + 0.5) * x_scale - 0.5;
+        let sx0 = sx.floor().max(0.0) as u32;
+        let sx1 = (sx0 + 1).min(src_w - 1);
+        let wx = (sx - sx0 as f32).clamp(0.0, 1.0);
+        let wx_q8 = (wx * 256.0).round() as u32;
+        x_map.push((sx0, sx1, wx_q8));
+    }
+
+    for dy in 0..dst_h {
+        let sy = (dy as f32 + 0.5) * y_scale - 0.5;
+        let sy0_top = sy.floor().max(0.0) as u32;
+        let sy1_top = (sy0_top + 1).min(src_h - 1);
+        let wy = (sy - sy0_top as f32).clamp(0.0, 1.0);
+        let wy_q8 = (wy * 256.0).round() as u32;
+
+        // OpenGL coordinates are flipped: row 0 is at bottom
+        let sy0 = src_h - 1 - sy0_top;
+        let sy1 = src_h - 1 - sy1_top;
+
+        let row0_offset = (sy0 * src_w * 4) as usize;
+        let row1_offset = (sy1 * src_w * 4) as usize;
+        let dst_row_offset = (dy * dst_w * 3) as usize;
+
+        for (dx, &(sx0, sx1, wx_q8)) in x_map.iter().enumerate() {
+            let p00_idx = row0_offset + (sx0 * 4) as usize;
+            let p10_idx = row0_offset + (sx1 * 4) as usize;
+            let p01_idx = row1_offset + (sx0 * 4) as usize;
+            let p11_idx = row1_offset + (sx1 * 4) as usize;
+
+            let inv_wx = 256 - wx_q8;
+            let inv_wy = 256 - wy_q8;
+
+            let w00 = (inv_wx * inv_wy) >> 8;
+            let w10 = (wx_q8 * inv_wy) >> 8;
+            let w01 = (inv_wx * wy_q8) >> 8;
+            let w11 = (wx_q8 * wy_q8) >> 8;
+
+            let dst_idx = dst_row_offset + dx * 3;
+            for c in 0..3 {
+                let val = (raw_rgba[p00_idx + c] as u32 * w00
+                    + raw_rgba[p10_idx + c] as u32 * w10
+                    + raw_rgba[p01_idx + c] as u32 * w01
+                    + raw_rgba[p11_idx + c] as u32 * w11)
+                    >> 8;
+                out[dst_idx + c] = val.min(255) as u8;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,6 +561,120 @@ mod tests {
                 eprintln!("Warning: Live Google Lens test skipped or network failed: {e}");
             }
         }
+    }
+
+    #[test]
+    fn test_live_lens_ocr_with_jpeg() {
+        let logo_bytes = include_bytes!("../../assets/logo.png");
+        let img = image::load_from_memory(logo_bytes).expect("Failed to load logo.png");
+        let rgb = img.to_rgb8();
+        let (w, h) = (rgb.width(), rgb.height());
+
+        let mut jpg_bytes = Vec::new();
+        encode_jpeg_for_ocr(rgb.as_raw(), w, h, &mut jpg_bytes).expect("Failed to encode JPEG");
+
+        let agent = create_lens_agent();
+
+        // Warm up connection
+        let start1 = std::time::Instant::now();
+        let _ = execute_lens_ocr_with_agent(&agent, jpg_bytes.clone(), w, h);
+        let elapsed1 = start1.elapsed();
+        println!("Lens OCR request 1 (cold): {:?}", elapsed1);
+
+        let start2 = std::time::Instant::now();
+        let result2 = execute_lens_ocr_with_agent(&agent, jpg_bytes.clone(), w, h);
+        let elapsed2 = start2.elapsed();
+        println!("Lens OCR request 2 (warm): {:?}", elapsed2);
+
+        match result2 {
+            Ok(lines) => {
+                println!("Got {} lines from JPEG!", lines.len());
+                for line in &lines {
+                    println!("Line: {}", line.text);
+                }
+                assert!(!lines.is_empty(), "Expected lines from JPEG");
+                let found = lines.iter().any(|l| l.text.contains("見ちゃダメ"));
+                assert!(found, "Expected to recognize 見ちゃダメ in JPEG");
+            }
+            Err(e) => {
+                panic!("JPEG OCR failed: {e}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_jpeg_encoding_and_ocr() {
+        let logo_bytes = include_bytes!("../../assets/logo.png");
+        let img = image::load_from_memory(logo_bytes).expect("Failed to load logo.png");
+        let rgb = img.to_rgb8();
+        let (w, h) = (rgb.width(), rgb.height());
+
+        let mut jpeg_bytes = Vec::new();
+        let enc_start = std::time::Instant::now();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_bytes, 85);
+        encoder.encode_image(&rgb).expect("Failed to encode JPEG");
+        let enc_elapsed = enc_start.elapsed();
+        println!("JPEG encoding (1024x1024) took: {:?}, size: {} bytes", enc_elapsed, jpeg_bytes.len());
+
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(20))
+            .build();
+        let start = std::time::Instant::now();
+        let lines = execute_lens_ocr_with_agent(&agent, jpeg_bytes, w, h).expect("OCR failed");
+        println!("Network OCR took: {:?}", start.elapsed());
+        assert!(!lines.is_empty());
+        let found = lines.iter().any(|l| l.text.contains("見ちゃダメ"));
+        assert!(found);
+    }
+
+    #[test]
+    fn test_lens_warmup() {
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(5))
+            .build();
+
+        let start = std::time::Instant::now();
+        // Warmup with HEAD
+        let _ = agent.request("HEAD", LENS_ENDPOINT)
+            .set("User-Agent", CHROME_USER_AGENT)
+            .call();
+        println!("HEAD warmup took: {:?}", start.elapsed());
+
+        let logo_bytes = include_bytes!("../../assets/logo.png");
+        let img = image::load_from_memory(logo_bytes).expect("Failed to load logo.png");
+        let rgb = img.to_rgb8();
+        let (w, h) = (rgb.width(), rgb.height());
+
+        for quality in [70, 80, 85, 90] {
+            let mut jpeg_bytes = Vec::new();
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_bytes, quality);
+            encoder.encode_image(&rgb).unwrap();
+            let start = std::time::Instant::now();
+            let lines = execute_lens_ocr_with_agent(&agent, jpeg_bytes.clone(), w, h).unwrap();
+            let elapsed = start.elapsed();
+            println!("Quality {}: size {} bytes, time {:?}, lines: {}", quality, jpeg_bytes.len(), elapsed, lines.len());
+        }
+    }
+
+    #[test]
+    fn test_convert_and_scale_gl_rgba_to_rgb() {
+        let src_w = 1920;
+        let src_h = 1080;
+        let dummy_rgba = vec![128u8; (src_w * src_h * 4) as usize];
+        let mut out = Vec::new();
+
+        let start = std::time::Instant::now();
+        convert_and_scale_gl_rgba_to_rgb(&dummy_rgba, src_w, src_h, 1280, 720, &mut out);
+        let elapsed = start.elapsed();
+        println!("Downscale 1080p -> 720p with flip and RGB conversion took: {:?}", elapsed);
+        assert_eq!(out.len(), (1280 * 720 * 3) as usize);
+
+        // Test identical size (no scale, only flip and strip alpha)
+        let start_ident = std::time::Instant::now();
+        convert_and_scale_gl_rgba_to_rgb(&dummy_rgba, 1280, 720, 1280, 720, &mut out);
+        let elapsed_ident = start_ident.elapsed();
+        println!("Direct flip + strip alpha (1280x720) took: {:?}", elapsed_ident);
+        assert_eq!(out.len(), (1280 * 720 * 3) as usize);
     }
 
     #[test]

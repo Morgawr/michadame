@@ -44,6 +44,7 @@ pub fn init_app_state(cc: &eframe::CreationContext) -> AppState {
     }
 
     let egui_ctx = cc.egui_ctx.clone();
+    state.ocr.start_worker(Some(egui_ctx.clone()));
     let (tx, rx) = crossbeam_channel::unbounded();
     state.device_scan_receiver = Some(rx);
     std::thread::spawn(move || {

@@ -6,7 +6,7 @@ use eframe::egui;
 use eframe::egui_glow;
 use std::sync::atomic::Ordering;
 
-fn capture_frame_pixels(
+fn capture_frame_pixels_raw(
     gl: &eframe::glow::Context,
     area: crate::video::gpu::geometry::RenderedArea,
 ) -> Option<(Vec<u8>, u32, u32)> {
@@ -48,88 +48,33 @@ fn capture_frame_pixels(
         gl.pixel_store_i32(glow::PACK_SKIP_PIXELS, skip_pixels);
     }
 
-    // Flip vertically (OpenGL coordinate origin is bottom-left; image origin is top-left)
-    let row_bytes = (area.width * 4) as usize;
-    let mut flipped = vec![0u8; raw_pixels.len()];
-    for y in 0..area.height as usize {
-        let src_row = area.height as usize - 1 - y;
-        flipped[y * row_bytes..(y + 1) * row_bytes]
-            .copy_from_slice(&raw_pixels[src_row * row_bytes..(src_row + 1) * row_bytes]);
-    }
-
-    Some((flipped, area.width, area.height))
+    Some((raw_pixels, area.width, area.height))
 }
 
-fn dispatch_ocr_worker(
-    pixels: Vec<u8>,
-    width: u32,
-    height: u32,
-    sender: crossbeam_channel::Sender<Result<Vec<crate::ocr::ParsedLine>, String>>,
-    is_processing: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) {
-    is_processing.store(true, Ordering::Release);
-    let _ = std::thread::Builder::new()
-        .name("google-lens-ocr".into())
-        .spawn(move || {
-            use image::{
-                codecs::png::{CompressionType, FilterType, PngEncoder},
-                imageops::FilterType as ResizeFilter,
-                ExtendedColorType, ImageEncoder, RgbaImage,
-            };
-
-            let Some(rgba_img) = RgbaImage::from_raw(width, height, pixels) else {
-                is_processing.store(false, Ordering::Release);
-                let _ = sender.send(Err("Invalid raw pixel buffer for OCR".into()));
-                return;
-            };
-
-            // Scale to 720p equivalent if larger, preserving aspect ratio
-            let (target_w, target_h) =
-                crate::ocr::lens::calculate_720p_target_dimensions(width, height);
-
-            let (final_img, final_w, final_h) = if target_w != width || target_h != height {
-                let resized = image::imageops::resize(
-                    &rgba_img,
-                    target_w,
-                    target_h,
-                    ResizeFilter::Triangle,
-                );
-                (resized, target_w, target_h)
-            } else {
-                (rgba_img, width, height)
-            };
-
-            // Convert to RGB8 (strip alpha channel to reduce payload size by 25%)
-            let rgb_img = image::RgbImage::from_fn(final_w, final_h, |x, y| {
-                let pixel = final_img.get_pixel(x, y);
-                image::Rgb([pixel[0], pixel[1], pixel[2]])
-            });
-
-            let mut png_bytes = Vec::new();
-            let encoder = PngEncoder::new_with_quality(
-                &mut png_bytes,
-                CompressionType::Fast,
-                FilterType::NoFilter,
-            );
-            if let Err(e) = encoder.write_image(
-                rgb_img.as_raw(),
-                final_w,
-                final_h,
-                ExtendedColorType::Rgb8,
-            ) {
-                is_processing.store(false, Ordering::Release);
-                let _ = sender.send(Err(format!("PNG encode failed: {e}")));
-                return;
-            }
-
-            let result = crate::ocr::lens::execute_lens_ocr(png_bytes, final_w, final_h);
-            let _ = sender.send(result);
-        });
+fn capture_frame_pixels(
+    gl: &eframe::glow::Context,
+    area: crate::video::gpu::geometry::RenderedArea,
+) -> Option<(Vec<u8>, u32, u32)> {
+    let (mut raw_pixels, w, h) = capture_frame_pixels_raw(gl, area)?;
+    let row_bytes = (w * 4) as usize;
+    let mut temp_row = vec![0u8; row_bytes];
+    let half_h = (h / 2) as usize;
+    for y in 0..half_h {
+        let opp_y = (h as usize) - 1 - y;
+        let r1_start = y * row_bytes;
+        let r2_start = opp_y * row_bytes;
+        temp_row.copy_from_slice(&raw_pixels[r1_start..r1_start + row_bytes]);
+        raw_pixels.copy_within(r2_start..r2_start + row_bytes, r1_start);
+        raw_pixels[r2_start..r2_start + row_bytes].copy_from_slice(&temp_row);
+    }
+    Some((raw_pixels, w, h))
 }
 
 pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) {
+    state.ocr.start_worker(Some(ctx.clone()));
+
     // Space to capture OCR; Shift+Space to clear OCR boxes
-    if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+    if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
         if ctx.input(|i| i.modifiers.shift) {
             if !state.ocr.boxes.is_empty() {
                 state.clear_ocr();
@@ -138,6 +83,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             if !state.ocr.is_processing.load(Ordering::Relaxed) {
                 state.ocr.capture_requested.store(true, Ordering::Release);
                 state.info("Capturing screen for Google Lens OCR...");
+                ctx.request_repaint();
             }
             send_ws_command(serde_json::json!({"command": "manual_ocr"}));
         }
@@ -169,13 +115,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         };
 
         let ocr_capture = state.ocr.capture_requested.clone();
-        let ocr_processing = state.ocr.is_processing.clone();
-        let ocr_sender = state
-            .ocr
-            .ocr_sender
-            .as_ref()
-            .expect("OCR sender channel not initialized")
-            .clone();
+        let ocr_req_sender = state.ocr.ocr_request_sender.clone();
         let bank_capture = state.bank.capture_handle();
 
         let ppp = ctx.pixels_per_point();
@@ -257,8 +197,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     .map(crate::replay::gpu::RuntimeView::new);
 
                 let ocr_capture_cb = ocr_capture.clone();
-                let ocr_processing_cb = ocr_processing.clone();
-                let ocr_sender_cb = ocr_sender.clone();
+                let ocr_req_sender_cb = ocr_req_sender.clone();
                 let bank_capture_cb = bank_capture.clone();
 
                 let capture_overlays = state.replay.config.capture_overlays;
@@ -300,15 +239,15 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 .unwrap_or((0, crate::replay::config::Rate::new(60, 1)));
                             if ocr_capture_cb.swap(false, Ordering::AcqRel) {
                                 if let Some((pixels, w, h)) =
-                                    capture_frame_pixels(painter.gl(), rendered_area)
+                                    capture_frame_pixels_raw(painter.gl(), rendered_area)
                                 {
-                                    dispatch_ocr_worker(
-                                        pixels,
-                                        w,
-                                        h,
-                                        ocr_sender_cb.clone(),
-                                        ocr_processing_cb.clone(),
-                                    );
+                                    if let Some(req_tx) = &ocr_req_sender_cb {
+                                        let _ = req_tx.send(crate::ocr::models::OcrCaptureRequest {
+                                            raw_rgba: pixels,
+                                            width: w,
+                                            height: h,
+                                        });
+                                    }
                                 }
                             }
 
@@ -452,8 +391,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 .map(crate::replay::gpu::RuntimeView::new);
 
             let ocr_capture_cb = ocr_capture.clone();
-            let ocr_processing_cb = ocr_processing.clone();
-            let ocr_sender_cb = ocr_sender.clone();
+            let ocr_req_sender_cb = ocr_req_sender.clone();
             let bank_capture_cb = bank_capture.clone();
             let capture_overlays = state.replay.config.capture_overlays;
 
@@ -501,15 +439,15 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         .unwrap_or((0, crate::replay::config::Rate::new(60, 1)));
                     if ocr_capture_cb.swap(false, Ordering::AcqRel) {
                         if let Some((pixels, w, h)) =
-                            capture_frame_pixels(painter.gl(), rendered_area)
+                            capture_frame_pixels_raw(painter.gl(), rendered_area)
                         {
-                            dispatch_ocr_worker(
-                                pixels,
-                                w,
-                                h,
-                                ocr_sender_cb.clone(),
-                                ocr_processing_cb.clone(),
-                            );
+                            if let Some(req_tx) = &ocr_req_sender_cb {
+                                let _ = req_tx.send(crate::ocr::models::OcrCaptureRequest {
+                                    raw_rgba: pixels,
+                                    width: w,
+                                    height: h,
+                                });
+                            }
                         }
                     }
 

@@ -3,4 +3,4 @@ pub mod models;
 pub mod overlay;
 
 #[allow(unused_imports)]
-pub use models::{OcrBox, OcrState, ParsedLine};
+pub use models::{OcrBox, OcrCaptureRequest, OcrState, ParsedLine};
