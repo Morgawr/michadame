@@ -41,6 +41,28 @@ pub struct NewBankEntry {
     pub tag: Option<String>,
 }
 
+/// A custom name dictionary entry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CustomNameEntry {
+    pub id: i64,
+    /// Unix timestamp in milliseconds.
+    pub created_at: i64,
+    pub kanji: String,
+    pub furigana: String,
+    pub source_tag: Option<String>,
+    pub notes: Option<String>,
+}
+
+/// A new custom name ready to be inserted.
+#[derive(Clone, Debug, Default)]
+pub struct NewCustomName {
+    pub created_at: i64,
+    pub kanji: String,
+    pub furigana: String,
+    pub source_tag: Option<String>,
+    pub notes: Option<String>,
+}
+
 pub struct BankDatabase {
     conn: Connection,
 }
@@ -90,7 +112,18 @@ impl BankDatabase {
             conn.execute_batch("ALTER TABLE mined_words ADD COLUMN tag TEXT;")?;
         }
         conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_mined_words_tag ON mined_words(tag);",
+            "CREATE INDEX IF NOT EXISTS idx_mined_words_tag ON mined_words(tag);
+             CREATE TABLE IF NOT EXISTS custom_names (
+                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                 created_at INTEGER NOT NULL,
+                 kanji      TEXT NOT NULL,
+                 furigana   TEXT NOT NULL,
+                 source_tag TEXT,
+                 notes      TEXT
+             );
+             CREATE INDEX IF NOT EXISTS idx_custom_names_kanji ON custom_names(kanji);
+             CREATE INDEX IF NOT EXISTS idx_custom_names_furigana ON custom_names(furigana);
+             CREATE INDEX IF NOT EXISTS idx_custom_names_created ON custom_names(created_at DESC);",
         )?;
         Ok(Self { conn })
     }
@@ -182,6 +215,54 @@ impl BankDatabase {
         self.conn.execute("DELETE FROM mined_words WHERE id = ?1", params![id])?;
         Ok(())
     }
+
+    /// Inserts a new custom name entry and returns it with its generated id.
+    pub fn insert_custom_name(&self, entry: &NewCustomName) -> Result<CustomNameEntry> {
+        self.conn.execute(
+            "INSERT INTO custom_names (created_at, kanji, furigana, source_tag, notes)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                entry.created_at,
+                entry.kanji,
+                entry.furigana,
+                entry.source_tag,
+                entry.notes,
+            ],
+        )?;
+        Ok(CustomNameEntry {
+            id: self.conn.last_insert_rowid(),
+            created_at: entry.created_at,
+            kanji: entry.kanji.clone(),
+            furigana: entry.furigana.clone(),
+            source_tag: entry.source_tag.clone(),
+            notes: entry.notes.clone(),
+        })
+    }
+
+    /// Lists all custom names, most recently created first.
+    pub fn list_custom_names(&self) -> Result<Vec<CustomNameEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, created_at, kanji, furigana, source_tag, notes
+             FROM custom_names ORDER BY created_at DESC, id DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(CustomNameEntry {
+                id: row.get(0)?,
+                created_at: row.get(1)?,
+                kanji: row.get(2)?,
+                furigana: row.get(3)?,
+                source_tag: row.get(4)?,
+                notes: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Deletes a custom name entry by id.
+    pub fn delete_custom_name(&self, id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM custom_names WHERE id = ?1", params![id])?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -269,5 +350,47 @@ mod tests {
         assert_eq!(list[0].tag, None);
         db.set_tag(list[0].id, Some("Grandia 2")).unwrap();
         assert_eq!(db.list_meta().unwrap()[0].tag.as_deref(), Some("Grandia 2"));
+    }
+
+    #[test]
+    fn custom_names_round_trip_and_can_be_deleted() {
+        let db = BankDatabase::open_in_memory().unwrap();
+        let name1 = db
+            .insert_custom_name(&NewCustomName {
+                created_at: 1_000,
+                kanji: "田中".into(),
+                furigana: "たなか".into(),
+                source_tag: Some("Game A".into()),
+                notes: Some("Protagonist".into()),
+            })
+            .unwrap();
+        let name2 = db
+            .insert_custom_name(&NewCustomName {
+                created_at: 2_000,
+                kanji: "田中".into(),
+                furigana: "たない".into(),
+                source_tag: None,
+                notes: None,
+            })
+            .unwrap();
+
+        let list = db.list_custom_names().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, name2.id);
+        assert_eq!(list[0].kanji, "田中");
+        assert_eq!(list[0].furigana, "たない");
+        assert_eq!(list[0].source_tag, None);
+        assert_eq!(list[0].notes, None);
+
+        assert_eq!(list[1].id, name1.id);
+        assert_eq!(list[1].kanji, "田中");
+        assert_eq!(list[1].furigana, "たなか");
+        assert_eq!(list[1].source_tag.as_deref(), Some("Game A"));
+        assert_eq!(list[1].notes.as_deref(), Some("Protagonist"));
+
+        db.delete_custom_name(name1.id).unwrap();
+        let list = db.list_custom_names().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, name2.id);
     }
 }

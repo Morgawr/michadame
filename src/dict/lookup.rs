@@ -4,6 +4,7 @@ use super::elongation::elongation_variants;
 use super::long_vowel::long_vowel_variants;
 use super::models::DictPopupState;
 use super::particles::ParticleIndex;
+use crate::bank::database::CustomNameEntry;
 use crate::ocr::OcrBox;
 use eframe::egui::{self, Rect};
 
@@ -12,9 +13,12 @@ pub fn lookup_word_at_pointer(
     pointer_pos: egui::Pos2,
     ocr_boxes: &[OcrBox],
     video_rect: egui::Rect,
-    db: &DictDatabase,
+    db: Option<&DictDatabase>,
     freq_db: Option<&super::frequency::FreqDatabase>,
     deinflector: &Deinflector,
+    custom_names: &[CustomNameEntry],
+    current_tag: Option<&str>,
+    custom_names_gen: u64,
 ) -> Option<DictPopupState> {
     if video_rect.width() <= 10.0 || video_rect.height() <= 10.0 || ocr_boxes.is_empty() {
         return None;
@@ -117,10 +121,12 @@ pub fn lookup_word_at_pointer(
         // E.g. hovering over '気' in "のような気がする" matches "気がする" (never "のような気がする"!).
         // E.g. hovering over 'な' in "なにか" matches "何か" (reading: "なにか").
         let max_len = 16.min(chars.len() - char_idx);
-        let particle_index = db.particle_index();
+        let particle_index = db.and_then(|d| d.particle_index());
         let cache_key = ScanCacheKey {
-            db_generation: db.generation,
+            db_generation: db.map_or(0, |d| d.generation),
             particle_index_ready: particle_index.is_some(),
+            custom_names_gen,
+            current_tag: current_tag.map(str::to_string),
             line_text: full_text.clone(),
             char_idx,
         };
@@ -151,8 +157,15 @@ pub fn lookup_word_at_pointer(
                 if is_ignorable_token(&sub_str) {
                     continue;
                 }
-                let full =
-                    find_span_entries(&sub_str, db, deinflector, particle_index.as_deref(), &mut acc);
+                let full = find_span_entries(
+                    &sub_str,
+                    db,
+                    deinflector,
+                    particle_index.as_deref(),
+                    custom_names,
+                    current_tag,
+                    &mut acc,
+                );
                 if primary_span.is_none() && acc.has_primary() {
                     primary_span = Some((start, end));
                 }
@@ -188,6 +201,8 @@ pub fn lookup_word_at_pointer(
                             db,
                             deinflector,
                             particle_index.as_deref(),
+                            custom_names,
+                            current_tag,
                             &mut acc,
                         );
                         if primary_span.is_none() && acc.has_primary() {
@@ -304,6 +319,8 @@ impl LineSegment<'_> {
 struct ScanCacheKey {
     db_generation: u64,
     particle_index_ready: bool,
+    custom_names_gen: u64,
+    current_tag: Option<String>,
     line_text: String,
     char_idx: usize,
 }
@@ -317,9 +334,40 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// Clears the thread-local scan cache (e.g. after adding or deleting a custom name).
+pub fn invalidate_scan_cache() {
+    SCAN_CACHE.with(|c| *c.borrow_mut() = None);
+}
+
+fn custom_name_to_term_entry(name: &CustomNameEntry) -> super::models::TermEntry {
+    super::models::TermEntry {
+        term: name.kanji.clone(),
+        reading: name.furigana.clone(),
+        definition_tags: Some("name".to_string()),
+        rules: String::new(),
+        score: 1000.0,
+        glossary: if let Some(notes) = &name.notes {
+            if !notes.trim().is_empty() {
+                vec![super::models::GlossaryEntry::Text(notes.clone())]
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        },
+        sequence: 0,
+        term_tags: name.source_tag.clone(),
+        inflection_reasons: vec![],
+        frequency: None,
+        custom_name_id: Some(name.id),
+        custom_tag: name.source_tag.clone(),
+    }
+}
+
 /// Looks up dictionary entries for a single candidate span, in tiers:
 ///
-/// 1. Exact / deinflected match (as before).
+/// 0. Custom names matching the span (kanji or furigana/reading), prioritized by current tag.
+/// 1. Exact / deinflected match from dictionary database.
 /// 2. Long-vowel normalized match for any word (e.g. `どーせ` → `どうせ`,
 ///    `せんせー` → `せんせい`), combined with deinflection.
 ///    2b. Emphatic elongation normalization: runs of `っ`/`ッ` collapsed or removed, `ー` and
@@ -327,88 +375,132 @@ thread_local! {
 ///    `い〜っぱい` → `いっぱい`), combined with deinflection.
 /// 3. Particle-swapped forms of set expressions over the candidates of 1 and 2
 ///    (e.g. `突拍子がない` → `突拍子もない`). Only entries tagged as expressions are kept.
-///
-/// Because this is evaluated per span length (longest first), a longer normalized/swapped
-/// match beats a shorter exact match, while at equal length an exact match always wins.
-///
-/// Results are added to `acc`: the first tier (of the longest matching span) that yields
-/// entries provides the *primary* results; everything found afterwards (later tiers, then
-/// shorter spans) is kept as lower-priority *alternatives*, up to [`MAX_ALTERNATES`]
-/// (e.g. `なーい` matches `ナーイ` exactly, but `ない` is offered as an alternative).
-///
-/// Returns `true` once `acc` is full and no further lookups are needed.
 fn find_span_entries(
     sub_str: &str,
-    db: &DictDatabase,
+    db: Option<&DictDatabase>,
     deinflector: &Deinflector,
     particle_index: Option<&ParticleIndex>,
+    custom_names: &[CustomNameEntry],
+    current_tag: Option<&str>,
     acc: &mut ScanAccumulator,
 ) -> bool {
-    let mut candidates = deinflector.deinflect(sub_str);
-    if let Ok(entries) = db.find_terms(&candidates) {
-        if acc.absorb(entries) {
-            return true;
+    // 0. Check custom names
+    let alt_kana = crate::dict::database::to_alternate_kana(sub_str);
+    let matching_names: Vec<&CustomNameEntry> = custom_names
+        .iter()
+        .filter(|n| {
+            n.kanji == sub_str
+                || n.furigana == sub_str
+                || alt_kana.as_deref() == Some(&n.furigana)
+        })
+        .collect();
+
+    if !matching_names.is_empty() {
+        let matches_tag = |n: &&CustomNameEntry| -> bool {
+            match (current_tag, n.source_tag.as_deref()) {
+                (Some(curr), Some(tag)) => !curr.trim().is_empty() && tag.trim().eq_ignore_ascii_case(curr.trim()),
+                _ => false,
+            }
+        };
+
+        // Separate entries matching current tag (top priority) from other custom names
+        let mut tagged_names = Vec::new();
+        let mut other_names = Vec::new();
+        for name in matching_names {
+            if matches_tag(&name) {
+                tagged_names.push(custom_name_to_term_entry(name));
+            } else {
+                other_names.push(custom_name_to_term_entry(name));
+            }
+        }
+
+        if !tagged_names.is_empty() {
+            if acc.absorb(tagged_names) {
+                return true;
+            }
+        }
+        if !other_names.is_empty() {
+            if acc.absorb(other_names) {
+                return true;
+            }
         }
     }
 
-    // Tier 2: long-vowel (ー) normalization. Only does work if the span contains ー.
-    let variants = long_vowel_variants(sub_str);
-    if !variants.is_empty() {
-        let mut lv_candidates = Vec::new();
-        // Variants are in priority order (e.g. せー → せい before せえ); first hit wins.
-        for (variant, reason) in &variants {
-            let mut cands = deinflector.deinflect(variant);
-            for cand in &mut cands {
-                // Normalization is applied to the surface text first, so it leads the trail.
-                cand.reasons.insert(0, reason.clone());
+    // 1. Check Japanese dictionary (if available)
+    if let Some(db) = db {
+        let mut candidates = deinflector.deinflect(sub_str);
+        if let Ok(entries) = db.find_terms(&candidates) {
+            if acc.absorb(entries) {
+                return true;
             }
-            if let Ok(entries) = db.find_terms(&cands) {
-                if acc.absorb(entries) {
-                    return true;
+        }
+
+        // Tier 2: long-vowel (ー) normalization. Only does work if the span contains ー.
+        let variants = long_vowel_variants(sub_str);
+        if !variants.is_empty() {
+            let mut lv_candidates = Vec::new();
+            // Variants are in priority order (e.g. せー → せい before せえ); first hit wins.
+            for (variant, reason) in &variants {
+                let mut cands = deinflector.deinflect(variant);
+                for cand in &mut cands {
+                    // Normalization is applied to the surface text first, so it leads the trail.
+                    cand.reasons.insert(0, reason.clone());
+                }
+                if let Ok(entries) = db.find_terms(&cands) {
+                    if acc.absorb(entries) {
+                        return true;
+                    }
+                }
+                lv_candidates.extend(cands);
+            }
+            candidates.extend(lv_candidates);
+        }
+
+        // Tier 2b: emphatic elongation (ぜっっったい, ぜーんぜん, い〜っぱい). Only does work if
+        // the span contains っ/ッ, ー or 〜.
+        let variants = elongation_variants(sub_str);
+        if !variants.is_empty() {
+            let mut el_candidates = Vec::new();
+            for (variant, reason) in &variants {
+                let mut cands = deinflector.deinflect(variant);
+                for cand in &mut cands {
+                    cand.reasons.insert(0, reason.clone());
+                }
+                if let Ok(entries) = db.find_terms(&cands) {
+                    if acc.absorb(entries) {
+                        return true;
+                    }
+                }
+                el_candidates.extend(cands);
+            }
+            candidates.extend(el_candidates);
+        }
+
+        // Tier 3: particle swap for expressions. Unlike spelling normalizations, a swap yields a
+        // different expression (気がする vs 気もする), so it is only used when nothing else matched
+        // and never contributes alternatives.
+        if let (Some(index), false) = (particle_index, acc.has_primary()) {
+            let swapped = index.swapped_candidates(&candidates);
+            if !swapped.is_empty() {
+                if let Ok(mut entries) = db.find_terms(&swapped) {
+                    entries.retain(|e| index.is_allowed(&e.term, &e.reading));
+                    return acc.absorb(entries);
                 }
             }
-            lv_candidates.extend(cands);
         }
-        candidates.extend(lv_candidates);
     }
 
-    // Tier 2b: emphatic elongation (ぜっっったい, ぜーんぜん, い〜っぱい). Only does work if
-    // the span contains っ/ッ, ー or 〜.
-    let variants = elongation_variants(sub_str);
-    if !variants.is_empty() {
-        let mut el_candidates = Vec::new();
-        for (variant, reason) in &variants {
-            let mut cands = deinflector.deinflect(variant);
-            for cand in &mut cands {
-                cand.reasons.insert(0, reason.clone());
-            }
-            if let Ok(entries) = db.find_terms(&cands) {
-                if acc.absorb(entries) {
-                    return true;
-                }
-            }
-            el_candidates.extend(cands);
-        }
-        candidates.extend(el_candidates);
-    }
-
-    // Tier 3: particle swap for expressions. Unlike spelling normalizations, a swap yields a
-    // different expression (気がする vs 気もする), so it is only used when nothing else matched
-    // and never contributes alternatives.
-    if let (Some(index), false) = (particle_index, acc.has_primary()) {
-        let swapped = index.swapped_candidates(&candidates);
-        if !swapped.is_empty() {
-            if let Ok(mut entries) = db.find_terms(&swapped) {
-                entries.retain(|e| index.is_allowed(&e.term, &e.reading));
-                return acc.absorb(entries);
-            }
-        }
-    }
     false
 }
 
 /// Maximum number of lower-priority alternative entries appended after the primary match.
 const MAX_ALTERNATES: usize = 8;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum EntryDedupeKey {
+    Custom(i64),
+    Dict(String, String, i64),
+}
 
 /// Collects entries over the whole scan (all tiers of all candidate spans, in priority order).
 ///
@@ -421,7 +513,7 @@ struct ScanAccumulator {
     groups: Vec<usize>,
     next_group: usize,
     primary_len: usize,
-    seen: std::collections::HashSet<(String, String, i64)>,
+    seen: std::collections::HashSet<EntryDedupeKey>,
 }
 
 impl ScanAccumulator {
@@ -443,7 +535,12 @@ impl ScanAccumulator {
             if self.is_full() {
                 break;
             }
-            if self.seen.insert((e.term.clone(), e.reading.clone(), e.sequence)) {
+            let key = if let Some(id) = e.custom_name_id {
+                EntryDedupeKey::Custom(id)
+            } else {
+                EntryDedupeKey::Dict(e.term.clone(), e.reading.clone(), e.sequence)
+            };
+            if self.seen.insert(key) {
                 self.entries.push(e);
                 self.groups.push(self.next_group);
             }
@@ -551,9 +648,12 @@ mod tests {
             egui::pos2(250.0, 270.0),
             &[ocr_box.clone()],
             video_rect,
-            &db,
+            Some(&db),
             None,
             global_deinflector(),
+            &[],
+            None,
+            0,
         );
         assert!(popup.is_some());
         let p = popup.unwrap();
@@ -567,9 +667,12 @@ mod tests {
             egui::pos2(550.0, 270.0),
             &[ocr_box.clone()],
             video_rect,
-            &db,
+            Some(&db),
             None,
             global_deinflector(),
+            &[],
+            None,
+            0,
         );
         assert!(popup.is_some());
         let p = popup.unwrap();
@@ -584,9 +687,12 @@ mod tests {
             egui::pos2(600.0, 330.0),
             &[ocr_box.clone()],
             video_rect,
-            &db,
+            Some(&db),
             None,
             global_deinflector(),
+            &[],
+            None,
+            0,
         );
         assert!(popup.is_some());
         let p = popup.unwrap();
@@ -634,9 +740,12 @@ mod tests {
             egui::pos2(400.0, 300.0),
             &[ocr_box.clone()],
             video_rect,
-            &db,
+            Some(&db),
             None,
             global_deinflector(),
+            &[],
+            None,
+            0,
         );
         assert!(popup1.is_some());
         let p1 = popup1.unwrap();
@@ -648,9 +757,12 @@ mod tests {
             egui::pos2(500.0, 300.0),
             &[ocr_box.clone()],
             video_rect,
-            &db,
+            Some(&db),
             None,
             global_deinflector(),
+            &[],
+            None,
+            0,
         );
         assert!(popup2.is_some());
         let p2 = popup2.unwrap();
@@ -707,9 +819,12 @@ mod tests {
             egui::pos2(200.0, 300.0),
             &[ocr_box.clone()],
             video_rect,
-            &db,
+            Some(&db),
             None,
             global_deinflector(),
+            &[],
+            None,
+            0,
         );
         assert!(popup_yo.is_some());
         let p_yo = popup_yo.unwrap();
@@ -721,9 +836,12 @@ mod tests {
             egui::pos2(500.0, 300.0),
             &[ocr_box.clone()],
             video_rect,
-            &db,
+            Some(&db),
             None,
             global_deinflector(),
+            &[],
+            None,
+            0,
         );
         assert!(popup_ki.is_some());
         let p_ki = popup_ki.unwrap();
@@ -735,9 +853,12 @@ mod tests {
             egui::pos2(700.0, 300.0),
             &[ocr_box.clone()],
             video_rect,
-            &db,
+            Some(&db),
             None,
             global_deinflector(),
+            &[],
+            None,
+            0,
         );
         assert!(popup_su.is_some());
         let p_su = popup_su.unwrap();
@@ -792,9 +913,12 @@ mod tests {
             egui::pos2(500.0, 300.0),
             &[ocr_box],
             video_rect,
-            &dict_db,
+            Some(&dict_db),
             Some(&freq_db),
             global_deinflector(),
+            &[],
+            None,
+            0,
         )
         .unwrap();
 
@@ -821,7 +945,7 @@ mod tests {
         let video_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
         // Box spans x: 100..900; first char center
         let x = 100.0 + (800.0 / n) * 0.5;
-        lookup_word_at_pointer(egui::pos2(x, 300.0), &[ocr_box], video_rect, db, None, global_deinflector())
+        lookup_word_at_pointer(egui::pos2(x, 300.0), &[ocr_box], video_rect, Some(db), None, global_deinflector(), &[], None, 0)
     }
 
     /// Hovers over the character at `idx` of `text` (single-line box) and returns the popup.
@@ -837,7 +961,7 @@ mod tests {
         };
         let video_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
         let x = 100.0 + (800.0 / n) * (idx as f32 + 0.5);
-        lookup_word_at_pointer(egui::pos2(x, 300.0), &[ocr_box], video_rect, db, None, global_deinflector())
+        lookup_word_at_pointer(egui::pos2(x, 300.0), &[ocr_box], video_rect, Some(db), None, global_deinflector(), &[], None, 0)
     }
 
     #[test]
@@ -1116,9 +1240,12 @@ mod tests {
             egui::pos2(x, 270.0),
             &[ocr_box.clone()],
             video_rect,
-            &db,
+            Some(&db),
             None,
             global_deinflector(),
+            &[],
+            None,
+            0,
         )
         .expect("should match across the line break");
         assert_eq!(p.matched_term, "調子が悪い");
@@ -1138,13 +1265,183 @@ mod tests {
             egui::pos2(x2, 330.0),
             &[ocr_box],
             video_rect,
-            &db,
+            Some(&db),
             None,
             global_deinflector(),
+            &[],
+            None,
+            0,
         )
         .expect("lookbehind should cross the line break");
         assert_eq!(p.matched_term, "調子が悪い");
         assert!((p.word_rect.center().y - 330.0).abs() < 1.0);
         assert_eq!(p.extra_word_rects.len(), 1);
+    }
+
+    #[test]
+    fn test_custom_name_lookup_and_tag_priority_sorting() {
+        let video_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
+        let ocr_box = OcrBox {
+            text: "田中さん".to_string(),
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.4,
+            height: 0.1,
+            lines: Vec::new(),
+        };
+
+        let custom_names = vec![
+            CustomNameEntry {
+                id: 1,
+                created_at: 1000,
+                kanji: "田中".to_string(),
+                furigana: "たなか".to_string(),
+                source_tag: Some("Game A".to_string()),
+                notes: Some("Protagonist from Game A".to_string()),
+            },
+            CustomNameEntry {
+                id: 2,
+                created_at: 2000,
+                kanji: "田中".to_string(),
+                furigana: "たない".to_string(),
+                source_tag: Some("Game B".to_string()),
+                notes: Some("Rival in Game B".to_string()),
+            },
+        ];
+
+        // 1. Hover on '田' (x = 350, within 300..500) with current_tag = "Game B"
+        // Should return both custom names, but "Game B" (id: 2) must be prioritized first
+        let popup = lookup_word_at_pointer(
+            egui::pos2(350.0, 300.0),
+            &[ocr_box.clone()],
+            video_rect,
+            None,
+            None,
+            global_deinflector(),
+            &custom_names,
+            Some("Game B"),
+            1,
+        )
+        .expect("should find custom names");
+
+        assert_eq!(popup.matched_term, "田中");
+        assert_eq!(popup.entries.len(), 2);
+        assert_eq!(popup.entries[0].custom_name_id, Some(2));
+        assert_eq!(popup.entries[0].reading, "たない");
+        assert_eq!(popup.entries[0].custom_tag.as_deref(), Some("Game B"));
+        assert_eq!(popup.entries[1].custom_name_id, Some(1));
+        assert_eq!(popup.entries[1].reading, "たなか");
+        assert_eq!(popup.entries[1].custom_tag.as_deref(), Some("Game A"));
+
+        // 2. Change current_tag to "Game A" -> now id: 1 should appear first
+        let popup2 = lookup_word_at_pointer(
+            egui::pos2(350.0, 300.0),
+            &[ocr_box.clone()],
+            video_rect,
+            None,
+            None,
+            global_deinflector(),
+            &custom_names,
+            Some("Game A"),
+            1,
+        )
+        .expect("should find custom names");
+
+        assert_eq!(popup2.entries.len(), 2);
+        assert_eq!(popup2.entries[0].custom_name_id, Some(1));
+        assert_eq!(popup2.entries[0].reading, "たなか");
+        assert_eq!(popup2.entries[1].custom_name_id, Some(2));
+        assert_eq!(popup2.entries[1].reading, "たない");
+    }
+
+    #[test]
+    fn test_custom_name_combined_with_dict_and_reading_lookup() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test_names_dict.db");
+        let db = DictDatabase::open_or_create(&db_path).unwrap();
+
+        // Add standard dictionary entry for 田中
+        db.conn
+            .execute(
+                "INSERT INTO terms VALUES ('田中', 'たなか', 'n', '', 500.0, '[\"surname\"]', 10, '')",
+                [],
+            )
+            .unwrap();
+
+        let video_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
+        let ocr_box = OcrBox {
+            text: "田中".to_string(),
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.2,
+            height: 0.1,
+            lines: Vec::new(),
+        };
+
+        let custom_names = vec![
+            CustomNameEntry {
+                id: 10,
+                created_at: 1000,
+                kanji: "田中".to_string(),
+                furigana: "たなか".to_string(),
+                source_tag: Some("Game A".to_string()),
+                notes: None,
+            },
+            CustomNameEntry {
+                id: 20,
+                created_at: 2000,
+                kanji: "田中".to_string(),
+                furigana: "たない".to_string(),
+                source_tag: Some("Game B".to_string()),
+                notes: None,
+            },
+        ];
+
+        // Hover over 田中 with tag "Game B":
+        // Group 0: Custom name with tag "Game B" (id 20)
+        // Group 1: Other custom name (id 10)
+        // Group 2: Dict entry (sequence 10)
+        let popup = lookup_word_at_pointer(
+            egui::pos2(500.0, 300.0),
+            &[ocr_box],
+            video_rect,
+            Some(&db),
+            None,
+            global_deinflector(),
+            &custom_names,
+            Some("Game B"),
+            1,
+        )
+        .expect("should find custom names and dict entry");
+
+        assert_eq!(popup.entries.len(), 3);
+        assert_eq!(popup.entries[0].custom_name_id, Some(20));
+        assert_eq!(popup.entries[1].custom_name_id, Some(10));
+        assert_eq!(popup.entries[2].custom_name_id, None);
+        assert_eq!(popup.entries[2].sequence, 10);
+
+        // Also test matching by furigana reading when text is in Hiragana
+        let ocr_kana_box = OcrBox {
+            text: "たない".to_string(),
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.3,
+            height: 0.1,
+            lines: Vec::new(),
+        };
+        let popup_kana = lookup_word_at_pointer(
+            egui::pos2(500.0, 300.0),
+            &[ocr_kana_box],
+            video_rect,
+            Some(&db),
+            None,
+            global_deinflector(),
+            &custom_names,
+            None,
+            1,
+        )
+        .expect("should find custom name matching reading");
+        assert_eq!(popup_kana.entries[0].custom_name_id, Some(20));
+        assert_eq!(popup_kana.entries[0].term, "田中");
     }
 }

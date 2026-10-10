@@ -55,30 +55,46 @@ const CIRCLED_NUMBERS: &[&str] = &[
     "⑪", "⑫", "⑬", "⑭", "⑮", "⑯", "⑰", "⑱", "⑲", "⑳",
 ];
 
+/// Action taken on an entry in the dictionary popup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryAction {
+    None,
+    Mine,
+    DeleteCustomName(i64),
+}
+
 /// Renders a single dictionary entry inside the popup scroll area.
 /// Renders a dictionary entry. If `mine_status` is given, a mining button (`+`) is drawn at
-/// the right of the header row. Returns true if the mining button was clicked.
+/// the right of the header row. If the entry is a custom name, a delete button is also drawn.
 pub fn render_term_entry(
     ui: &mut egui::Ui,
     entry: &TermEntry,
     index: usize,
     mine_status: Option<crate::bank::MineStatus>,
     is_mined: bool,
-) -> bool {
+) -> EntryAction {
     if index > 0 {
         ui.add_space(14.0);
         ui.separator();
         ui.add_space(8.0);
     }
 
-    let mut mine_clicked = false;
+    let mut action = EntryAction::None;
 
     // 1. Entry Header
     ui.horizontal(|ui| {
-        // Reserve room on the right for the mining button.
+        // Reserve room on the right for action buttons.
         let button_size = 56.0;
-        let header_width = if mine_status.is_some() {
-            (ui.available_width() - button_size - 12.0).max(100.0)
+        let has_mine = mine_status.is_some();
+        let has_del = entry.custom_name_id.is_some();
+        let num_buttons = (if has_mine { 1.0 } else { 0.0 }) + (if has_del { 1.0 } else { 0.0 });
+        let buttons_width = if num_buttons > 0.0 {
+            num_buttons * button_size + (num_buttons - 1.0) * 8.0
+        } else {
+            0.0
+        };
+        let header_width = if buttons_width > 0.0 {
+            (ui.available_width() - buttons_width - 12.0).max(100.0)
         } else {
             ui.available_width()
         };
@@ -87,16 +103,91 @@ pub fn render_term_entry(
             egui::Layout::top_down(egui::Align::LEFT),
             |ui| render_entry_header(ui, entry, is_mined),
         );
-        if let Some(status) = mine_status {
+        if buttons_width > 0.0 {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                mine_clicked = render_mine_button(ui, status, button_size);
+                if let Some(status) = mine_status {
+                    if render_mine_button(ui, status, button_size) {
+                        action = EntryAction::Mine;
+                    }
+                    if has_del {
+                        ui.add_space(8.0);
+                    }
+                }
+                if let Some(name_id) = entry.custom_name_id {
+                    if render_delete_name_button(ui, button_size) {
+                        action = EntryAction::DeleteCustomName(name_id);
+                    }
+                }
             });
         }
     });
 
     ui.add_space(6.0);
     render_glossaries(ui, entry);
-    mine_clicked
+    action
+}
+
+/// Vector trash-can button to delete an entry from custom names.
+fn render_delete_name_button(ui: &mut egui::Ui, size: f32) -> bool {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    let hovered = response.hovered();
+    let (fill, stroke_color, icon_color) = if hovered {
+        (
+            Color32::from_rgba_premultiplied(65, 25, 25, 220),
+            Color32::from_rgb(239, 68, 68),
+            Color32::from_rgb(248, 113, 113),
+        )
+    } else {
+        (
+            COLOR_TAG_BG,
+            COLOR_TAG_BORDER,
+            COLOR_TAG_TEXT,
+        )
+    };
+    ui.painter().rect(
+        rect,
+        8.0,
+        fill,
+        egui::Stroke::new(1.5, stroke_color),
+    );
+
+    let center = rect.center();
+    let arm = size * 0.22;
+    let stroke = egui::Stroke::new(1.5, icon_color);
+
+    // Lid top handle
+    ui.painter().line_segment(
+        [center + egui::vec2(-arm * 0.45, -arm * 1.15), center + egui::vec2(arm * 0.45, -arm * 1.15)],
+        stroke,
+    );
+    // Lid horizontal bar
+    ui.painter().line_segment(
+        [center + egui::vec2(-arm * 1.25, -arm * 0.8), center + egui::vec2(arm * 1.25, -arm * 0.8)],
+        stroke,
+    );
+    // Can body
+    let tl = center + egui::vec2(-arm * 0.95, -arm * 0.5);
+    let tr = center + egui::vec2(arm * 0.95, -arm * 0.5);
+    let bl = center + egui::vec2(-arm * 0.75, arm * 1.15);
+    let br = center + egui::vec2(arm * 0.75, arm * 1.15);
+    ui.painter().line_segment([tl, bl], stroke);
+    ui.painter().line_segment([bl, br], stroke);
+    ui.painter().line_segment([br, tr], stroke);
+    // Vertical inner ribs
+    let inner_stroke = egui::Stroke::new(1.2, icon_color);
+    ui.painter().line_segment(
+        [center + egui::vec2(-arm * 0.3, -arm * 0.1), center + egui::vec2(-arm * 0.25, arm * 0.8)],
+        inner_stroke,
+    );
+    ui.painter().line_segment(
+        [center + egui::vec2(arm * 0.3, -arm * 0.1), center + egui::vec2(arm * 0.25, arm * 0.8)],
+        inner_stroke,
+    );
+
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response.on_hover_text("Delete from custom names").clicked()
 }
 
 /// Round `+` / `…` / `✔` button used to add an entry to the mining bank.
@@ -190,6 +281,17 @@ pub fn render_entry_header(ui: &mut egui::Ui, entry: &TermEntry, is_mined: bool)
         );
         ui.label(job);
 
+        // Custom Name badge
+        if entry.custom_name_id.is_some() {
+            render_pill_badge(
+                ui,
+                "Custom Name",
+                Color32::from_rgb(30, 58, 138),
+                Color32::from_rgb(147, 197, 253),
+                Color32::from_rgb(59, 130, 246),
+            );
+        }
+
         // Mined badge / icon if already in the mining bank
         if is_mined {
             render_pill_badge(
@@ -214,11 +316,23 @@ pub fn render_entry_header(ui: &mut egui::Ui, entry: &TermEntry, is_mined: bool)
         .filter(|t| !t.is_empty() && *t != "★" && *t != "form" && *t != "P")
         .collect();
     let has_tags = !tags_to_show.is_empty();
+    let has_custom_tag = entry.custom_tag.is_some();
 
-    if has_freq || has_deinflect || has_tags {
+    if has_freq || has_deinflect || has_tags || has_custom_tag {
         ui.add_space(3.0 * scale);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(6.0 * scale, 4.0 * scale);
+
+            // Custom source tag badge
+            if let Some(tag) = &entry.custom_tag {
+                render_pill_badge(
+                    ui,
+                    &format!("🏷 {tag}"),
+                    COLOR_TAG_BG,
+                    COLOR_TAG_TEXT,
+                    COLOR_TAG_BORDER,
+                );
+            }
 
             // Frequency rank badge
             if let Some(freq) = &entry.frequency {
@@ -259,6 +373,20 @@ pub fn render_entry_header(ui: &mut egui::Ui, entry: &TermEntry, is_mined: bool)
 
 /// Renders all glossaries / senses of an entry.
 pub fn render_glossaries(ui: &mut egui::Ui, entry: &TermEntry) {
+    if entry.custom_name_id.is_some() {
+        if let Some(GlossaryEntry::Text(notes)) = entry.glossary.first() {
+            if !notes.trim().is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(notes)
+                            .font(dict_font(32.0))
+                            .color(COLOR_DEFINITION),
+                    );
+                });
+            }
+        }
+        return;
+    }
     for (g_idx, item) in entry.glossary.iter().enumerate() {
         match item {
             GlossaryEntry::Text(text) => {

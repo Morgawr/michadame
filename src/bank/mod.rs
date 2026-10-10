@@ -5,7 +5,7 @@ pub mod database;
 pub mod sentence;
 pub mod tags;
 
-pub use database::{BankDatabase, BankEntryMeta, NewBankEntry};
+pub use database::{BankDatabase, BankEntryMeta, CustomNameEntry, NewBankEntry, NewCustomName};
 
 use crate::dict::TermEntry;
 use crossbeam_channel::{Receiver, Sender};
@@ -181,6 +181,8 @@ pub fn entry_from_json(term: &str, reading: &str, json: &str) -> Option<TermEntr
             .map(|a| a.iter().filter_map(|r| r.as_str().map(str::to_string)).collect())
             .unwrap_or_default(),
         frequency,
+        custom_name_id: None,
+        custom_tag: None,
     })
 }
 
@@ -353,6 +355,24 @@ pub struct BankState {
     pub compact_mode: bool,
     /// Mined word entry IDs expanded while in compact mode.
     pub expanded_entries: HashSet<i64>,
+    /// Custom name dictionary entries, most recent first.
+    pub custom_names: Vec<CustomNameEntry>,
+    /// Generation counter incremented when custom names are added or deleted (for cache invalidation).
+    pub custom_names_generation: u64,
+    /// Modal dialog state for adding a custom name in the word bank window.
+    pub add_name_dialog: AddNameDialogState,
+}
+
+/// Modal dialog state for adding a custom name in the word bank window.
+#[derive(Clone, Debug, Default)]
+pub struct AddNameDialogState {
+    pub open: bool,
+    pub kanji: String,
+    pub furigana: String,
+    pub source_tag: String,
+    pub notes: String,
+    pub focus: bool,
+    pub error_msg: Option<String>,
 }
 
 /// In-progress edit of a bank entry's tag.
@@ -392,6 +412,10 @@ impl BankState {
             .as_ref()
             .and_then(|db| db.list_meta().map_err(|e| tracing::warn!("Failed to list bank: {e}")).ok())
             .unwrap_or_default();
+        let custom_names = db
+            .as_ref()
+            .and_then(|db| db.list_custom_names().map_err(|e| tracing::warn!("Failed to list custom names: {e}")).ok())
+            .unwrap_or_default();
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         let mut state = Self {
             db: Arc::new(Mutex::new(db)),
@@ -417,6 +441,9 @@ impl BankState {
             copying_screenshot: None,
             compact_mode: false,
             expanded_entries: HashSet::new(),
+            custom_names,
+            custom_names_generation: 1,
+            add_name_dialog: AddNameDialogState::default(),
         };
         state.rebuild_keys();
         state
@@ -445,13 +472,78 @@ impl BankState {
     /// most-recent-first).
     fn rebuild_known_tags(&mut self) {
         let mut seen = HashSet::new();
-        self.known_tags = self
-            .entries
-            .iter()
-            .filter_map(|e| e.tag.as_ref())
-            .filter(|t| seen.insert(t.as_str()))
-            .cloned()
-            .collect();
+        let mut tags = Vec::new();
+        for entry in &self.entries {
+            if let Some(t) = &entry.tag {
+                if seen.insert(t.as_str()) {
+                    tags.push(t.clone());
+                }
+            }
+        }
+        for name in &self.custom_names {
+            if let Some(t) = &name.source_tag {
+                if seen.insert(t.as_str()) {
+                    tags.push(t.clone());
+                }
+            }
+        }
+        self.known_tags = tags;
+    }
+
+    /// Opens the Add Custom Name dialog in the Word Bank window.
+    pub fn open_add_name_dialog(&mut self) {
+        self.add_name_dialog = AddNameDialogState {
+            open: true,
+            kanji: String::new(),
+            furigana: String::new(),
+            source_tag: self.mining_tag().unwrap_or_else(|| self.current_tag.clone()),
+            notes: String::new(),
+            focus: true,
+            error_msg: None,
+        };
+    }
+
+    /// Adds a new custom name entry.
+    pub fn add_custom_name(
+        &mut self,
+        kanji: &str,
+        furigana: &str,
+        source_tag: Option<&str>,
+        notes: Option<&str>,
+    ) -> anyhow::Result<CustomNameEntry> {
+        let tag = source_tag.and_then(|t| tags::canonicalize_tag(t, &self.known_tags));
+        let new_entry = NewCustomName {
+            created_at: unix_millis(),
+            kanji: kanji.trim().to_string(),
+            furigana: furigana.trim().to_string(),
+            source_tag: tag,
+            notes: notes.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()),
+        };
+        let entry = {
+            let guard = self.db.lock().map_err(|_| anyhow::anyhow!("bank database lock poisoned"))?;
+            let db = guard
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("mining bank database is not available"))?;
+            db.insert_custom_name(&new_entry)?
+        };
+        self.custom_names.insert(0, entry.clone());
+        self.custom_names_generation = self.custom_names_generation.wrapping_add(1);
+        self.rebuild_known_tags();
+        Ok(entry)
+    }
+
+    /// Deletes a custom name entry by id.
+    pub fn delete_custom_name(&mut self, id: i64) -> anyhow::Result<()> {
+        {
+            let guard = self.db.lock().map_err(|_| anyhow::anyhow!("lock poisoned"))?;
+            if let Some(db) = guard.as_ref() {
+                db.delete_custom_name(id)?;
+            }
+        }
+        self.custom_names.retain(|e| e.id != id);
+        self.custom_names_generation = self.custom_names_generation.wrapping_add(1);
+        self.rebuild_known_tags();
+        Ok(())
     }
 
     /// The tag to stamp on a newly mined word: the settings tag, trimmed and matched to an
@@ -782,6 +874,8 @@ mod tests {
                 rank: 1234,
                 display_value: Some("1234㋕".into()),
             }),
+            custom_name_id: None,
+            custom_tag: None,
         };
         let json = entry_to_json(&entry);
         assert!(!json.contains("example-sentence"));
@@ -820,6 +914,8 @@ mod tests {
             term_tags: None,
             inflection_reasons: vec![],
             frequency: None,
+            custom_name_id: None,
+            custom_tag: None,
         };
         let text = "おはよう。今日は暑いね。";
         let request = MineRequest::from_lookup(&entry, text, (8, 10), bank.mining_tag());
@@ -863,6 +959,8 @@ mod tests {
             term_tags: None,
             inflection_reasons: vec![],
             frequency: None,
+            custom_name_id: None,
+            custom_tag: None,
         };
         let len = term.chars().count();
         let request = MineRequest::from_lookup(&entry, sentence, (0, len), bank.mining_tag());
@@ -933,6 +1031,8 @@ mod tests {
             term_tags: None,
             inflection_reasons: vec![],
             frequency: None,
+            custom_name_id: None,
+            custom_tag: None,
         };
         let request = MineRequest::from_lookup(&entry1, "お茶が熱い。", (3, 5), bank.mining_tag());
         assert!(bank.request_mine(request));
@@ -973,6 +1073,8 @@ mod tests {
             term_tags: None,
             inflection_reasons: vec![],
             frequency: None,
+            custom_name_id: None,
+            custom_tag: None,
         };
         let req = MineRequest::from_lookup(&entry_zero, "林檎を食べた。", (0, 2), None);
         assert!(bank.request_mine(req));
@@ -1005,6 +1107,8 @@ mod tests {
             term_tags: None,
             inflection_reasons: vec![],
             frequency: None,
+            custom_name_id: None,
+            custom_tag: None,
         };
         let req = MineRequest::from_lookup(&entry, "本を読む。", (0, 1), None);
         assert!(bank.request_mine(req));

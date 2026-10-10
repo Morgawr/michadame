@@ -203,11 +203,13 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         if let Some(pos) = pointer_pos {
             if hovered_any_box {
                 let has_db = state.dict.db.lock().map(|g| g.is_some()).unwrap_or(false);
-                if has_db {
-                    let db_guard = state.dict.db.lock().unwrap();
-                    let db = db_guard.as_ref().unwrap();
+                let has_custom = !state.bank.custom_names.is_empty();
+                if has_db || has_custom {
+                    let db_guard = state.dict.db.lock().ok();
+                    let db = db_guard.as_ref().and_then(|g| g.as_ref());
                     let freq_guard = state.dict.freq_db.lock().ok();
                     let freq_db = freq_guard.as_ref().and_then(|g| g.as_ref());
+                    let current_tag = state.bank.mining_tag();
                     let lookup = crate::dict::lookup::lookup_word_at_pointer(
                         pos,
                         &state.ocr.boxes,
@@ -215,6 +217,9 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
                         db,
                         freq_db,
                         crate::dict::global_deinflector(),
+                        &state.bank.custom_names,
+                        current_tag.as_deref(),
+                        state.bank.custom_names_generation,
                     );
                     if let Some(new_popup) = lookup {
                         // Don't jump to a neighboring word right after leaving the current
@@ -272,7 +277,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         .map(|p| crate::bank::sentence::extract_sentence(&p.source_text, p.char_range).0)
         .unwrap_or_default();
     let bank = &state.bank;
-    let mine_clicked = crate::dict::popup::draw_dict_popup(
+    let popup_action = crate::dict::popup::draw_dict_popup(
         ui,
         &mut state.dict.popup,
         video_rect,
@@ -281,20 +286,38 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         |entry| bank.is_entry_mined(&entry.term, &entry.reading, entry.sequence),
     );
 
-    // Queue a mining request; the screenshot is grabbed by the video paint callback at the
-    // end of this frame, before any overlay is drawn.
-    if let Some(idx) = mine_clicked {
-        let tag = state.bank.mining_tag();
-        let request = state.dict.popup.as_ref().and_then(|p| {
-            p.entries.get(idx).map(|e| {
-                crate::bank::MineRequest::from_lookup(e, &p.source_text, p.char_range, tag)
-            })
-        });
-        if let Some(request) = request {
-            if !state.bank.request_mine(request) {
-                state.error("Another word is still being mined, try again.");
+    // Handle user actions in popup: mining or deleting a custom name
+    if let Some(action) = popup_action {
+        match action {
+            crate::dict::popup::PopupAction::Mine(idx) => {
+                let tag = state.bank.mining_tag();
+                let request = state.dict.popup.as_ref().and_then(|p| {
+                    p.entries.get(idx).map(|e| {
+                        crate::bank::MineRequest::from_lookup(e, &p.source_text, p.char_range, tag)
+                    })
+                });
+                if let Some(request) = request {
+                    if !state.bank.request_mine(request) {
+                        state.error("Another word is still being mined, try again.");
+                    }
+                    ui.ctx().request_repaint();
+                }
             }
-            ui.ctx().request_repaint();
+            crate::dict::popup::PopupAction::DeleteCustomName(id) => {
+                if let Err(e) = state.bank.delete_custom_name(id) {
+                    state.error(format!("Failed to delete custom name: {e}"));
+                } else {
+                    state.info("Deleted custom name.");
+                    if let Some(ref mut popup) = state.dict.popup {
+                        popup.entries.retain(|e| e.custom_name_id != Some(id));
+                        if popup.entries.is_empty() {
+                            state.dict.popup = None;
+                        }
+                    }
+                    crate::dict::lookup::invalidate_scan_cache();
+                    ui.ctx().request_repaint();
+                }
+            }
         }
     }
 }

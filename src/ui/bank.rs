@@ -52,9 +52,11 @@ pub fn draw_bank_window(state: &mut AppState, ctx: &egui::Context) {
 }
 
 fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
-    // Keyboard: Esc closes the enlarged screenshot; B closes the window.
+    // Keyboard: Esc closes the enlarged screenshot or add-name dialog; B closes the window.
     if state.bank.enlarged.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         state.bank.enlarged = None;
+    } else if state.bank.add_name_dialog.open && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        state.bank.add_name_dialog.open = false;
     } else if !ctx.wants_keyboard_input()
         && ctx.input(|i| i.modifiers.is_none() && i.key_pressed(egui::Key::B))
     {
@@ -76,6 +78,20 @@ fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
                 format!("{shown} of {total} word{}", plural(total))
             };
             ui.label(RichText::new(text).color(COLOR_MUTED));
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let add_btn = egui::Button::new(
+                    RichText::new("➕ Add Name")
+                        .font(egui::FontId::proportional(13.0))
+                        .color(Color32::from_rgb(240, 245, 255)),
+                )
+                .fill(Color32::from_rgba_premultiplied(45, 55, 75, 200))
+                .stroke(egui::Stroke::new(1.0, Color32::from_rgba_premultiplied(90, 105, 135, 180)))
+                .rounding(5.0);
+                if ui.add(add_btn).on_hover_text("Add a custom name to the dictionary").clicked() {
+                    state.bank.open_add_name_dialog();
+                }
+            });
         });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -203,6 +219,7 @@ fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
     }
 
     draw_enlarged(state, ctx);
+    draw_add_name_dialog(state, ctx);
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -877,6 +894,133 @@ fn draw_enlarged(state: &mut AppState, ctx: &egui::Context) {
         });
     if close {
         state.bank.enlarged = None;
+    }
+}
+
+fn draw_add_name_dialog(state: &mut AppState, ctx: &egui::Context) {
+    if !state.bank.add_name_dialog.open {
+        return;
+    }
+
+    let screen_rect = ctx.screen_rect();
+    // Dim the background behind the modal dialog
+    egui::Area::new(egui::Id::new("bank_add_name_modal_backdrop"))
+        .fixed_pos(screen_rect.min)
+        .order(egui::Order::Middle)
+        .show(ctx, |ui| {
+            let (rect, _) = ui.allocate_exact_size(screen_rect.size(), egui::Sense::hover());
+            ui.painter().rect_filled(rect, 0.0, Color32::from_black_alpha(160));
+        });
+
+    let mut close = false;
+    let mut save = false;
+
+    egui::Window::new("Add Custom Name")
+        .id(egui::Id::new("bank_add_name_dialog"))
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .collapsible(false)
+        .resizable(false)
+        .default_width(380.0)
+        .show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.add_space(4.0);
+
+            if let Some(err) = &state.bank.add_name_dialog.error_msg {
+                ui.colored_label(Color32::from_rgb(248, 113, 113), format!("⚠ {err}"));
+                ui.add_space(4.0);
+            }
+
+            ui.label(RichText::new("Kanji / Word:").strong());
+            let kanji_edit = ui.add(
+                egui::TextEdit::singleline(&mut state.bank.add_name_dialog.kanji)
+                    .hint_text("e.g. 田中")
+                    .desired_width(f32::INFINITY),
+            );
+            if state.bank.add_name_dialog.focus {
+                kanji_edit.request_focus();
+                state.bank.add_name_dialog.focus = false;
+            }
+
+            ui.add_space(6.0);
+            ui.label(RichText::new("Furigana / Reading:").strong());
+            ui.add(
+                egui::TextEdit::singleline(&mut state.bank.add_name_dialog.furigana)
+                    .hint_text("e.g. たなか")
+                    .desired_width(f32::INFINITY),
+            );
+
+            ui.add_space(6.0);
+            ui.label(RichText::new("Source Tag (optional):").color(COLOR_TAG));
+            ui.add(
+                egui::TextEdit::singleline(&mut state.bank.add_name_dialog.source_tag)
+                    .hint_text("Defaults to current mining tag; leave empty for none")
+                    .desired_width(f32::INFINITY),
+            );
+
+            ui.add_space(6.0);
+            ui.label(RichText::new("Notes (optional):").color(COLOR_MUTED));
+            ui.add(
+                egui::TextEdit::multiline(&mut state.bank.add_name_dialog.notes)
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("Any extra context, character notes, etc."),
+            );
+
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                if ui.button("Save Name").clicked() {
+                    save = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+            });
+        });
+
+    if save {
+        let kanji = state.bank.add_name_dialog.kanji.trim().to_string();
+        let furigana = state.bank.add_name_dialog.furigana.trim().to_string();
+        let source_tag = {
+            let t = state.bank.add_name_dialog.source_tag.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        };
+        let notes = {
+            let n = state.bank.add_name_dialog.notes.trim();
+            if n.is_empty() {
+                None
+            } else {
+                Some(n.to_string())
+            }
+        };
+
+        if kanji.is_empty() || furigana.is_empty() {
+            state.bank.add_name_dialog.error_msg =
+                Some("Kanji and Furigana / Reading are required.".to_string());
+        } else {
+            match state.bank.add_custom_name(
+                &kanji,
+                &furigana,
+                source_tag.as_deref(),
+                notes.as_deref(),
+            ) {
+                Ok(_) => {
+                    crate::dict::lookup::invalidate_scan_cache();
+                    state.info(format!("Added custom name: {kanji} ({furigana})"));
+                    state.bank.add_name_dialog.open = false;
+                }
+                Err(e) => {
+                    state.bank.add_name_dialog.error_msg =
+                        Some(format!("Failed to save custom name: {e}"));
+                }
+            }
+        }
+    }
+    if close {
+        state.bank.add_name_dialog.open = false;
     }
 }
 

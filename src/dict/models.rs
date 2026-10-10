@@ -74,6 +74,10 @@ pub struct TermEntry {
     pub inflection_reasons: Vec<String>,
     /// Frequency information if available from a frequency dictionary (e.g. Jiten)
     pub frequency: Option<TermFrequency>,
+    /// If this entry is from the custom name dictionary, its database ID.
+    pub custom_name_id: Option<i64>,
+    /// Source tag if this entry is from the custom name dictionary.
+    pub custom_tag: Option<String>,
 }
 
 /// A candidate produced by the Japanese deinflector.

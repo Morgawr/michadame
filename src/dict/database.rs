@@ -215,6 +215,8 @@ impl DictDatabase {
                     term_tags,
                     inflection_reasons: candidate.reasons.clone(),
                     frequency: None,
+                    custom_name_id: None,
+                    custom_tag: None,
                 });
             }
         }
