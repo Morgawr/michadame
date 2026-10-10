@@ -126,6 +126,7 @@ impl From<LegacyConfig> for MichadameConfig {
             bank_current_tag: legacy.bank_current_tag,
             bank_compact_mode: legacy.bank_compact_mode,
             popup_under_crt: legacy.popup_under_crt,
+            twitch: legacy.twitch,
             profiles,
         }
     }
@@ -234,6 +235,7 @@ mod tests {
             bank_current_tag: None,
             bank_compact_mode: None,
             popup_under_crt: Some(false),
+            twitch: Default::default(),
         };
 
         let config: MichadameConfig = MichadameConfig::from(legacy);
@@ -363,6 +365,7 @@ mod tests {
             bank_current_tag: None,
             bank_compact_mode: None,
             popup_under_crt: None,
+            twitch: Default::default(),
         };
 
         let config: MichadameConfig = MichadameConfig::from(legacy);

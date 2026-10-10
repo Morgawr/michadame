@@ -175,7 +175,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         );
 
         let pointer_pos = ui.input(|i| i.pointer.hover_pos());
-        let is_on_crt_surface = pointer_pos.map_or(false, |pos| crt_surface.contains(pos));
+        let is_on_crt_surface = pointer_pos.map_or(false, |pos| {
+            crt_surface.contains(pos) && !state.twitch.overlay_contains(pos)
+        });
         let software_mouse_active = is_software_mouse_active(state, is_on_crt_surface);
 
         let (software_mouse_pos, software_mouse_clip) = if software_mouse_active {

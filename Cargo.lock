@@ -2842,6 +2842,7 @@ dependencies = [
  "rtrb",
  "rusb",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "tempfile",
@@ -2851,6 +2852,7 @@ dependencies = [
  "ureq",
  "url",
  "v4l",
+ "webpki-roots 0.26.11",
  "zip",
 ]
 

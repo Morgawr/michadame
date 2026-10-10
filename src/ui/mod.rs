@@ -11,6 +11,8 @@ pub mod filters;
 pub mod networking;
 pub mod profiles;
 pub mod tag_input;
+pub mod twitch;
+pub mod twitch_overlay;
 pub mod video_player;
 
 pub use networking::send_ws_command;

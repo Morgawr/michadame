@@ -1,6 +1,41 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Global Twitch integration settings (not tied to a profile).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct TwitchConfig {
+    /// Normalized channel login (lowercase, no `#`).
+    pub channel: String,
+    /// Show the live chat overlay on the video window.
+    pub chat_overlay_enabled: bool,
+    /// Overlay width as a fraction of the video window width.
+    pub overlay_width_pct: f32,
+    /// Overlay background opacity (0..1).
+    pub overlay_opacity: f32,
+    pub font_size: f32,
+    /// Seconds before a chat message disappears. 0 = never.
+    pub message_lifetime_secs: u32,
+    pub max_messages: u32,
+    /// Optional Twitch application Client ID override. Empty = built-in.
+    pub client_id: String,
+}
+
+impl Default for TwitchConfig {
+    fn default() -> Self {
+        Self {
+            channel: String::new(),
+            chat_overlay_enabled: false,
+            overlay_width_pct: 0.22,
+            overlay_opacity: 0.65,
+            font_size: 14.0,
+            message_lifetime_secs: 120,
+            max_messages: 150,
+            client_id: String::new(),
+        }
+    }
+}
+
 #[derive(Default, Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct Profile {
@@ -215,6 +250,8 @@ pub struct LegacyConfig {
     pub bank_current_tag: Option<String>,
     pub bank_compact_mode: Option<bool>,
     pub popup_under_crt: Option<bool>,
+    #[serde(default)]
+    pub twitch: TwitchConfig,
 }
 
 impl Default for LegacyConfig {
@@ -315,6 +352,7 @@ impl Default for LegacyConfig {
             bank_current_tag: None,
             bank_compact_mode: None,
             popup_under_crt: None,
+            twitch: TwitchConfig::default(),
         }
     }
 }
@@ -347,6 +385,7 @@ pub struct MichadameConfig {
     pub popup_under_crt: Option<bool>,
     pub default_halo: Option<crate::app::models::HaloSettings>,
     pub default_cathode_interference: Option<crate::app::models::CathodeInterferenceSettings>,
+    pub twitch: TwitchConfig,
     // confy's TOML serializer requires scalar fields before nested tables.
     pub replay: crate::replay::config::ReplayConfig,
     pub profiles: BTreeMap<String, Profile>,
@@ -374,6 +413,7 @@ impl Default for MichadameConfig {
             ocr_timeout_seconds: Some(45),
             default_halo: None,
             default_cathode_interference: None,
+            twitch: TwitchConfig::default(),
             bank_current_tag: None,
             bank_compact_mode: None,
             popup_under_crt: Some(false),

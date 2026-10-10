@@ -273,6 +273,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     (SettingsTab::Devices, "Capture Devices"),
                     (SettingsTab::AudioReplay, "Audio / Replay"),
                     (SettingsTab::OcrDict, "OCR / Dictionaries"),
+                    (SettingsTab::Twitch, "Twitch"),
                     (SettingsTab::Hotkeys, "Hotkeys"),
                 ];
                 for (tab, label) in tabs {
@@ -353,6 +354,9 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 }
                 SettingsTab::OcrDict => {
                     draw_ocr_dict_tab(ui, state, &mut changed);
+                }
+                SettingsTab::Twitch => {
+                    changed |= super::twitch::draw_twitch_tab(ui, state);
                 }
                 SettingsTab::Hotkeys => {
                     draw_hotkeys_tab(ui);
@@ -638,6 +642,7 @@ fn draw_hotkeys_tab(ui: &mut egui::Ui) {
                     ("K", "Toggle Lights Off Night Mode"),
                     ("G", "Toggle 480p Pixelate Filter"),
                     ("Q", "Stop Stream Confirmation Dialog"),
+                    ("T", "Hide / Show Twitch Chat Overlay (when enabled)"),
                     ("Escape", "Exit Fullscreen / Close Dialogs / Dismiss Popups"),
                     ("Space", "Capture OCR (Google Lens)"),
                     ("Shift + Space", "Clear OCR Bounding Boxes"),

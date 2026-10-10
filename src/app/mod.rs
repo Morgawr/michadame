@@ -146,6 +146,7 @@ impl Default for AppState {
             ocr: crate::ocr::OcrState::default(),
             dict: crate::dict::DictState::default(),
             bank: crate::bank::BankState::default(),
+            twitch: crate::twitch::TwitchState::default(),
             config_load_error: None,
             config_quarantine_path: None,
         }
@@ -375,7 +376,9 @@ impl eframe::App for AppState {
             repaint_requested = true;
         }
 
-        if ctx.input(|i| i.key_pressed(egui::Key::F)) {
+        // Video-window hotkeys must not fire while typing (e.g. in the Twitch chat input).
+        let typing = ctx.wants_keyboard_input();
+        if !typing && ctx.input(|i| i.key_pressed(egui::Key::F)) {
             let is_fullscreen = !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(is_fullscreen));
         }
@@ -405,7 +408,7 @@ impl eframe::App for AppState {
                 ctx.request_repaint();
             }
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::G)) {
+        if !typing && ctx.input(|i| i.key_pressed(egui::Key::G)) {
             self.video.pixelate_filter_enabled = !self.video.pixelate_filter_enabled;
             let status = if self.video.pixelate_filter_enabled {
                 "enabled"
@@ -415,16 +418,18 @@ impl eframe::App for AppState {
             self.info(format!("480p Pixelate filter {}.", status));
             config::save_config(self);
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        // While typing, Escape only unfocuses the text field.
+        if !typing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Q))
+        if !typing
+            && ctx.input(|i| i.key_pressed(egui::Key::Q))
             && self.ui.video_window_open
             && !self.ui.show_stop_stream_dialog
         {
             self.ui.show_stop_stream_dialog = true;
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::M)) {
+        if !typing && ctx.input(|i| i.key_pressed(egui::Key::M)) {
             self.ui.control_window_open = !self.ui.control_window_open;
         }
         if !ctx.wants_keyboard_input()
@@ -652,6 +657,16 @@ impl eframe::App for AppState {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
         ui::bank::draw_bank_window(self, ctx);
+
+        repaint_requested |= self.twitch.poll(ctx);
+        for (is_error, message) in self.twitch.take_notifications() {
+            if is_error {
+                self.error(message);
+            } else {
+                self.info(message);
+            }
+        }
+        ui::twitch_overlay::draw(self, ctx);
 
         self.update_fps_counters(ctx);
         ui::debug::draw(self, ctx);

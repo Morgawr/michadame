@@ -290,6 +290,7 @@ pub fn save_config_at(path: &Path, state: &mut AppState) -> Result<(), confy::Co
     cfg.default_halo = Some(state.halo_defaults.clone());
     cfg.default_cathode_interference = Some(state.cathode_interference_defaults.clone());
     cfg.popup_under_crt = Some(state.dict.popup_under_crt);
+    cfg.twitch = state.twitch.config.clone();
 
     let current_profile_data = build_profile_from_state(state);
     state
@@ -350,6 +351,7 @@ pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(
     cfg.bank_current_tag = crate::bank::tags::normalize_tag(&state.bank.current_tag);
     cfg.bank_compact_mode = Some(state.bank.compact_mode);
     cfg.default_halo = Some(state.halo_defaults.clone());
+    cfg.twitch = state.twitch.config.clone();
 
     cfg.active_profile = state.active_profile.clone();
     cfg.profiles = state.profiles.clone();
@@ -638,6 +640,7 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     state.bank.current_tag = cfg.bank_current_tag.clone().unwrap_or_default();
     state.bank.saved_current_tag = state.bank.current_tag.clone();
     state.bank.compact_mode = cfg.bank_compact_mode.unwrap_or(false);
+    state.twitch.apply_config(cfg.twitch.clone());
     if let Some(defaults) = &cfg.default_halo {
         state.halo_defaults = defaults.clone();
     }
@@ -1614,5 +1617,36 @@ crt_brightboost = 1.6
         assert_eq!(loaded_state.video.deinterlace_motion_threshold, 0.25);
         assert_eq!(loaded_state.video.deinterlace_line_spacing, 2.0);
         assert_eq!(loaded_state.video.deinterlace_spatial_mix, 0.95);
+    }
+
+    #[test]
+    fn twitch_settings_round_trip_and_old_configs_get_defaults() {
+        let path = std::env::temp_dir().join(format!(
+            "michadame-twitch-config-{}-{}.toml",
+            std::process::id(),
+            crate::replay::now_us()
+        ));
+        // An existing config written before the Twitch table existed.
+        std::fs::write(&path, "active_profile = \"Default\"\nocr_timeout_seconds = 30\n").unwrap();
+        let old: MichadameConfig = confy::load_path(&path).unwrap();
+        assert_eq!(old.twitch, crate::config::TwitchConfig::default());
+        assert_eq!(old.ocr_timeout_seconds, Some(30));
+
+        let mut state = AppState::default();
+        apply_config(&mut state, &old);
+        state.twitch.config.channel = "some_streamer".into();
+        state.twitch.config.chat_overlay_enabled = true;
+        state.twitch.config.overlay_width_pct = 0.3;
+        state.twitch.config.message_lifetime_secs = 0;
+        save_config_at(&path, &mut state).unwrap();
+
+        let loaded: MichadameConfig = confy::load_path(&path).unwrap();
+        assert_eq!(loaded.twitch, state.twitch.config);
+        let mut restarted = AppState::default();
+        apply_config(&mut restarted, &loaded);
+        assert_eq!(restarted.twitch.config, state.twitch.config);
+        assert_eq!(restarted.twitch.channel_input, "some_streamer");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("toml.bak"));
     }
 }

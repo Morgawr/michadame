@@ -6,6 +6,7 @@ mod ui;
 mod video;
 mod ocr;
 mod bank;
+mod twitch;
 pub mod dict;
 
 use anyhow::Result;

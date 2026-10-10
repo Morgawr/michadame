@@ -40,6 +40,7 @@ pub enum SettingsTab {
     Devices,
     AudioReplay,
     OcrDict,
+    Twitch,
     Hotkeys,
 }
 
@@ -249,6 +250,7 @@ pub struct AppState {
     pub ocr: crate::ocr::OcrState,
     pub dict: crate::dict::DictState,
     pub bank: crate::bank::BankState,
+    pub twitch: crate::twitch::TwitchState,
     pub config_load_error: Option<String>,
     pub config_quarantine_path: Option<std::path::PathBuf>,
 }
