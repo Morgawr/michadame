@@ -7,6 +7,7 @@ use super::params::{
 };
 use super::programs::*;
 use crate::video::types::{RawFrame, ScalerFilter};
+use eframe::egui;
 use eframe::glow::{self, HasContext};
 use ffmpeg_next::format::Pixel;
 use std::num::NonZero;
@@ -129,6 +130,20 @@ pub struct CrtFilterRenderer {
     night_glow_corner_size_loc: Option<glow::UniformLocation>,
     night_glow_filter_type_loc: Option<glow::UniformLocation>,
     night_glow_intensity_loc: Option<glow::UniformLocation>,
+
+    pub popup_primitives: Vec<egui::ClippedPrimitive>,
+    popup_prog: glow::Program,
+    popup_vao: glow::VertexArray,
+    popup_vbo: glow::Buffer,
+    popup_ebo: glow::Buffer,
+    popup_screen_size_loc: Option<glow::UniformLocation>,
+    popup_offset_loc: Option<glow::UniformLocation>,
+    popup_sampler_loc: Option<glow::UniformLocation>,
+    popup_shadow_mask_loc: Option<glow::UniformLocation>,
+    popup_scanline_strength_loc: Option<glow::UniformLocation>,
+    popup_scanline_freq_loc: Option<glow::UniformLocation>,
+    popup_brightboost_loc: Option<glow::UniformLocation>,
+    blit_prog: glow::Program,
 
     post_fbos: [glow::Framebuffer; 2],
     post_textures: [glow::Texture; 2],
@@ -265,6 +280,28 @@ impl CrtFilterRenderer {
 
             gl.use_program(Some(night_glow_prog));
             if let Some(loc) = gl.get_uniform_location(night_glow_prog, "video_texture") {
+                gl.uniform_1_i32(Some(&loc), 0);
+            }
+            gl.use_program(None);
+
+            let popup_prog = compile_program(gl, VS_POPUP, FS_POPUP);
+            let popup_screen_size_loc = gl.get_uniform_location(popup_prog, "u_screen_size");
+            let popup_offset_loc = gl.get_uniform_location(popup_prog, "u_offset");
+            let popup_sampler_loc = gl.get_uniform_location(popup_prog, "u_sampler");
+            let popup_shadow_mask_loc = gl.get_uniform_location(popup_prog, "u_shadow_mask");
+            let popup_scanline_strength_loc = gl.get_uniform_location(popup_prog, "u_scanline_strength");
+            let popup_scanline_freq_loc = gl.get_uniform_location(popup_prog, "u_scanline_freq");
+            let popup_brightboost_loc = gl.get_uniform_location(popup_prog, "u_brightboost");
+
+            gl.use_program(Some(popup_prog));
+            if let Some(ref loc) = popup_sampler_loc {
+                gl.uniform_1_i32(Some(loc), 0);
+            }
+            gl.use_program(None);
+
+            let blit_prog = compile_program(gl, VS_SRC, FS_BLIT);
+            gl.use_program(Some(blit_prog));
+            if let Some(loc) = gl.get_uniform_location(blit_prog, "u_texture") {
                 gl.uniform_1_i32(Some(&loc), 0);
             }
             gl.use_program(None);
@@ -556,6 +593,10 @@ impl CrtFilterRenderer {
             gl.bind_buffer(glow::ARRAY_BUFFER, None);
             gl.bind_vertex_array(None);
 
+            let popup_vao = gl.create_vertex_array().expect("Cannot create popup VAO");
+            let popup_vbo = gl.create_buffer().unwrap();
+            let popup_ebo = gl.create_buffer().unwrap();
+
             let mut bezel_img = image::load_from_memory(include_bytes!("../../../assets/nec_pc98_bezel.png"))
                 .expect("Failed to load nec_pc98_bezel.png")
                 .to_rgba8();
@@ -742,6 +783,19 @@ impl CrtFilterRenderer {
                 night_glow_corner_size_loc,
                 night_glow_filter_type_loc,
                 night_glow_intensity_loc,
+                popup_primitives: Vec::new(),
+                popup_prog,
+                popup_vao,
+                popup_vbo,
+                popup_ebo,
+                popup_screen_size_loc,
+                popup_offset_loc,
+                popup_sampler_loc,
+                popup_shadow_mask_loc,
+                popup_scanline_strength_loc,
+                popup_scanline_freq_loc,
+                popup_brightboost_loc,
+                blit_prog,
                 post_fbos,
                 post_textures,
                 last_post_size: (0, 0),
@@ -1185,6 +1239,8 @@ impl CrtFilterRenderer {
     pub fn paint(
         &mut self,
         gl: &glow::Context,
+        painter: &egui_glow::Painter,
+        widget_rect: egui::Rect,
         raw_frame: Option<&RawFrame>,
         fallback_texture: Option<glow::Texture>,
         resolution: (u32, u32),
@@ -1408,7 +1464,8 @@ impl CrtFilterRenderer {
             let run_glass = glass_params
                 .map(|g| g.enabled && g.intensity > 0.001)
                 .unwrap_or(false);
-            let has_post = run_cathode || run_glass;
+            let has_popup = !self.popup_primitives.is_empty();
+            let has_post = run_cathode || run_glass || has_popup;
 
             let (upstream_target_fbo, cathode_target_fbo, glass_target_fbo) =
                 match (run_cathode, run_glass) {
@@ -1424,7 +1481,14 @@ impl CrtFilterRenderer {
                         self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
                         (Some(self.post_fbos[0]), None, None)
                     }
-                    (false, false) => (None, None, None),
+                    (false, false) => {
+                        if has_popup {
+                            self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
+                            (Some(self.post_fbos[0]), None, None)
+                        } else {
+                            (None, None, None)
+                        }
+                    }
                 };
 
             if run_lottes {
@@ -1537,6 +1601,36 @@ impl CrtFilterRenderer {
                 );
             }
 
+            if has_popup {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
+                gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+                let (s_mask, scan_str, b_boost) = if run_lottes {
+                    (
+                        params.shadow_mask,
+                        (params.hard_scan / 30.0).clamp(0.0, 1.0),
+                        params.brightboost.max(1.0),
+                    )
+                } else if run_halo {
+                    (
+                        halo_params.shadow_mask,
+                        0.5,
+                        halo_params.brightboost.max(1.0),
+                    )
+                } else {
+                    (0.0, 0.0, 1.0)
+                };
+                self.draw_popup_primitives(
+                    gl,
+                    painter,
+                    output_size,
+                    widget_rect,
+                    s_mask,
+                    scan_str,
+                    b_boost,
+                );
+                self.popup_primitives.clear();
+            }
+
             if run_cathode {
                 let cathode_input = self.post_textures[0];
                 let scissor_cathode = scissor_enabled && !run_glass;
@@ -1573,8 +1667,35 @@ impl CrtFilterRenderer {
                 );
             }
 
+            let final_output_tex = if run_glass {
+                if run_cathode {
+                    self.post_textures[1]
+                } else {
+                    self.post_textures[0]
+                }
+            } else if run_cathode {
+                self.post_textures[0]
+            } else if has_popup {
+                self.post_textures[0]
+            } else {
+                final_input_texture
+            };
+            self.last_video_texture = Some(final_output_tex);
+
+            if !run_cathode && !run_glass && has_popup {
+                self.blit_texture(gl, self.post_textures[0], output_size, None, scissor_enabled);
+            }
+
+            if scissor_enabled {
+                gl.enable(glow::SCISSOR_TEST);
+            } else {
+                gl.disable(glow::SCISSOR_TEST);
+            }
+
             if blend_enabled {
                 gl.enable(glow::BLEND);
+            } else {
+                gl.disable(glow::BLEND);
             }
 
             gl.bind_vertex_array(None);
@@ -1593,6 +1714,8 @@ impl CrtFilterRenderer {
     pub fn draw_passthrough(
         &mut self,
         gl: &glow::Context,
+        painter: &egui_glow::Painter,
+        widget_rect: egui::Rect,
         raw_frame: Option<&RawFrame>,
         fallback_texture: Option<glow::Texture>,
         resolution: (u32, u32),
@@ -1809,7 +1932,8 @@ impl CrtFilterRenderer {
             let run_glass = glass_params
                 .map(|g| g.enabled && g.intensity > 0.001)
                 .unwrap_or(false);
-            let has_post = run_cathode || run_glass;
+            let has_popup = !self.popup_primitives.is_empty();
+            let has_post = run_cathode || run_glass || has_popup;
 
             let (upstream_target_fbo, cathode_target_fbo, glass_target_fbo) =
                 match (run_cathode, run_glass) {
@@ -1825,7 +1949,14 @@ impl CrtFilterRenderer {
                         self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
                         (Some(self.post_fbos[0]), None, None)
                     }
-                    (false, false) => (None, None, None),
+                    (false, false) => {
+                        if has_popup {
+                            self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
+                            (Some(self.post_fbos[0]), None, None)
+                        } else {
+                            (None, None, None)
+                        }
+                    }
                 };
 
             if scissor_enabled && !has_post {
@@ -1843,6 +1974,21 @@ impl CrtFilterRenderer {
                 border_crop,
                 upstream_target_fbo,
             );
+
+            if has_popup {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
+                gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+                self.draw_popup_primitives(
+                    gl,
+                    painter,
+                    output_size,
+                    widget_rect,
+                    0.0,
+                    0.0,
+                    1.0,
+                );
+                self.popup_primitives.clear();
+            }
 
             if run_cathode {
                 let cp = cathode_params.unwrap();
@@ -1881,9 +2027,37 @@ impl CrtFilterRenderer {
                 );
             }
 
+            let final_output_tex = if run_glass {
+                if run_cathode {
+                    self.post_textures[1]
+                } else {
+                    self.post_textures[0]
+                }
+            } else if run_cathode {
+                self.post_textures[0]
+            } else if has_popup {
+                self.post_textures[0]
+            } else {
+                current_video_texture
+            };
+            self.last_video_texture = Some(final_output_tex);
+
+            if !run_cathode && !run_glass && has_popup {
+                self.blit_texture(gl, self.post_textures[0], output_size, None, scissor_enabled);
+            }
+
+            if scissor_enabled {
+                gl.enable(glow::SCISSOR_TEST);
+            } else {
+                gl.disable(glow::SCISSOR_TEST);
+            }
+
             if blend_enabled {
                 gl.enable(glow::BLEND);
+            } else {
+                gl.disable(glow::BLEND);
             }
+
             if old_vbo != 0 {
                 gl.bind_vertex_array(Some(glow::VertexArray::from(glow::NativeVertexArray(
                     NonZero::new(old_vbo as u32).unwrap(),
@@ -2105,6 +2279,180 @@ impl CrtFilterRenderer {
         gl.use_program(None);
     }
 
+    pub fn draw_popup_primitives(
+        &self,
+        gl: &glow::Context,
+        painter: &egui_glow::Painter,
+        output_size: (f32, f32),
+        widget_rect: egui::Rect,
+        shadow_mask: f32,
+        scanline_strength: f32,
+        brightboost: f32,
+    ) {
+        if self.popup_primitives.is_empty() || widget_rect.width() <= 0.0 || widget_rect.height() <= 0.0 {
+            return;
+        }
+
+        unsafe {
+            let mut prev_scissor = [0i32; 4];
+            gl.get_parameter_i32_slice(glow::SCISSOR_BOX, &mut prev_scissor);
+            let prev_scissor_enabled = gl.is_enabled(glow::SCISSOR_TEST);
+            let prev_blend_enabled = gl.is_enabled(glow::BLEND);
+            let prev_src_rgb = gl.get_parameter_i32(glow::BLEND_SRC_RGB) as u32;
+            let prev_dst_rgb = gl.get_parameter_i32(glow::BLEND_DST_RGB) as u32;
+            let prev_src_alpha = gl.get_parameter_i32(glow::BLEND_SRC_ALPHA) as u32;
+            let prev_dst_alpha = gl.get_parameter_i32(glow::BLEND_DST_ALPHA) as u32;
+            let prev_vao = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
+
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+            gl.enable(glow::SCISSOR_TEST);
+
+            gl.use_program(Some(self.popup_prog));
+
+            gl.uniform_2_f32(
+                self.popup_screen_size_loc.as_ref(),
+                widget_rect.width(),
+                widget_rect.height(),
+            );
+            gl.uniform_2_f32(
+                self.popup_offset_loc.as_ref(),
+                widget_rect.min.x,
+                widget_rect.min.y,
+            );
+            gl.uniform_1_i32(self.popup_sampler_loc.as_ref(), 0);
+
+            gl.uniform_1_f32(self.popup_shadow_mask_loc.as_ref(), shadow_mask);
+            gl.uniform_1_f32(
+                self.popup_scanline_strength_loc.as_ref(),
+                scanline_strength,
+            );
+            let scanline_freq = (output_size.1 / 240.0).max(2.0);
+            gl.uniform_1_f32(self.popup_scanline_freq_loc.as_ref(), scanline_freq);
+            gl.uniform_1_f32(self.popup_brightboost_loc.as_ref(), brightboost);
+
+            gl.bind_vertex_array(Some(self.popup_vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.popup_vbo));
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(self.popup_ebo));
+
+            let stride = std::mem::size_of::<egui::epaint::Vertex>() as i32;
+            gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, stride, 0);
+            gl.enable_vertex_attrib_array(0);
+            gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, stride, 8);
+            gl.enable_vertex_attrib_array(1);
+            gl.vertex_attrib_pointer_f32(2, 4, glow::UNSIGNED_BYTE, false, stride, 16);
+            gl.enable_vertex_attrib_array(2);
+
+            let ppp = output_size.0 / widget_rect.width();
+
+            for primitive in &self.popup_primitives {
+                if let egui::epaint::Primitive::Mesh(mesh) = &primitive.primitive {
+                    if mesh.vertices.is_empty() || mesh.indices.is_empty() {
+                        continue;
+                    }
+
+                    let clip_rect = primitive.clip_rect;
+                    let clip_min_x = ((clip_rect.min.x - widget_rect.min.x) * ppp).round() as i32;
+                    let clip_min_y = ((clip_rect.min.y - widget_rect.min.y) * ppp).round() as i32;
+                    let clip_max_x = ((clip_rect.max.x - widget_rect.min.x) * ppp).round() as i32;
+                    let clip_max_y = ((clip_rect.max.y - widget_rect.min.y) * ppp).round() as i32;
+
+                    let clip_min_x = clip_min_x.clamp(0, output_size.0 as i32);
+                    let clip_min_y = clip_min_y.clamp(0, output_size.1 as i32);
+                    let clip_max_x = clip_max_x.clamp(clip_min_x, output_size.0 as i32);
+                    let clip_max_y = clip_max_y.clamp(clip_min_y, output_size.1 as i32);
+
+                    let scissor_w = clip_max_x - clip_min_x;
+                    let scissor_h = clip_max_y - clip_min_y;
+                    if scissor_w <= 0 || scissor_h <= 0 {
+                        continue;
+                    }
+
+                    let scissor_y = output_size.1 as i32 - clip_max_y;
+                    gl.scissor(clip_min_x, scissor_y, scissor_w, scissor_h);
+
+                    if let Some(texture) = painter.texture(mesh.texture_id) {
+                        gl.active_texture(glow::TEXTURE0);
+                        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                    }
+
+                    gl.buffer_data_u8_slice(
+                        glow::ARRAY_BUFFER,
+                        bytemuck::cast_slice(&mesh.vertices),
+                        glow::STREAM_DRAW,
+                    );
+
+                    gl.buffer_data_u8_slice(
+                        glow::ELEMENT_ARRAY_BUFFER,
+                        bytemuck::cast_slice(&mesh.indices),
+                        glow::STREAM_DRAW,
+                    );
+
+                    gl.draw_elements(
+                        glow::TRIANGLES,
+                        mesh.indices.len() as i32,
+                        glow::UNSIGNED_INT,
+                        0,
+                    );
+                }
+            }
+
+            gl.bind_vertex_array(None);
+            if prev_vao != 0 {
+                gl.bind_vertex_array(Some(glow::VertexArray::from(glow::NativeVertexArray(
+                    NonZero::new(prev_vao as u32).unwrap(),
+                ))));
+            }
+            gl.bind_buffer(glow::ARRAY_BUFFER, None);
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, None);
+
+            gl.scissor(
+                prev_scissor[0],
+                prev_scissor[1],
+                prev_scissor[2],
+                prev_scissor[3],
+            );
+            if prev_scissor_enabled {
+                gl.enable(glow::SCISSOR_TEST);
+            } else {
+                gl.disable(glow::SCISSOR_TEST);
+            }
+
+            gl.blend_func_separate(prev_src_rgb, prev_dst_rgb, prev_src_alpha, prev_dst_alpha);
+            if prev_blend_enabled {
+                gl.enable(glow::BLEND);
+            } else {
+                gl.disable(glow::BLEND);
+            }
+        }
+    }
+
+    unsafe fn blit_texture(
+        &self,
+        gl: &glow::Context,
+        texture: glow::Texture,
+        output_size: (f32, f32),
+        target_fbo: Option<glow::Framebuffer>,
+        scissor_enabled: bool,
+    ) {
+        gl.bind_framebuffer(glow::FRAMEBUFFER, target_fbo);
+        gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+        gl.use_program(Some(self.blit_prog));
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+
+        gl.bind_vertex_array(Some(self.vertex_array));
+        if scissor_enabled {
+            gl.enable(glow::SCISSOR_TEST);
+        } else {
+            gl.disable(glow::SCISSOR_TEST);
+        }
+        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        gl.bind_vertex_array(None);
+        gl.use_program(None);
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn draw_retro_frame(
         &self,
@@ -2123,6 +2471,10 @@ impl CrtFilterRenderer {
         unsafe {
             let old_vbo = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
             let blend_enabled = gl.is_enabled(glow::BLEND);
+            let prev_src_rgb = gl.get_parameter_i32(glow::BLEND_SRC_RGB) as u32;
+            let prev_dst_rgb = gl.get_parameter_i32(glow::BLEND_DST_RGB) as u32;
+            let prev_src_alpha = gl.get_parameter_i32(glow::BLEND_SRC_ALPHA) as u32;
+            let prev_dst_alpha = gl.get_parameter_i32(glow::BLEND_DST_ALPHA) as u32;
             gl.enable(glow::BLEND);
             gl.blend_func_separate(
                 glow::SRC_ALPHA,
@@ -2208,6 +2560,7 @@ impl CrtFilterRenderer {
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.use_program(None);
 
+            gl.blend_func_separate(prev_src_rgb, prev_dst_rgb, prev_src_alpha, prev_dst_alpha);
             if !blend_enabled {
                 gl.disable(glow::BLEND);
             }
@@ -2335,6 +2688,11 @@ impl CrtFilterRenderer {
             gl.delete_program(self.cathode_prog);
             gl.delete_program(self.crt_glass_prog);
             gl.delete_program(self.night_glow_prog);
+            gl.delete_program(self.popup_prog);
+            gl.delete_program(self.blit_prog);
+            gl.delete_vertex_array(self.popup_vao);
+            gl.delete_buffer(self.popup_vbo);
+            gl.delete_buffer(self.popup_ebo);
             for fbo in self.post_fbos {
                 gl.delete_framebuffer(fbo);
             }

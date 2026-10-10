@@ -413,6 +413,20 @@ fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool
             *changed = true;
         }
 
+        if ui
+            .checkbox(
+                &mut state.dict.popup_under_crt,
+                "Show dictionary popup under CRT filters",
+            )
+            .on_hover_text(
+                "Renders the dictionary lookup window underneath CRT filters, glass reflections, and bezel borders instead of on top of them.\nClamps the popup within the visible CRT viewport so it never cuts into the borders.",
+            )
+            .changed()
+        {
+            crate::config::save_config(state);
+            *changed = true;
+        }
+
         ui.label(
             egui::RichText::new("Space = capture OCR, Shift + Space = clear OCR boxes")
                 .monospace()

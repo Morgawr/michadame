@@ -217,6 +217,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
                             let rendered_area = renderer.paint(
                                 painter.gl(),
+                                painter,
+                                rect,
                                 latest_frame.as_deref(),
                                 fallback_tex,
                                 res,
@@ -405,6 +407,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         .unwrap_or((texture_size.x as u32, texture_size.y as u32));
                     let rendered_area = renderer_clone.lock().unwrap().draw_passthrough(
                         painter.gl(),
+                        painter,
+                        rect,
                         latest_frame.as_deref(),
                         fallback_tex,
                         res,

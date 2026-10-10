@@ -67,15 +67,16 @@ pub fn draw_dict_popup(
     popup_state: &mut Option<DictPopupState>,
     video_rect: egui::Rect,
     show_highlight: bool,
+    popup_under_crt: bool,
     mine_status: impl Fn(&super::models::TermEntry) -> crate::bank::MineStatus,
     is_mined: impl Fn(&super::models::TermEntry) -> bool,
-) -> Option<PopupAction> {
+) -> (Option<PopupAction>, Vec<egui::ClippedPrimitive>) {
     let Some(popup) = popup_state else {
-        return None;
+        return (None, Vec::new());
     };
 
     if popup.entries.is_empty() {
-        return None;
+        return (None, Vec::new());
     }
 
     let mut popup_action: Option<PopupAction> = None;
@@ -105,10 +106,22 @@ pub fn draw_dict_popup(
 
     let mut is_pointer_in_popup = false;
 
-    // 3. Render floating popup in Foreground layer
-    let area_response = egui::Area::new(egui::Id::new("jitendex_dict_popup"))
+    // 3. Render floating popup
+    let layer_id = if popup_under_crt {
+        egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("jitendex_dict_popup_crt"),
+        )
+    } else {
+        egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("jitendex_dict_popup"),
+        )
+    };
+
+    let area_response = egui::Area::new(layer_id.id)
         .fixed_pos(placement.pos)
-        .order(egui::Order::Foreground)
+        .order(layer_id.order)
         .show(ui.ctx(), |ui| {
             let frame = egui::Frame::none()
                 .fill(POPUP_BG)
@@ -198,6 +211,25 @@ pub fn draw_dict_popup(
             }
         });
 
+    let primitives = if popup_under_crt {
+        let clipped_shapes = ui
+            .ctx()
+            .graphics_mut(|g| {
+                g.get_mut(layer_id)
+                    .map(|list| list.all_entries().cloned().collect::<Vec<_>>())
+            })
+            .unwrap_or_default();
+        // Clear the stolen layer so egui does not paint it in foreground
+        let _ = ui.ctx().graphics_mut(|g| g.get_mut(layer_id).map(std::mem::take));
+        if clipped_shapes.is_empty() {
+            Vec::new()
+        } else {
+            ui.ctx().tessellate(clipped_shapes, ui.ctx().pixels_per_point())
+        }
+    } else {
+        Vec::new()
+    };
+
     // 4. Update whether the user is interacting with the popup window
     popup.popup_rect = Some(area_response.response.rect);
     popup.is_popup_hovered = is_pointer_in_popup;
@@ -213,7 +245,7 @@ pub fn draw_dict_popup(
             popup.last_word_hover_time = now;
         }
     }
-    popup_action
+    (popup_action, primitives)
 }
 
 /// Placement result containing the top-left position and dimensions for the popup.
@@ -295,10 +327,82 @@ pub fn calculate_clamped_popup_pos(
     calculate_popup_placement(word_rect, popup_w, popup_h, video_rect).pos
 }
 
+/// Calculates the effective visible CRT screen viewport in egui screen coordinates.
+/// Accounts for border crop margins, retro PC bezel frames, and CRT glass curvature safe margins.
+pub fn calculate_crt_viewport(
+    video_rect: egui::Rect,
+    border_crop: [f32; 4], // [left, right, top, bottom]
+    retro_pc_frame: bool,
+    curvature_active: bool,
+    _ppp: f32,
+) -> egui::Rect {
+    let mut min = video_rect.min;
+    let mut max = video_rect.max;
+    let w = video_rect.width();
+    let h = video_rect.height();
+
+    // 1. Account for user border cropping ([left, right, top, bottom])
+    min.x += w * border_crop[0].clamp(0.0, 0.45);
+    max.x -= w * border_crop[1].clamp(0.0, 0.45);
+    min.y += h * border_crop[2].clamp(0.0, 0.45);
+    max.y -= h * border_crop[3].clamp(0.0, 0.45);
+
+    // 2. Account for retro PC bezel frame if active (CRT is recessed inside plastic chassis)
+    if retro_pc_frame {
+        // In retro PC frame mode, the bezel frame occupies roughly:
+        // Top ~ 6.5%, Bottom ~ 10.0%, Left/Right ~ 5.5% of the video canvas
+        min.y += h * 0.065;
+        max.y -= h * 0.100;
+        min.x += w * 0.055;
+        max.x -= w * 0.055;
+    }
+
+    // 3. Account for CRT glass curvature safe margins (barrel distortion curves inwards)
+    if curvature_active {
+        // Edge curvature pulls corners and outer edges inward; inset safe margins ~2.5%
+        min.x += w * 0.025;
+        max.x -= w * 0.025;
+        min.y += h * 0.025;
+        max.y -= h * 0.025;
+    }
+
+    // Ensure rect is valid and non-inverted
+    if min.x >= max.x {
+        let mid = (video_rect.min.x + video_rect.max.x) * 0.5;
+        min.x = mid - 50.0;
+        max.x = mid + 50.0;
+    }
+    if min.y >= max.y {
+        let mid = (video_rect.min.y + video_rect.max.y) * 0.5;
+        min.y = mid - 50.0;
+        max.y = mid + 50.0;
+    }
+
+    egui::Rect::from_min_max(min, max)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn test_calculate_crt_viewport_insets() {
+        let video_rect = egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(1000.0, 800.0));
+        let crop = [0.05, 0.05, 0.10, 0.10]; // 5% L/R (50px), 10% T/B (80px)
+        let vp = calculate_crt_viewport(video_rect, crop, false, false, 1.0);
+        assert_eq!(vp.min.x, 150.0);
+        assert_eq!(vp.max.x, 1050.0);
+        assert_eq!(vp.min.y, 180.0);
+        assert_eq!(vp.max.y, 820.0);
+
+        // With retro frame and curvature
+        let vp_retro = calculate_crt_viewport(video_rect, [0.0, 0.0, 0.0, 0.0], true, true, 1.0);
+        assert!(vp_retro.min.x > video_rect.min.x);
+        assert!(vp_retro.max.x < video_rect.max.x);
+        assert!(vp_retro.min.y > video_rect.min.y);
+        assert!(vp_retro.max.y < video_rect.max.y);
+    }
 
     fn popup_at(x: f32, char_range: (usize, usize), last_word_hover_time: Instant) -> DictPopupState {
         let word_rect = egui::Rect::from_min_size(egui::pos2(x, 100.0), egui::vec2(40.0, 30.0));

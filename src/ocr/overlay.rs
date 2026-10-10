@@ -5,6 +5,9 @@ use std::time::Instant;
 /// Draws the interactive OCR bounding boxes and floating controls on top of the video feed.
 pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egui::Rect) {
     if video_rect.width() <= 10.0 || video_rect.height() <= 10.0 || state.ocr.boxes.is_empty() {
+        if let Some(ref r) = state.crt_renderer {
+            r.lock().unwrap().popup_primitives.clear();
+        }
         return;
     }
 
@@ -277,14 +280,46 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         .map(|p| crate::bank::sentence::extract_sentence(&p.source_text, p.char_range).0)
         .unwrap_or_default();
     let bank = &state.bank;
-    let popup_action = crate::dict::popup::draw_dict_popup(
+    let target_rect = if state.dict.popup_under_crt {
+        let border_crop = [
+            state.video.border_crop_left,
+            state.video.border_crop_right,
+            state.video.border_crop_top,
+            state.video.border_crop_bottom,
+        ];
+        let filter = crate::devices::filter_type::CrtFilter::from_u8(
+            state.crt_filter.load(std::sync::atomic::Ordering::Relaxed),
+        );
+        let is_crt_on = filter != crate::devices::filter_type::CrtFilter::Off;
+        let retro_pc_frame = is_crt_on && state.video.retro_pc_frame;
+        let curvature_active = is_crt_on
+            && (filter == crate::devices::filter_type::CrtFilter::Lottes
+                || (filter == crate::devices::filter_type::CrtFilter::Halo && state.halo.curvature));
+        let ppp = ui.ctx().pixels_per_point();
+        crate::dict::popup::calculate_crt_viewport(
+            video_rect,
+            border_crop,
+            retro_pc_frame,
+            curvature_active,
+            ppp,
+        )
+    } else {
+        video_rect
+    };
+
+    let (popup_action, popup_primitives) = crate::dict::popup::draw_dict_popup(
         ui,
         &mut state.dict.popup,
-        video_rect,
+        target_rect,
         !state.ocr.hide_overlay,
+        state.dict.popup_under_crt,
         |entry| bank.status(&entry.term, &entry.reading, &popup_sentence),
         |entry| bank.is_entry_mined(&entry.term, &entry.reading, entry.sequence),
     );
+
+    if let Some(ref r) = state.crt_renderer {
+        r.lock().unwrap().popup_primitives = popup_primitives;
+    }
 
     // Handle user actions in popup: mining or deleting a custom name
     if let Some(action) = popup_action {

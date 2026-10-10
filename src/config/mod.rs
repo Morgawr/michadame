@@ -98,6 +98,7 @@ impl From<LegacyConfig> for MichadameConfig {
                 audio_sample_rate: legacy.audio_sample_rate,
                 audio_sample_format: legacy.audio_sample_format.clone(),
                 audio_filter: Some(legacy.replay.audio_filter.clone()),
+                popup_under_crt: legacy.popup_under_crt,
             };
             profiles.insert("Default".to_string(), legacy_profile);
             active_profile = "Default".to_string();
@@ -123,6 +124,7 @@ impl From<LegacyConfig> for MichadameConfig {
             default_cathode_interference: legacy.default_cathode_interference,
             bank_current_tag: legacy.bank_current_tag,
             bank_compact_mode: legacy.bank_compact_mode,
+            popup_under_crt: legacy.popup_under_crt,
             profiles,
         }
     }
@@ -229,6 +231,7 @@ mod tests {
             default_cathode_interference: None,
             bank_current_tag: None,
             bank_compact_mode: None,
+            popup_under_crt: Some(false),
         };
 
         let config: MichadameConfig = MichadameConfig::from(legacy);
@@ -356,6 +359,7 @@ mod tests {
             default_cathode_interference: None,
             bank_current_tag: None,
             bank_compact_mode: None,
+            popup_under_crt: None,
         };
 
         let config: MichadameConfig = MichadameConfig::from(legacy);

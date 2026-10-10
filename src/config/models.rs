@@ -103,6 +103,8 @@ pub struct Profile {
     pub audio_sample_rate: Option<u32>,
     pub audio_sample_format: Option<String>,
 
+    pub popup_under_crt: Option<bool>,
+
     // Audio filter
     pub audio_filter: Option<crate::replay::config::AudioFilterConfig>,
 }
@@ -210,6 +212,7 @@ pub struct LegacyConfig {
     pub default_cathode_interference: Option<crate::app::models::CathodeInterferenceSettings>,
     pub bank_current_tag: Option<String>,
     pub bank_compact_mode: Option<bool>,
+    pub popup_under_crt: Option<bool>,
 }
 
 impl Default for LegacyConfig {
@@ -308,6 +311,7 @@ impl Default for LegacyConfig {
             default_cathode_interference: None,
             bank_current_tag: None,
             bank_compact_mode: None,
+            popup_under_crt: None,
         }
     }
 }
@@ -337,6 +341,7 @@ pub struct MichadameConfig {
     pub bank_current_tag: Option<String>,
     /// Whether the mining bank window starts in compact mode.
     pub bank_compact_mode: Option<bool>,
+    pub popup_under_crt: Option<bool>,
     pub default_halo: Option<crate::app::models::HaloSettings>,
     pub default_cathode_interference: Option<crate::app::models::CathodeInterferenceSettings>,
     // confy's TOML serializer requires scalar fields before nested tables.
@@ -368,6 +373,7 @@ impl Default for MichadameConfig {
             default_cathode_interference: None,
             bank_current_tag: None,
             bank_compact_mode: None,
+            popup_under_crt: Some(false),
             profiles,
         }
     }

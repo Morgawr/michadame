@@ -60,6 +60,8 @@ pub struct DictState {
     pub event_rx: Option<Receiver<DictEvent>>,
     /// Active popup state when user hovers over an OCR word.
     pub popup: Option<DictPopupState>,
+    /// Whether the OCR dictionary popup appears underneath CRT and glass filters.
+    pub popup_under_crt: bool,
 }
 
 impl DictState {
@@ -152,6 +154,7 @@ impl DictState {
             event_tx: tx,
             event_rx: Some(rx),
             popup: None,
+            popup_under_crt: false,
         }
     }
 

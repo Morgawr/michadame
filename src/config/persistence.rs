@@ -235,6 +235,7 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         audio_sample_format: Some(state.hardware.audio_sample_format.clone()),
 
         audio_filter: Some(state.replay.config.audio_filter.clone()),
+        popup_under_crt: Some(state.dict.popup_under_crt),
     }
 }
 
@@ -287,6 +288,7 @@ pub fn save_config_at(path: &Path, state: &mut AppState) -> Result<(), confy::Co
     cfg.bank_compact_mode = Some(state.bank.compact_mode);
     cfg.default_halo = Some(state.halo_defaults.clone());
     cfg.default_cathode_interference = Some(state.cathode_interference_defaults.clone());
+    cfg.popup_under_crt = Some(state.dict.popup_under_crt);
 
     let current_profile_data = build_profile_from_state(state);
     state
@@ -565,6 +567,10 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) -> bool {
         }
     }
 
+    if let Some(under) = profile.popup_under_crt {
+        state.dict.popup_under_crt = under;
+    }
+
     audio_hardware_changed
 }
 
@@ -626,6 +632,7 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     state.ocr.sticky_distance = cfg.ocr_sticky_distance.unwrap_or(0.6);
     state.ocr.hide_overlay = cfg.ocr_hide_overlay.unwrap_or(false);
     state.ocr.timeout_seconds = cfg.ocr_timeout_seconds.unwrap_or(45);
+    state.dict.popup_under_crt = cfg.popup_under_crt.unwrap_or(false);
     state.bank.current_tag = cfg.bank_current_tag.clone().unwrap_or_default();
     state.bank.saved_current_tag = state.bank.current_tag.clone();
     state.bank.compact_mode = cfg.bank_compact_mode.unwrap_or(false);
@@ -1145,6 +1152,27 @@ mod tests {
         assert_eq!(new_state.video.crt_glass_photographer_intensity, 0.30);
         assert!(!new_state.video.crt_glass_flash_enabled);
         assert_eq!(new_state.video.crt_glass_flash_intensity, 0.40);
+    }
+
+    #[test]
+    fn test_popup_under_crt_profile_roundtrip() {
+        let mut state = AppState::default();
+        assert!(!state.dict.popup_under_crt);
+
+        state.dict.popup_under_crt = true;
+        let profile = build_profile_from_state(&state);
+        assert_eq!(profile.popup_under_crt, Some(true));
+
+        let mut new_state = AppState::default();
+        apply_profile_to_state(&mut new_state, &profile);
+        assert!(new_state.dict.popup_under_crt);
+
+        state.dict.popup_under_crt = false;
+        let profile = build_profile_from_state(&state);
+        assert_eq!(profile.popup_under_crt, Some(false));
+
+        apply_profile_to_state(&mut new_state, &profile);
+        assert!(!new_state.dict.popup_under_crt);
     }
 
     #[test]
