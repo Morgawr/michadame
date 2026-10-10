@@ -137,11 +137,14 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                 state.video.border_crop_right * 100.0,
             ));
             ui.label(format!(
-                "Pixelate: {} · FFT: {} · median: {} ({:.2}) · vibrance: {:.2}",
+                "Pixelate: {} · FFT: {} · median: {} ({:.2}) · deinterlace: {} (m:{}, b:{:.2}) · vibrance: {:.2}",
                 state.video.pixelate_filter_enabled,
                 state.video.fft_filter_enabled,
                 state.video.median_filter_enabled,
                 state.video.median_mix,
+                state.video.deinterlace_filter_enabled,
+                state.video.deinterlace_mode,
+                state.video.deinterlace_blend,
                 state.video.vibrance
             ));
 

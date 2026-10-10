@@ -4,6 +4,7 @@ pub const VS_SRC: &str = include_str!("../shaders/vs_src.glsl");
 pub const FS_YUV_PLANAR: &str = include_str!("../shaders/fs_yuv_planar.glsl");
 pub const FS_YUYV_PACKED: &str = include_str!("../shaders/fs_yuyv_packed.glsl");
 pub const FS_MEDIAN_3X1: &str = include_str!("../shaders/fs_median_3x1.glsl");
+pub const FS_DEINTERLACE: &str = include_str!("../shaders/fs_deinterlace.glsl");
 pub const FS_PIXELATE: &str = include_str!("../shaders/fs_pixelate.glsl");
 pub const FS_PASSTHROUGH: &str = include_str!("../shaders/fs_passthrough.glsl");
 pub const FS_FINAL: &str = include_str!("../shaders/fs_final.glsl");

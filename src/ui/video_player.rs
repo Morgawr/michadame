@@ -415,6 +415,12 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             let horizontal_stretch = state.video.horizontal_stretch;
             let median_filter_enabled = state.video.median_filter_enabled;
             let median_mix = state.video.median_mix;
+            let deinterlace_filter_enabled = state.video.deinterlace_filter_enabled;
+            let deinterlace_mode = state.video.deinterlace_mode;
+            let deinterlace_blend = state.video.deinterlace_blend;
+            let deinterlace_motion_threshold = state.video.deinterlace_motion_threshold;
+            let deinterlace_line_spacing = state.video.deinterlace_line_spacing;
+            let deinterlace_spatial_mix = state.video.deinterlace_spatial_mix;
             let vibrance = state.video.vibrance;
             let overscan_x = state.video.overscan_x;
             let overscan_y = state.video.overscan_y;
@@ -469,6 +475,12 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         horizontal_stretch,
                         median_filter_enabled,
                         median_mix,
+                        deinterlace_filter_enabled,
+                        deinterlace_mode,
+                        deinterlace_blend,
+                        deinterlace_motion_threshold,
+                        deinterlace_line_spacing,
+                        deinterlace_spatial_mix,
                         vibrance,
                         scaler_filter,
                         overscan_x,

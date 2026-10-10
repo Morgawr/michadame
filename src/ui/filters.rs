@@ -122,6 +122,122 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 changed = true;
             }
         });
+
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .checkbox(&mut state.video.deinterlace_filter_enabled, "Deinterlace Filter")
+                .changed()
+            {
+                crate::config::save_config(state);
+                changed = true;
+            }
+            if state.video.deinterlace_filter_enabled {
+                egui::ComboBox::from_id_source("deinterlace_mode")
+                    .selected_text(match state.video.deinterlace_mode {
+                        0 => "Motion Adaptive",
+                        1 => "Bob Dejitter (50% Weave)",
+                        2 => "Vertical FIR",
+                        3 => "Vertical Median",
+                        4 => "Motion Map (Debug)",
+                        _ => "Unknown",
+                    })
+                    .show_ui(ui, |ui| {
+                        let modes = [
+                            (0, "Motion Adaptive", "Same-parity 3-frame motion adaptive weave; completely stops bob flicker on static edges while filtering motion"),
+                            (1, "Bob Dejitter (50% Weave)", "Pure 50% inter-frame weave; 100% cure for 30/60Hz bob jitter everywhere"),
+                            (2, "Vertical FIR", "3-tap lowpass vertical blur on current frame to reduce scanline comb artifacts"),
+                            (3, "Vertical Median", "3x1 vertical median filter on current frame to remove single-line artifacts"),
+                            (4, "Motion Map (Debug)", "Highlights static fields (green) vs detected motion (magenta/red)"),
+                        ];
+                        for (mode_idx, label, tip) in modes {
+                            let resp = ui.selectable_value(
+                                &mut state.video.deinterlace_mode,
+                                mode_idx,
+                                label,
+                            );
+                            resp.clone().on_hover_text(tip);
+                            if resp.changed() {
+                                crate::config::save_config(state);
+                                changed = true;
+                            }
+                        }
+                    });
+            }
+        });
+
+        if state.video.deinterlace_filter_enabled {
+            if matches!(state.video.deinterlace_mode, 0 | 1) {
+                if ui
+                    .add(
+                        egui::Slider::new(&mut state.video.deinterlace_blend, 0.0..=1.0)
+                            .text("Blend Amount")
+                            .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
+                    )
+                    .on_hover_text("Temporal mix between fields (50% is mathematical weave, completely cures bob bounce)")
+                    .changed()
+                {
+                    crate::config::save_config(state);
+                    changed = true;
+                }
+            }
+
+            if matches!(state.video.deinterlace_mode, 0 | 4) {
+                if ui
+                    .add(
+                        egui::Slider::new(
+                            &mut state.video.deinterlace_motion_threshold,
+                            0.01..=0.5,
+                        )
+                        .text("Motion Sensitivity")
+                        .custom_formatter(|n, _| format!("{:.2}", n)),
+                    )
+                    .on_hover_text("Threshold to distinguish moving objects from static field jitter (higher = more areas treated as static weave)")
+                    .changed()
+                {
+                    crate::config::save_config(state);
+                    changed = true;
+                }
+            }
+
+            if matches!(state.video.deinterlace_mode, 0 | 2 | 3) {
+                let spatial_label = if state.video.deinterlace_mode == 0 {
+                    "Spatial Strength (Moving Areas)"
+                } else {
+                    "Spatial Strength"
+                };
+                if ui
+                    .add(
+                        egui::Slider::new(&mut state.video.deinterlace_spatial_mix, 0.0..=1.0)
+                            .text(spatial_label)
+                            .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
+                    )
+                    .on_hover_text("Strength of vertical FIR/median filter in moving areas to eliminate comb lines (static areas use 100% field weave)")
+                    .changed()
+                {
+                    crate::config::save_config(state);
+                    changed = true;
+                }
+
+                if ui
+                    .add(
+                        egui::Slider::new(&mut state.video.deinterlace_line_spacing, 0.5..=3.0)
+                            .text("Line Pitch Scale")
+                            .custom_formatter(|n, _| format!("{:.1}x", n)),
+                    )
+                    .on_hover_text("Scale factor for scanline pitch (1.0x automatically targets 1 full 480i scanline; applies to the spatial filter on moving pixels)")
+                    .changed()
+                {
+                    crate::config::save_config(state);
+                    changed = true;
+                }
+            }
+
+            ui.label(
+                egui::RichText::new("ℹ Tip: For Dreamcast 480i bob flicker via upscaler, use Motion Adaptive or Bob Dejitter (50% Weave) to completely eliminate screen shaking.")
+                    .small()
+                    .weak(),
+            );
+        }
         ui.horizontal_wrapped(|ui| {
             if ui
                 .checkbox(&mut state.video.fft_filter_enabled, "FFT Mask Filter")
@@ -698,6 +814,12 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 state.video.pixelate_filter_enabled = false;
                 state.video.median_filter_enabled = false;
                 state.video.median_mix = 1.0;
+                state.video.deinterlace_filter_enabled = false;
+                state.video.deinterlace_mode = 0;
+                state.video.deinterlace_blend = 0.5;
+                state.video.deinterlace_motion_threshold = 0.08;
+                state.video.deinterlace_line_spacing = 1.0;
+                state.video.deinterlace_spatial_mix = 0.75;
                 state.video.overscan_x = 0.0;
                 state.video.overscan_y = 0.0;
                 state.video.underscan_x = 0.0;

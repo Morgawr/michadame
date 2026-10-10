@@ -18,6 +18,12 @@ pub struct ShaderParams {
     pub horizontal_stretch: f32,
     pub median_filter_enabled: bool,
     pub median_mix: f32,
+    pub deinterlace_filter_enabled: bool,
+    pub deinterlace_mode: u8,
+    pub deinterlace_blend: f32,
+    pub deinterlace_motion_threshold: f32,
+    pub deinterlace_line_spacing: f32,
+    pub deinterlace_spatial_mix: f32,
     pub vibrance: f32,
     pub scaler_filter: u8,
     pub overscan_x: f32,
@@ -269,6 +275,12 @@ impl ShaderParams {
             horizontal_stretch: state.video.horizontal_stretch,
             median_filter_enabled: state.video.median_filter_enabled,
             median_mix: state.video.median_mix,
+            deinterlace_filter_enabled: state.video.deinterlace_filter_enabled,
+            deinterlace_mode: state.video.deinterlace_mode,
+            deinterlace_blend: state.video.deinterlace_blend,
+            deinterlace_motion_threshold: state.video.deinterlace_motion_threshold,
+            deinterlace_line_spacing: state.video.deinterlace_line_spacing,
+            deinterlace_spatial_mix: state.video.deinterlace_spatial_mix,
             vibrance: state.video.vibrance,
             scaler_filter: state.scaler_filter.load(Ordering::Relaxed),
             overscan_x: state.video.overscan_x,
@@ -302,6 +314,12 @@ impl Default for ShaderParams {
             horizontal_stretch: 1.0,
             median_filter_enabled: false,
             median_mix: 1.0,
+            deinterlace_filter_enabled: false,
+            deinterlace_mode: 0,
+            deinterlace_blend: 0.5,
+            deinterlace_motion_threshold: 0.08,
+            deinterlace_line_spacing: 1.0,
+            deinterlace_spatial_mix: 0.75,
             vibrance: 1.0,
             scaler_filter: crate::video::types::ScalerFilter::FastBilinear as u8,
             overscan_x: 0.0,
@@ -323,6 +341,28 @@ mod tests {
         assert_eq!(params.hard_scan, -8.0);
         assert_eq!(params.warp_x, 0.031);
         assert_eq!(params.shadow_mask, 3.0);
+        assert!(!params.deinterlace_filter_enabled);
+        assert_eq!(params.deinterlace_mode, 0);
+        assert_eq!(params.deinterlace_blend, 0.5);
+    }
+
+    #[test]
+    fn test_shader_params_deinterlace_from_state() {
+        let mut state = AppState::default();
+        state.video.deinterlace_filter_enabled = true;
+        state.video.deinterlace_mode = 2;
+        state.video.deinterlace_blend = 0.75;
+        state.video.deinterlace_motion_threshold = 0.2;
+        state.video.deinterlace_line_spacing = 2.25;
+        state.video.deinterlace_spatial_mix = 0.9;
+
+        let params = ShaderParams::from_state(&state);
+        assert!(params.deinterlace_filter_enabled);
+        assert_eq!(params.deinterlace_mode, 2);
+        assert_eq!(params.deinterlace_blend, 0.75);
+        assert_eq!(params.deinterlace_motion_threshold, 0.2);
+        assert_eq!(params.deinterlace_line_spacing, 2.25);
+        assert_eq!(params.deinterlace_spatial_mix, 0.9);
     }
 
     #[test]

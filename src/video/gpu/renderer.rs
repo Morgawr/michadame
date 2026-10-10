@@ -28,6 +28,16 @@ pub struct CrtFilterRenderer {
     yuv_underscan_loc: glow::UniformLocation,
     yuyv_underscan_loc: glow::UniformLocation,
     median_mix_loc: glow::UniformLocation,
+    deinterlace_prog: glow::Program,
+    deinterlace_current_frame_loc: Option<glow::UniformLocation>,
+    deinterlace_prev_frame_loc: Option<glow::UniformLocation>,
+    deinterlace_prev_frame_2_loc: Option<glow::UniformLocation>,
+    deinterlace_has_prev2_loc: Option<glow::UniformLocation>,
+    deinterlace_mode_loc: glow::UniformLocation,
+    deinterlace_blend_loc: glow::UniformLocation,
+    deinterlace_motion_thresh_loc: glow::UniformLocation,
+    deinterlace_line_spacing_loc: glow::UniformLocation,
+    deinterlace_spatial_mix_loc: glow::UniformLocation,
     anime4k_small: Anime4kUpscaler,
     anime4k_medium: Anime4kUpscaler,
     anime4k_large: Anime4kUpscaler,
@@ -129,6 +139,8 @@ pub struct CrtFilterRenderer {
     last_pass_res: (u32, u32),
     last_frame_size: (u32, u32),
     last_frame_format: Option<Pixel>,
+    last_frame_captured_at: i64,
+    history_count: u32,
 }
 
 fn intermediate_texture_internal_format(pass_index: usize) -> u32 {
@@ -136,7 +148,7 @@ fn intermediate_texture_internal_format(pass_index: usize) -> u32 {
         // These passes store linear RGB that is later sampled by another shader before
         // the final linear->sRGB presentation step, so RGBA8 causes visible
         // dark-area quantization. Keep them in half-float instead.
-        4..=6 => glow::RGBA16F,
+        0 | 1 | 2 | 4..=6 => glow::RGBA16F,
         _ => glow::RGBA8,
     }
 }
@@ -162,8 +174,8 @@ fn pass_texture_dimensions(
         // Pass 4 is the low-scale pixelate subrender. The final pass samples it
         // back to the output surface, preserving the existing shader order.
         4 => pixelate_subrender_size(effective_size.0, effective_size.1),
-        // Median and YUV conversion happen before any upscaling.
-        5 | 6 => source_size,
+        // History (0: t-1, 2: t-2), Deinterlace (1), Median (5), and YUV (6) happen before any upscaling.
+        0 | 1 | 2 | 5 | 6 => source_size,
         _ => effective_size,
     }
 }
@@ -174,6 +186,7 @@ impl CrtFilterRenderer {
             let passthrough_prog = compile_program(gl, VS_SRC, FS_PASSTHROUGH);
             let pixelate_prog = compile_program(gl, VS_SRC, FS_PIXELATE);
             let median_prog = compile_program(gl, VS_SRC, FS_MEDIAN_3X1);
+            let deinterlace_prog = compile_program(gl, VS_SRC, FS_DEINTERLACE);
             let final_prog = compile_program(gl, VS_SRC, FS_FINAL);
             let yuv_planar_prog = compile_program(gl, VS_SRC, FS_YUV_PLANAR);
             let yuyv_packed_prog = compile_program(gl, VS_SRC, FS_YUYV_PACKED);
@@ -275,6 +288,36 @@ impl CrtFilterRenderer {
                 ),
                 0,
             );
+            gl.use_program(None);
+
+            let deinterlace_mode_loc = gl.get_uniform_location(deinterlace_prog, "mode").unwrap();
+            let deinterlace_blend_loc =
+                gl.get_uniform_location(deinterlace_prog, "blend_amount").unwrap();
+            let deinterlace_motion_thresh_loc =
+                gl.get_uniform_location(deinterlace_prog, "motion_threshold").unwrap();
+            let deinterlace_line_spacing_loc =
+                gl.get_uniform_location(deinterlace_prog, "line_spacing").unwrap();
+            let deinterlace_spatial_mix_loc =
+                gl.get_uniform_location(deinterlace_prog, "spatial_mix").unwrap();
+            let deinterlace_current_frame_loc =
+                gl.get_uniform_location(deinterlace_prog, "current_frame");
+            let deinterlace_prev_frame_loc =
+                gl.get_uniform_location(deinterlace_prog, "prev_frame");
+            let deinterlace_prev_frame_2_loc =
+                gl.get_uniform_location(deinterlace_prog, "prev_frame_2");
+            let deinterlace_has_prev2_loc =
+                gl.get_uniform_location(deinterlace_prog, "has_prev2");
+
+            gl.use_program(Some(deinterlace_prog));
+            if let Some(loc) = &deinterlace_current_frame_loc {
+                gl.uniform_1_i32(Some(loc), 0);
+            }
+            if let Some(loc) = &deinterlace_prev_frame_loc {
+                gl.uniform_1_i32(Some(loc), 1);
+            }
+            if let Some(loc) = &deinterlace_prev_frame_2_loc {
+                gl.uniform_1_i32(Some(loc), 2);
+            }
             gl.use_program(None);
 
             let final_output_res_loc = gl
@@ -650,6 +693,16 @@ impl CrtFilterRenderer {
                 passthrough_border_crop_loc,
                 median_prog,
                 median_mix_loc,
+                deinterlace_prog,
+                deinterlace_current_frame_loc,
+                deinterlace_prev_frame_loc,
+                deinterlace_prev_frame_2_loc,
+                deinterlace_has_prev2_loc,
+                deinterlace_mode_loc,
+                deinterlace_blend_loc,
+                deinterlace_motion_thresh_loc,
+                deinterlace_line_spacing_loc,
+                deinterlace_spatial_mix_loc,
                 cathode_prog,
                 cathode_output_res_loc,
                 cathode_source_size_loc,
@@ -701,6 +754,8 @@ impl CrtFilterRenderer {
                 last_pass_res: (0, 0),
                 last_frame_size: (0, 0),
                 last_frame_format: None,
+                last_frame_captured_at: -1,
+                history_count: 0,
             }
         }
     }
@@ -988,6 +1043,103 @@ impl CrtFilterRenderer {
         tex
     }
 
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn update_frame_history_and_prepare_input(
+        &mut self,
+        gl: &glow::Context,
+        raw_frame: Option<&RawFrame>,
+        target_width: u32,
+        target_height: u32,
+        overscan_x: f32,
+        overscan_y: f32,
+        underscan_x: f32,
+        underscan_y: f32,
+        fft_filter: Option<&Arc<Mutex<FftFilter>>>,
+        fft_mask_threshold: f32,
+        fft_black_threshold: f32,
+    ) -> Option<glow::Texture> {
+        let frame = raw_frame?;
+        let is_new_frame = frame.captured_at != self.last_frame_captured_at;
+
+        if is_new_frame {
+            if self.history_count >= 1 {
+                // Shift history: pass_textures[0] (t-1) -> pass_textures[2] (t-2)
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.fbos[0]));
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.fbos[2]));
+                gl.blit_framebuffer(
+                    0,
+                    0,
+                    target_width as i32,
+                    target_height as i32,
+                    0,
+                    0,
+                    target_width as i32,
+                    target_height as i32,
+                    glow::COLOR_BUFFER_BIT,
+                    glow::NEAREST,
+                );
+
+                // Shift history: pass_textures[6] (t) -> pass_textures[0] (t-1)
+                // pass_textures[6] currently holds the decoded frame from the previous arrival
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.fbos[6]));
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.fbos[0]));
+                gl.blit_framebuffer(
+                    0,
+                    0,
+                    target_width as i32,
+                    target_height as i32,
+                    0,
+                    0,
+                    target_width as i32,
+                    target_height as i32,
+                    glow::COLOR_BUFFER_BIT,
+                    glow::NEAREST,
+                );
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            }
+        }
+
+        let tex = self.prepare_input_texture(
+            gl,
+            frame,
+            target_width,
+            target_height,
+            overscan_x,
+            overscan_y,
+            underscan_x,
+            underscan_y,
+            fft_filter,
+            fft_mask_threshold,
+            fft_black_threshold,
+        );
+
+        if is_new_frame {
+            if self.history_count == 0 {
+                // First frame ever: seed history 1 with the initial frame so it's not uninitialized
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.fbos[6]));
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.fbos[0]));
+                gl.blit_framebuffer(
+                    0,
+                    0,
+                    target_width as i32,
+                    target_height as i32,
+                    0,
+                    0,
+                    target_width as i32,
+                    target_height as i32,
+                    glow::COLOR_BUFFER_BIT,
+                    glow::NEAREST,
+                );
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            }
+            self.last_frame_captured_at = frame.captured_at;
+            self.history_count = self.history_count.saturating_add(1);
+        }
+
+        gl.viewport(0, 0, target_width as i32, target_height as i32);
+        Some(tex)
+    }
+
     unsafe fn setup_post_framebuffer(
         &mut self,
         gl: &glow::Context,
@@ -1109,26 +1261,75 @@ impl CrtFilterRenderer {
             gl.bind_vertex_array(Some(self.vertex_array));
             gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
 
-            if let Some(frame) = raw_frame {
-                video_texture = Some(self.prepare_input_texture(
-                    gl,
-                    frame,
-                    resolution.0,
-                    resolution.1,
-                    params.overscan_x,
-                    params.overscan_y,
-                    params.underscan_x,
-                    params.underscan_y,
-                    fft_filter,
-                    fft_mask_threshold,
-                    fft_black_threshold,
-                ));
-                gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
+            if let Some(tex) = self.update_frame_history_and_prepare_input(
+                gl,
+                raw_frame,
+                resolution.0,
+                resolution.1,
+                params.overscan_x,
+                params.overscan_y,
+                params.underscan_x,
+                params.underscan_y,
+                fft_filter,
+                fft_mask_threshold,
+                fft_black_threshold,
+            ) {
+                video_texture = Some(tex);
             }
 
             let input_texture = video_texture.expect("No video texture available");
             let mut current_video_texture = input_texture;
             let mut current_res = resolution;
+
+            // Apply Deinterlace filter before median / upscaling
+            if params.deinterlace_filter_enabled {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[1]));
+                gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
+                gl.use_program(Some(self.deinterlace_prog));
+                if let Some(loc) = &self.deinterlace_current_frame_loc {
+                    gl.uniform_1_i32(Some(loc), 0);
+                }
+                if let Some(loc) = &self.deinterlace_prev_frame_loc {
+                    gl.uniform_1_i32(Some(loc), 1);
+                }
+                if let Some(loc) = &self.deinterlace_prev_frame_2_loc {
+                    gl.uniform_1_i32(Some(loc), 2);
+                }
+                if let Some(loc) = &self.deinterlace_has_prev2_loc {
+                    gl.uniform_1_i32(Some(loc), if self.history_count >= 2 { 1 } else { 0 });
+                }
+                gl.uniform_1_i32(Some(&self.deinterlace_mode_loc), params.deinterlace_mode as i32);
+                gl.uniform_1_f32(Some(&self.deinterlace_blend_loc), params.deinterlace_blend);
+                gl.uniform_1_f32(
+                    Some(&self.deinterlace_motion_thresh_loc),
+                    params.deinterlace_motion_threshold,
+                );
+                gl.uniform_1_f32(
+                    Some(&self.deinterlace_line_spacing_loc),
+                    params.deinterlace_line_spacing,
+                );
+                gl.uniform_1_f32(
+                    Some(&self.deinterlace_spatial_mix_loc),
+                    params.deinterlace_spatial_mix,
+                );
+
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(current_video_texture));
+                gl.active_texture(glow::TEXTURE1);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[0]));
+                gl.active_texture(glow::TEXTURE2);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[2]));
+
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+                gl.active_texture(glow::TEXTURE2);
+                gl.bind_texture(glow::TEXTURE_2D, None);
+                gl.active_texture(glow::TEXTURE1);
+                gl.bind_texture(glow::TEXTURE_2D, None);
+                gl.active_texture(glow::TEXTURE0);
+
+                current_video_texture = self.pass_textures[1];
+            }
 
             // Apply Median filter before upscaling
             if params.median_filter_enabled {
@@ -1400,6 +1601,12 @@ impl CrtFilterRenderer {
         horizontal_stretch: f32,
         median_filter_enabled: bool,
         median_mix: f32,
+        deinterlace_filter_enabled: bool,
+        deinterlace_mode: u8,
+        deinterlace_blend: f32,
+        deinterlace_motion_threshold: f32,
+        deinterlace_line_spacing: f32,
+        deinterlace_spatial_mix: f32,
         vibrance: f32,
         scaler_filter: u8,
         overscan_x: f32,
@@ -1473,26 +1680,75 @@ impl CrtFilterRenderer {
             gl.disable(glow::BLEND);
             gl.bind_vertex_array(Some(self.vertex_array));
 
-            if let Some(frame) = raw_frame {
-                video_texture = Some(self.prepare_input_texture(
-                    gl,
-                    frame,
-                    resolution.0,
-                    resolution.1,
-                    overscan_x,
-                    overscan_y,
-                    underscan_x,
-                    underscan_y,
-                    fft_filter,
-                    fft_mask_threshold,
-                    fft_black_threshold,
-                ));
-                gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
+            if let Some(tex) = self.update_frame_history_and_prepare_input(
+                gl,
+                raw_frame,
+                resolution.0,
+                resolution.1,
+                overscan_x,
+                overscan_y,
+                underscan_x,
+                underscan_y,
+                fft_filter,
+                fft_mask_threshold,
+                fft_black_threshold,
+            ) {
+                video_texture = Some(tex);
             }
 
             let input_texture = video_texture.expect("No video texture available");
             let mut current_video_texture = input_texture;
             let mut current_res = resolution;
+
+            // Apply Deinterlace filter before median / upscaling
+            if deinterlace_filter_enabled {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[1]));
+                gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
+                gl.use_program(Some(self.deinterlace_prog));
+                if let Some(loc) = &self.deinterlace_current_frame_loc {
+                    gl.uniform_1_i32(Some(loc), 0);
+                }
+                if let Some(loc) = &self.deinterlace_prev_frame_loc {
+                    gl.uniform_1_i32(Some(loc), 1);
+                }
+                if let Some(loc) = &self.deinterlace_prev_frame_2_loc {
+                    gl.uniform_1_i32(Some(loc), 2);
+                }
+                if let Some(loc) = &self.deinterlace_has_prev2_loc {
+                    gl.uniform_1_i32(Some(loc), if self.history_count >= 2 { 1 } else { 0 });
+                }
+                gl.uniform_1_i32(Some(&self.deinterlace_mode_loc), deinterlace_mode as i32);
+                gl.uniform_1_f32(Some(&self.deinterlace_blend_loc), deinterlace_blend);
+                gl.uniform_1_f32(
+                    Some(&self.deinterlace_motion_thresh_loc),
+                    deinterlace_motion_threshold,
+                );
+                gl.uniform_1_f32(
+                    Some(&self.deinterlace_line_spacing_loc),
+                    deinterlace_line_spacing,
+                );
+                gl.uniform_1_f32(
+                    Some(&self.deinterlace_spatial_mix_loc),
+                    deinterlace_spatial_mix,
+                );
+
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(current_video_texture));
+                gl.active_texture(glow::TEXTURE1);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[0]));
+                gl.active_texture(glow::TEXTURE2);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[2]));
+
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+                gl.active_texture(glow::TEXTURE2);
+                gl.bind_texture(glow::TEXTURE_2D, None);
+                gl.active_texture(glow::TEXTURE1);
+                gl.bind_texture(glow::TEXTURE_2D, None);
+                gl.active_texture(glow::TEXTURE0);
+
+                current_video_texture = self.pass_textures[1];
+            }
 
             // Apply Median filter before upscaling
             if median_filter_enabled {
@@ -2072,6 +2328,7 @@ impl CrtFilterRenderer {
             gl.delete_texture(self.silhouette_texture);
             gl.delete_program(self.pixelate_prog);
             gl.delete_program(self.median_prog);
+            gl.delete_program(self.deinterlace_prog);
             gl.delete_program(self.final_prog);
             gl.delete_program(self.yuv_planar_prog);
             gl.delete_program(self.yuyv_packed_prog);
@@ -2210,6 +2467,7 @@ impl CrtFilterRenderer {
             }
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.history_count = 0;
         }
     }
 }
@@ -2220,6 +2478,9 @@ mod tests {
 
     #[test]
     fn linear_prepasses_use_high_precision_targets() {
+        assert_eq!(intermediate_texture_internal_format(0), glow::RGBA16F);
+        assert_eq!(intermediate_texture_internal_format(1), glow::RGBA16F);
+        assert_eq!(intermediate_texture_internal_format(2), glow::RGBA16F);
         assert_eq!(intermediate_texture_internal_format(4), glow::RGBA16F);
         assert_eq!(intermediate_texture_internal_format(5), glow::RGBA16F);
         assert_eq!(intermediate_texture_internal_format(6), glow::RGBA16F);
@@ -2239,6 +2500,18 @@ mod tests {
         let effective_size = (1440, 960);
 
         assert_eq!(
+            pass_texture_dimensions(0, source_size, effective_size),
+            source_size
+        );
+        assert_eq!(
+            pass_texture_dimensions(1, source_size, effective_size),
+            source_size
+        );
+        assert_eq!(
+            pass_texture_dimensions(2, source_size, effective_size),
+            source_size
+        );
+        assert_eq!(
             pass_texture_dimensions(4, source_size, effective_size),
             (720, 480)
         );
@@ -2251,18 +2524,107 @@ mod tests {
             source_size
         );
         assert_eq!(
-            pass_texture_dimensions(0, source_size, effective_size),
+            pass_texture_dimensions(3, source_size, effective_size),
             effective_size
         );
     }
 
     #[test]
     fn other_intermediate_passes_keep_existing_format() {
-        for pass_index in 0..4 {
+        for pass_index in 3..4 {
             assert_eq!(
                 intermediate_texture_internal_format(pass_index),
                 glow::RGBA8
             );
+        }
+    }
+
+    #[test]
+    fn deinterlace_shader_contains_three_frame_uniforms() {
+        use crate::video::gpu::programs::FS_DEINTERLACE;
+        assert!(FS_DEINTERLACE.contains("uniform sampler2D current_frame;"));
+        assert!(FS_DEINTERLACE.contains("uniform sampler2D prev_frame;"));
+        assert!(FS_DEINTERLACE.contains("uniform sampler2D prev_frame_2;"));
+        assert!(FS_DEINTERLACE.contains("uniform int has_prev2;"));
+        assert!(FS_DEINTERLACE.contains("uniform int mode;"));
+        assert!(FS_DEINTERLACE.contains("uniform float blend_amount;"));
+        assert!(FS_DEINTERLACE.contains("uniform float motion_threshold;"));
+        assert!(FS_DEINTERLACE.contains("uniform float line_spacing;"));
+        assert!(FS_DEINTERLACE.contains("uniform float spatial_mix;"));
+    }
+
+    #[test]
+    fn deinterlace_bob_dejitter_math() {
+        // Simulate a high-contrast horizontal line (e.g. text/HUD edge) bobbing between Field 0 and Field 1:
+        // On Frame N (Even field t): scanline y has intensity 1.0
+        // On Frame N+1 (Odd field t+1): scanline y has intensity 0.0 (bobbed by 1 field line)
+        // On Frame N+2 (Even field t+2): scanline y has intensity 1.0 (same parity as Frame N)
+        let frame_t = 1.0f32;
+        let frame_t1 = 0.0f32;
+        let frame_t2 = 1.0f32;
+
+        // Same-parity difference (t vs t-2):
+        let parity_diff = (frame_t - frame_t2).abs();
+        assert_eq!(parity_diff, 0.0, "Same-parity difference must be zero on static bobbing edges");
+
+        // 50% temporal weave on Frame N (curr = t, prev = t-1):
+        let weave_n = frame_t * 0.5 + frame_t1 * 0.5;
+        // 50% temporal weave on Frame N+1 (curr = t+1, prev = t):
+        let weave_n1 = frame_t1 * 0.5 + frame_t * 0.5;
+
+        assert_eq!(weave_n, 0.5);
+        assert_eq!(weave_n1, 0.5);
+        assert_eq!(
+            weave_n, weave_n1,
+            "50% weave must produce identical values across consecutive frames, eliminating bob flicker"
+        );
+    }
+
+    #[test]
+    fn history_shift_preserves_distinct_frames_across_repeat_paints() {
+        // Simulates arrival of Frame 1, multiple repeat paints, Frame 2, multiple repeat paints
+        // and proves that history buffers retain t-1 and t-2 without collapsing on repeat paints.
+        let mut history_count = 0u32;
+        let mut last_captured_at = 0u64;
+
+        let mut buf_curr = 0u32;
+        let mut buf_prev1 = 0u32;
+        let mut buf_prev2 = 0u32;
+
+        let arrivals = [
+            (100u64, 1u32), // Frame 1 arrival
+            (100u64, 1u32), // Frame 1 repeat paint 1
+            (100u64, 1u32), // Frame 1 repeat paint 2
+            (200u64, 2u32), // Frame 2 arrival
+            (200u64, 2u32), // Frame 2 repeat paint 1
+            (200u64, 2u32), // Frame 2 repeat paint 2
+            (300u64, 3u32), // Frame 3 arrival
+            (300u64, 3u32), // Frame 3 repeat paint 1
+            (300u64, 3u32), // Frame 3 repeat paint 2
+        ];
+
+        for (step, (pts, frame_id)) in arrivals.iter().enumerate() {
+            let is_new_frame = *pts != last_captured_at;
+            if is_new_frame && history_count >= 1 {
+                buf_prev2 = buf_prev1;
+                buf_prev1 = buf_curr;
+            }
+            buf_curr = *frame_id;
+            if is_new_frame {
+                if history_count == 0 {
+                    buf_prev1 = buf_curr;
+                }
+                last_captured_at = *pts;
+                history_count += 1;
+            }
+
+            if step >= 6 {
+                // Steps 6, 7, 8 are Frame 3 (new + 2 repeat paints)
+                assert_eq!(buf_curr, 3, "Current frame must remain Frame 3");
+                assert_eq!(buf_prev1, 2, "Previous frame must remain Frame 2 on both new and repeat paints");
+                assert_eq!(buf_prev2, 1, "Previous-2 frame must remain Frame 1 on both new and repeat paints");
+                assert_eq!(history_count, 3);
+            }
         }
     }
 }

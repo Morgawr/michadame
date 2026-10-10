@@ -163,6 +163,12 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         horizontal_stretch: Some(state.video.horizontal_stretch),
         median_filter_enabled: Some(state.video.median_filter_enabled),
         median_mix: Some(state.video.median_mix),
+        deinterlace_filter_enabled: Some(state.video.deinterlace_filter_enabled),
+        deinterlace_mode: Some(state.video.deinterlace_mode),
+        deinterlace_blend: Some(state.video.deinterlace_blend),
+        deinterlace_motion_threshold: Some(state.video.deinterlace_motion_threshold),
+        deinterlace_line_spacing: Some(state.video.deinterlace_line_spacing),
+        deinterlace_spatial_mix: Some(state.video.deinterlace_spatial_mix),
         vibrance: Some(state.video.vibrance),
         overscan_x: Some(state.video.overscan_x),
         overscan_y: Some(state.video.overscan_y),
@@ -401,6 +407,12 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) -> bool {
     state.video.horizontal_stretch = profile.horizontal_stretch.unwrap_or(1.0);
     state.video.median_filter_enabled = profile.median_filter_enabled.unwrap_or(false);
     state.video.median_mix = profile.median_mix.unwrap_or(1.0);
+    state.video.deinterlace_filter_enabled = profile.deinterlace_filter_enabled.unwrap_or(false);
+    state.video.deinterlace_mode = profile.deinterlace_mode.unwrap_or(0);
+    state.video.deinterlace_blend = profile.deinterlace_blend.unwrap_or(0.5);
+    state.video.deinterlace_motion_threshold = profile.deinterlace_motion_threshold.unwrap_or(0.08);
+    state.video.deinterlace_line_spacing = profile.deinterlace_line_spacing.unwrap_or(1.0);
+    state.video.deinterlace_spatial_mix = profile.deinterlace_spatial_mix.unwrap_or(0.75);
     state.video.vibrance = profile.vibrance.unwrap_or(1.0);
     state.video.overscan_x = profile.overscan_x.unwrap_or(0.0);
     state.video.overscan_y = profile.overscan_y.unwrap_or(0.0);
@@ -1523,5 +1535,33 @@ crt_brightboost = 1.6
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_deinterlace_filter_profile_roundtrip() {
+        let mut state = AppState::default();
+        state.video.deinterlace_filter_enabled = true;
+        state.video.deinterlace_mode = 2;
+        state.video.deinterlace_blend = 0.65;
+        state.video.deinterlace_motion_threshold = 0.25;
+        state.video.deinterlace_line_spacing = 2.0;
+        state.video.deinterlace_spatial_mix = 0.95;
+
+        let profile = build_profile_from_state(&state);
+        assert_eq!(profile.deinterlace_filter_enabled, Some(true));
+        assert_eq!(profile.deinterlace_mode, Some(2));
+        assert_eq!(profile.deinterlace_blend, Some(0.65));
+        assert_eq!(profile.deinterlace_motion_threshold, Some(0.25));
+        assert_eq!(profile.deinterlace_line_spacing, Some(2.0));
+        assert_eq!(profile.deinterlace_spatial_mix, Some(0.95));
+
+        let mut loaded_state = AppState::default();
+        apply_profile_to_state(&mut loaded_state, &profile);
+        assert!(loaded_state.video.deinterlace_filter_enabled);
+        assert_eq!(loaded_state.video.deinterlace_mode, 2);
+        assert_eq!(loaded_state.video.deinterlace_blend, 0.65);
+        assert_eq!(loaded_state.video.deinterlace_motion_threshold, 0.25);
+        assert_eq!(loaded_state.video.deinterlace_line_spacing, 2.0);
+        assert_eq!(loaded_state.video.deinterlace_spatial_mix, 0.95);
     }
 }
