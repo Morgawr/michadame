@@ -1149,6 +1149,22 @@ pub fn draw_effects_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
         if ui
             .checkbox(
+                &mut state.video.retro_software_mouse,
+                "Retro Software Mouse Pointer",
+            )
+            .on_hover_text(
+                "Renders a vintage pixelated software mouse cursor directly inside the CRT video feed with scanlines and glass effects while hovering the screen.\nThe real hardware cursor is automatically restored outside the CRT surface or when the foreground dictionary popup is active.",
+            )
+            .changed()
+        {
+            crate::config::save_config(state);
+            changed = true;
+        }
+
+        technical_separator(ui);
+
+        if ui
+            .checkbox(
                 &mut state.video.crt_glass_enabled,
                 "Glossy Screen Glass Effect",
             )

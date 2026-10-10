@@ -157,6 +157,7 @@ pub struct VideoSettings {
     pub retro_pc_frame: bool,
     pub retro_pc_frame_dark_mode: bool,
     pub retro_pc_ambient_glow: f32,
+    pub retro_software_mouse: bool,
     pub lights_off_night_mode: bool,
     pub night_mode_glow_intensity: f32,
     pub crt_glass_enabled: bool,

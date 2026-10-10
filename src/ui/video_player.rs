@@ -127,6 +127,16 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             output_size,
             state.video.horizontal_stretch,
         );
+        let video_rect_min = response.rect.min
+            + egui::vec2(
+                rendered_area_geom.x as f32 / ppp,
+                rendered_area_geom.y as f32 / ppp,
+            );
+        let video_rect_size = egui::vec2(
+            rendered_area_geom.width as f32 / ppp,
+            rendered_area_geom.height as f32 / ppp,
+        );
+        let video_rect = egui::Rect::from_min_size(video_rect_min, video_rect_size);
 
         let cathode_params = video::gpu::CathodeInterferenceShaderParams::from_state(state);
         let time = ui.input(|i| i.time) as f32;
@@ -145,6 +155,48 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         } else {
             0.0
         };
+
+        let border_crop = [
+            state.video.border_crop_left,
+            state.video.border_crop_right,
+            state.video.border_crop_top,
+            state.video.border_crop_bottom,
+        ];
+        let underscan = [state.video.underscan_x, state.video.underscan_y];
+        let overscan = [state.video.overscan_x, state.video.overscan_y];
+        let crt_surface = crate::dict::popup::calculate_crt_raster_surface(
+            video_rect,
+            border_crop,
+            underscan,
+            overscan,
+        );
+
+        let pointer_pos = ui.input(|i| i.pointer.hover_pos());
+        let is_on_crt_surface = pointer_pos.map_or(false, |pos| crt_surface.contains(pos));
+        let software_mouse_active = is_software_mouse_active(state, is_on_crt_surface);
+
+        let (software_mouse_pos, software_mouse_clip) = if software_mouse_active {
+            let pos = pointer_pos.map(|pos| {
+                let rel_x = pos.x - response.rect.min.x;
+                let rel_y = pos.y - response.rect.min.y;
+                (rel_x * ppp, rel_y * ppp)
+            });
+            let clip_min_x = ((crt_surface.min.x - response.rect.min.x) * ppp).round() as i32;
+            let clip_max_x = ((crt_surface.max.x - response.rect.min.x) * ppp).round() as i32;
+            let clip_min_y = ((crt_surface.min.y - response.rect.min.y) * ppp).round() as i32;
+            let clip_max_y = ((crt_surface.max.y - response.rect.min.y) * ppp).round() as i32;
+            let clip_w = (clip_max_x - clip_min_x).max(1);
+            let clip_h = (clip_max_y - clip_min_y).max(1);
+            let clip_y = (output_size.1 as i32 - clip_max_y).max(0);
+            (pos, Some([clip_min_x, clip_y, clip_w, clip_h]))
+        } else {
+            (None, None)
+        };
+
+        if software_mouse_active {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+        }
+
         if state.cathode_interference.enabled
             || retro_pc_frame
             || (night_mode_glow_intensity > 0.001)
@@ -234,6 +286,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 fft_clone.as_ref(),
                                 fft_threshold,
                                 fft_black,
+                                software_mouse_pos,
+                                software_mouse_clip,
                             );
                             let (at, rate) = latest_frame
                                 .as_ref()
@@ -501,18 +555,11 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         }
 
         // Draw interactive OCR bounding box overlay on top of the video image
-        let video_rect_min = response.rect.min
-            + egui::vec2(
-                rendered_area_geom.x as f32 / ppp,
-                rendered_area_geom.y as f32 / ppp,
-            );
-        let video_rect_size = egui::vec2(
-            rendered_area_geom.width as f32 / ppp,
-            rendered_area_geom.height as f32 / ppp,
-        );
-        let video_rect = egui::Rect::from_min_size(video_rect_min, video_rect_size);
-
         crate::ocr::overlay::draw_ocr_overlay(ui, state, video_rect);
+
+        if software_mouse_active {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+        }
 
         // When capturing overlays in the replay buffer, capture the frame after egui has
         // rendered the interactive OCR boxes and dictionary popup in the Foreground layer.
@@ -561,5 +608,106 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             let is_fullscreen = !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(is_fullscreen));
         }
+    }
+}
+
+/// Determines if the retro software mouse pointer should be active.
+/// Returns false if CRT filter is off, feature is disabled, mouse is outside
+/// the CRT video surface, any system dialog/overlay is open, or if the
+/// dictionary popup is active and rendered on top of the CRT filter.
+pub fn is_software_mouse_active(state: &AppState, is_on_crt_surface: bool) -> bool {
+    let filter = CrtFilter::from_u8(state.crt_filter.load(Ordering::Relaxed));
+    let is_crt_on = filter != CrtFilter::Off;
+    let popup_active = state.dict.popup.is_some();
+    let popup_under_crt = state.dict.popup_under_crt;
+
+    let has_system_dialog = state.ui.show_quit_dialog
+        || state.ui.show_stop_stream_dialog
+        || state.ui.show_first_run_dialog
+        || (state.config_load_error.is_some() && !state.ui.dismissed_config_error)
+        || state.video.fft_mask_window_open
+        || state.ui.debug_open;
+
+    is_crt_on
+        && state.video.retro_software_mouse
+        && is_on_crt_surface
+        && !has_system_dialog
+        && !(popup_active && !popup_under_crt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_software_mouse_active_conditions() {
+        let mut state = AppState::default();
+        state.video.retro_software_mouse = true;
+        state.crt_filter.store(1, Ordering::Relaxed); // Lottes CRT
+
+        // Normal case on CRT surface
+        assert!(is_software_mouse_active(&state, true));
+        // Off CRT surface
+        assert!(!is_software_mouse_active(&state, false));
+
+        // CRT filter turned off
+        state.crt_filter.store(0, Ordering::Relaxed);
+        assert!(!is_software_mouse_active(&state, true));
+        state.crt_filter.store(1, Ordering::Relaxed);
+
+        // Feature toggle disabled
+        state.video.retro_software_mouse = false;
+        assert!(!is_software_mouse_active(&state, true));
+        state.video.retro_software_mouse = true;
+
+        // Modal / system dialogs restore hardware cursor
+        state.ui.show_quit_dialog = true;
+        assert!(!is_software_mouse_active(&state, true));
+        state.ui.show_quit_dialog = false;
+
+        state.ui.show_stop_stream_dialog = true;
+        assert!(!is_software_mouse_active(&state, true));
+        state.ui.show_stop_stream_dialog = false;
+
+        state.ui.show_first_run_dialog = true;
+        assert!(!is_software_mouse_active(&state, true));
+        state.ui.show_first_run_dialog = false;
+
+        state.config_load_error = Some("corrupt config".into());
+        state.ui.dismissed_config_error = false;
+        assert!(!is_software_mouse_active(&state, true));
+        state.ui.dismissed_config_error = true;
+        assert!(is_software_mouse_active(&state, true));
+
+        state.video.fft_mask_window_open = true;
+        assert!(!is_software_mouse_active(&state, true));
+        state.video.fft_mask_window_open = false;
+
+        state.ui.debug_open = true;
+        assert!(!is_software_mouse_active(&state, true));
+        state.ui.debug_open = false;
+
+        // Dictionary popup interactions
+        state.dict.popup = Some(crate::dict::DictPopupState {
+            matched_term: "test".into(),
+            source_text: "test".into(),
+            char_range: (0, 4),
+            box_rect: egui::Rect::ZERO,
+            word_rect: egui::Rect::ZERO,
+            extra_word_rects: Vec::new(),
+            entries: Vec::new(),
+            popup_rect: None,
+            is_popup_hovered: false,
+            last_hover_time: std::time::Instant::now(),
+            last_word_hover_time: std::time::Instant::now(),
+        });
+
+        // Popup active ON TOP of CRT -> software mouse disabled (hardware cursor shown)
+        state.dict.popup_under_crt = false;
+        assert!(!is_software_mouse_active(&state, true));
+
+        // Popup active UNDER CRT -> software mouse remains active
+        state.dict.popup_under_crt = true;
+        assert!(is_software_mouse_active(&state, true));
     }
 }

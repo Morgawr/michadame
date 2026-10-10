@@ -72,6 +72,7 @@ impl Default for AppState {
                 retro_pc_frame: false,
                 retro_pc_frame_dark_mode: false,
                 retro_pc_ambient_glow: 0.55,
+                retro_software_mouse: false,
                 lights_off_night_mode: false,
                 night_mode_glow_intensity: 0.0,
                 crt_glass_enabled: false,

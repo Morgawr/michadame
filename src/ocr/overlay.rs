@@ -60,7 +60,10 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
 
         if is_hovered {
             hovered_any_box = true;
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            let software_mouse_active = crate::ui::video_player::is_software_mouse_active(state, true);
+            if !software_mouse_active {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
         }
 
         // Right-click dismisses the OCR box from the UI
@@ -287,6 +290,8 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
             state.video.border_crop_top,
             state.video.border_crop_bottom,
         ];
+        let underscan = [state.video.underscan_x, state.video.underscan_y];
+        let overscan = [state.video.overscan_x, state.video.overscan_y];
         let filter = crate::devices::filter_type::CrtFilter::from_u8(
             state.crt_filter.load(std::sync::atomic::Ordering::Relaxed),
         );
@@ -299,6 +304,8 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         crate::dict::popup::calculate_crt_viewport(
             video_rect,
             border_crop,
+            underscan,
+            overscan,
             retro_pc_frame,
             curvature_active,
             ppp,

@@ -15,6 +15,75 @@ use std::sync::{Arc, Mutex};
 
 const PIXELATE_TARGET_HEIGHT: u32 = 480;
 
+pub const RETRO_CURSOR_WIDTH: u32 = 16;
+pub const RETRO_CURSOR_HEIGHT: u32 = 24;
+
+const RETRO_CURSOR_SPRITE: [&str; 24] = [
+    "B...............",
+    "BB..............",
+    "BWB.............",
+    "BWWBS...........",
+    "BWWWWBS.........",
+    "BWWWWWBS........",
+    "BWWWWWWBS.......",
+    "BWWWWWWWBS......",
+    "BWWWWWWWWBS.....",
+    "BWWWWWWWWWBS....",
+    "BWWWWWWWWWWBS...",
+    "BWWWWWWWWWWWBS..",
+    "BWWWWWWBBBBBSS..",
+    "BWWWBWWBS.......",
+    "BWWB.BWWB.......",
+    "BWB..BWWB.......",
+    "BB....BWWB......",
+    "B.....BWWB......",
+    ".......BWWB.....",
+    ".......BWWB.....",
+    "........BB......",
+    "................",
+    "................",
+    "................",
+];
+
+fn generate_retro_cursor_pixels() -> [u8; (RETRO_CURSOR_WIDTH * RETRO_CURSOR_HEIGHT * 4) as usize] {
+    let mut pixels = [0u8; (RETRO_CURSOR_WIDTH * RETRO_CURSOR_HEIGHT * 4) as usize];
+    for (y, row) in RETRO_CURSOR_SPRITE.iter().enumerate() {
+        for (x, ch) in row.chars().enumerate() {
+            if x >= RETRO_CURSOR_WIDTH as usize || y >= RETRO_CURSOR_HEIGHT as usize {
+                continue;
+            }
+            let idx = (y * RETRO_CURSOR_WIDTH as usize + x) * 4;
+            match ch {
+                'B' => {
+                    pixels[idx] = 0;
+                    pixels[idx + 1] = 0;
+                    pixels[idx + 2] = 0;
+                    pixels[idx + 3] = 255;
+                }
+                'W' => {
+                    pixels[idx] = 255;
+                    pixels[idx + 1] = 255;
+                    pixels[idx + 2] = 255;
+                    pixels[idx + 3] = 255;
+                }
+                'S' => {
+                    pixels[idx] = 0;
+                    pixels[idx + 1] = 0;
+                    pixels[idx + 2] = 0;
+                    pixels[idx + 3] = 75;
+                }
+                _ => {
+                    pixels[idx] = 0;
+                    pixels[idx + 1] = 0;
+                    pixels[idx + 2] = 0;
+                    pixels[idx + 3] = 0;
+                }
+            }
+        }
+    }
+    pixels
+}
+
 pub struct CrtFilterRenderer {
     passthrough_prog: glow::Program,
     pixelate_prog: glow::Program,
@@ -144,6 +213,16 @@ pub struct CrtFilterRenderer {
     popup_scanline_freq_loc: Option<glow::UniformLocation>,
     popup_brightboost_loc: Option<glow::UniformLocation>,
     blit_prog: glow::Program,
+    retro_mouse_prog: glow::Program,
+    retro_mouse_texture: glow::Texture,
+    retro_mouse_screen_size_loc: Option<glow::UniformLocation>,
+    retro_mouse_cursor_pos_loc: Option<glow::UniformLocation>,
+    retro_mouse_cursor_size_loc: Option<glow::UniformLocation>,
+    retro_mouse_sampler_loc: Option<glow::UniformLocation>,
+    retro_mouse_shadow_mask_loc: Option<glow::UniformLocation>,
+    retro_mouse_scanline_strength_loc: Option<glow::UniformLocation>,
+    retro_mouse_scanline_freq_loc: Option<glow::UniformLocation>,
+    retro_mouse_brightboost_loc: Option<glow::UniformLocation>,
 
     post_fbos: [glow::Framebuffer; 2],
     post_textures: [glow::Texture; 2],
@@ -305,6 +384,42 @@ impl CrtFilterRenderer {
                 gl.uniform_1_i32(Some(&loc), 0);
             }
             gl.use_program(None);
+
+            let retro_mouse_prog = compile_program(gl, VS_RETRO_MOUSE, FS_RETRO_MOUSE);
+            let retro_mouse_screen_size_loc = gl.get_uniform_location(retro_mouse_prog, "u_screen_size");
+            let retro_mouse_cursor_pos_loc = gl.get_uniform_location(retro_mouse_prog, "u_cursor_pos");
+            let retro_mouse_cursor_size_loc = gl.get_uniform_location(retro_mouse_prog, "u_cursor_size");
+            let retro_mouse_sampler_loc = gl.get_uniform_location(retro_mouse_prog, "u_cursor_sampler");
+            let retro_mouse_shadow_mask_loc = gl.get_uniform_location(retro_mouse_prog, "u_shadow_mask");
+            let retro_mouse_scanline_strength_loc = gl.get_uniform_location(retro_mouse_prog, "u_scanline_strength");
+            let retro_mouse_scanline_freq_loc = gl.get_uniform_location(retro_mouse_prog, "u_scanline_freq");
+            let retro_mouse_brightboost_loc = gl.get_uniform_location(retro_mouse_prog, "u_brightboost");
+
+            gl.use_program(Some(retro_mouse_prog));
+            if let Some(ref loc) = retro_mouse_sampler_loc {
+                gl.uniform_1_i32(Some(loc), 0);
+            }
+            gl.use_program(None);
+
+            let retro_mouse_texture = gl.create_texture().expect("Cannot create retro mouse texture");
+            gl.bind_texture(glow::TEXTURE_2D, Some(retro_mouse_texture));
+            let cursor_pixels = generate_retro_cursor_pixels();
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA as i32,
+                RETRO_CURSOR_WIDTH as i32,
+                RETRO_CURSOR_HEIGHT as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                Some(&cursor_pixels),
+            );
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+            gl.bind_texture(glow::TEXTURE_2D, None);
 
             let p_passthrough_output_res_loc = gl
                 .get_uniform_location(passthrough_prog, "outputResolution")
@@ -796,6 +911,16 @@ impl CrtFilterRenderer {
                 popup_scanline_freq_loc,
                 popup_brightboost_loc,
                 blit_prog,
+                retro_mouse_prog,
+                retro_mouse_texture,
+                retro_mouse_screen_size_loc,
+                retro_mouse_cursor_pos_loc,
+                retro_mouse_cursor_size_loc,
+                retro_mouse_sampler_loc,
+                retro_mouse_shadow_mask_loc,
+                retro_mouse_scanline_strength_loc,
+                retro_mouse_scanline_freq_loc,
+                retro_mouse_brightboost_loc,
                 post_fbos,
                 post_textures,
                 last_post_size: (0, 0),
@@ -1256,6 +1381,8 @@ impl CrtFilterRenderer {
         fft_filter: Option<&Arc<Mutex<FftFilter>>>,
         fft_mask_threshold: f32,
         fft_black_threshold: f32,
+        software_mouse_pos: Option<(f32, f32)>,
+        software_mouse_clip: Option<[i32; 4]>,
     ) -> RenderedArea {
         let mut video_texture = fallback_texture;
 
@@ -1465,7 +1592,8 @@ impl CrtFilterRenderer {
                 .map(|g| g.enabled && g.intensity > 0.001)
                 .unwrap_or(false);
             let has_popup = !self.popup_primitives.is_empty();
-            let has_post = run_cathode || run_glass || has_popup;
+            let has_mouse = software_mouse_pos.is_some();
+            let has_post = run_cathode || run_glass || has_popup || has_mouse;
 
             let (upstream_target_fbo, cathode_target_fbo, glass_target_fbo) =
                 match (run_cathode, run_glass) {
@@ -1482,7 +1610,7 @@ impl CrtFilterRenderer {
                         (Some(self.post_fbos[0]), None, None)
                     }
                     (false, false) => {
-                        if has_popup {
+                        if has_popup || has_mouse {
                             self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
                             (Some(self.post_fbos[0]), None, None)
                         } else {
@@ -1631,6 +1759,36 @@ impl CrtFilterRenderer {
                 self.popup_primitives.clear();
             }
 
+            if let Some(mouse_pos) = software_mouse_pos {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
+                gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+                let (s_mask, scan_str, b_boost) = if run_lottes {
+                    (
+                        params.shadow_mask,
+                        (params.hard_scan / 30.0).clamp(0.0, 1.0),
+                        params.brightboost.max(1.0),
+                    )
+                } else if run_halo {
+                    (
+                        halo_params.shadow_mask,
+                        0.5,
+                        halo_params.brightboost.max(1.0),
+                    )
+                } else {
+                    (0.0, 0.0, 1.0)
+                };
+                self.draw_software_mouse(
+                    gl,
+                    mouse_pos,
+                    output_size,
+                    s_mask,
+                    scan_str,
+                    b_boost,
+                    output_size.0 / widget_rect.width(),
+                    software_mouse_clip,
+                );
+            }
+
             if run_cathode {
                 let cathode_input = self.post_textures[0];
                 let scissor_cathode = scissor_enabled && !run_glass;
@@ -1675,14 +1833,14 @@ impl CrtFilterRenderer {
                 }
             } else if run_cathode {
                 self.post_textures[0]
-            } else if has_popup {
+            } else if has_popup || has_mouse {
                 self.post_textures[0]
             } else {
                 final_input_texture
             };
             self.last_video_texture = Some(final_output_tex);
 
-            if !run_cathode && !run_glass && has_popup {
+            if !run_cathode && !run_glass && (has_popup || has_mouse) {
                 self.blit_texture(gl, self.post_textures[0], output_size, None, scissor_enabled);
             }
 
@@ -2454,6 +2612,105 @@ impl CrtFilterRenderer {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn draw_software_mouse(
+        &self,
+        gl: &glow::Context,
+        cursor_pos: (f32, f32),
+        output_size: (f32, f32),
+        shadow_mask: f32,
+        scanline_strength: f32,
+        brightboost: f32,
+        ppp: f32,
+        clip_rect: Option<[i32; 4]>,
+    ) {
+        unsafe {
+            let mut prev_scissor = [0i32; 4];
+            gl.get_parameter_i32_slice(glow::SCISSOR_BOX, &mut prev_scissor);
+            let prev_scissor_enabled = gl.is_enabled(glow::SCISSOR_TEST);
+
+            if let Some([cx, cy, cw, ch]) = clip_rect {
+                gl.enable(glow::SCISSOR_TEST);
+                gl.scissor(cx, cy, cw, ch);
+            } else {
+                gl.disable(glow::SCISSOR_TEST);
+            }
+
+            let prev_blend = gl.is_enabled(glow::BLEND);
+            let prev_src_rgb = gl.get_parameter_i32(glow::BLEND_SRC_RGB) as u32;
+            let prev_dst_rgb = gl.get_parameter_i32(glow::BLEND_DST_RGB) as u32;
+            let prev_src_alpha = gl.get_parameter_i32(glow::BLEND_SRC_ALPHA) as u32;
+            let prev_dst_alpha = gl.get_parameter_i32(glow::BLEND_DST_ALPHA) as u32;
+            let prev_vao = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
+
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+
+            gl.use_program(Some(self.retro_mouse_prog));
+
+            let scale = (1.5 * ppp).round().max(1.0);
+            let cursor_w = RETRO_CURSOR_WIDTH as f32 * scale;
+            let cursor_h = RETRO_CURSOR_HEIGHT as f32 * scale;
+
+            gl.uniform_2_f32(
+                self.retro_mouse_screen_size_loc.as_ref(),
+                output_size.0,
+                output_size.1,
+            );
+            gl.uniform_2_f32(
+                self.retro_mouse_cursor_pos_loc.as_ref(),
+                cursor_pos.0,
+                cursor_pos.1,
+            );
+            gl.uniform_2_f32(
+                self.retro_mouse_cursor_size_loc.as_ref(),
+                cursor_w,
+                cursor_h,
+            );
+            gl.uniform_1_i32(self.retro_mouse_sampler_loc.as_ref(), 0);
+
+            gl.uniform_1_f32(self.retro_mouse_shadow_mask_loc.as_ref(), shadow_mask);
+            gl.uniform_1_f32(
+                self.retro_mouse_scanline_strength_loc.as_ref(),
+                scanline_strength,
+            );
+            let scanline_freq = (output_size.1 / 240.0).max(2.0);
+            gl.uniform_1_f32(self.retro_mouse_scanline_freq_loc.as_ref(), scanline_freq);
+            gl.uniform_1_f32(self.retro_mouse_brightboost_loc.as_ref(), brightboost);
+
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.retro_mouse_texture));
+
+            gl.bind_vertex_array(Some(self.vertex_array));
+            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.use_program(None);
+            gl.blend_func_separate(prev_src_rgb, prev_dst_rgb, prev_src_alpha, prev_dst_alpha);
+            if !prev_blend {
+                gl.disable(glow::BLEND);
+            }
+            gl.scissor(
+                prev_scissor[0],
+                prev_scissor[1],
+                prev_scissor[2],
+                prev_scissor[3],
+            );
+            if prev_scissor_enabled {
+                gl.enable(glow::SCISSOR_TEST);
+            } else {
+                gl.disable(glow::SCISSOR_TEST);
+            }
+            if prev_vao != 0 {
+                gl.bind_vertex_array(Some(glow::VertexArray::from(glow::NativeVertexArray(
+                    NonZero::new(prev_vao as u32).unwrap(),
+                ))));
+            } else {
+                gl.bind_vertex_array(None);
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_retro_frame(
         &self,
         gl: &glow::Context,
@@ -2690,6 +2947,8 @@ impl CrtFilterRenderer {
             gl.delete_program(self.night_glow_prog);
             gl.delete_program(self.popup_prog);
             gl.delete_program(self.blit_prog);
+            gl.delete_program(self.retro_mouse_prog);
+            gl.delete_texture(self.retro_mouse_texture);
             gl.delete_vertex_array(self.popup_vao);
             gl.delete_buffer(self.popup_vbo);
             gl.delete_buffer(self.popup_ebo);

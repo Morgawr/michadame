@@ -327,27 +327,84 @@ pub fn calculate_clamped_popup_pos(
     calculate_popup_placement(word_rect, popup_w, popup_h, video_rect).pos
 }
 
+/// Calculates the exact visible CRT raster surface bounds in egui screen coordinates.
+/// Accounts for aspect-fitted video rect, border crops, and underscan/overscan.
+/// This represents the physical CRT screen surface (raster) without safe text margin insets.
+pub fn calculate_crt_raster_surface(
+    video_rect: egui::Rect,
+    border_crop: [f32; 4], // [left, right, top, bottom]
+    underscan: [f32; 2],   // [underscan_x, underscan_y]
+    overscan: [f32; 2],    // [overscan_x, overscan_y]
+) -> egui::Rect {
+    let w = video_rect.width();
+    let h = video_rect.height();
+
+    // 1. Account for underscan stretch & overscan offsets inside the raster
+    let sx = (1.0 + underscan[0]).max(0.01);
+    let sy = (1.0 + underscan[1]).max(0.01);
+    let ox = overscan[0];
+    let oy = overscan[1];
+
+    let vis_u_min = (0.5 + (ox - 0.5) * sx).clamp(0.0, 1.0);
+    let vis_u_max = (0.5 + (ox + 0.5) * sx).clamp(0.0, 1.0);
+    let vis_v_min = (0.5 + (oy - 0.5) * sy).clamp(0.0, 1.0);
+    let vis_v_max = (0.5 + (oy + 0.5) * sy).clamp(0.0, 1.0);
+
+    // 2. Account for user border cropping ([left, right, top, bottom])
+    let crop_u_min = border_crop[0].clamp(0.0, 0.45);
+    let crop_u_max = (1.0 - border_crop[1].clamp(0.0, 0.45)).clamp(0.0, 1.0);
+    let crop_v_min = border_crop[2].clamp(0.0, 0.45);
+    let crop_v_max = (1.0 - border_crop[3].clamp(0.0, 0.45)).clamp(0.0, 1.0);
+
+    // Combined active video content boundaries in normalized coordinates [0, 1]
+    let u_start = vis_u_min.max(crop_u_min);
+    let u_end = vis_u_max.min(crop_u_max);
+    let v_start = vis_v_min.max(crop_v_min);
+    let v_end = vis_v_max.min(crop_v_max);
+
+    let mut min = egui::pos2(
+        video_rect.min.x + w * u_start,
+        video_rect.min.y + h * v_start,
+    );
+    let mut max = egui::pos2(
+        video_rect.min.x + w * u_end,
+        video_rect.min.y + h * v_end,
+    );
+
+    // Ensure rect is valid and non-inverted
+    if min.x >= max.x {
+        let mid = (video_rect.min.x + video_rect.max.x) * 0.5;
+        min.x = mid - 50.0;
+        max.x = mid + 50.0;
+    }
+    if min.y >= max.y {
+        let mid = (video_rect.min.y + video_rect.max.y) * 0.5;
+        min.y = mid - 50.0;
+        max.y = mid + 50.0;
+    }
+
+    egui::Rect::from_min_max(min, max)
+}
+
 /// Calculates the effective visible CRT screen viewport in egui screen coordinates.
-/// Accounts for border crop margins, retro PC bezel frames, and CRT glass curvature safe margins.
+/// Accounts for raster underscan stretch, overscan offset shifts, border crop margins,
+/// retro PC bezel frames, and CRT glass curvature safe margins for dictionary popup text.
 pub fn calculate_crt_viewport(
     video_rect: egui::Rect,
     border_crop: [f32; 4], // [left, right, top, bottom]
+    underscan: [f32; 2],   // [underscan_x, underscan_y]
+    overscan: [f32; 2],    // [overscan_x, overscan_y]
     retro_pc_frame: bool,
     curvature_active: bool,
     _ppp: f32,
 ) -> egui::Rect {
-    let mut min = video_rect.min;
-    let mut max = video_rect.max;
+    let raster = calculate_crt_raster_surface(video_rect, border_crop, underscan, overscan);
+    let mut min = raster.min;
+    let mut max = raster.max;
     let w = video_rect.width();
     let h = video_rect.height();
 
-    // 1. Account for user border cropping ([left, right, top, bottom])
-    min.x += w * border_crop[0].clamp(0.0, 0.45);
-    max.x -= w * border_crop[1].clamp(0.0, 0.45);
-    min.y += h * border_crop[2].clamp(0.0, 0.45);
-    max.y -= h * border_crop[3].clamp(0.0, 0.45);
-
-    // 2. Account for retro PC bezel frame if active (CRT is recessed inside plastic chassis)
+    // 3. Account for retro PC bezel frame if active (CRT is recessed inside plastic chassis)
     if retro_pc_frame {
         // In retro PC frame mode, the bezel frame occupies roughly:
         // Top ~ 6.5%, Bottom ~ 10.0%, Left/Right ~ 5.5% of the video canvas
@@ -357,7 +414,7 @@ pub fn calculate_crt_viewport(
         max.x -= w * 0.055;
     }
 
-    // 3. Account for CRT glass curvature safe margins (barrel distortion curves inwards)
+    // 4. Account for CRT glass curvature safe margins (barrel distortion curves inwards)
     if curvature_active {
         // Edge curvature pulls corners and outer edges inward; inset safe margins ~2.5%
         min.x += w * 0.025;
@@ -390,18 +447,72 @@ mod tests {
     fn test_calculate_crt_viewport_insets() {
         let video_rect = egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(1000.0, 800.0));
         let crop = [0.05, 0.05, 0.10, 0.10]; // 5% L/R (50px), 10% T/B (80px)
-        let vp = calculate_crt_viewport(video_rect, crop, false, false, 1.0);
+        let vp = calculate_crt_viewport(video_rect, crop, [0.0, 0.0], [0.0, 0.0], false, false, 1.0);
         assert_eq!(vp.min.x, 150.0);
         assert_eq!(vp.max.x, 1050.0);
         assert_eq!(vp.min.y, 180.0);
         assert_eq!(vp.max.y, 820.0);
 
         // With retro frame and curvature
-        let vp_retro = calculate_crt_viewport(video_rect, [0.0, 0.0, 0.0, 0.0], true, true, 1.0);
+        let vp_retro = calculate_crt_viewport(video_rect, [0.0, 0.0, 0.0, 0.0], [0.0, 0.0], [0.0, 0.0], true, true, 1.0);
         assert!(vp_retro.min.x > video_rect.min.x);
         assert!(vp_retro.max.x < video_rect.max.x);
         assert!(vp_retro.min.y > video_rect.min.y);
         assert!(vp_retro.max.y < video_rect.max.y);
+    }
+
+    #[test]
+    fn test_calculate_crt_raster_surface_bounds() {
+        let video_rect = egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(1000.0, 800.0));
+        let surface = calculate_crt_raster_surface(video_rect, [0.0, 0.0, 0.0, 0.0], [0.0, 0.0], [0.0, 0.0]);
+        // Default raster surface must match the entire video rect without safe margin shrinkage
+        assert_eq!(surface, video_rect);
+
+        // Border crop
+        let cropped = calculate_crt_raster_surface(video_rect, [0.05, 0.05, 0.10, 0.10], [0.0, 0.0], [0.0, 0.0]);
+        assert_eq!(cropped.min.x, 150.0);
+        assert_eq!(cropped.max.x, 1050.0);
+        assert_eq!(cropped.min.y, 180.0);
+        assert_eq!(cropped.max.y, 820.0);
+
+        // Viewport with retro frame must be strictly smaller than raster surface
+        let vp_retro = calculate_crt_viewport(video_rect, [0.0, 0.0, 0.0, 0.0], [0.0, 0.0], [0.0, 0.0], true, true, 1.0);
+        assert!(vp_retro.min.x > surface.min.x);
+        assert!(vp_retro.max.x < surface.max.x);
+        assert!(vp_retro.min.y > surface.min.y);
+        assert!(vp_retro.max.y < surface.max.y);
+    }
+
+    #[test]
+    fn test_calculate_crt_viewport_underscan_and_overscan() {
+        let video_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 1000.0));
+        // Underscan -0.1 (shrunk by 10% -> 5% inset on left and right)
+        let vp_under = calculate_crt_viewport(
+            video_rect,
+            [0.0, 0.0, 0.0, 0.0],
+            [-0.1, -0.2],
+            [0.0, 0.0],
+            false,
+            false,
+            1.0,
+        );
+        assert!((vp_under.min.x - 50.0).abs() < 0.01);
+        assert!((vp_under.max.x - 950.0).abs() < 0.01);
+        assert!((vp_under.min.y - 100.0).abs() < 0.01);
+        assert!((vp_under.max.y - 900.0).abs() < 0.01);
+
+        // Overscan +0.05 X (shifted right by 50px)
+        let vp_over = calculate_crt_viewport(
+            video_rect,
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0],
+            [0.05, 0.0],
+            false,
+            false,
+            1.0,
+        );
+        assert!((vp_over.min.x - 50.0).abs() < 0.01);
+        assert!((vp_over.max.x - 1000.0).abs() < 0.01);
     }
 
     fn popup_at(x: f32, char_range: (usize, usize), last_word_hover_time: Instant) -> DictPopupState {

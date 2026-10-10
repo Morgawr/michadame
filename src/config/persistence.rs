@@ -150,6 +150,7 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         retro_pc_frame: Some(state.video.retro_pc_frame),
         retro_pc_frame_dark_mode: Some(state.video.retro_pc_frame_dark_mode),
         retro_pc_ambient_glow: Some(state.video.retro_pc_ambient_glow),
+        retro_software_mouse: Some(state.video.retro_software_mouse),
         lights_off_night_mode: Some(state.video.lights_off_night_mode),
         night_mode_glow_intensity: Some(state.video.night_mode_glow_intensity),
         crt_glass_enabled: Some(state.video.crt_glass_enabled),
@@ -391,6 +392,7 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) -> bool {
     state.video.retro_pc_frame = profile.retro_pc_frame.unwrap_or(false);
     state.video.retro_pc_frame_dark_mode = profile.retro_pc_frame_dark_mode.unwrap_or(false);
     state.video.retro_pc_ambient_glow = profile.retro_pc_ambient_glow.unwrap_or(0.55);
+    state.video.retro_software_mouse = profile.retro_software_mouse.unwrap_or(false);
     state.video.lights_off_night_mode = profile.lights_off_night_mode.unwrap_or(false);
     state.video.night_mode_glow_intensity = profile.night_mode_glow_intensity.unwrap_or(0.0);
 
@@ -1082,6 +1084,27 @@ mod tests {
         assert_eq!(new_state.video.retro_pc_ambient_glow, 0.0);
         assert!(!new_state.video.lights_off_night_mode);
         assert_eq!(new_state.video.night_mode_glow_intensity, 0.0);
+    }
+
+    #[test]
+    fn test_retro_software_mouse_profile_roundtrip() {
+        let mut state = AppState::default();
+        assert!(!state.video.retro_software_mouse);
+
+        state.video.retro_software_mouse = true;
+        let profile = build_profile_from_state(&state);
+        assert_eq!(profile.retro_software_mouse, Some(true));
+
+        let mut new_state = AppState::default();
+        apply_profile_to_state(&mut new_state, &profile);
+        assert!(new_state.video.retro_software_mouse);
+
+        state.video.retro_software_mouse = false;
+        let profile = build_profile_from_state(&state);
+        assert_eq!(profile.retro_software_mouse, Some(false));
+
+        apply_profile_to_state(&mut new_state, &profile);
+        assert!(!new_state.video.retro_software_mouse);
     }
 
     #[test]
