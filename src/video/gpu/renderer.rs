@@ -201,6 +201,9 @@ pub struct CrtFilterRenderer {
     night_glow_intensity_loc: Option<glow::UniformLocation>,
 
     pub popup_primitives: Vec<egui::ClippedPrimitive>,
+    /// Niconico chat comments, drawn under the CRT post effects and kept in
+    /// replays/mining captures.
+    pub comment_primitives: Vec<egui::ClippedPrimitive>,
     popup_prog: glow::Program,
     popup_vao: glow::VertexArray,
     popup_vbo: glow::Buffer,
@@ -899,6 +902,7 @@ impl CrtFilterRenderer {
                 night_glow_filter_type_loc,
                 night_glow_intensity_loc,
                 popup_primitives: Vec::new(),
+                comment_primitives: Vec::new(),
                 popup_prog,
                 popup_vao,
                 popup_vbo,
@@ -1593,8 +1597,10 @@ impl CrtFilterRenderer {
                 .map(|g| g.enabled && g.intensity > 0.001)
                 .unwrap_or(false);
             let has_popup = !skip_popup && !self.popup_primitives.is_empty();
+            let has_comments = !self.comment_primitives.is_empty();
+            let has_overlay = has_popup || has_comments;
             let has_mouse = software_mouse_pos.is_some();
-            let has_post = run_cathode || run_glass || has_popup || has_mouse;
+            let has_post = run_cathode || run_glass || has_overlay || has_mouse;
 
             let (upstream_target_fbo, cathode_target_fbo, glass_target_fbo) =
                 match (run_cathode, run_glass) {
@@ -1611,7 +1617,7 @@ impl CrtFilterRenderer {
                         (Some(self.post_fbos[0]), None, None)
                     }
                     (false, false) => {
-                        if has_popup || has_mouse {
+                        if has_overlay || has_mouse {
                             self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
                             (Some(self.post_fbos[0]), None, None)
                         } else {
@@ -1730,24 +1736,43 @@ impl CrtFilterRenderer {
                 );
             }
 
+            let (s_mask, scan_str, b_boost) = if run_lottes {
+                (
+                    params.shadow_mask,
+                    (params.hard_scan / 30.0).clamp(0.0, 1.0),
+                    params.brightboost.max(1.0),
+                )
+            } else if run_halo {
+                (
+                    halo_params.shadow_mask,
+                    0.5,
+                    halo_params.brightboost.max(1.0),
+                )
+            } else {
+                (0.0, 0.0, 1.0)
+            };
+
+            // Niconico comments sit on the CRT image (below the dictionary
+            // popup) and are kept in mining captures, unlike the popup.
+            if has_comments {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
+                gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+                self.draw_overlay_primitives(
+                    gl,
+                    painter,
+                    &self.comment_primitives,
+                    output_size,
+                    widget_rect,
+                    s_mask,
+                    scan_str,
+                    b_boost,
+                );
+                self.comment_primitives.clear();
+            }
+
             if has_popup {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
                 gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
-                let (s_mask, scan_str, b_boost) = if run_lottes {
-                    (
-                        params.shadow_mask,
-                        (params.hard_scan / 30.0).clamp(0.0, 1.0),
-                        params.brightboost.max(1.0),
-                    )
-                } else if run_halo {
-                    (
-                        halo_params.shadow_mask,
-                        0.5,
-                        halo_params.brightboost.max(1.0),
-                    )
-                } else {
-                    (0.0, 0.0, 1.0)
-                };
                 self.draw_popup_primitives(
                     gl,
                     painter,
@@ -1834,14 +1859,14 @@ impl CrtFilterRenderer {
                 }
             } else if run_cathode {
                 self.post_textures[0]
-            } else if has_popup || has_mouse {
+            } else if has_overlay || has_mouse {
                 self.post_textures[0]
             } else {
                 final_input_texture
             };
             self.last_video_texture = Some(final_output_tex);
 
-            if !run_cathode && !run_glass && (has_popup || has_mouse) {
+            if !run_cathode && !run_glass && (has_overlay || has_mouse) {
                 self.blit_texture(gl, self.post_textures[0], output_size, None, scissor_enabled);
             }
 
@@ -2092,7 +2117,9 @@ impl CrtFilterRenderer {
                 .map(|g| g.enabled && g.intensity > 0.001)
                 .unwrap_or(false);
             let has_popup = !self.popup_primitives.is_empty();
-            let has_post = run_cathode || run_glass || has_popup;
+            let has_comments = !self.comment_primitives.is_empty();
+            let has_overlay = has_popup || has_comments;
+            let has_post = run_cathode || run_glass || has_overlay;
 
             let (upstream_target_fbo, cathode_target_fbo, glass_target_fbo) =
                 match (run_cathode, run_glass) {
@@ -2109,7 +2136,7 @@ impl CrtFilterRenderer {
                         (Some(self.post_fbos[0]), None, None)
                     }
                     (false, false) => {
-                        if has_popup {
+                        if has_overlay {
                             self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
                             (Some(self.post_fbos[0]), None, None)
                         } else {
@@ -2133,6 +2160,22 @@ impl CrtFilterRenderer {
                 border_crop,
                 upstream_target_fbo,
             );
+
+            if has_comments {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
+                gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+                self.draw_overlay_primitives(
+                    gl,
+                    painter,
+                    &self.comment_primitives,
+                    output_size,
+                    widget_rect,
+                    0.0,
+                    0.0,
+                    1.0,
+                );
+                self.comment_primitives.clear();
+            }
 
             if has_popup {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
@@ -2194,14 +2237,14 @@ impl CrtFilterRenderer {
                 }
             } else if run_cathode {
                 self.post_textures[0]
-            } else if has_popup {
+            } else if has_overlay {
                 self.post_textures[0]
             } else {
                 current_video_texture
             };
             self.last_video_texture = Some(final_output_tex);
 
-            if !run_cathode && !run_glass && has_popup {
+            if !run_cathode && !run_glass && has_overlay {
                 self.blit_texture(gl, self.post_textures[0], output_size, None, scissor_enabled);
             }
 
@@ -2448,7 +2491,33 @@ impl CrtFilterRenderer {
         scanline_strength: f32,
         brightboost: f32,
     ) {
-        if self.popup_primitives.is_empty() || widget_rect.width() <= 0.0 || widget_rect.height() <= 0.0 {
+        self.draw_overlay_primitives(
+            gl,
+            painter,
+            &self.popup_primitives,
+            output_size,
+            widget_rect,
+            shadow_mask,
+            scanline_strength,
+            brightboost,
+        );
+    }
+
+    /// Draw tessellated egui primitives into the current framebuffer with the
+    /// simulated shadow mask / scanlines, so they look part of the CRT image.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_overlay_primitives(
+        &self,
+        gl: &glow::Context,
+        painter: &egui_glow::Painter,
+        primitives: &[egui::ClippedPrimitive],
+        output_size: (f32, f32),
+        widget_rect: egui::Rect,
+        shadow_mask: f32,
+        scanline_strength: f32,
+        brightboost: f32,
+    ) {
+        if primitives.is_empty() || widget_rect.width() <= 0.0 || widget_rect.height() <= 0.0 {
             return;
         }
 
@@ -2504,7 +2573,7 @@ impl CrtFilterRenderer {
 
             let ppp = output_size.0 / widget_rect.width();
 
-            for primitive in &self.popup_primitives {
+            for primitive in primitives {
                 if let egui::epaint::Primitive::Mesh(mesh) = &primitive.primitive {
                     if mesh.vertices.is_empty() || mesh.indices.is_empty() {
                         continue;

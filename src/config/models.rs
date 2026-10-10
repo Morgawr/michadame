@@ -19,6 +19,14 @@ pub struct TwitchConfig {
     pub max_messages: u32,
     /// Optional Twitch application Client ID override. Empty = built-in.
     pub client_id: String,
+    /// Fire each chat message across the video, niconico style.
+    pub niconico_enabled: bool,
+    /// Comment text height as a fraction of the video height.
+    pub niconico_size_pct: f32,
+    /// Average seconds a comment takes to cross the screen.
+    pub niconico_duration_secs: f32,
+    /// Most comments on screen at once (oldest dropped first). 0 = unlimited.
+    pub niconico_max_comments: u32,
 }
 
 impl Default for TwitchConfig {
@@ -32,6 +40,10 @@ impl Default for TwitchConfig {
             message_lifetime_secs: 120,
             max_messages: 150,
             client_id: String::new(),
+            niconico_enabled: false,
+            niconico_size_pct: 0.06,
+            niconico_duration_secs: 7.0,
+            niconico_max_comments: 0,
         }
     }
 }

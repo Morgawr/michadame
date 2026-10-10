@@ -575,6 +575,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         // Draw interactive OCR bounding box overlay on top of the video image
         crate::ocr::overlay::draw_ocr_overlay(ui, state, video_rect);
 
+        // Niconico chat comments, drawn by the renderer under the CRT effects.
+        crate::ui::niconico::update(state, ctx, video_rect);
+
         if software_mouse_active {
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
         }

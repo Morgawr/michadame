@@ -386,10 +386,16 @@ pub fn calculate_crt_raster_surface(
     egui::Rect::from_min_max(min, max)
 }
 
-/// Calculates the effective visible CRT screen viewport in egui screen coordinates.
-/// Accounts for raster underscan stretch, overscan offset shifts, border crop margins,
-/// retro PC bezel frames, and CRT glass curvature safe margins for dictionary popup text.
-pub fn calculate_crt_viewport(
+/// Calculates the safe area boundary EXCLUSIVELY for positioning the floating dictionary popup window.
+///
+/// **IMPORTANT NOTICE**:
+/// - This function is **ONLY** for dictionary popup window layout (ensuring definition popups
+///   don't get clipped by retro PC bezel frames or glass curvature corners).
+/// - **DO NOT USE THIS** for video viewports, full-screen canvas layers, or scrolling text
+///   overlays (such as Niconico comments)!
+/// - For the active video picture bounds, use `video_rect` directly (or `calculate_crt_raster_surface`
+///   for raster edges without popup safety insets).
+pub fn calculate_crt_popup_safe_area(
     video_rect: egui::Rect,
     border_crop: [f32; 4], // [left, right, top, bottom]
     underscan: [f32; 2],   // [underscan_x, underscan_y]
@@ -444,17 +450,17 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn test_calculate_crt_viewport_insets() {
+    fn test_calculate_crt_popup_safe_area_insets() {
         let video_rect = egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(1000.0, 800.0));
         let crop = [0.05, 0.05, 0.10, 0.10]; // 5% L/R (50px), 10% T/B (80px)
-        let vp = calculate_crt_viewport(video_rect, crop, [0.0, 0.0], [0.0, 0.0], false, false, 1.0);
+        let vp = calculate_crt_popup_safe_area(video_rect, crop, [0.0, 0.0], [0.0, 0.0], false, false, 1.0);
         assert_eq!(vp.min.x, 150.0);
         assert_eq!(vp.max.x, 1050.0);
         assert_eq!(vp.min.y, 180.0);
         assert_eq!(vp.max.y, 820.0);
 
         // With retro frame and curvature
-        let vp_retro = calculate_crt_viewport(video_rect, [0.0, 0.0, 0.0, 0.0], [0.0, 0.0], [0.0, 0.0], true, true, 1.0);
+        let vp_retro = calculate_crt_popup_safe_area(video_rect, [0.0, 0.0, 0.0, 0.0], [0.0, 0.0], [0.0, 0.0], true, true, 1.0);
         assert!(vp_retro.min.x > video_rect.min.x);
         assert!(vp_retro.max.x < video_rect.max.x);
         assert!(vp_retro.min.y > video_rect.min.y);
@@ -476,7 +482,7 @@ mod tests {
         assert_eq!(cropped.max.y, 820.0);
 
         // Viewport with retro frame must be strictly smaller than raster surface
-        let vp_retro = calculate_crt_viewport(video_rect, [0.0, 0.0, 0.0, 0.0], [0.0, 0.0], [0.0, 0.0], true, true, 1.0);
+        let vp_retro = calculate_crt_popup_safe_area(video_rect, [0.0, 0.0, 0.0, 0.0], [0.0, 0.0], [0.0, 0.0], true, true, 1.0);
         assert!(vp_retro.min.x > surface.min.x);
         assert!(vp_retro.max.x < surface.max.x);
         assert!(vp_retro.min.y > surface.min.y);
@@ -484,10 +490,10 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_crt_viewport_underscan_and_overscan() {
+    fn test_calculate_crt_popup_safe_area_underscan_and_overscan() {
         let video_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 1000.0));
         // Underscan -0.1 (shrunk by 10% -> 5% inset on left and right)
-        let vp_under = calculate_crt_viewport(
+        let vp_under = calculate_crt_popup_safe_area(
             video_rect,
             [0.0, 0.0, 0.0, 0.0],
             [-0.1, -0.2],
@@ -502,7 +508,7 @@ mod tests {
         assert!((vp_under.max.y - 900.0).abs() < 0.01);
 
         // Overscan +0.05 X (shifted right by 50px)
-        let vp_over = calculate_crt_viewport(
+        let vp_over = calculate_crt_popup_safe_area(
             video_rect,
             [0.0, 0.0, 0.0, 0.0],
             [0.0, 0.0],

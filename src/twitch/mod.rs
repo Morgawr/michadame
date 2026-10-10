@@ -67,6 +67,26 @@ pub enum AuthFlow {
     },
 }
 
+/// A chat message flying across the video (niconico style).
+#[derive(Clone, Debug)]
+pub struct Comment {
+    pub id: Option<String>,
+    pub login: String,
+    pub fragments: Vec<Fragment>,
+    pub spawned: Instant,
+    /// Top of the comment as a fraction of the free vertical space (0 = top).
+    pub y_norm: f32,
+    /// Time to travel from fully off the right edge to fully off the left edge.
+    pub duration: Duration,
+}
+
+impl Comment {
+    /// 0 when entering on the right, 1 when fully gone on the left.
+    pub fn progress(&self, now: Instant) -> f32 {
+        now.saturating_duration_since(self.spawned).as_secs_f32() / self.duration.as_secs_f32().max(0.1)
+    }
+}
+
 pub struct TwitchState {
     pub config: TwitchConfig,
     /// Editable buffers for the settings tab.
@@ -87,6 +107,8 @@ pub struct TwitchState {
     pub auth_flow: AuthFlow,
     /// Whether the channel is actually broadcasting (from the Helix API).
     pub stream_status: StreamStatus,
+    /// Niconico comments currently on screen.
+    pub comments: VecDeque<Comment>,
 
     self_display_name: Option<String>,
     self_color: Option<egui::Color32>,
@@ -109,11 +131,13 @@ impl Default for TwitchState {
             status: ConnectionStatus::Disabled,
             messages: VecDeque::new(),
             input: String::new(),
-            overlay_hidden: false,
+            // Start hidden each session; the user opens it with `T`.
+            overlay_hidden: true,
             overlay_rect: None,
             emotes: EmoteCache::default(),
             auth_flow: AuthFlow::Idle,
             stream_status: StreamStatus::Unknown(String::new()),
+            comments: VecDeque::new(),
             self_display_name: None,
             self_color: None,
             worker: None,
@@ -242,6 +266,7 @@ impl TwitchState {
             }
         }
         self.trim_messages(now);
+        self.trim_comments(now);
         changed
     }
 
@@ -275,7 +300,7 @@ impl TwitchState {
     /// Start/stop/restart the IRC worker to match the settings.
     fn sync_connection(&mut self, ctx: &egui::Context) {
         let channel = self.config.channel.clone();
-        let wanted = self.config.chat_overlay_enabled && !channel.is_empty();
+        let wanted = (self.config.chat_overlay_enabled || self.config.niconico_enabled) && !channel.is_empty();
         let login = self.token.as_ref().map(|t| t.login.clone());
         let up_to_date = self
             .worker
@@ -285,6 +310,7 @@ impl TwitchState {
             let channel_changed = self.worker.as_ref().map_or(true, |w| w.channel != channel);
             if channel_changed {
                 self.messages.clear();
+                self.comments.clear();
                 self.messages
                     .push_back(ChatMessage::system(format!("Joining #{channel}…"), Instant::now()));
             }
@@ -292,15 +318,77 @@ impl TwitchState {
             self.status = ConnectionStatus::Connecting;
         } else if !wanted && self.worker.is_some() {
             self.worker = None;
+            self.comments.clear();
             self.status = ConnectionStatus::Disabled;
         }
+    }
+
+    /// Store a chat message, firing it as a niconico comment if enabled.
+    fn push_chat(&mut self, chat: ChatMessage, now: Instant) {
+        if self.config.niconico_enabled && chat.kind != MessageKind::System {
+            self.spawn_comment(&chat, now, &mut rand::thread_rng());
+        }
+        self.messages.push_back(chat);
+    }
+
+    pub fn spawn_comment(&mut self, chat: &ChatMessage, now: Instant, rng: &mut impl rand::Rng) {
+        let has_content = chat.fragments.iter().any(|f| match f {
+            Fragment::Text(t) => !t.trim().is_empty(),
+            Fragment::Emote { .. } => true,
+        });
+        if !has_content {
+            return;
+        }
+        let base = self.config.niconico_duration_secs.clamp(2.0, 30.0);
+        let duration = Duration::from_secs_f32(base * rng.gen_range(0.75..1.3));
+        // Pick the candidate row least crowded by comments still entering
+        // from the right, so new comments rarely sit on top of each other.
+        let entering: Vec<f32> = self
+            .comments
+            .iter()
+            .filter(|c| c.progress(now) < 0.4)
+            .map(|c| c.y_norm)
+            .collect();
+        let band = self.config.niconico_size_pct.clamp(0.02, 0.3) * 1.15;
+        let mut best = (usize::MAX, 0.0f32);
+        for _ in 0..8 {
+            let y: f32 = rng.gen_range(0.0..=1.0);
+            let clashes = entering.iter().filter(|&&o| (o - y).abs() < band).count();
+            if clashes < best.0 {
+                best = (clashes, y);
+                if clashes == 0 {
+                    break;
+                }
+            }
+        }
+        self.comments.push_back(Comment {
+            id: chat.id.clone(),
+            login: chat.login.clone(),
+            fragments: chat.fragments.clone(),
+            spawned: now,
+            y_norm: best.1,
+            duration,
+        });
+        let max = self.config.niconico_max_comments as usize;
+        while max > 0 && self.comments.len() > max {
+            self.comments.pop_front();
+        }
+    }
+
+    /// Drop comments that have fully left the screen (or all, if disabled).
+    pub fn trim_comments(&mut self, now: Instant) {
+        if !self.config.niconico_enabled {
+            self.comments.clear();
+            return;
+        }
+        self.comments.retain(|c| c.progress(now) < 1.0);
     }
 
     pub fn handle_irc(&mut self, msg: &IrcMessage, now: Instant) {
         match msg.command.as_str() {
             "PRIVMSG" => {
                 if let Some(chat) = self.chat_from_privmsg(msg, now) {
-                    self.messages.push_back(chat);
+                    self.push_chat(chat, now);
                 }
             }
             "USERNOTICE" => {
@@ -310,7 +398,7 @@ impl TwitchState {
                 // Resub/announcement messages may carry user text as well.
                 if msg.params.len() >= 2 {
                     if let Some(chat) = self.chat_from_privmsg(msg, now) {
-                        self.messages.push_back(chat);
+                        self.push_chat(chat, now);
                     }
                 }
             }
@@ -318,9 +406,11 @@ impl TwitchState {
                 Some(login) => {
                     let login = login.to_ascii_lowercase();
                     self.messages.retain(|m| m.login != login);
+                    self.comments.retain(|c| c.login != login);
                 }
                 None => {
                     self.messages.clear();
+                    self.comments.clear();
                     self.messages
                         .push_back(ChatMessage::system("Chat was cleared by a moderator", now));
                 }
@@ -328,6 +418,7 @@ impl TwitchState {
             "CLEARMSG" => {
                 if let Some(target) = msg.tag("target-msg-id") {
                     self.messages.retain(|m| m.id.as_deref() != Some(target));
+                    self.comments.retain(|c| c.id.as_deref() != Some(target));
                 }
             }
             "NOTICE" => {
@@ -398,7 +489,7 @@ impl TwitchState {
             Some(b) => (b, MessageKind::Action),
             None => (text.as_str(), MessageKind::Chat),
         };
-        self.messages.push_back(ChatMessage {
+        let chat = ChatMessage {
             id: None,
             display_name: self.self_display_name.clone().unwrap_or_else(|| login.clone()),
             login,
@@ -406,7 +497,8 @@ impl TwitchState {
             fragments: emotes::split_by_known_names(body, &self.emotes.names),
             kind,
             received: now,
-        });
+        };
+        self.push_chat(chat, now);
     }
 
     pub fn trim_messages(&mut self, now: Instant) {
@@ -645,5 +737,74 @@ mod tests {
         state.send_input();
         assert!(state.messages.is_empty());
         assert_eq!(state.input, "hello");
+    }
+
+    #[test]
+    fn niconico_comments_spawn_expire_and_obey_moderation() {
+        let mut state = TwitchState::default();
+        let now = Instant::now();
+        // Disabled: no comments.
+        state.handle_irc(&irc("@id=a0 :alice!alice@alice.tmi.twitch.tv PRIVMSG #c :hi"), now);
+        assert!(state.comments.is_empty());
+
+        state.config.niconico_enabled = true;
+        state.handle_irc(&irc("@id=a1 :alice!alice@alice.tmi.twitch.tv PRIVMSG #c :hello"), now);
+        state.handle_irc(&irc("@id=b1 :bob!bob@bob.tmi.twitch.tv PRIVMSG #c :yo"), now);
+        state.handle_irc(&irc("@id=b2 :bob!bob@bob.tmi.twitch.tv PRIVMSG #c :   "), now);
+        state.handle_irc(&irc(":tmi.twitch.tv NOTICE #c :system stuff"), now);
+        assert_eq!(state.comments.len(), 2, "blank and system messages don't fly");
+        let c = &state.comments[0];
+        assert_eq!(c.fragments, vec![Fragment::Text("hello".into())]);
+        assert!((0.0..=1.0).contains(&c.y_norm));
+        let base = state.config.niconico_duration_secs;
+        assert!(c.duration.as_secs_f32() >= base * 0.75 - 0.01 && c.duration.as_secs_f32() <= base * 1.3);
+
+        state.handle_irc(&irc("@target-msg-id=a1 :tmi.twitch.tv CLEARMSG #c :hello"), now);
+        assert_eq!(state.comments.len(), 1);
+        state.handle_irc(&irc(":tmi.twitch.tv CLEARCHAT #c :bob"), now);
+        assert!(state.comments.is_empty());
+
+        state.handle_irc(&irc("@id=a2 :alice!alice@alice.tmi.twitch.tv PRIVMSG #c :again"), now);
+        state.trim_comments(now + Duration::from_secs(1));
+        assert_eq!(state.comments.len(), 1);
+        state.trim_comments(now + Duration::from_secs(60));
+        assert!(state.comments.is_empty(), "comments leave once off screen");
+
+        // Unlimited by default.
+        for i in 0..200 {
+            state.handle_irc(&irc(&format!("@id=x{i} :x!x@x.tmi.twitch.tv PRIVMSG #c :spam {i}")), now);
+        }
+        assert_eq!(state.comments.len(), 200);
+        // A cap drops the oldest.
+        state.config.niconico_max_comments = 50;
+        state.handle_irc(&irc("@id=last :x!x@x.tmi.twitch.tv PRIVMSG #c :last"), now);
+        assert_eq!(state.comments.len(), 50);
+        assert_eq!(state.comments.back().unwrap().id.as_deref(), Some("last"));
+        state.config.niconico_enabled = false;
+        state.trim_comments(now);
+        assert!(state.comments.is_empty());
+    }
+
+    #[test]
+    fn niconico_comments_avoid_rows_in_use() {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let mut state = TwitchState::default();
+        state.config.niconico_enabled = true;
+        let now = Instant::now();
+        let msg = ChatMessage::system("x", now);
+        let mut overlaps = 0;
+        for _ in 0..5 {
+            state.spawn_comment(&msg, now, &mut rng);
+        }
+        let ys: Vec<f32> = state.comments.iter().map(|c| c.y_norm).collect();
+        for i in 0..ys.len() {
+            for j in (i + 1)..ys.len() {
+                if (ys[i] - ys[j]).abs() < state.config.niconico_size_pct {
+                    overlaps += 1;
+                }
+            }
+        }
+        assert_eq!(overlaps, 0, "{ys:?}");
     }
 }

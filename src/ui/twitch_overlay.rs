@@ -413,7 +413,12 @@ mod tests {
             }
             input
         };
+        // Hidden at startup even when enabled; T opens it.
         let _ = ctx.run(egui::RawInput::default(), |ctx| draw(&mut state, ctx));
+        assert!(state.twitch.overlay_hidden);
+        assert!(state.twitch.overlay_rect.is_none());
+        let _ = ctx.run(press(), |ctx| draw(&mut state, ctx));
+        assert!(!state.twitch.overlay_hidden);
         let rect = state.twitch.overlay_rect.expect("overlay visible");
         // Must be above the Tooltip layer where replay capture of overlays happens.
         let layer = ctx.layer_id_at(rect.center()).expect("overlay layer");

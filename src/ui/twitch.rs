@@ -136,6 +136,59 @@ pub fn draw_twitch_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
     ui.add_space(4.0);
 
+    technical_group(ui, "Niconico Comments:", |ui| {
+        if ui
+            .checkbox(
+                &mut state.twitch.config.niconico_enabled,
+                "Fly chat messages across the video (niconico style)",
+            )
+            .on_hover_text(
+                "Every new chat message scrolls across the picture from right to left.\nComments are drawn under the CRT effects and are included in replays and mining screenshots.",
+            )
+            .changed()
+        {
+            save_now = true;
+        }
+        ui.add_space(4.0);
+        let cfg = &mut state.twitch.config;
+        let mut dirty = false;
+        dirty |= slider_item(
+            ui,
+            "Text Size:",
+            percent_slider_range(&mut cfg.niconico_size_pct, 0.03..=0.15, 1.0),
+            Some("Comment height as a share of the picture height."),
+        )
+        .changed();
+        dirty |= slider_item(
+            ui,
+            "Crossing Time:",
+            egui::Slider::new(&mut cfg.niconico_duration_secs, 3.0..=15.0)
+                .step_by(0.5)
+                .suffix(" s"),
+            Some("Average time for a comment to cross the screen. Each comment gets a random speed around this."),
+        )
+        .changed();
+        dirty |= slider_item(
+            ui,
+            "Max On Screen:",
+            egui::Slider::new(&mut cfg.niconico_max_comments, 0..=500).custom_formatter(|n, _| {
+                if n < 1.0 {
+                    "Unlimited".to_string()
+                } else {
+                    format!("{n:.0}")
+                }
+            }),
+            Some("Most comments flying at once; the oldest are dropped beyond this.\n• 0: unlimited"),
+        )
+        .changed();
+        if dirty {
+            state.twitch.config_dirty = true;
+            changed = true;
+        }
+    });
+
+    ui.add_space(4.0);
+
     technical_group(ui, "Twitch Account:", |ui| {
         let ctx = ui.ctx().clone();
         if let Some(token) = &state.twitch.token {
@@ -249,9 +302,10 @@ fn status_line(state: &AppState) -> (egui::Color32, String) {
         return (MUTED, "Status: no channel set".into());
     }
     match &tw.status {
-        ConnectionStatus::Disabled if !tw.config.chat_overlay_enabled => {
-            (MUTED, "Status: idle (enable the chat overlay to connect)".into())
-        }
+        ConnectionStatus::Disabled if !tw.config.chat_overlay_enabled && !tw.config.niconico_enabled => (
+            MUTED,
+            "Status: idle (enable the chat overlay or niconico comments to connect)".into(),
+        ),
         ConnectionStatus::Disabled => (MUTED, "Status: disconnected".into()),
         ConnectionStatus::Connecting => (
             egui::Color32::from_rgb(230, 190, 60),

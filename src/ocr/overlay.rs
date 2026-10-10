@@ -301,7 +301,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
             && (filter == crate::devices::filter_type::CrtFilter::Lottes
                 || (filter == crate::devices::filter_type::CrtFilter::Halo && state.halo.curvature));
         let ppp = ui.ctx().pixels_per_point();
-        crate::dict::popup::calculate_crt_viewport(
+        crate::dict::popup::calculate_crt_popup_safe_area(
             video_rect,
             border_crop,
             underscan,

@@ -68,27 +68,58 @@ vec3 Mask(vec2 pos) {
     return mask;
 }
 
+float ToLinear1(float c) {
+    return (c <= 0.04045) ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
+}
+
+vec3 ToLinear(vec3 c) {
+    return vec3(ToLinear1(c.r), ToLinear1(c.g), ToLinear1(c.b));
+}
+
+float ToSrgb1(float c) {
+    return (c < 0.0031308 ? c * 12.92 : 1.055 * pow(c, 0.41666) - 0.055);
+}
+
+vec3 ToSrgb(vec3 c) {
+    return vec3(ToSrgb1(c.r), ToSrgb1(c.g), ToSrgb1(c.b));
+}
+
 void main() {
     vec4 col = texture(u_cursor_sampler, v_tc);
     if (col.a <= 0.01) {
         discard;
     }
 
-    vec3 rgb = col.rgb;
+    bool crt_active = (u_shadow_mask > 0.5 || u_scanline_strength > 0.001);
+    if (!crt_active) {
+        out_color = col;
+        return;
+    }
 
+    // Convert sRGB color to linear space for physically accurate CRT phosphor/scanline rendering
+    vec3 lin = ToLinear(col.rgb);
+
+    // Apply scanlines in linear space
     if (u_scanline_strength > 0.001 && u_scanline_freq > 1.0) {
         float scan = sin(gl_FragCoord.y * 3.14159265 * 2.0 / u_scanline_freq);
-        float scan_factor = 1.0 - u_scanline_strength * 0.35 * (0.5 + 0.5 * scan);
-        rgb *= scan_factor;
+        float scan_factor = 1.0 - u_scanline_strength * 0.25 * (0.5 + 0.5 * scan);
+        lin *= scan_factor;
     }
 
+    // Apply shadow mask / aperture grille in linear space
     if (u_shadow_mask > 0.5) {
-        rgb *= Mask(gl_FragCoord.xy * 1.000001);
+        lin *= Mask(gl_FragCoord.xy * 1.000001);
     }
 
-    if (u_brightboost > 0.001) {
-        rgb *= u_brightboost;
-    }
+    // Phosphor saturation boost: on a CRT, cursor drives the electron beam
+    // to full excitation, and in the CRT shader pipeline, the video feed has bloom
+    // and brightboost elevating whites. Boost linear light so whites saturate brightly
+    // rather than appearing dark and grey.
+    float boost = 1.5 * max(u_brightboost, 1.0);
+    lin *= boost;
 
-    out_color = vec4(rgb, col.a);
+    // Convert back from linear space to sRGB display gamma
+    vec3 srgb = ToSrgb(lin);
+
+    out_color = vec4(clamp(srgb, 0.0, 1.0), col.a);
 }
