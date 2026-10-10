@@ -668,10 +668,14 @@ fn draw_tag_row(
 /// Settings-panel row for the tag applied to newly mined words (shown above "Appearance").
 /// Returns true if the setting changed.
 pub fn draw_tag_setting(ui: &mut egui::Ui, state: &mut AppState) -> bool {
-    ui.separator();
     let mut committed = false;
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Mining Tag:").strong());
+        ui.label(
+            RichText::new("Mining Tag:")
+                .monospace()
+                .size(11.0)
+                .color(egui::Color32::from_rgb(150, 150, 150)),
+        );
         let bank = &mut state.bank;
         let out = tag_input(
             ui,
@@ -679,7 +683,7 @@ pub fn draw_tag_setting(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             &mut bank.current_tag,
             &bank.known_tags,
             "e.g. Final Fantasy 7",
-            260.0,
+            140.0,
             false,
         );
         if out.cancelled {
@@ -693,10 +697,6 @@ pub fn draw_tag_setting(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             committed = true;
         }
     });
-    ui.label(
-        RichText::new("Newly mined words are tagged with this (e.g. the game being played). Leave empty for no tag.")
-            .weak(),
-    );
 
     if !committed {
         return false;

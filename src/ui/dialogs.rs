@@ -150,7 +150,7 @@ pub fn show_config_error_dialog(
                     ui.label(
                         egui::RichText::new(quarantine.to_string_lossy())
                             .monospace()
-                            .color(egui::Color32::LIGHT_BLUE),
+                            .color(egui::Color32::from_rgb(208, 208, 208)),
                     );
                 });
                 ui.add_space(10.0);

@@ -1,14 +1,25 @@
-use crate::{app::AppState, devices::filter_type::CrtFilter};
+use crate::{
+    app::AppState,
+    devices::filter_type::CrtFilter,
+    ui::controls::{
+        mult_slider, percent_slider, percent_slider_range, slider_item, sub_heading,
+        technical_group, technical_separator, two_columns,
+    },
+};
 use eframe::egui;
 
-pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
+pub fn draw_shaders_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     let mut changed = false;
 
-    ui.separator();
-    ui.group(|ui| {
-        ui.label("Appearance:");
+    // Appearance Group
+    technical_group(ui, "Appearance:", |ui| {
         ui.horizontal_wrapped(|ui| {
-            ui.label("Filter:");
+            ui.label(
+                egui::RichText::new("Filter:")
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(170, 170, 170)),
+            );
             let current_filter = state.crt_filter.load(std::sync::atomic::Ordering::Relaxed);
             let selected_text = CrtFilter::from_u8(current_filter).to_string();
 
@@ -48,14 +59,20 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         changed = true;
                     }
                 });
-        });
 
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Scaler:");
+            ui.add_space(8.0);
+
+            ui.label(
+                egui::RichText::new("Scaler:")
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(170, 170, 170)),
+            );
             let current_scaler = state
                 .scaler_filter
                 .load(std::sync::atomic::Ordering::Relaxed);
-            let scaler_text = crate::video::types::ScalerFilter::from_u8(current_scaler).to_string();
+            let scaler_text =
+                crate::video::types::ScalerFilter::from_u8(current_scaler).to_string();
             egui::ComboBox::from_id_source("scaler_selector")
                 .selected_text(scaler_text)
                 .show_ui(ui, |ui| {
@@ -75,24 +92,43 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     }
                 });
 
-            ui.label("Range:");
+            ui.add_space(8.0);
+
+            ui.label(
+                egui::RichText::new("Range:")
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(170, 170, 170)),
+            );
             let current_range = state.color_range.load(std::sync::atomic::Ordering::Relaxed);
             let range_text = crate::video::types::ColorRange::from_u8(current_range).to_string();
             egui::ComboBox::from_id_source("range_selector")
                 .selected_text(range_text)
                 .show_ui(ui, |ui| {
-                    if ui.selectable_value(&mut current_range.clone(), 0, "Full (PC)").clicked() {
-                        state.color_range.store(0, std::sync::atomic::Ordering::Relaxed);
+                    if ui
+                        .selectable_value(&mut current_range.clone(), 0, "Full (PC)")
+                        .clicked()
+                    {
+                        state
+                            .color_range
+                            .store(0, std::sync::atomic::Ordering::Relaxed);
                         crate::config::save_config(state);
                         changed = true;
                     }
-                    if ui.selectable_value(&mut current_range.clone(), 1, "Limited (TV)").clicked() {
-                        state.color_range.store(1, std::sync::atomic::Ordering::Relaxed);
+                    if ui
+                        .selectable_value(&mut current_range.clone(), 1, "Limited (TV)")
+                        .clicked()
+                    {
+                        state
+                            .color_range
+                            .store(1, std::sync::atomic::Ordering::Relaxed);
                         crate::config::save_config(state);
                         changed = true;
                     }
                 });
         });
+
+        technical_separator(ui);
 
         ui.horizontal_wrapped(|ui| {
             if ui
@@ -102,6 +138,9 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 crate::config::save_config(state);
                 changed = true;
             }
+
+            ui.add_space(6.0);
+
             if ui
                 .checkbox(&mut state.video.median_filter_enabled, "Median Filter 3x1")
                 .changed()
@@ -109,135 +148,25 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 crate::config::save_config(state);
                 changed = true;
             }
-            if state.video.median_filter_enabled
-                && ui
-                    .add(
-                        egui::Slider::new(&mut state.video.median_mix, 0.0..=1.0)
-                            .text("Intensity")
-                            .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
-                    )
-                    .changed()
-            {
-                crate::config::save_config(state);
-                changed = true;
+
+            if state.video.median_filter_enabled {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("Intensity:")
+                        .monospace()
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(153, 153, 153)),
+                );
+                let slider = percent_slider(&mut state.video.median_mix, 0.0..=1.0);
+                if ui.add(slider).changed() {
+                    crate::config::save_config(state);
+                    changed = true;
+                }
             }
         });
 
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .checkbox(&mut state.video.deinterlace_filter_enabled, "Deinterlace Filter")
-                .changed()
-            {
-                crate::config::save_config(state);
-                changed = true;
-            }
-            if state.video.deinterlace_filter_enabled {
-                egui::ComboBox::from_id_source("deinterlace_mode")
-                    .selected_text(match state.video.deinterlace_mode {
-                        0 => "Motion Adaptive",
-                        1 => "Bob Dejitter (50% Weave)",
-                        2 => "Vertical FIR",
-                        3 => "Vertical Median",
-                        4 => "Motion Map (Debug)",
-                        _ => "Unknown",
-                    })
-                    .show_ui(ui, |ui| {
-                        let modes = [
-                            (0, "Motion Adaptive", "Same-parity 3-frame motion adaptive weave; completely stops bob flicker on static edges while filtering motion"),
-                            (1, "Bob Dejitter (50% Weave)", "Pure 50% inter-frame weave; 100% cure for 30/60Hz bob jitter everywhere"),
-                            (2, "Vertical FIR", "3-tap lowpass vertical blur on current frame to reduce scanline comb artifacts"),
-                            (3, "Vertical Median", "3x1 vertical median filter on current frame to remove single-line artifacts"),
-                            (4, "Motion Map (Debug)", "Highlights static fields (green) vs detected motion (magenta/red)"),
-                        ];
-                        for (mode_idx, label, tip) in modes {
-                            let resp = ui.selectable_value(
-                                &mut state.video.deinterlace_mode,
-                                mode_idx,
-                                label,
-                            );
-                            resp.clone().on_hover_text(tip);
-                            if resp.changed() {
-                                crate::config::save_config(state);
-                                changed = true;
-                            }
-                        }
-                    });
-            }
-        });
+        ui.add_space(2.0);
 
-        if state.video.deinterlace_filter_enabled {
-            if matches!(state.video.deinterlace_mode, 0 | 1) {
-                if ui
-                    .add(
-                        egui::Slider::new(&mut state.video.deinterlace_blend, 0.0..=1.0)
-                            .text("Blend Amount")
-                            .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
-                    )
-                    .on_hover_text("Temporal mix between fields (50% is mathematical weave, completely cures bob bounce)")
-                    .changed()
-                {
-                    crate::config::save_config(state);
-                    changed = true;
-                }
-            }
-
-            if matches!(state.video.deinterlace_mode, 0 | 4) {
-                if ui
-                    .add(
-                        egui::Slider::new(
-                            &mut state.video.deinterlace_motion_threshold,
-                            0.01..=0.5,
-                        )
-                        .text("Motion Sensitivity")
-                        .custom_formatter(|n, _| format!("{:.2}", n)),
-                    )
-                    .on_hover_text("Threshold to distinguish moving objects from static field jitter (higher = more areas treated as static weave)")
-                    .changed()
-                {
-                    crate::config::save_config(state);
-                    changed = true;
-                }
-            }
-
-            if matches!(state.video.deinterlace_mode, 0 | 2 | 3) {
-                let spatial_label = if state.video.deinterlace_mode == 0 {
-                    "Spatial Strength (Moving Areas)"
-                } else {
-                    "Spatial Strength"
-                };
-                if ui
-                    .add(
-                        egui::Slider::new(&mut state.video.deinterlace_spatial_mix, 0.0..=1.0)
-                            .text(spatial_label)
-                            .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
-                    )
-                    .on_hover_text("Strength of vertical FIR/median filter in moving areas to eliminate comb lines (static areas use 100% field weave)")
-                    .changed()
-                {
-                    crate::config::save_config(state);
-                    changed = true;
-                }
-
-                if ui
-                    .add(
-                        egui::Slider::new(&mut state.video.deinterlace_line_spacing, 0.5..=3.0)
-                            .text("Line Pitch Scale")
-                            .custom_formatter(|n, _| format!("{:.1}x", n)),
-                    )
-                    .on_hover_text("Scale factor for scanline pitch (1.0x automatically targets 1 full 480i scanline; applies to the spatial filter on moving pixels)")
-                    .changed()
-                {
-                    crate::config::save_config(state);
-                    changed = true;
-                }
-            }
-
-            ui.label(
-                egui::RichText::new("ℹ Tip: For Dreamcast 480i bob flicker via upscaler, use Motion Adaptive or Bob Dejitter (50% Weave) to completely eliminate screen shaking.")
-                    .small()
-                    .weak(),
-            );
-        }
         ui.horizontal_wrapped(|ui| {
             if ui
                 .checkbox(&mut state.video.fft_filter_enabled, "FFT Mask Filter")
@@ -246,22 +175,30 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 crate::config::save_config(state);
                 changed = true;
             }
-            if state.video.fft_filter_enabled && ui.button("Edit Mask…").clicked() {
-                state.video.fft_mask_window_open = true;
-            }
-        });
-        if state.video.fft_filter_enabled {
-            let (fft_w, fft_h) = state.fft_mask_resolution;
-            let has_frame = fft_w > 0 && fft_h > 0;
-            let stream_res = state.latest_frame.as_ref()
-                .map(|f| (f.width, f.height))
-                .unwrap_or((0, 0));
 
-            if has_frame && stream_res.0 > 0 {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Mask:");
+            if state.video.fft_filter_enabled {
+                if ui.button("Edit Mask…").clicked() {
+                    state.video.fft_mask_window_open = true;
+                }
+
+                let (fft_w, fft_h) = state.fft_mask_resolution;
+                let has_frame = fft_w > 0 && fft_h > 0;
+                let stream_res = state
+                    .latest_frame
+                    .as_ref()
+                    .map(|f| (f.width, f.height))
+                    .unwrap_or((0, 0));
+
+                if has_frame && stream_res.0 > 0 {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("Mask:")
+                            .monospace()
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(170, 170, 170)),
+                    );
                     ui.text_edit_singleline(&mut state.fft_mask_save_name);
-                    if ui.button("💾 Save").clicked() && !state.fft_mask_save_name.is_empty() {
+                    if ui.button("Save").clicked() && !state.fft_mask_save_name.is_empty() {
                         match crate::config::fft_masks::save_mask(
                             &state.fft_mask_save_name,
                             stream_res,
@@ -272,21 +209,26 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         ) {
                             Ok(()) => {
                                 state.info(format!("Saved FFT mask '{}'", state.fft_mask_save_name));
-                                state.fft_available_masks = crate::config::fft_masks::list_masks_for_resolution(stream_res);
+                                state.fft_available_masks =
+                                    crate::config::fft_masks::list_masks_for_resolution(stream_res);
                             }
                             Err(e) => state.error(format!("Failed to save mask: {}", e)),
                         }
                     }
-                });
 
-                // Refresh available masks when list is empty
-                if state.fft_available_masks.is_empty() {
-                    state.fft_available_masks = crate::config::fft_masks::list_masks_for_resolution(stream_res);
-                }
+                    if state.fft_available_masks.is_empty() {
+                        state.fft_available_masks =
+                            crate::config::fft_masks::list_masks_for_resolution(stream_res);
+                    }
 
-                if !state.fft_available_masks.is_empty() {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("Load:");
+                    if !state.fft_available_masks.is_empty() {
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new("Load:")
+                                .monospace()
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(170, 170, 170)),
+                        );
                         for mask_name in state.fft_available_masks.clone() {
                             if ui.button(&mask_name).clicked() {
                                 match crate::config::fft_masks::load_mask(&mask_name, stream_res) {
@@ -310,15 +252,821 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        });
+    });
+
+    ui.add_space(4.0);
+
+    let current_filter =
+        CrtFilter::from_u8(state.crt_filter.load(std::sync::atomic::Ordering::Relaxed));
+
+    if current_filter == CrtFilter::Halo {
+        technical_group(ui, "", |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Halo CRT Parameters:")
+                        .monospace()
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(224, 224, 224)),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Save as Defaults").clicked() {
+                        state.halo_defaults = state.halo.clone();
+                        let current_profile_data = crate::config::build_profile_from_state(state);
+                        state
+                            .profiles
+                            .insert(state.active_profile.clone(), current_profile_data);
+                        crate::config::save_config(state);
+                        state.info("Saved current settings as default");
+                        changed = true;
+                    }
+                    if ui.button("Reset Defaults").clicked() {
+                        state.halo = state.halo_defaults.clone();
+                        changed = true;
+                    }
+                });
+            });
+            ui.add_space(4.0);
+
+            sub_heading(ui, "Beam Dynamics & Brightness:");
+                two_columns(ui, |c1, c2| {
+                    if slider_item(
+                        c1,
+                        "Brightboost (Dark):",
+                        egui::Slider::new(&mut state.halo.brightboost, 0.5..=3.0).step_by(0.05),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                    if slider_item(
+                        c2,
+                        "Brightboost (Bright):",
+                        egui::Slider::new(&mut state.halo.brightboost1, 0.5..=3.0).step_by(0.05),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                });
+
+                two_columns(ui, |c1, c2| {
+                    if slider_item(
+                        c1,
+                        "Beam Min:",
+                        egui::Slider::new(&mut state.halo.beam_min, 0.5..=3.0).step_by(0.05),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                    if slider_item(
+                        c2,
+                        "Beam Max:",
+                        egui::Slider::new(&mut state.halo.beam_max, 0.2..=2.0).step_by(0.05),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                });
+
+                two_columns(ui, |c1, c2| {
+                    if slider_item(
+                        c1,
+                        "Beam Size:",
+                        egui::Slider::new(&mut state.halo.beam_size, 0.0..=2.0).step_by(0.05),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                    if slider_item(
+                        c2,
+                        "Sharpness:",
+                        egui::Slider::new(&mut state.halo.h_sharp, 1.0..=10.0).step_by(0.1),
+                        Some("Horizontal sharpness (1.0 = soft analog CRT, 3.5 = Trinitron, 10.0 = razor-sharp PVM)"),
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                });
+
+                technical_separator(ui);
+
+                sub_heading(ui, "Shadow Mask:");
+                two_columns(ui, |c1, c2| {
+                    // Left column: Shadow mask selector dropdown
+                    c1.horizontal(|ui| {
+                        ui.add_sized(
+                            [130.0, 18.0],
+                            egui::Label::new(
+                                egui::RichText::new("Shadow Mask:")
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(153, 153, 153)),
+                            ),
+                        );
+                        let mask_names = [
+                            (0.0, "0: None"),
+                            (1.0, "1: CGWG"),
+                            (2.0, "2: Lottes"),
+                            (3.0, "3: Stretched"),
+                            (4.0, "4: VGA"),
+                            (5.0, "5: Fine"),
+                            (6.0, "6: Trinitron"),
+                        ];
+                        let cur_val = state.halo.shadow_mask.round();
+                        let cur_text = mask_names
+                            .iter()
+                            .find(|(v, _)| *v == cur_val)
+                            .map(|(_, t)| *t)
+                            .unwrap_or("Custom");
+                        let avail_w = (ui.available_width() - 4.0).max(60.0);
+                        egui::ComboBox::from_id_source("halo_shadow_mask_combo")
+                            .selected_text(cur_text)
+                            .width(avail_w)
+                            .show_ui(ui, |ui| {
+                                for (val, text) in mask_names {
+                                    if ui.selectable_value(&mut state.halo.shadow_mask, val, text).clicked() {
+                                        changed = true;
+                                    }
+                                }
+                            });
+                    });
+
+                    // Right column: Mask Strength
+                    if slider_item(
+                        c2,
+                        "Mask Strength:",
+                        percent_slider(&mut state.halo.maskstr, 0.0..=1.0),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                });
+
+                two_columns(ui, |c1, c2| {
+                    if slider_item(
+                        c1,
+                        "Mask Size:",
+                        egui::Slider::new(&mut state.halo.masksize, 1.0..=4.0).step_by(1.0),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                    if slider_item(
+                        c2,
+                        "Mask Cutoff:",
+                        percent_slider(&mut state.halo.mcut, 0.0..=1.0),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                });
+
+                two_columns(ui, |c1, c2| {
+                    if slider_item(
+                        c1,
+                        "Slot Mask (Bright):",
+                        percent_slider(&mut state.halo.slotmask, 0.0..=1.0),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                    if slider_item(
+                        c2,
+                        "Slot Mask (Dark):",
+                        percent_slider(&mut state.halo.slotmask1, 0.0..=1.0),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                });
+
+                two_columns(ui, |c1, c2| {
+                    if slider_item(
+                        c1,
+                        "Double Slot:",
+                        egui::Slider::new(&mut state.halo.double_slot, 1.0..=4.0).step_by(1.0),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                    if slider_item(
+                        c2,
+                        "Smooth Mask:",
+                        egui::Slider::new(&mut state.halo.smoothmask, 0.0..=2.0).step_by(0.05),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                });
+
+                technical_separator(ui);
+
+                sub_heading(ui, "Glow & Curvature:");
+                two_columns(ui, |c1, c2| {
+                    if slider_item(
+                        c1,
+                        "Glow:",
+                        percent_slider(&mut state.halo.glow, 0.0..=1.0),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                    if slider_item(
+                        c2,
+                        "Bloom:",
+                        percent_slider(&mut state.halo.bloom, 0.0..=1.0),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                });
+
+                two_columns(ui, |c1, c2| {
+                    if slider_item(
+                        c1,
+                        "Halation:",
+                        percent_slider(&mut state.halo.halation, 0.0..=0.5),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                    if slider_item(
+                        c2,
+                        "Halo Glow:",
+                        egui::Slider::new(&mut state.halo.halo_intensity, 0.0..=2.0).step_by(0.05),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                });
+
+                two_columns(ui, |c1, c2| {
+                    if slider_item(
+                        c1,
+                        "Screen Scale %:",
+                        percent_slider_range(&mut state.halo.halo_zoom, 50.0..=100.0, 100.0),
+                        Some("Scales the CRT screen within the viewport to create bezel room for the halo glow."),
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                    if slider_item(
+                        c2,
+                        "Corner Size:",
+                        egui::Slider::new(&mut state.halo.corner_size, 0.0..=0.1).step_by(0.005),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                });
+
+                ui.add_space(3.0);
+                if ui.checkbox(&mut state.halo.curvature, "Curvature").changed() {
+                    changed = true;
+                }
+            });
+        ui.add_space(4.0);
+    } else if current_filter == CrtFilter::Lottes {
+        technical_group(ui, "", |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Lottes CRT Parameters:")
+                        .monospace()
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(224, 224, 224)),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Reset Defaults").clicked() {
+                        state.crt.hard_scan = -8.0;
+                        state.crt.hard_pix = -3.0;
+                        state.crt.brightboost = 1.0;
+                        state.crt.warp_x = 0.031;
+                        state.crt.warp_y = 0.041;
+                        state.crt.shadow_mask = 3.0;
+                        state.crt.hard_bloom_pix = -1.5;
+                        state.crt.hard_bloom_scan = -2.0;
+                        state.crt.bloom_amount = 0.15;
+                        state.crt.shape = 2.0;
+                        changed = true;
+                    }
+                });
+            });
+            ui.add_space(4.0);
+
+            two_columns(ui, |c1, c2| {
+                    if slider_item(
+                        c1,
+                        "HardScan:",
+                        egui::Slider::new(&mut state.crt.hard_scan, -20.0..=0.0).step_by(0.5),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                    if slider_item(
+                        c2,
+                        "HardPix:",
+                        egui::Slider::new(&mut state.crt.hard_pix, -20.0..=0.0).step_by(0.5),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                });
+
+                two_columns(ui, |c1, c2| {
+                    if slider_item(
+                        c1,
+                        "Brightboost:",
+                        egui::Slider::new(&mut state.crt.brightboost, 0.5..=2.0).step_by(0.05),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                    if slider_item(
+                        c2,
+                        "Bloom Amount:",
+                        egui::Slider::new(&mut state.crt.bloom_amount, 0.0..=1.0).step_by(0.01),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                });
+
+                two_columns(ui, |c1, c2| {
+                    if slider_item(
+                        c1,
+                        "WarpX:",
+                        egui::Slider::new(&mut state.crt.warp_x, 0.0..=0.125).step_by(0.001),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                    if slider_item(
+                        c2,
+                        "WarpY:",
+                        egui::Slider::new(&mut state.crt.warp_y, 0.0..=0.125).step_by(0.001),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                });
+
+                two_columns(ui, |c1, c2| {
+                    if slider_item(
+                        c1,
+                        "ShadowMask:",
+                        egui::Slider::new(&mut state.crt.shadow_mask, 0.0..=4.0).step_by(1.0),
+                        Some("0=None, 1=Compressed TV, 2=Aperture-grille, 3=Stretched VGA, 4=VGA"),
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                    if slider_item(
+                        c2,
+                        "Shape:",
+                        egui::Slider::new(&mut state.crt.shape, 0.0..=10.0).step_by(0.05),
+                        Some("Kernel exponent. The original Lottes default is 2.0."),
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                });
+
+                two_columns(ui, |c1, c2| {
+                    if slider_item(
+                        c1,
+                        "BloomPix:",
+                        egui::Slider::new(&mut state.crt.hard_bloom_pix, -2.0..=-0.5).step_by(0.05),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                    if slider_item(
+                        c2,
+                        "BloomScan:",
+                        egui::Slider::new(&mut state.crt.hard_bloom_scan, -4.0..=-1.0).step_by(0.05),
+                        None,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                });
+            });
+        ui.add_space(4.0);
+    } else {
+        technical_group(ui, "", |ui| {
+            ui.label(
+                egui::RichText::new("Filter is set to None. CRT post-processing is disabled.")
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(102, 102, 102)),
+            );
+        });
+        ui.add_space(4.0);
+    }
+
+    changed
+}
+
+pub fn draw_geometry_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
+    let mut changed = false;
+
+    // Group 1: Deinterlace Filter
+    technical_group(ui, "Deinterlace Filter:", |ui| {
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .checkbox(&mut state.video.deinterlace_filter_enabled, "Deinterlace Filter")
+                .changed()
+            {
+                crate::config::save_config(state);
+                changed = true;
+            }
+
+            if state.video.deinterlace_filter_enabled {
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new("Mode:")
+                        .monospace()
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(170, 170, 170)),
+                );
+                egui::ComboBox::from_id_source("deinterlace_mode")
+                    .selected_text(match state.video.deinterlace_mode {
+                        0 => "0: Motion Adaptive",
+                        1 => "1: Bob Dejitter (50% Weave)",
+                        2 => "2: Vertical FIR",
+                        3 => "3: Vertical Median",
+                        4 => "4: Motion Map (Debug)",
+                        _ => "Unknown",
+                    })
+                    .show_ui(ui, |ui| {
+                        let modes: [(u8, &str, &str); 5] = [
+                            (0, "0: Motion Adaptive", "Same-parity 3-frame motion adaptive weave; completely stops bob flicker on static edges while filtering motion"),
+                            (1, "1: Bob Dejitter (50% Weave)", "Pure 50% inter-frame weave; 100% cure for 30/60Hz bob jitter everywhere"),
+                            (2, "2: Vertical FIR", "3-tap lowpass vertical blur on current frame to reduce scanline comb artifacts"),
+                            (3, "3: Vertical Median", "3x1 vertical median filter on current frame to remove single-line artifacts"),
+                            (4, "4: Motion Map (Debug)", "Highlights static fields (green) vs detected motion (magenta/red)"),
+                        ];
+                        for (mode_idx, label, tip) in modes {
+                            let resp = ui.selectable_value(
+                                &mut state.video.deinterlace_mode,
+                                mode_idx,
+                                label,
+                            );
+                            resp.clone().on_hover_text(tip);
+                            if resp.changed() {
+                                crate::config::save_config(state);
+                                changed = true;
+                            }
+                        }
+                    });
+            }
+        });
+
+        if state.video.deinterlace_filter_enabled {
+            ui.add_space(4.0);
+            match state.video.deinterlace_mode {
+                0 => {
+                    // Motion Adaptive: Blend, Motion, Spatial, Pitch
+                    two_columns(ui, |c1, c2| {
+                        let slider = percent_slider(&mut state.video.deinterlace_blend, 0.0..=1.0);
+                        if slider_item(
+                            c1,
+                            "Blend Amount:",
+                            slider,
+                            Some("Temporal mix between fields (50% is mathematical weave, completely cures bob bounce)"),
+                        )
+                        .changed()
+                        {
+                            crate::config::save_config(state);
+                            changed = true;
+                        }
+
+                        let slider = egui::Slider::new(&mut state.video.deinterlace_motion_threshold, 0.01..=0.5)
+                            .step_by(0.01)
+                            .custom_formatter(|n, _| format!("{:.2}", n));
+                        if slider_item(
+                            c2,
+                            "Motion Sensitivity:",
+                            slider,
+                            Some("Threshold to distinguish moving objects from static field jitter (higher = more areas treated as static weave)"),
+                        )
+                        .changed()
+                        {
+                            crate::config::save_config(state);
+                            changed = true;
+                        }
+                    });
+
+                    two_columns(ui, |c1, c2| {
+                        let slider = percent_slider(&mut state.video.deinterlace_spatial_mix, 0.0..=1.0);
+                        if slider_item(
+                            c1,
+                            "Spatial Strength (Moving):",
+                            slider,
+                            Some("Strength of vertical FIR/median filter in moving areas to eliminate comb lines"),
+                        )
+                        .changed()
+                        {
+                            crate::config::save_config(state);
+                            changed = true;
+                        }
+
+                        let slider = mult_slider(&mut state.video.deinterlace_line_spacing, 0.5..=3.0);
+                        if slider_item(
+                            c2,
+                            "Line Pitch Scale:",
+                            slider,
+                            Some("Scale factor for scanline pitch (1.0x automatically targets 1 full 480i scanline)"),
+                        )
+                        .changed()
+                        {
+                            crate::config::save_config(state);
+                            changed = true;
+                        }
                     });
                 }
+                1 => {
+                    // Bob Dejitter: Blend only
+                    two_columns(ui, |c1, _| {
+                        let slider = percent_slider(&mut state.video.deinterlace_blend, 0.0..=1.0);
+                        if slider_item(
+                            c1,
+                            "Blend Amount:",
+                            slider,
+                            Some("Temporal mix between fields (50% is mathematical weave, completely cures bob bounce)"),
+                        )
+                        .changed()
+                        {
+                            crate::config::save_config(state);
+                            changed = true;
+                        }
+                    });
+                }
+                2 | 3 => {
+                    // FIR or Median: Spatial & Pitch
+                    two_columns(ui, |c1, c2| {
+                        let slider = percent_slider(&mut state.video.deinterlace_spatial_mix, 0.0..=1.0);
+                        if slider_item(
+                            c1,
+                            "Spatial Strength:",
+                            slider,
+                            Some("Strength of vertical FIR/median filter"),
+                        )
+                        .changed()
+                        {
+                            crate::config::save_config(state);
+                            changed = true;
+                        }
+
+                        let slider = mult_slider(&mut state.video.deinterlace_line_spacing, 0.5..=3.0);
+                        if slider_item(
+                            c2,
+                            "Line Pitch Scale:",
+                            slider,
+                            Some("Scale factor for scanline pitch"),
+                        )
+                        .changed()
+                        {
+                            crate::config::save_config(state);
+                            changed = true;
+                        }
+                    });
+                }
+                4 => {
+                    // Motion Map: Motion Sensitivity only
+                    two_columns(ui, |c1, _| {
+                        let slider = egui::Slider::new(&mut state.video.deinterlace_motion_threshold, 0.01..=0.5)
+                            .step_by(0.01)
+                            .custom_formatter(|n, _| format!("{:.2}", n));
+                        if slider_item(
+                            c1,
+                            "Motion Sensitivity:",
+                            slider,
+                            Some("Threshold to distinguish moving objects from static field jitter"),
+                        )
+                        .changed()
+                        {
+                            crate::config::save_config(state);
+                            changed = true;
+                        }
+                    });
+                }
+                _ => {}
             }
         }
     });
 
-    ui.group(|ui| {
-        ui.label("Visual Tweaks:");
+    ui.add_space(4.0);
 
+    // Group 2: Aspect & Scaling
+    technical_group(ui, "Aspect & Scaling:", |ui| {
+        two_columns(ui, |c1, c2| {
+            let slider = percent_slider_range(&mut state.video.vibrance, 0.0..=3.0, 3.0);
+            if slider_item(c1, "Vibrance (Saturation):", slider, None).changed() {
+                crate::config::save_config(state);
+                changed = true;
+            }
+
+            let slider = egui::Slider::new(&mut state.video.horizontal_stretch, 0.5..=1.5)
+                .step_by(0.001)
+                .custom_formatter(|n, _| format!("{:.1}%", n * 100.0))
+                .custom_parser(|s| {
+                    let s = s.trim().trim_end_matches('%').trim();
+                    s.parse::<f64>().ok().map(|v| if v > 1.5 { (v / 100.0) as f64 } else { v })
+                });
+            if slider_item(c2, "Horizontal Stretch:", slider, None).changed() {
+                crate::config::save_config(state);
+                changed = true;
+            }
+        });
+
+        two_columns(ui, |c1, c2| {
+            let slider = egui::Slider::new(&mut state.video.overscan_x, -0.2..=0.2)
+                .step_by(0.0005)
+                .custom_formatter(|n, _| format!("{:.1}%", n * 100.0))
+                .custom_parser(|s| {
+                    let s = s.trim().trim_end_matches('%').trim();
+                    s.parse::<f64>().ok().map(|v| if v.abs() > 0.2 { (v / 100.0) as f64 } else { v })
+                });
+            if slider_item(c1, "Overscan X:", slider, None).changed() {
+                crate::config::save_config(state);
+                changed = true;
+            }
+
+            let slider = egui::Slider::new(&mut state.video.overscan_y, -0.2..=0.2)
+                .step_by(0.001)
+                .custom_formatter(|n, _| format!("{:.1}%", n * 100.0))
+                .custom_parser(|s| {
+                    let s = s.trim().trim_end_matches('%').trim();
+                    s.parse::<f64>().ok().map(|v| if v.abs() > 0.2 { (v / 100.0) as f64 } else { v })
+                });
+            if slider_item(c2, "Overscan Y:", slider, None).changed() {
+                crate::config::save_config(state);
+                changed = true;
+            }
+        });
+
+        two_columns(ui, |c1, c2| {
+            let slider = egui::Slider::new(&mut state.video.underscan_x, -0.2..=0.3)
+                .step_by(0.0005)
+                .custom_formatter(|n, _| format!("{:.1}%", (1.0 + n) * 100.0))
+                .custom_parser(|s| {
+                    let s = s.trim().trim_end_matches('%').trim();
+                    s.parse::<f64>().ok().map(|p| if p > 50.0 { (p / 100.0 - 1.0) as f64 } else { p })
+                });
+            if slider_item(
+                c1,
+                "Underscan Stretch X:",
+                slider,
+                Some("Stretches the image raster horizontally inside the rendering surface without changing screen boundaries, cutting off excess edges."),
+            )
+            .changed()
+            {
+                crate::config::save_config(state);
+                changed = true;
+            }
+
+            let slider = egui::Slider::new(&mut state.video.underscan_y, -0.2..=0.3)
+                .step_by(0.001)
+                .custom_formatter(|n, _| format!("{:.1}%", (1.0 + n) * 100.0))
+                .custom_parser(|s| {
+                    let s = s.trim().trim_end_matches('%').trim();
+                    s.parse::<f64>().ok().map(|p| if p > 50.0 { (p / 100.0 - 1.0) as f64 } else { p })
+                });
+            if slider_item(
+                c2,
+                "Underscan Stretch Y:",
+                slider,
+                Some("Stretches the image raster vertically inside the rendering surface without changing screen boundaries, cutting off excess edges."),
+            )
+            .changed()
+            {
+                crate::config::save_config(state);
+                changed = true;
+            }
+        });
+
+        technical_separator(ui);
+
+        sub_heading(ui, "Border Cut-off (Pillowing Mask):");
+        two_columns(ui, |c1, c2| {
+            let slider = egui::Slider::new(&mut state.video.border_crop_top, 0.0..=0.2)
+                .step_by(0.001)
+                .custom_formatter(|n, _| format!("{:.1}%", n * 100.0))
+                .custom_parser(|s| {
+                    let s = s.trim().trim_end_matches('%').trim();
+                    s.parse::<f64>().ok().map(|v| if v > 0.2 { (v / 100.0) as f64 } else { v })
+                });
+            if slider_item(c1, "Top Cut-off:", slider, None).changed() {
+                crate::config::save_config(state);
+                changed = true;
+            }
+
+            let slider = egui::Slider::new(&mut state.video.border_crop_bottom, 0.0..=0.2)
+                .step_by(0.001)
+                .custom_formatter(|n, _| format!("{:.1}%", n * 100.0))
+                .custom_parser(|s| {
+                    let s = s.trim().trim_end_matches('%').trim();
+                    s.parse::<f64>().ok().map(|v| if v > 0.2 { (v / 100.0) as f64 } else { v })
+                });
+            if slider_item(c2, "Bottom Cut-off:", slider, None).changed() {
+                crate::config::save_config(state);
+                changed = true;
+            }
+        });
+
+        two_columns(ui, |c1, c2| {
+            let slider = egui::Slider::new(&mut state.video.border_crop_left, 0.0..=0.2)
+                .step_by(0.001)
+                .custom_formatter(|n, _| format!("{:.1}%", n * 100.0))
+                .custom_parser(|s| {
+                    let s = s.trim().trim_end_matches('%').trim();
+                    s.parse::<f64>().ok().map(|v| if v > 0.2 { (v / 100.0) as f64 } else { v })
+                });
+            if slider_item(c1, "Left Cut-off:", slider, None).changed() {
+                crate::config::save_config(state);
+                changed = true;
+            }
+
+            let slider = egui::Slider::new(&mut state.video.border_crop_right, 0.0..=0.2)
+                .step_by(0.001)
+                .custom_formatter(|n, _| format!("{:.1}%", n * 100.0))
+                .custom_parser(|s| {
+                    let s = s.trim().trim_end_matches('%').trim();
+                    s.parse::<f64>().ok().map(|v| if v > 0.2 { (v / 100.0) as f64 } else { v })
+                });
+            if slider_item(c2, "Right Cut-off:", slider, None).changed() {
+                crate::config::save_config(state);
+                changed = true;
+            }
+        });
+    });
+
+    changed
+}
+
+pub fn draw_effects_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
+    let mut changed = false;
+
+    // Group 1: Visual Tweaks
+    technical_group(ui, "Visual Tweaks:", |ui| {
         if ui
             .checkbox(
                 &mut state.video.use_magenta_background,
@@ -331,114 +1079,120 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             changed = true;
         }
 
-        let is_crt_on = state.crt_filter.load(std::sync::atomic::Ordering::Relaxed) != 0;
+        technical_separator(ui);
 
-        ui.add_enabled_ui(is_crt_on, |ui| {
-            if !is_crt_on {
-                ui.label(
-                    egui::RichText::new("ℹ The frame and glass reflection effects require CRT filter to be enabled (press 'C').")
-                        .weak()
-                        .small(),
-                );
-            }
+        if ui
+            .checkbox(
+                &mut state.video.retro_pc_frame,
+                "Retro PC Monitor Frame",
+            )
+            .on_hover_text(
+                "Displays a vintage NEC PC-98 CRT monitor casing in empty areas around the screen (requires CRT shader).",
+            )
+            .changed()
+        {
+            crate::config::save_config(state);
+            changed = true;
+        }
 
-            if ui
-                .checkbox(
-                    &mut state.video.retro_pc_frame,
-                    "Retro PC Monitor Frame",
-                )
-                .on_hover_text(
-                    "Displays a vintage NEC PC-98 CRT monitor casing in empty areas around the screen (requires CRT shader).",
-                )
-                .changed()
-            {
-                crate::config::save_config(state);
-                changed = true;
-            }
-
-            if state.video.retro_pc_frame {
-                if ui
-                    .add(
-                        egui::Slider::new(&mut state.video.retro_pc_ambient_glow, 0.0..=1.0)
-                            .text("Bezel Ambient Glow")
-                            .custom_formatter(|n, _| {
-                                if n <= 0.001 {
-                                    "Off".to_string()
-                                } else {
-                                    format!("{:.0}%", n * 100.0)
-                                }
-                            }),
-                    )
-                    .on_hover_text(
-                        "Controls the intensity of the real-time diffuse halo glow reflecting from the active video feed onto the deep inner bezel sides (0% = Off).",
-                    )
-                    .changed()
-                {
-                    crate::config::save_config(state);
-                    changed = true;
-                }
-
-                if ui
-                    .checkbox(
-                        &mut state.video.retro_pc_frame_dark_mode,
-                        "Dark Room Bezel",
-                    )
-                    .on_hover_text(
-                        "Tones down bezel brightness as if room lights are turned off (automatically enabled during Lights Off Night Mode).",
-                    )
-                    .changed()
-                {
-                    crate::config::save_config(state);
-                    changed = true;
-                }
-            }
-
-            if ui
-                .checkbox(
-                    &mut state.video.crt_glass_enabled,
-                    "Glossy Screen Glass Effect",
-                )
-                .on_hover_text(
-                    "Simulates a photorealistic curved CRT glass patina, refractions, and reflections reacting to screen light (requires CRT shader).",
+        if state.video.retro_pc_frame {
+            ui.add_space(3.0);
+            two_columns(ui, |c1, c2| {
+                let slider = egui::Slider::new(&mut state.video.retro_pc_ambient_glow, 0.0..=1.0)
+                    .step_by(0.05)
+                    .custom_formatter(|n, _| {
+                        if n <= 0.001 {
+                            "Off".to_string()
+                        } else {
+                            format!("{:.0}%", n * 100.0)
+                        }
+                    })
+                    .custom_parser(|s| {
+                        let s = s.trim().trim_end_matches('%').trim();
+                        if s.eq_ignore_ascii_case("off") {
+                            Some(0.0)
+                        } else {
+                            s.parse::<f64>().ok().map(|v| if v > 1.0 { (v / 100.0) as f64 } else { v })
+                        }
+                    });
+                if slider_item(
+                    c1,
+                    "Bezel Ambient Glow:",
+                    slider,
+                    Some("Controls the intensity of the real-time diffuse halo glow reflecting from the active video feed onto the deep inner bezel sides (0% = Off)."),
                 )
                 .changed()
-            {
-                crate::config::save_config(state);
-                changed = true;
-            }
-
-            if state.video.crt_glass_enabled {
-                if ui
-                    .add(
-                        egui::Slider::new(&mut state.video.crt_glass_intensity, 0.0..=1.0)
-                            .text("Glass Intensity")
-                            .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
-                    )
-                    .on_hover_text(
-                        "Controls the intensity of the glass patina, refractions, and reflections.",
-                    )
-                    .changed()
                 {
                     crate::config::save_config(state);
                     changed = true;
                 }
 
-                if ui
-                    .add(
-                        egui::Slider::new(&mut state.video.crt_glass_glossiness, 0.0..=1.0)
-                            .text("Glass Glossiness")
-                            .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
-                    )
-                    .on_hover_text(
-                        "Controls specular sharpness and surface glossiness of the glass patina.",
-                    )
-                    .changed()
+                c2.horizontal(|ui| {
+                    if ui
+                        .checkbox(
+                            &mut state.video.retro_pc_frame_dark_mode,
+                            "Dark Room Bezel",
+                        )
+                        .on_hover_text(
+                            "Tones down bezel brightness as if room lights are turned off (automatically enabled during Lights Off Night Mode).",
+                        )
+                        .changed()
+                    {
+                        crate::config::save_config(state);
+                        changed = true;
+                    }
+                });
+            });
+        }
+
+        technical_separator(ui);
+
+        if ui
+            .checkbox(
+                &mut state.video.crt_glass_enabled,
+                "Glossy Screen Glass Effect",
+            )
+            .on_hover_text(
+                "Simulates a photorealistic curved CRT glass patina, refractions, and reflections reacting to screen light (requires CRT shader).",
+            )
+            .changed()
+        {
+            crate::config::save_config(state);
+            changed = true;
+        }
+
+        if state.video.crt_glass_enabled {
+            ui.add_space(3.0);
+            two_columns(ui, |c1, c2| {
+                let slider = percent_slider(&mut state.video.crt_glass_intensity, 0.0..=1.0);
+                if slider_item(
+                    c1,
+                    "Glass Intensity:",
+                    slider,
+                    Some("Controls the intensity of the glass patina, refractions, and reflections."),
+                )
+                .changed()
                 {
                     crate::config::save_config(state);
                     changed = true;
                 }
 
-                ui.add_space(2.0);
+                let slider = percent_slider(&mut state.video.crt_glass_glossiness, 0.0..=1.0);
+                if slider_item(
+                    c2,
+                    "Glass Glossiness:",
+                    slider,
+                    Some("Controls specular sharpness and surface glossiness of the glass patina."),
+                )
+                .changed()
+                {
+                    crate::config::save_config(state);
+                    changed = true;
+                }
+            });
+
+            ui.add_space(3.0);
+            ui.horizontal(|ui| {
                 if ui
                     .checkbox(
                         &mut state.video.crt_glass_ceiling_light_enabled,
@@ -452,8 +1206,10 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     crate::config::save_config(state);
                     changed = true;
                 }
+            });
 
-                ui.add_space(2.0);
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
                 if ui
                     .checkbox(
                         &mut state.video.crt_glass_photographer_enabled,
@@ -469,26 +1225,23 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 }
 
                 if state.video.crt_glass_photographer_enabled {
-                    if ui
-                        .add(
-                            egui::Slider::new(
-                                &mut state.video.crt_glass_photographer_intensity,
-                                0.0..=1.0,
-                            )
-                            .text("Photographer Intensity")
-                            .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
-                        )
-                        .on_hover_text(
-                            "Controls the opacity of the photographer silhouette reflection.",
-                        )
-                        .changed()
-                    {
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new("Photographer Intensity:")
+                            .monospace()
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(153, 153, 153)),
+                    );
+                    let slider = percent_slider(&mut state.video.crt_glass_photographer_intensity, 0.0..=1.0);
+                    if ui.add(slider).changed() {
                         crate::config::save_config(state);
                         changed = true;
                     }
                 }
+            });
 
-                ui.add_space(2.0);
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
                 if ui
                     .checkbox(
                         &mut state.video.crt_glass_flash_enabled,
@@ -504,34 +1257,35 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 }
 
                 if state.video.crt_glass_flash_enabled {
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut state.video.crt_glass_flash_intensity, 0.0..=1.0)
-                                .text("Flash Intensity")
-                                .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
-                        )
-                        .on_hover_text(
-                            "Controls the exposure and brightness of the camera flash reflection.",
-                        )
-                        .changed()
-                    {
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new("Flash Intensity:")
+                            .monospace()
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(153, 153, 153)),
+                    );
+                    let slider = percent_slider(&mut state.video.crt_glass_flash_intensity, 0.0..=1.0);
+                    if ui.add(slider).changed() {
                         crate::config::save_config(state);
                         changed = true;
                     }
                 }
+            });
 
-                if state.video.lights_off_night_mode {
-                    ui.label(
-                        egui::RichText::new(
-                            "🌙 Ceiling & camera reflections are suspended by Lights Off Night Mode.",
-                        )
-                        .weak()
-                        .small(),
-                    );
-                }
+            if state.video.lights_off_night_mode {
+                ui.label(
+                    egui::RichText::new(
+                        "🌙 Ceiling & camera reflections are suspended by Lights Off Night Mode.",
+                    )
+                    .weak()
+                    .small(),
+                );
             }
+        }
 
-            ui.add_space(2.0);
+        technical_separator(ui);
+
+        ui.horizontal(|ui| {
             if ui
                 .checkbox(
                     &mut state.video.lights_off_night_mode,
@@ -547,525 +1301,42 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             }
 
             if state.video.lights_off_night_mode {
-                if ui
-                    .add(
-                        egui::Slider::new(&mut state.video.night_mode_glow_intensity, 0.0..=1.0)
-                            .text("Night Mode Halo Glow")
-                            .custom_formatter(|n, _| {
-                                if n <= 0.001 {
-                                    "Off".to_string()
-                                } else {
-                                    format!("{:.0}%", n * 100.0)
-                                }
-                            }),
-                    )
-                    .on_hover_text(
-                        "Controls the intensity of the atmospheric CRT halo glow layer cast across the entire picture and borders during Night Mode (0% = Off).",
-                    )
-                    .changed()
-                {
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new("Night Mode Halo Glow:")
+                        .monospace()
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(153, 153, 153)),
+                );
+                let slider = egui::Slider::new(&mut state.video.night_mode_glow_intensity, 0.0..=1.0)
+                    .step_by(0.05)
+                    .custom_formatter(|n, _| {
+                        if n <= 0.001 {
+                            "Off".to_string()
+                        } else {
+                            format!("{:.0}%", n * 100.0)
+                        }
+                    })
+                    .custom_parser(|s| {
+                        let s = s.trim().trim_end_matches('%').trim();
+                        if s.eq_ignore_ascii_case("off") {
+                            Some(0.0)
+                        } else {
+                            s.parse::<f64>().ok().map(|v| if v > 1.0 { (v / 100.0) as f64 } else { v })
+                        }
+                    });
+                if ui.add(slider).changed() {
                     crate::config::save_config(state);
                     changed = true;
                 }
             }
         });
-
-        if ui
-            .add(
-                egui::Slider::new(&mut state.video.vibrance, 0.0..=3.0)
-                    .text("Vibrance (Saturation)")
-                    .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
-            )
-            .changed()
-        {
-            changed = true;
-        }
-        if ui
-            .add(
-                egui::Slider::new(&mut state.video.horizontal_stretch, 0.5..=1.5)
-                    .text("Horizontal Stretch")
-                    .step_by(0.001)
-                    .custom_formatter(|n, _| format!("{:.1}%", n * 100.0)),
-            )
-            .changed()
-        {
-            changed = true;
-        }
-
-        if ui
-            .add(
-                egui::Slider::new(&mut state.video.overscan_x, -0.2..=0.2)
-                    .text("Overscan X")
-                    .step_by(0.0005)
-                    .custom_formatter(|n, _| format!("{:.1}%", n * 100.0)),
-            )
-            .changed()
-        {
-            changed = true;
-        }
-        if ui
-            .add(
-                egui::Slider::new(&mut state.video.overscan_y, -0.2..=0.2)
-                    .text("Overscan Y")
-                    .step_by(0.001)
-                    .custom_formatter(|n, _| format!("{:.1}%", n * 100.0)),
-            )
-            .changed()
-        {
-            changed = true;
-        }
-
-        if ui
-            .add(
-                egui::Slider::new(&mut state.video.underscan_x, -0.2..=0.3)
-                    .text("Underscan Stretch X")
-                    .step_by(0.0005)
-                    .custom_formatter(|n, _| format!("{:.1}%", (1.0 + n) * 100.0))
-                    .custom_parser(|s| {
-                        let s = s.trim_end_matches('%').trim();
-                        s.parse::<f64>().ok().map(|p| if p > 50.0 { p / 100.0 - 1.0 } else { p })
-                    }),
-            )
-            .on_hover_text("Stretches the image raster horizontally inside the rendering surface without changing screen boundaries, cutting off excess edges.")
-            .changed()
-        {
-            changed = true;
-        }
-        if ui
-            .add(
-                egui::Slider::new(&mut state.video.underscan_y, -0.2..=0.3)
-                    .text("Underscan Stretch Y")
-                    .step_by(0.001)
-                    .custom_formatter(|n, _| format!("{:.1}%", (1.0 + n) * 100.0))
-                    .custom_parser(|s| {
-                        let s = s.trim_end_matches('%').trim();
-                        s.parse::<f64>().ok().map(|p| if p > 50.0 { p / 100.0 - 1.0 } else { p })
-                    }),
-            )
-            .on_hover_text("Stretches the image raster vertically inside the rendering surface without changing screen boundaries, cutting off excess edges.")
-            .changed()
-        {
-            changed = true;
-        }
-
-        ui.separator();
-        ui.label("Border Cut-off (Pillowing Mask):");
-        if ui
-            .add(
-                egui::Slider::new(&mut state.video.border_crop_top, 0.0..=0.2)
-                    .text("Top Cut-off")
-                    .step_by(0.001)
-                    .custom_formatter(|n, _| format!("{:.1}%", n * 100.0)),
-            )
-            .changed()
-        {
-            changed = true;
-        }
-        if ui
-            .add(
-                egui::Slider::new(&mut state.video.border_crop_bottom, 0.0..=0.2)
-                    .text("Bottom Cut-off")
-                    .step_by(0.001)
-                    .custom_formatter(|n, _| format!("{:.1}%", n * 100.0)),
-            )
-            .changed()
-        {
-            changed = true;
-        }
-        if ui
-            .add(
-                egui::Slider::new(&mut state.video.border_crop_left, 0.0..=0.2)
-                    .text("Left Cut-off")
-                    .step_by(0.001)
-                    .custom_formatter(|n, _| format!("{:.1}%", n * 100.0)),
-            )
-            .changed()
-        {
-            changed = true;
-        }
-        if ui
-            .add(
-                egui::Slider::new(&mut state.video.border_crop_right, 0.0..=0.2)
-                    .text("Right Cut-off")
-                    .step_by(0.001)
-                    .custom_formatter(|n, _| format!("{:.1}%", n * 100.0)),
-            )
-            .changed()
-        {
-            changed = true;
-        }
     });
 
-    let current_filter =
-        CrtFilter::from_u8(state.crt_filter.load(std::sync::atomic::Ordering::Relaxed));
+    ui.add_space(4.0);
 
-    if current_filter == CrtFilter::Lottes {
-        ui.group(|ui| {
-            ui.label("Lottes CRT Parameters:");
-
-            let mut scan = state.crt.hard_scan;
-            let mut pix = state.crt.hard_pix;
-            let mut bright = state.crt.brightboost;
-            let mut warp_x = state.crt.warp_x;
-            let mut warp_y = state.crt.warp_y;
-            let mut mask = state.crt.shadow_mask;
-            let mut bloom_pix = state.crt.hard_bloom_pix;
-            let mut bloom_scan = state.crt.hard_bloom_scan;
-            let mut bloom_amount = state.crt.bloom_amount;
-            let mut shape = state.crt.shape;
-
-            if ui
-                .add(egui::Slider::new(&mut scan, -20.0..=0.0).text("HardScan"))
-                .changed()
-            {
-                state.crt.hard_scan = scan;
-                changed = true;
-            }
-            if ui
-                .add(egui::Slider::new(&mut pix, -20.0..=0.0).text("HardPix"))
-                .changed()
-            {
-                state.crt.hard_pix = pix;
-                changed = true;
-            }
-            if ui
-                .add(egui::Slider::new(&mut bright, 0.5..=2.0).text("Brightboost"))
-                .changed()
-            {
-                state.crt.brightboost = bright;
-                changed = true;
-            }
-            if ui
-                .add(egui::Slider::new(&mut bloom_amount, 0.0..=1.0).text("Bloom Amount"))
-                .changed()
-            {
-                state.crt.bloom_amount = bloom_amount;
-                changed = true;
-            }
-            if ui
-                .add(egui::Slider::new(&mut warp_x, 0.0..=0.125).text("WarpX"))
-                .changed()
-            {
-                state.crt.warp_x = warp_x;
-                changed = true;
-            }
-            if ui
-                .add(egui::Slider::new(&mut warp_y, 0.0..=0.125).text("WarpY"))
-                .changed()
-            {
-                state.crt.warp_y = warp_y;
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::Slider::new(&mut mask, 0.0..=4.0)
-                        .text("ShadowMask")
-                        .step_by(1.0),
-                )
-                .on_hover_text(
-                    "0=None, 1=Compressed TV, 2=Aperture-grille, 3=Stretched VGA, 4=VGA",
-                )
-                .changed()
-            {
-                state.crt.shadow_mask = mask.round();
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::Slider::new(&mut shape, 0.0..=10.0)
-                        .text("Shape")
-                        .step_by(0.05),
-                )
-                .on_hover_text("Kernel exponent. The original Lottes default is 2.0.")
-                .changed()
-            {
-                state.crt.shape = shape;
-                changed = true;
-            }
-            if ui
-                .add(egui::Slider::new(&mut bloom_pix, -2.0..=-0.5).text("BloomPix"))
-                .changed()
-            {
-                state.crt.hard_bloom_pix = bloom_pix;
-                changed = true;
-            }
-            if ui
-                .add(egui::Slider::new(&mut bloom_scan, -4.0..=-1.0).text("BloomScan"))
-                .changed()
-            {
-                state.crt.hard_bloom_scan = bloom_scan;
-                changed = true;
-            }
-            if ui.button("Reset Defaults").clicked() {
-                state.crt.hard_scan = -8.0;
-                state.crt.hard_pix = -3.0;
-                state.crt.brightboost = 1.0;
-                state.crt.warp_x = 0.031;
-                state.crt.warp_y = 0.041;
-                state.crt.shadow_mask = 3.0;
-                state.crt.hard_bloom_pix = -1.5;
-                state.crt.hard_bloom_scan = -2.0;
-                state.crt.bloom_amount = 0.15;
-                state.crt.shape = 2.0;
-
-                state.video.vibrance = 1.0;
-                state.video.use_magenta_background = false;
-                state.video.horizontal_stretch = 1.0;
-                state.video.pixelate_filter_enabled = false;
-                state.video.median_filter_enabled = false;
-                state.video.median_mix = 1.0;
-                state.video.deinterlace_filter_enabled = false;
-                state.video.deinterlace_mode = 0;
-                state.video.deinterlace_blend = 0.5;
-                state.video.deinterlace_motion_threshold = 0.08;
-                state.video.deinterlace_line_spacing = 1.0;
-                state.video.deinterlace_spatial_mix = 0.75;
-                state.video.overscan_x = 0.0;
-                state.video.overscan_y = 0.0;
-                state.video.underscan_x = 0.0;
-                state.video.underscan_y = 0.0;
-                state.video.border_crop_left = 0.0;
-                state.video.border_crop_right = 0.0;
-                state.video.border_crop_top = 0.0;
-                state.video.border_crop_bottom = 0.0;
-                changed = true;
-            }
-        });
-    }
-
-    if current_filter == CrtFilter::Halo {
-        ui.group(|ui| {
-            ui.label("Halo CRT Parameters:");
-
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.halo.brightboost, 0.5..=3.0)
-                        .text("Brightboost (Dark)")
-                        .step_by(0.05),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.halo.brightboost1, 0.5..=3.0)
-                        .text("Brightboost (Bright)")
-                        .step_by(0.05),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.halo.beam_min, 0.5..=3.0)
-                        .text("Beam Min")
-                        .step_by(0.05),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.halo.beam_max, 0.2..=2.0)
-                        .text("Beam Max")
-                        .step_by(0.05),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.halo.beam_size, 0.0..=2.0)
-                        .text("Beam Size")
-                        .step_by(0.05),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.halo.h_sharp, 1.0..=10.0)
-                        .text("Sharpness")
-                        .step_by(0.1),
-                )
-                .on_hover_text("Horizontal sharpness (1.0 = soft analog CRT, 3.5 = Trinitron, 10.0 = razor-sharp PVM)")
-                .changed()
-            {
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.halo.glow, 0.0..=1.0)
-                        .text("Glow")
-                        .step_by(0.01),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.halo.bloom, 0.0..=1.0)
-                        .text("Bloom")
-                        .step_by(0.01),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.halo.halation, 0.0..=0.5)
-                        .text("Halation")
-                        .step_by(0.01),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.halo.shadow_mask, 0.0..=6.0)
-                        .text("Shadow Mask")
-                        .step_by(1.0),
-                )
-                .on_hover_text(
-                    "0=None, 1=CGWG, 2=Lottes, 3=Stretched, 4=VGA, 5=Fine, 6=Trinitron",
-                )
-                .changed()
-            {
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.halo.masksize, 1.0..=4.0)
-                        .text("Mask Size")
-                        .step_by(1.0),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.halo.maskstr, 0.0..=1.0)
-                        .text("Mask Strength")
-                        .step_by(0.05),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.halo.mcut, 0.0..=1.0)
-                        .text("Mask Cutoff")
-                        .step_by(0.05),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.halo.slotmask, 0.0..=1.0)
-                        .text("Slot Mask (Bright)")
-                        .step_by(0.05),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.halo.slotmask1, 0.0..=1.0)
-                        .text("Slot Mask (Dark)")
-                        .step_by(0.05),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.halo.double_slot, 1.0..=4.0)
-                        .text("Double Slot")
-                        .step_by(1.0),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.halo.smoothmask, 0.0..=2.0)
-                        .text("Smooth Mask")
-                        .step_by(0.05),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.halo.halo_zoom, 50.0..=100.0)
-                        .text("Screen Scale %")
-                        .step_by(0.5),
-                )
-                .on_hover_text("Scales the CRT screen within the viewport to create bezel room for the halo glow.")
-                .changed()
-            {
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.halo.halo_intensity, 0.0..=2.0)
-                        .text("Halo Glow")
-                        .step_by(0.05),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.halo.corner_size, 0.0..=0.1)
-                        .text("Corner Size")
-                        .step_by(0.005),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-            if ui.checkbox(&mut state.halo.curvature, "Curvature").changed() {
-                changed = true;
-            }
-
-            ui.horizontal(|ui| {
-                if ui.button("Reset Defaults").clicked() {
-                    state.halo = state.halo_defaults.clone();
-                    changed = true;
-                }
-                if ui.button("Save as Defaults").clicked() {
-                    state.halo_defaults = state.halo.clone();
-                    let current_profile_data = crate::config::build_profile_from_state(state);
-                    state
-                        .profiles
-                        .insert(state.active_profile.clone(), current_profile_data);
-                    crate::config::save_config(state);
-                    state.info("Saved current settings as default");
-                    changed = true;
-                }
-            });
-        });
-    }
-
-    ui.group(|ui| {
+    // Group 2: Cathode Glow & Interference
+    technical_group(ui, "", |ui| {
         ui.horizontal(|ui| {
             if ui
                 .checkbox(
@@ -1079,118 +1350,131 @@ pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             {
                 changed = true;
             }
+
+            if state.cathode_interference.enabled {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Save as Defaults").clicked() {
+                        state.cathode_interference_defaults = state.cathode_interference.clone();
+                        let current_profile_data = crate::config::build_profile_from_state(state);
+                        state
+                            .profiles
+                            .insert(state.active_profile.clone(), current_profile_data);
+                        crate::config::save_config(state);
+                        state.info("Saved current cathode settings as default");
+                        changed = true;
+                    }
+                    if ui.button("Reset Defaults").clicked() {
+                        state.cathode_interference = state.cathode_interference_defaults.clone();
+                        changed = true;
+                    }
+                });
+            }
         });
 
         if state.cathode_interference.enabled {
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.cathode_interference.intensity, 0.0..=1.0)
-                        .text("Intensity")
-                        .step_by(0.01)
-                        .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
+            ui.add_space(4.0);
+            two_columns(ui, |c1, c2| {
+                let slider = percent_slider(&mut state.cathode_interference.intensity, 0.0..=1.0);
+                if slider_item(
+                    c1,
+                    "Intensity:",
+                    slider,
+                    Some("Master intensity of cathode glow, flicker, and interference."),
                 )
-                .on_hover_text("Master intensity of cathode glow, flicker, and interference.")
                 .changed()
-            {
-                changed = true;
-            }
-
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.cathode_interference.frequency, 0.1..=5.0)
-                        .text("Frequency")
-                        .step_by(0.05)
-                        .custom_formatter(|n, _| format!("{:.2}x", n)),
-                )
-                .on_hover_text("Speed of AC hum ripple, flicker rate, and glitch frequency.")
-                .changed()
-            {
-                changed = true;
-            }
-
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.cathode_interference.randomization, 0.0..=1.0)
-                        .text("Randomization")
-                        .step_by(0.01)
-                        .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
-                )
-                .on_hover_text("Unpredictability and jitteriness of flicker and micro-glitches.")
-                .changed()
-            {
-                changed = true;
-            }
-
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.cathode_interference.electricity_glow, 0.0..=1.0)
-                        .text("Electricity Glow")
-                        .step_by(0.01)
-                        .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
-                )
-                .on_hover_text("Lightbulb/cathode bloom that selectively energizes highlights and dynamically modulates dark areas.")
-                .changed()
-            {
-                changed = true;
-            }
-
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.cathode_interference.flicker_depth, 0.0..=1.0)
-                        .text("Flicker Depth")
-                        .step_by(0.01)
-                        .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
-                )
-                .on_hover_text("Depth of rolling AC power hum and high-frequency cathode phosphor flutter.")
-                .changed()
-            {
-                changed = true;
-            }
-
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.cathode_interference.interference, 0.0..=1.0)
-                        .text("Interference / Noise")
-                        .step_by(0.01)
-                        .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
-                )
-                .on_hover_text("Analog RF static noise and intermittent horizontal scanline micro-glitches.")
-                .changed()
-            {
-                changed = true;
-            }
-
-            if ui
-                .add(
-                    egui::Slider::new(&mut state.cathode_interference.lightbulb_effect, 0.0..=1.0)
-                        .text("Lightbulb Effect")
-                        .step_by(0.01)
-                        .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)),
-                )
-                .on_hover_text("Pulsating lightbulb breathing that makes the brightness of bright areas and darkness of dark areas glow up and down.")
-                .changed()
-            {
-                changed = true;
-            }
-
-            ui.horizontal(|ui| {
-                if ui.button("Reset Defaults").clicked() {
-                    state.cathode_interference = state.cathode_interference_defaults.clone();
+                {
                     changed = true;
                 }
-                if ui.button("Save as Defaults").clicked() {
-                    state.cathode_interference_defaults = state.cathode_interference.clone();
-                    let current_profile_data = crate::config::build_profile_from_state(state);
-                    state
-                        .profiles
-                        .insert(state.active_profile.clone(), current_profile_data);
-                    crate::config::save_config(state);
-                    state.info("Saved current cathode settings as default");
+
+                let slider = mult_slider(&mut state.cathode_interference.frequency, 0.1..=5.0);
+                if slider_item(
+                    c2,
+                    "Frequency:",
+                    slider,
+                    Some("Speed of AC hum ripple, flicker rate, and glitch frequency."),
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+            });
+
+            two_columns(ui, |c1, c2| {
+                let slider = percent_slider(&mut state.cathode_interference.randomization, 0.0..=1.0);
+                if slider_item(
+                    c1,
+                    "Randomization:",
+                    slider,
+                    Some("Unpredictability and jitteriness of flicker and micro-glitches."),
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+
+                let slider = percent_slider(&mut state.cathode_interference.electricity_glow, 0.0..=1.0);
+                if slider_item(
+                    c2,
+                    "Electricity Glow:",
+                    slider,
+                    Some("Lightbulb/cathode bloom that selectively energizes highlights and dynamically modulates dark areas."),
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+            });
+
+            two_columns(ui, |c1, c2| {
+                let slider = percent_slider(&mut state.cathode_interference.flicker_depth, 0.0..=1.0);
+                if slider_item(
+                    c1,
+                    "Flicker Depth:",
+                    slider,
+                    Some("Depth of rolling AC power hum and high-frequency cathode phosphor flutter."),
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+
+                let slider = percent_slider(&mut state.cathode_interference.interference, 0.0..=1.0);
+                if slider_item(
+                    c2,
+                    "Interference / Noise:",
+                    slider,
+                    Some("Analog RF static noise and intermittent horizontal scanline micro-glitches."),
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+            });
+
+            two_columns(ui, |c1, _| {
+                let slider = percent_slider(&mut state.cathode_interference.lightbulb_effect, 0.0..=1.0);
+                if slider_item(
+                    c1,
+                    "Lightbulb Effect:",
+                    slider,
+                    Some("Pulsating lightbulb breathing that makes the brightness of bright areas and darkness of dark areas glow up and down."),
+                )
+                .changed()
+                {
                     changed = true;
                 }
             });
         }
     });
 
+    changed
+}
+
+#[allow(dead_code)]
+pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
+    let mut changed = false;
+    changed |= draw_shaders_tab(ui, state);
+    changed |= draw_geometry_tab(ui, state);
+    changed |= draw_effects_tab(ui, state);
     changed
 }

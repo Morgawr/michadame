@@ -43,10 +43,16 @@ pub fn draw_toggle(replay: &mut Replay, ui: &mut egui::Ui, streaming: bool) {
     }
 }
 
-pub fn draw(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
+pub fn draw_replay_buffer_group(
+    replay: &mut Replay,
+    ui: &mut egui::Ui,
+    streaming: bool,
+) -> bool {
     let mut changed = false;
-    ui.group(|ui| {
-        ui.strong("Live replay buffer");
+
+    crate::ui::controls::technical_group(ui, "Live Replay Buffer:", |ui| {
+        draw_toggle(replay, ui, streaming);
+
         if replay.runtime.is_none()
             && replay.available_now.is_some_and(|available| {
                 replay.config.budget().saturating_add(SAFETY_RESERVE) >= available
@@ -70,47 +76,102 @@ pub fn draw(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
         if status.saving {
             ui.label("Saving…");
         }
+
+        ui.add_space(4.0);
+
         ui.add_enabled_ui(replay.runtime.is_none(), |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Maximum history (seconds)");
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut replay.config.history_seconds)
-                            .clamp_range(1..=3600),
-                    )
-                    .changed();
+            crate::ui::controls::two_columns(ui, |c1, c2| {
+                c1.horizontal(|ui| {
+                    ui.add_sized(
+                        [180.0, 18.0],
+                        egui::Label::new(
+                            egui::RichText::new("Maximum history (seconds):")
+                                .monospace()
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(170, 170, 170)),
+                        ),
+                    );
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut replay.config.history_seconds)
+                                .clamp_range(1..=3600),
+                        )
+                        .changed();
+                });
+
+                c2.horizontal(|ui| {
+                    ui.add_sized(
+                        [160.0, 18.0],
+                        egui::Label::new(
+                            egui::RichText::new("RAM budget (MiB):")
+                                .monospace()
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(170, 170, 170)),
+                        ),
+                    );
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut replay.config.memory_mib)
+                                .clamp_range(256..=32768),
+                        )
+                        .changed();
+                });
             });
-            ui.horizontal(|ui| {
-                ui.label("RAM budget (MiB)");
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut replay.config.memory_mib)
-                            .clamp_range(256..=32768),
-                    )
-                    .changed();
+
+            crate::ui::controls::two_columns(ui, |c1, c2| {
+                c1.horizontal(|ui| {
+                    ui.add_sized(
+                        [180.0, 18.0],
+                        egui::Label::new(
+                            egui::RichText::new("Work queue RAM (MiB):")
+                                .monospace()
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(170, 170, 170)),
+                        ),
+                    );
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut replay.config.work_queue_mib)
+                                .clamp_range(32..=8192),
+                        )
+                        .changed();
+                });
+
+                c2.horizontal(|ui| {
+                    ui.add_sized(
+                        [160.0, 18.0],
+                        egui::Label::new(
+                            egui::RichText::new("GPU render device:")
+                                .monospace()
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(170, 170, 170)),
+                        ),
+                    );
+                    let avail = (ui.available_width() - 4.0).max(60.0);
+                    changed |= ui
+                        .add_sized([avail, 18.0], egui::TextEdit::singleline(&mut replay.config.render_device))
+                        .changed();
+                });
             });
+
             ui.horizontal(|ui| {
-                ui.label("Work queue RAM (MiB)");
+                ui.add_sized(
+                    [180.0, 18.0],
+                    egui::Label::new(
+                        egui::RichText::new("Save folder:")
+                            .monospace()
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(170, 170, 170)),
+                    ),
+                );
+                let avail = (ui.available_width() - 4.0).max(100.0);
                 changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut replay.config.work_queue_mib)
-                            .clamp_range(32..=8192),
-                    )
-                    .changed();
-            });
-            ui.horizontal(|ui| {
-                ui.label("GPU render device");
-                changed |= ui
-                    .text_edit_singleline(&mut replay.config.render_device)
-                    .changed();
-            });
-            ui.horizontal(|ui| {
-                ui.label("Save folder");
-                changed |= ui
-                    .text_edit_singleline(&mut replay.config.directory)
+                    .add_sized([avail, 18.0], egui::TextEdit::singleline(&mut replay.config.directory))
                     .changed();
             });
         });
+
+        ui.add_space(2.0);
         changed |= ui
             .checkbox(
                 &mut replay.config.capture_overlays,
@@ -121,70 +182,111 @@ pub fn draw(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
             )
             .changed();
 
-        egui::CollapsingHeader::new("Save shortcuts")
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Custom clip seconds");
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(&mut replay.config.custom_seconds)
-                                .clamp_range(1..=3600),
-                        )
-                        .changed();
-                });
-                for (index, seconds) in replay.config.durations().into_iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("Save {seconds}s"));
-                        egui::ComboBox::from_id_source(("replay-key", index))
-                            .selected_text(if replay.config.keys[index] == 0 {
-                                "Disabled".into()
+        crate::ui::controls::technical_separator(ui);
+        crate::ui::controls::sub_heading(ui, "Save Shortcuts:");
+
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Custom clip seconds:")
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(170, 170, 170)),
+            );
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut replay.config.custom_seconds)
+                        .clamp_range(1..=3600),
+                )
+                .changed();
+        });
+
+        ui.add_space(2.0);
+
+        let durations = replay.config.durations();
+        let items: Vec<(usize, u32)> = durations.into_iter().enumerate().collect();
+        if items.len() >= 4 {
+            let row1 = (items[0], items[1]);
+            let row2 = (items[2], items[3]);
+            for ((idx_a, sec_a), (idx_b, sec_b)) in [row1, row2] {
+                crate::ui::controls::two_columns(ui, |c1, c2| {
+                    let mut draw_shortcut = |col: &mut egui::Ui, index: usize, seconds: u32| {
+                        col.horizontal(|ui| {
+                            let label_str = if index == 3 {
+                                "Save Custom:".to_string()
                             } else {
-                                format!("F{}", replay.config.keys[index])
-                            })
-                            .show_ui(ui, |ui| {
-                                for number in 0..=12 {
-                                    let assigned = number != 0
-                                        && replay
-                                            .config
-                                            .keys
-                                            .iter()
-                                            .enumerate()
-                                            .any(|(i, k)| i != index && *k == number);
-                                    ui.add_enabled_ui(!assigned, |ui| {
-                                        changed |= ui
-                                            .selectable_value(
-                                                &mut replay.config.keys[index],
-                                                number,
-                                                if number == 0 {
-                                                    "Disabled".into()
-                                                } else {
-                                                    format!("F{number}")
-                                                },
-                                            )
-                                            .changed();
-                                    });
-                                }
-                            });
-                        if ui
-                            .add_enabled(
-                                replay.runtime.is_some() && !status.saving,
-                                egui::Button::new("Save now"),
-                            )
-                            .clicked()
-                        {
-                            if let Err(e) = replay.save(seconds) {
-                                replay.last_status.message = e.to_string();
-                                if let Some(r) = &replay.runtime {
-                                    r.shared.message(e.to_string());
+                                format!("Save {}s:", seconds)
+                            };
+                            ui.add_sized(
+                                [110.0, 18.0],
+                                egui::Label::new(
+                                    egui::RichText::new(label_str)
+                                        .monospace()
+                                        .size(11.0)
+                                        .color(egui::Color32::from_rgb(170, 170, 170)),
+                                ),
+                            );
+
+                            egui::ComboBox::from_id_source(("replay-key", index))
+                                .selected_text(if replay.config.keys[index] == 0 {
+                                    "Disabled".into()
+                                } else {
+                                    format!("F{}", replay.config.keys[index])
+                                })
+                                .show_ui(ui, |ui| {
+                                    for number in 0..=12 {
+                                        let assigned = number != 0
+                                            && replay
+                                                .config
+                                                .keys
+                                                .iter()
+                                                .enumerate()
+                                                .any(|(i, k)| i != index && *k == number);
+                                        ui.add_enabled_ui(!assigned, |ui| {
+                                            changed |= ui
+                                                .selectable_value(
+                                                    &mut replay.config.keys[index],
+                                                    number,
+                                                    if number == 0 {
+                                                        "Disabled".into()
+                                                    } else {
+                                                        format!("F{number}")
+                                                    },
+                                                )
+                                                .changed();
+                                        });
+                                    }
+                                });
+
+                            if ui
+                                .add_enabled(
+                                    replay.runtime.is_some() && !status.saving,
+                                    egui::Button::new("Save now"),
+                                )
+                                .clicked()
+                            {
+                                if let Err(e) = replay.save(seconds) {
+                                    replay.last_status.message = e.to_string();
+                                    if let Some(r) = &replay.runtime {
+                                        r.shared.message(e.to_string());
+                                    }
                                 }
                             }
-                        }
-                    });
-                }
-            });
+                        });
+                    };
+
+                    draw_shortcut(c1, idx_a, sec_a);
+                    draw_shortcut(c2, idx_b, sec_b);
+                });
+            }
+        }
     });
+
     changed
+}
+
+#[allow(dead_code)]
+pub fn draw(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
+    draw_replay_buffer_group(replay, ui, false)
 }
 
 pub fn draw_debug(replay: &Replay, ui: &mut egui::Ui) {
@@ -270,39 +372,51 @@ pub fn draw_debug(replay: &Replay, ui: &mut egui::Ui) {
     }
 }
 
-pub fn draw_audio_filter(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
+pub fn draw_audio_filter_group(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
     let mut changed = false;
     let filter = &mut replay.config.audio_filter;
 
-    egui::CollapsingHeader::new("🔊 Console Audio Noise Filter")
-        .default_open(filter.enabled)
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if ui
-                    .checkbox(&mut filter.enabled, "Enable Noise Filter")
-                    .on_hover_text(
-                        "Real-time zero-latency DSP filter applied to live audio and recordings.\n\
-                         Eliminates console interference hum, power harmonics, and CRT whine\n\
-                         without muffling high-frequency game audio.",
-                    )
-                    .changed()
-                {
-                    changed = true;
-                }
-            });
-
-            if !filter.enabled {
-                ui.label(
-                    egui::RichText::new("Filter is disabled. Live audio passes through untouched.")
-                        .italics()
-                        .color(egui::Color32::GRAY),
-                );
-                return;
+    crate::ui::controls::technical_group(ui, "", |ui| {
+        ui.horizontal(|ui| {
+            if ui
+                .checkbox(&mut filter.enabled, "Console Audio Noise Filter")
+                .on_hover_text(
+                    "Real-time zero-latency DSP filter applied to live audio and recordings.\n\
+                     Eliminates console interference hum, power harmonics, and CRT whine\n\
+                     without muffling high-frequency game audio.",
+                )
+                .changed()
+            {
+                changed = true;
             }
 
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label("Preset:");
+            if filter.enabled {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Reset to Preset Defaults").clicked() {
+                        filter.apply_preset(filter.preset);
+                        changed = true;
+                    }
+                });
+            }
+        });
+
+        if !filter.enabled {
+            ui.label(
+                egui::RichText::new("Filter is disabled. Live audio passes through untouched.")
+                    .italics()
+                    .color(egui::Color32::from_rgb(136, 136, 136)),
+            );
+            return;
+        }
+
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Preset:")
+                        .monospace()
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(170, 170, 170)),
+                );
                 let current_label = match filter.preset {
                     FilterPreset::DreamcastNtsc => "Dreamcast / NTSC (FFmpeg afftdn + 60 Hz Notch + 15.7 kHz CRT)",
                     FilterPreset::ConsolePal => "PAL Console (FFmpeg afftdn + 50 Hz Notch + 15.6 kHz CRT)",
@@ -348,9 +462,8 @@ pub fn draw_audio_filter(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
                     });
             });
 
-            ui.add_space(4.0);
-            ui.group(|ui| {
-                ui.label(egui::RichText::new("DSP Filter Stages").strong());
+            crate::ui::controls::technical_separator(ui);
+            crate::ui::controls::sub_heading(ui, "DSP Filter Stages:");
 
                 // Realtime Denoising Backend
                 ui.horizontal(|ui| {
@@ -401,72 +514,80 @@ pub fn draw_audio_filter(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
                 }
 
                 if filter.denoise_backend == DenoiseBackend::Afftdn {
-                    ui.horizontal(|ui| {
-                        ui.label("Noise Reduction:");
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut filter.denoise_reduction_db, 6.0..=40.0)
-                                    .suffix(" dB"),
-                            )
-                            .on_hover_text(
+                    ui.add_space(2.0);
+                    crate::ui::controls::two_columns(ui, |c1, c2| {
+                        let slider = egui::Slider::new(&mut filter.denoise_reduction_db, 6.0..=40.0)
+                            .step_by(0.5)
+                            .suffix(" dB");
+                        if crate::ui::controls::slider_item(
+                            c1,
+                            "Noise Reduction:",
+                            slider,
+                            Some(
                                 "Amount of spectral noise floor reduction (afftdn).\n\
                                  12-20 dB is recommended for transparent filtering without phase smearing.\n\
                                  Values above 25 dB can cause underwater sound.",
-                            )
-                            .changed()
+                            ),
+                        )
+                        .changed()
                         {
                             changed = true;
                         }
 
-                        ui.label("Noise Floor:");
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut filter.denoise_noise_floor_db, -70.0..=-25.0)
-                                    .suffix(" dBFS"),
-                            )
-                            .on_hover_text(
+                        let slider = egui::Slider::new(&mut filter.denoise_noise_floor_db, -70.0..=-25.0)
+                            .step_by(0.5)
+                            .suffix(" dBFS");
+                        if crate::ui::controls::slider_item(
+                            c2,
+                            "Noise Floor:",
+                            slider,
+                            Some(
                                 "Expected background noise floor level.\n\
                                  Setting this to -45 to -40 dBFS matches console AV cable ground buzz,\n\
                                  allowing modest noise reduction (15-20 dB) to completely eliminate buzz\n\
                                  without requiring aggressive reduction that causes artifacts.",
-                            )
-                            .changed()
+                            ),
+                        )
+                        .changed()
                         {
                             changed = true;
                         }
                     });
 
-                    ui.horizontal(|ui| {
-                        ui.label("Smoothing:");
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut filter.denoise_gain_smooth, 0..=10)
-                                    .suffix(" bins"),
-                            )
-                            .on_hover_text(
+                    crate::ui::controls::two_columns(ui, |c1, c2| {
+                        let slider = egui::Slider::new(&mut filter.denoise_gain_smooth, 0..=10)
+                            .suffix(" bins");
+                        if crate::ui::controls::slider_item(
+                            c1,
+                            "Smoothing:",
+                            slider,
+                            Some(
                                 "FFT bin gain smoothing radius (default 0).\n\
                                  Set to 0 for pure point-wise filtering without bin smearing.\n\
                                  Values > 0 smear gain across neighboring bins.",
-                            )
-                            .changed()
+                            ),
+                        )
+                        .changed()
                         {
                             changed = true;
                         }
 
-                        if ui
-                            .checkbox(
-                                &mut filter.denoise_track_noise,
-                                "Track Bright-Scene Surges",
-                            )
-                            .on_hover_text(
-                                "Dynamically tracks fluctuating noise levels in real time.\n\
-                                 Adapts when bright video scenes draw higher current through\n\
-                                 shared video ground cables and cause the buzz to intensify.",
-                            )
-                            .changed()
-                        {
-                            changed = true;
-                        }
+                        c2.horizontal(|ui| {
+                            if ui
+                                .checkbox(
+                                    &mut filter.denoise_track_noise,
+                                    "Track Bright-Scene Surges",
+                                )
+                                .on_hover_text(
+                                    "Dynamically tracks fluctuating noise levels in real time.\n\
+                                     Adapts when bright video scenes draw higher current through\n\
+                                     shared video ground cables and cause the buzz to intensify.",
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        });
                     });
                 }
 
@@ -656,19 +777,25 @@ pub fn draw_audio_filter(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
                         }
                     }
                 });
-            });
 
             if let Some(spec) = filter.build_filter_spec() {
+                ui.add_space(2.0);
                 ui.label(
                     egui::RichText::new(format!("Active pipeline: {}", spec))
                         .small()
-                        .color(egui::Color32::LIGHT_BLUE),
+                        .monospace()
+                        .color(egui::Color32::from_rgb(180, 180, 180)),
                 );
             }
-        });
+    });
 
     if changed {
         replay.sync_audio_filter();
     }
     changed
+}
+
+#[allow(dead_code)]
+pub fn draw_audio_filter(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
+    draw_audio_filter_group(replay, ui)
 }

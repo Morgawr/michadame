@@ -31,6 +31,18 @@ pub struct HardwareState {
     pub selected_framerate: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsTab {
+    #[default]
+    Shaders,
+    Geometry,
+    Effects,
+    Devices,
+    AudioReplay,
+    OcrDict,
+    Hotkeys,
+}
+
 pub struct UiState {
     pub debug_open: bool,
     pub is_fullscreen: bool,
@@ -41,6 +53,7 @@ pub struct UiState {
     pub video_window_open: bool,
     pub control_window_open: bool,
     pub dismissed_config_error: bool,
+    pub active_settings_tab: SettingsTab,
 }
 
 pub struct CrtSettings {

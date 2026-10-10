@@ -47,6 +47,7 @@ impl Default for AppState {
                 video_window_open: false,
                 control_window_open: true,
                 dismissed_config_error: false,
+                active_settings_tab: crate::app::models::SettingsTab::default(),
             },
             crt: CrtSettings {
                 hard_scan: -8.0,
@@ -315,7 +316,10 @@ impl eframe::App for AppState {
                 egui::ViewportId::from_hash_of("control_window"),
                 egui::ViewportBuilder::default()
                     .with_title("Michadame Controls")
-                    .with_inner_size([900.0, 900.0]),
+                    .with_inner_size([960.0, 770.0])
+                    .with_min_inner_size([960.0, 770.0])
+                    .with_max_inner_size([960.0, 770.0])
+                    .with_resizable(false),
                 |ctx, class| {
                     assert!(
                         class == egui::ViewportClass::Immediate,
