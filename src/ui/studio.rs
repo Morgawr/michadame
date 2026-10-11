@@ -681,13 +681,23 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
         } else {
             (stream_title.to_string(), egui::Color32::from_rgb(220, 220, 220))
         };
-        ui.label(
-            egui::RichText::new(display_text)
-                .monospace()
-                .strong()
-                .size(11.0)
-                .color(display_color),
-        );
+        let avail_w = ui.available_width().min(STUDIO_WINDOW_SIZE[0] - 65.0);
+        ui.add_sized(
+            [avail_w, 16.0],
+            egui::Label::new(
+                egui::RichText::new(display_text)
+                    .monospace()
+                    .strong()
+                    .size(11.0)
+                    .color(display_color),
+            )
+            .truncate(true),
+        )
+        .on_hover_text(if stream_title.is_empty() {
+            "(No stream title set)"
+        } else {
+            stream_title
+        });
     });
 
     ui.add_space(10.0);
@@ -697,7 +707,8 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
     let btn_size = 92.0;
     let btn_gap = 12.0;
     let total_grid_w = 4.0 * btn_size + 3.0 * btn_gap;
-    let side_padding = ((ui.available_width() - total_grid_w) / 2.0).max(0.0);
+    let content_w = ui.available_width().min(STUDIO_WINDOW_SIZE[0] - 16.0);
+    let side_padding = ((content_w - total_grid_w) / 2.0).max(0.0);
 
     ui.horizontal(|ui| {
         ui.add_space(side_padding);
@@ -812,7 +823,8 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
                     .color(LABEL_COLOR),
             ),
         );
-        let slider_width = (ui.available_width() - readout_width - 8.0).max(100.0);
+        let avail_w = ui.available_width().min(STUDIO_WINDOW_SIZE[0] - 16.0 - label_width);
+        let slider_width = (avail_w - readout_width - 8.0).max(100.0);
         let mut vol = state.hardware.master_volume;
         let peak = state.hardware.live_audio_peak;
         let resp = studio_mixer_slider(ui, &mut vol, 0.0..=1.0, peak, true, slider_width);
@@ -848,7 +860,8 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
             ),
         );
 
-        let slider_width = (ui.available_width() - readout_width - 8.0).max(100.0);
+        let avail_w = ui.available_width().min(STUDIO_WINDOW_SIZE[0] - 16.0 - label_width);
+        let slider_width = (avail_w - readout_width - 8.0).max(100.0);
         let mut mic_vol = state.mic.config.volume;
         let mic_peak = state.hardware.live_mic_peak;
         let mic_active = state.mic.config.enabled;
@@ -910,7 +923,7 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
         .inner_margin(egui::Margin::symmetric(10.0, 8.0))
         .rounding(egui::Rounding::same(4.0))
         .show(ui, |ui| {
-            ui.set_width(ui.available_width());
+            ui.set_width(ui.available_width().min(STUDIO_WINDOW_SIZE[0] - 16.0));
 
             match &status {
                 BroadcastStatus::Live { started_at } => {
@@ -1074,5 +1087,17 @@ mod tests {
         assert!(!state.twitch.config.alerts_enabled);
         state.twitch.config.alerts_enabled = true;
         assert!(state.twitch.config.alerts_enabled);
+    }
+
+    #[test]
+    fn test_studio_contents_renders_with_long_stream_title() {
+        let mut state = AppState::default();
+        state.twitch.stream_info.original_title = "Late night comfy read stream | Streaming until my son wakes up and asks for breakfast | Playing retro games".to_string();
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                draw_studio_contents(&mut state, ui);
+            });
+        });
     }
 }
