@@ -11,20 +11,36 @@ const LABEL_COLOR: egui::Color32 = egui::Color32::from_rgb(153, 153, 153);
 const MUTED_COLOR: egui::Color32 = egui::Color32::from_rgb(119, 119, 119);
 pub const STUDIO_WINDOW_SIZE: [f32; 2] = [480.0, 410.0];
 
-/// Computes the stream health status string and display color based on broadcast state and dropped frames.
+/// Calculates the percentage of dropped frames/blocks out of total stream units.
+pub fn compute_drop_percentage(frames_sent: u64, video_drops: u64, audio_drops: u64) -> f64 {
+    let total_drops = video_drops.saturating_add(audio_drops);
+    let total_units = frames_sent.saturating_add(total_drops);
+    if total_units == 0 {
+        0.0
+    } else {
+        (total_drops as f64 / total_units as f64) * 100.0
+    }
+}
+
+/// Computes the stream health status string and display color based on broadcast state and frame delivery rates.
 pub fn evaluate_stream_health(
     status: &BroadcastStatus,
+    frames_sent: u64,
     video_drops: u64,
     audio_drops: u64,
 ) -> (&'static str, egui::Color32) {
     match status {
         BroadcastStatus::Live { .. } => {
             let total_drops = video_drops.saturating_add(audio_drops);
-            if total_drops == 0 {
+            let total_units = frames_sent.saturating_add(total_drops);
+            let drop_pct = compute_drop_percentage(frames_sent, video_drops, audio_drops);
+
+            // Startup grace: fewer than 300 frames (~5s at 60fps) with small initial drops is Excellent
+            if total_drops == 0 || (total_units < 300 && total_drops <= 3) || drop_pct < 0.5 {
                 ("Excellent", egui::Color32::from_rgb(80, 220, 120))
-            } else if total_drops < 20 {
+            } else if drop_pct < 1.5 {
                 ("Good", egui::Color32::from_rgb(168, 224, 99))
-            } else if total_drops < 100 {
+            } else if drop_pct < 5.0 {
                 ("Fair", egui::Color32::from_rgb(241, 196, 15))
             } else {
                 ("Poor", egui::Color32::from_rgb(231, 76, 60))
@@ -904,17 +920,19 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
     ui.add_space(14.0);
 
     // 5. Stream Diagnostic Data at the bottom
-    let (fps, kbps, vdrop, adrop) = if let Some(m) = state.twitch.broadcast_metrics() {
+    let (fps, kbps, vdrop, adrop, frames_sent) = if let Some(m) = state.twitch.broadcast_metrics() {
         let fps = m.current_fps.load(Ordering::Relaxed) as f32 / 10.0;
         let kbps = m.current_bitrate_kbps.load(Ordering::Relaxed);
         let vdrop = m.video_dropped.load(Ordering::Relaxed);
         let adrop = m.audio_dropped.load(Ordering::Relaxed);
-        (fps, kbps, vdrop, adrop)
+        let frames_sent = m.frames_sent.load(Ordering::Relaxed);
+        (fps, kbps, vdrop, adrop, frames_sent)
     } else {
-        (0.0, 0, 0, 0)
+        (0.0, 0, 0, 0, 0)
     };
 
-    let (health_str, health_color) = evaluate_stream_health(&status, vdrop, adrop);
+    let (health_str, health_color) = evaluate_stream_health(&status, frames_sent, vdrop, adrop);
+    let drop_pct = compute_drop_percentage(frames_sent, vdrop, adrop);
     let viewer_count = state.twitch.viewer_count();
 
     egui::Frame::none()
@@ -947,7 +965,11 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
                                 .strong()
                                 .size(11.0)
                                 .color(health_color),
-                        );
+                        )
+                        .on_hover_text(format!(
+                            "Frame drop rate: {drop_pct:.2}% (V: {vdrop}, A: {adrop} dropped out of {} total)",
+                            frames_sent.saturating_add(vdrop)
+                        ));
                         ui.label(
                             egui::RichText::new(format!("  |  Viewers: {viewers_str}"))
                                 .monospace()
@@ -959,9 +981,14 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
 
                     ui.add_space(2.0);
                     ui.horizontal(|ui| {
+                        let drop_pct_str = if drop_pct > 0.0 && drop_pct < 0.1 {
+                            "<0.1%".to_string()
+                        } else {
+                            format!("{drop_pct:.1}%")
+                        };
                         ui.label(
                             egui::RichText::new(format!(
-                                "Bitrate: {kbps} kbps  |  Dropped Frames: V {vdrop} / A {adrop}"
+                                "Bitrate: {kbps} kbps  |  Dropped: V {vdrop} / A {adrop} ({drop_pct_str})"
                             ))
                             .monospace()
                             .size(10.5)
@@ -1026,13 +1053,13 @@ mod tests {
 
     #[test]
     fn test_evaluate_stream_health_offline_and_connecting() {
-        let (offline_health, _) = evaluate_stream_health(&BroadcastStatus::Offline, 0, 0);
+        let (offline_health, _) = evaluate_stream_health(&BroadcastStatus::Offline, 0, 0, 0);
         assert_eq!(offline_health, "Offline");
 
-        let (connecting_health, _) = evaluate_stream_health(&BroadcastStatus::Connecting, 0, 0);
+        let (connecting_health, _) = evaluate_stream_health(&BroadcastStatus::Connecting, 0, 0, 0);
         assert_eq!(connecting_health, "Connecting…");
 
-        let (err_health, _) = evaluate_stream_health(&BroadcastStatus::Error("err".into()), 0, 0);
+        let (err_health, _) = evaluate_stream_health(&BroadcastStatus::Error("err".into()), 0, 0, 0);
         assert_eq!(err_health, "Error");
     }
 
@@ -1042,17 +1069,29 @@ mod tests {
             started_at: Instant::now(),
         };
 
-        let (health, _) = evaluate_stream_health(&live, 0, 0);
+        // Flawless stream (0 drops)
+        let (health, _) = evaluate_stream_health(&live, 10_000, 0, 0);
         assert_eq!(health, "Excellent");
 
-        let (health, _) = evaluate_stream_health(&live, 10, 5);
+        // Real-world 2-hour session: 100 video drops out of 432,000 frames (0.027% drops -> Excellent!)
+        let (health, _) = evaluate_stream_health(&live, 432_000, 100, 20);
+        assert_eq!(health, "Excellent");
+
+        // Minor drops (< 1.5% -> Good)
+        let (health, _) = evaluate_stream_health(&live, 10_000, 80, 20);
         assert_eq!(health, "Good");
 
-        let (health, _) = evaluate_stream_health(&live, 50, 20);
+        // Moderate drops (< 5.0% -> Fair)
+        let (health, _) = evaluate_stream_health(&live, 10_000, 250, 50);
         assert_eq!(health, "Fair");
 
-        let (health, _) = evaluate_stream_health(&live, 80, 50);
+        // Severe drops (>= 5.0% -> Poor)
+        let (health, _) = evaluate_stream_health(&live, 10_000, 600, 100);
         assert_eq!(health, "Poor");
+
+        // Startup grace with a couple initialization drops (< 300 frames)
+        let (health, _) = evaluate_stream_health(&live, 120, 2, 0);
+        assert_eq!(health, "Excellent");
     }
 
     #[test]
