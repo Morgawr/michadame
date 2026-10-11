@@ -3,7 +3,9 @@
 use super::controls::{percent_slider_range, slider_item, sub_heading, technical_group};
 use crate::app::AppState;
 use crate::config::models::{StreamingAudioEncoder, StreamingVideoEncoder};
-use crate::twitch::{normalize_channel, AuthFlow, BroadcastStatus, ConnectionStatus, StreamStatus};
+use crate::twitch::{
+    normalize_channel, AlertTestKind, AuthFlow, BroadcastStatus, ConnectionStatus, StreamStatus,
+};
 use eframe::egui;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -201,6 +203,126 @@ pub fn draw_twitch_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             state.twitch.config_dirty = true;
             changed = true;
         }
+    });
+
+    ui.add_space(4.0);
+
+    technical_group(ui, "Video Alerts:", |ui| {
+        if ui
+            .checkbox(
+                &mut state.twitch.config.alerts_enabled,
+                "Inject alert notices into the video feed",
+            )
+            .on_hover_text(
+                "Draws animated on-screen cards for followers, subs, bits, and raids directly into the video.\nAlerts are drawn under CRT effects and are included in replays and broadcasts.",
+            )
+            .changed()
+        {
+            save_now = true;
+        }
+
+        ui.add_space(4.0);
+        let cfg = &mut state.twitch.config;
+        let mut dirty = false;
+
+        dirty |= slider_item(
+            ui,
+            "Duration:",
+            egui::Slider::new(&mut cfg.alerts_duration_secs, 2.0..=15.0)
+                .step_by(0.5)
+                .suffix(" s"),
+            Some("How long each alert notice remains on screen before sliding out."),
+        )
+        .changed();
+
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            label(ui, "Event Types:");
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    if ui.checkbox(&mut cfg.alert_follows, "Follows").changed() {
+                        dirty = true;
+                    }
+                    if ui.checkbox(&mut cfg.alert_subs, "Subscriptions").changed() {
+                        dirty = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.checkbox(&mut cfg.alert_bits, "Bits").changed() {
+                        dirty = true;
+                    }
+                    if ui.checkbox(&mut cfg.alert_raids, "Raids").changed() {
+                        dirty = true;
+                    }
+                });
+            });
+        });
+
+        if cfg.alert_bits {
+            dirty |= slider_item(
+                ui,
+                "Min Bits:",
+                egui::Slider::new(&mut cfg.alert_min_bits, 1..=5000),
+                Some("Ignore cheers below this amount."),
+            )
+            .changed();
+        }
+
+        if dirty {
+            state.twitch.config_dirty = true;
+            changed = true;
+        }
+
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            label(ui, "Test Alerts:");
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Test Follow")
+                        .on_hover_text("Trigger a simulated follower alert")
+                        .clicked()
+                    {
+                        state.twitch.alerts.trigger_test(AlertTestKind::Follow);
+                        changed = true;
+                    }
+                    if ui
+                        .button("Test Sub")
+                        .on_hover_text("Trigger a simulated subscriber alert")
+                        .clicked()
+                    {
+                        state.twitch.alerts.trigger_test(AlertTestKind::Sub);
+                        changed = true;
+                    }
+                    if ui
+                        .button("Test Gift Sub")
+                        .on_hover_text("Trigger a simulated gift sub alert")
+                        .clicked()
+                    {
+                        state.twitch.alerts.trigger_test(AlertTestKind::GiftSub);
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Test Bits")
+                        .on_hover_text("Trigger a simulated 500 bits cheer alert")
+                        .clicked()
+                    {
+                        state.twitch.alerts.trigger_test(AlertTestKind::Bits);
+                        changed = true;
+                    }
+                    if ui
+                        .button("Test Raid")
+                        .on_hover_text("Trigger a simulated raid alert")
+                        .clicked()
+                    {
+                        state.twitch.alerts.trigger_test(AlertTestKind::Raid);
+                        changed = true;
+                    }
+                });
+            });
+        });
     });
 
     ui.add_space(4.0);

@@ -16,8 +16,11 @@ use std::time::Instant;
 
 impl Default for AppState {
     fn default() -> Self {
+        let replay = crate::replay::Replay::default();
+        let mut twitch = crate::twitch::TwitchState::default();
+        twitch.audio_tap = Some(replay.audio.clone());
         Self {
-            replay: crate::replay::Replay::default(),
+            replay,
             hardware: HardwareState {
                 video_queue_drops: Arc::new(AtomicU64::new(0)),
                 audio_peak_amplitude: Arc::new(AtomicU64::new(0)),
@@ -157,7 +160,7 @@ impl Default for AppState {
             ocr: crate::ocr::OcrState::default(),
             dict: crate::dict::DictState::default(),
             bank: crate::bank::BankState::default(),
-            twitch: crate::twitch::TwitchState::default(),
+            twitch,
             mic: crate::app::models::MicState::default(),
             config_load_error: None,
             config_quarantine_path: None,

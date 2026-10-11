@@ -49,6 +49,15 @@ pub struct TwitchConfig {
     pub audio_encoder: StreamingAudioEncoder,
     pub ingest_server: String,
     pub stream_key: String,
+
+    // Video alerts (followers, subs, bits, raids)
+    pub alerts_enabled: bool,
+    pub alerts_duration_secs: f32,
+    pub alert_follows: bool,
+    pub alert_subs: bool,
+    pub alert_bits: bool,
+    pub alert_raids: bool,
+    pub alert_min_bits: u32,
 }
 
 impl Default for TwitchConfig {
@@ -74,6 +83,14 @@ impl Default for TwitchConfig {
             audio_encoder: StreamingAudioEncoder::Aac,
             ingest_server: "rtmps://live.twitch.tv:443/app/".into(),
             stream_key: String::new(),
+
+            alerts_enabled: false,
+            alerts_duration_secs: 5.0,
+            alert_follows: true,
+            alert_subs: true,
+            alert_bits: true,
+            alert_raids: true,
+            alert_min_bits: 1,
         }
     }
 }

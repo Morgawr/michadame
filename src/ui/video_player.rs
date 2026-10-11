@@ -606,6 +606,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         // Niconico chat comments, drawn by the renderer under the CRT effects.
         crate::ui::niconico::update(state, ctx, video_rect);
 
+        // Video alert notices, drawn by the renderer under the CRT effects.
+        crate::ui::alerts::update(state, ctx, video_rect);
+
         // Extra widget for local video player mode (scrub bar, play/pause/stop)
         if state.video_player.is_some() {
             draw_video_file_controls(state, ui, ctx, response.rect);

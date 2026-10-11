@@ -129,6 +129,11 @@ fn submit_to_route(
     }
 }
 
+struct ActiveAlertAudio {
+    samples: Vec<f32>,
+    playhead_frames: f64,
+}
+
 /// ALSA capture and microphone capture threads submit audio through this tap.
 pub struct AudioTap {
     enabled: AtomicBool,
@@ -142,6 +147,8 @@ pub struct AudioTap {
     broadcast_mic_route: Mutex<Option<AudioRoute>>,
     pub filter: std::sync::RwLock<crate::replay::config::AudioFilterConfig>,
     game_volume: Arc<AtomicU32>,
+    active_alert: Mutex<Option<ActiveAlertAudio>>,
+    last_game_submit: AtomicI64,
 }
 
 impl Default for AudioTap {
@@ -158,6 +165,8 @@ impl Default for AudioTap {
             broadcast_mic_route: Mutex::new(None),
             filter: std::sync::RwLock::new(crate::replay::config::AudioFilterConfig::default()),
             game_volume: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            active_alert: Mutex::new(None),
+            last_game_submit: AtomicI64::new(0),
         }
     }
 }
@@ -188,12 +197,122 @@ impl AudioTap {
         self.mic_discontinuity.store(true, Ordering::Relaxed);
         self.broadcast_mic_discontinuity.store(true, Ordering::Relaxed);
     }
+    /// Plays an alert chime into the stream broadcast and replay routes.
+    ///
+    /// If ALSA game audio is actively flowing, the chime samples are queued and resampled
+    /// on-the-fly to match the ALSA capture rate (e.g. 44.1 kHz, 48 kHz) and channel layout.
+    /// If ALSA audio is idle/stopped, the chime is directly submitted as 48 kHz stereo audio blocks.
+    pub fn play_alert(&self, samples: &[f32]) {
+        if !self.is_enabled() {
+            return;
+        }
+        let now = now_us();
+        let last_submit = self.last_game_submit.load(Ordering::Relaxed);
+
+        if last_submit > 0 && (now - last_submit) <= 150_000 {
+            // ALSA capture is actively running; queue samples to be resampled and mixed in submit()
+            let mut guard = self.active_alert.lock().unwrap();
+            *guard = Some(ActiveAlertAudio {
+                samples: samples.to_vec(),
+                playhead_frames: 0.0,
+            });
+        } else {
+            // ALSA capture is idle or not running; submit directly to broadcast and replay routes
+            let chunk_size = 1920 * 2; // 40ms of 48 kHz stereo
+            let mut offset = 0;
+            let mut at = now;
+            while offset < samples.len() {
+                let end = (offset + chunk_size).min(samples.len());
+                let chunk = &samples[offset..end];
+                submit_to_route(&self.route, &self.discontinuity, chunk, 48000, 2, at);
+                submit_to_route(
+                    &self.broadcast_route,
+                    &self.broadcast_discontinuity,
+                    chunk,
+                    48000,
+                    2,
+                    at,
+                );
+                at += (chunk.len() as i64 / 2) * 1_000_000 / 48000;
+                offset = end;
+            }
+        }
+    }
     pub fn submit(&self, samples: &[f32], rate: u32, channels: u16, at: i64) {
+        self.last_game_submit.store(now_us(), Ordering::Relaxed);
         if !self.enabled.load(Ordering::Relaxed) {
             return;
         }
-        submit_to_route(&self.route, &self.discontinuity, samples, rate, channels, at);
-        submit_to_route(&self.broadcast_route, &self.broadcast_discontinuity, samples, rate, channels, at);
+
+        let mixed_buf;
+        let effective_samples = {
+            let mut alert_guard = self.active_alert.lock().unwrap();
+            if let Some(active) = alert_guard.as_mut() {
+                let src_frames = active.samples.len() / 2;
+                if src_frames == 0 || rate == 0 || channels == 0 {
+                    *alert_guard = None;
+                    samples
+                } else {
+                    let mut buf = samples.to_vec();
+                    let frames = buf.len() / channels as usize;
+                    let step = 48000.0 / rate as f64;
+                    let mut finished = false;
+
+                    for k in 0..frames {
+                        if active.playhead_frames >= src_frames as f64 {
+                            finished = true;
+                            break;
+                        }
+                        let pos = active.playhead_frames;
+                        let idx = pos.floor() as usize;
+                        let frac = (pos - idx as f64) as f32;
+
+                        let idx0 = idx.saturating_sub(1);
+                        let idx1 = idx.min(src_frames - 1);
+                        let idx2 = (idx + 1).min(src_frames - 1);
+                        let idx3 = (idx + 2).min(src_frames - 1);
+
+                        // High-fidelity Catmull-Rom cubic interpolation per channel
+                        let mut ch_samples = [0.0f32; 2];
+                        for c in 0..2 {
+                            let p0 = active.samples[idx0 * 2 + c];
+                            let p1 = active.samples[idx1 * 2 + c];
+                            let p2 = active.samples[idx2 * 2 + c];
+                            let p3 = active.samples[idx3 * 2 + c];
+
+                            let c0 = p1;
+                            let c1 = 0.5 * (p2 - p0);
+                            let c2 = p0 - 2.5 * p1 + 2.0 * p2 - 0.5 * p3;
+                            let c3 = 0.5 * (p3 - p0) + 1.5 * (p1 - p2);
+
+                            ch_samples[c] = ((c3 * frac + c2) * frac + c1) * frac + c0;
+                        }
+
+                        if channels == 1 {
+                            let mono_mix = (ch_samples[0] + ch_samples[1]) * 0.5;
+                            buf[k] = (buf[k] + mono_mix).clamp(-1.0, 1.0);
+                        } else {
+                            let base = k * channels as usize;
+                            buf[base] = (buf[base] + ch_samples[0]).clamp(-1.0, 1.0);
+                            buf[base + 1] = (buf[base + 1] + ch_samples[1]).clamp(-1.0, 1.0);
+                        }
+
+                        active.playhead_frames += step;
+                    }
+
+                    if finished || active.playhead_frames >= src_frames as f64 {
+                        *alert_guard = None;
+                    }
+                    mixed_buf = buf;
+                    &mixed_buf[..]
+                }
+            } else {
+                samples
+            }
+        };
+
+        submit_to_route(&self.route, &self.discontinuity, effective_samples, rate, channels, at);
+        submit_to_route(&self.broadcast_route, &self.broadcast_discontinuity, effective_samples, rate, channels, at);
     }
     pub fn submit_mic(&self, samples: &[f32], rate: u32, channels: u16, at: i64) {
         if !self.enabled.load(Ordering::Relaxed) {
@@ -863,5 +982,80 @@ mod tests {
         assert_eq!(loaded.replay.history_seconds, 600);
         assert_eq!(loaded.replay.keys, [1, 2, 3, 4, 5, 6]);
         assert!(Replay::default().runtime.is_none());
+    }
+
+    #[test]
+    fn test_audio_tap_play_alert_idle_submits_blocks() {
+        let (tap, rx, free, _) = test_tap(4);
+        let chime = vec![0.3f32; 3840]; // 1 full 40ms block of stereo
+        tap.play_alert(&chime);
+
+        let block = rx.try_recv().expect("Direct alert submission should send block when idle");
+        assert_eq!(block.len, 3840);
+        assert!((block.samples[0] - 0.3).abs() < 1e-4);
+        free.send(block).unwrap();
+    }
+
+    #[test]
+    fn test_audio_tap_play_alert_active_mixes_samples() {
+        let (tap, rx, free, _) = test_tap(4);
+        // Simulate active ALSA submission
+        tap.submit(&[0.2f32; 3840], 48000, 2, now_us());
+        let _ = rx.try_recv();
+
+        // Queue alert while actively flowing
+        let chime = vec![0.3f32; 3840];
+        tap.play_alert(&chime);
+
+        // Next submit should mix incoming game audio (0.2) + chime (0.3) = 0.5
+        tap.submit(&[0.2f32; 3840], 48000, 2, now_us());
+        let mixed = rx.try_recv().expect("Should receive mixed block");
+        assert_eq!(mixed.len, 3840);
+        assert!((mixed.samples[0] - 0.5).abs() < 1e-4);
+        free.send(mixed).unwrap();
+    }
+
+    #[test]
+    fn test_audio_tap_play_alert_active_mixes_44100_preserving_pitch_and_timing() {
+        let (tap, rx, free, _) = test_tap(4);
+        // Simulate active 44.1 kHz ALSA capture
+        tap.submit(&[0.1f32; 3528], 44100, 2, now_us());
+        let _ = rx.try_recv();
+
+        // 48 kHz stereo constant chime (0.4)
+        let chime = vec![0.4f32; 4800];
+        tap.play_alert(&chime);
+
+        // Submit next 44.1 kHz block: should resample and mix 0.1 + 0.4 = 0.5
+        tap.submit(&[0.1f32; 3528], 44100, 2, now_us());
+        let mixed = rx.try_recv().expect("Should receive mixed block at 44100");
+        assert_eq!(mixed.rate, 44100);
+        assert_eq!(mixed.channels, 2);
+        assert!((mixed.samples[0] - 0.5).abs() < 1e-3);
+        free.send(mixed).unwrap();
+    }
+
+    #[test]
+    fn test_audio_tap_play_alert_mono_downmix() {
+        let (tap, rx, free, _) = test_tap(4);
+        // Simulate active mono capture
+        tap.submit(&[0.1f32; 1920], 48000, 1, now_us());
+        let _ = rx.try_recv();
+
+        // Stereo chime: L=0.6, R=0.2 -> Mono average = 0.4
+        let mut chime = Vec::with_capacity(3840);
+        for _ in 0..1920 {
+            chime.push(0.6f32);
+            chime.push(0.2f32);
+        }
+        tap.play_alert(&chime);
+
+        tap.submit(&[0.1f32; 1920], 48000, 1, now_us());
+        let mixed = rx.try_recv().expect("Should receive mixed mono block");
+        assert_eq!(mixed.rate, 48000);
+        assert_eq!(mixed.channels, 1);
+        // 0.1 game + 0.4 average chime = 0.5
+        assert!((mixed.samples[0] - 0.5).abs() < 1e-3);
+        free.send(mixed).unwrap();
     }
 }

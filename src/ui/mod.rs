@@ -15,6 +15,7 @@ pub mod tag_input;
 pub mod twitch;
 pub mod twitch_overlay;
 pub mod niconico;
+pub mod alerts;
 pub mod studio;
 pub mod video_player;
 

@@ -1,12 +1,17 @@
 //! Twitch integration: chat connection state, messages and login.
 
+pub mod alerts;
+pub mod alert_audio;
 pub mod auth;
 pub mod broadcast;
 pub mod emotes;
+pub mod eventsub;
 pub mod irc;
 pub mod live;
 pub mod stream_info;
 
+#[allow(unused_imports)]
+pub use alerts::{ActiveAlert, AlertEvent, AlertKind, AlertTestKind, AlertsState};
 pub use broadcast::{BroadcastHandle, BroadcastMetrics, BroadcastStatus};
 pub use live::StreamStatus;
 #[allow(unused_imports)]
@@ -125,10 +130,14 @@ pub struct TwitchState {
     pub stream_info: StreamInfoState,
     pub stream_info_loaded: bool,
     pub studio_active: bool,
+    pub alerts: AlertsState,
+    pub alert_player: alert_audio::AlertSoundPlayer,
+    pub audio_tap: Option<Arc<crate::replay::AudioTap>>,
 
     self_display_name: Option<String>,
     self_color: Option<egui::Color32>,
     worker: Option<irc::WorkerHandle>,
+    eventsub: Option<eventsub::EventSubHandle>,
     live_poller: Option<live::LivePoller>,
     auth_rx: Option<Receiver<DeviceFlowEvent>>,
     auth_cancel: Option<Arc<AtomicBool>>,
@@ -161,14 +170,33 @@ impl Default for TwitchState {
             stream_info: StreamInfoState::default(),
             stream_info_loaded: false,
             studio_active: false,
+            alerts: AlertsState::default(),
+            alert_player: alert_audio::AlertSoundPlayer::default(),
+            audio_tap: None,
             self_display_name: None,
             self_color: None,
             worker: None,
+            eventsub: None,
             live_poller: None,
             auth_rx: None,
             auth_cancel: None,
             token_loaded: false,
             notifications: Vec::new(),
+        }
+    }
+}
+
+impl TwitchState {
+    /// Updates the local alert sound playback volume to follow the stream master volume.
+    pub fn set_master_volume(&self, volume: f32) {
+        self.alert_player.set_volume(volume);
+    }
+
+    /// Plays the retro alert chime both locally on PC and into the broadcast / replay audio stream.
+    pub fn play_alert_sound(&self) {
+        self.alert_player.play_local();
+        if let Some(tap) = &self.audio_tap {
+            tap.play_alert(self.alert_player.chime_samples());
         }
     }
 }
@@ -321,6 +349,23 @@ impl TwitchState {
         self.overlay_rect.map_or(false, |r| r.contains(pos))
     }
 
+    pub fn enqueue_alert(&mut self, event: AlertEvent) {
+        if !self.config.alerts_enabled {
+            return;
+        }
+        let allow = match &event.kind {
+            AlertKind::Follow { .. } => self.config.alert_follows,
+            AlertKind::Subscription { .. } => self.config.alert_subs,
+            AlertKind::Bits { amount, .. } => {
+                self.config.alert_bits && *amount >= self.config.alert_min_bits
+            }
+            AlertKind::Raid { .. } => self.config.alert_raids,
+        };
+        if allow {
+            self.alerts.enqueue(event);
+        }
+    }
+
     pub fn take_notifications(&mut self) -> Vec<(bool, String)> {
         std::mem::take(&mut self.notifications)
     }
@@ -395,9 +440,48 @@ impl TwitchState {
                 changed = true;
             }
         }
+        self.sync_eventsub(ctx);
+        if let Some(es) = &self.eventsub {
+            let new_events: Vec<AlertEvent> = es.events.try_iter().collect();
+            if !new_events.is_empty() {
+                for ev in new_events {
+                    self.enqueue_alert(ev);
+                }
+                changed = true;
+            }
+        }
+        let default_alert_duration =
+            Duration::from_secs_f32(self.config.alerts_duration_secs.clamp(1.0, 30.0));
+        if self.alerts.update(now, default_alert_duration).is_some() {
+            ctx.request_repaint();
+            changed = true;
+        }
+        if self.config.alerts_enabled && self.alerts.take_just_activated() {
+            self.play_alert_sound();
+        }
+
         self.trim_messages(now);
         self.trim_comments(now);
         changed
+    }
+
+    fn sync_eventsub(&mut self, ctx: &egui::Context) {
+        let wanted = self.config.alerts_enabled && self.config.alert_follows && self.token.is_some();
+        if !wanted {
+            self.eventsub = None;
+            return;
+        }
+        let Some(token) = &self.token else {
+            self.eventsub = None;
+            return;
+        };
+        let up_to_date = self
+            .eventsub
+            .as_ref()
+            .map_or(false, |es| es.access_token == token.access_token);
+        if !up_to_date {
+            self.eventsub = Some(eventsub::spawn(token.clone(), Some(ctx.clone())));
+        }
     }
 
     /// Poll Helix for the real live status while the overlay is on. Needs a login
@@ -519,10 +603,136 @@ impl TwitchState {
         match msg.command.as_str() {
             "PRIVMSG" => {
                 if let Some(chat) = self.chat_from_privmsg(msg, now) {
+                    if self.config.alerts_enabled && self.config.alert_bits {
+                        if let Some(bits_str) = msg.tag("bits") {
+                            if let Ok(bits) = bits_str.parse::<u32>() {
+                                if bits >= self.config.alert_min_bits {
+                                    let raw_text = msg.params.get(1).map(String::as_str).unwrap_or("");
+                                    let text = raw_text
+                                        .strip_prefix("\u{1}ACTION ")
+                                        .map(|t| t.trim_end_matches('\u{1}'))
+                                        .unwrap_or(raw_text)
+                                        .trim()
+                                        .to_string();
+                                    self.enqueue_alert(AlertEvent {
+                                        id: msg.tag("id").map(str::to_string).unwrap_or_else(|| {
+                                            format!("bits-{}-{}", chat.login, now.elapsed().as_nanos())
+                                        }),
+                                        kind: AlertKind::Bits {
+                                            user: chat.display_name.clone(),
+                                            amount: bits,
+                                            message: if text.is_empty() { None } else { Some(text) },
+                                        },
+                                        timestamp: now,
+                                    });
+                                }
+                            }
+                        }
+                    }
                     self.push_chat(chat, now);
                 }
             }
             "USERNOTICE" => {
+                if self.config.alerts_enabled {
+                    let msg_id = msg.tag("msg-id").unwrap_or_default();
+                    match msg_id {
+                        "sub" | "resub" => {
+                            if self.config.alert_subs {
+                                let user = msg
+                                    .tag("display-name")
+                                    .or_else(|| msg.tag("login"))
+                                    .unwrap_or("Someone")
+                                    .to_string();
+                                let tier = match msg.tag("msg-param-sub-plan") {
+                                    Some("2000") => "Tier 2".to_string(),
+                                    Some("3000") => "Tier 3".to_string(),
+                                    Some("Prime") => "Prime".to_string(),
+                                    _ => "Tier 1".to_string(),
+                                };
+                                let months = msg
+                                    .tag("msg-param-cumulative-months")
+                                    .and_then(|m| m.parse::<u32>().ok())
+                                    .unwrap_or(1);
+                                let message = msg.trailing().filter(|m| !m.trim().is_empty()).map(str::to_string);
+                                self.enqueue_alert(AlertEvent {
+                                    id: msg.tag("id").map(str::to_string).unwrap_or_else(|| {
+                                        format!("sub-{user}-{}", now.elapsed().as_nanos())
+                                    }),
+                                    kind: AlertKind::Subscription {
+                                        user,
+                                        tier,
+                                        months,
+                                        is_gift: false,
+                                        gifter: None,
+                                        message,
+                                    },
+                                    timestamp: now,
+                                });
+                            }
+                        }
+                        "subgift" | "submysterygift" => {
+                            if self.config.alert_subs {
+                                let gifter = msg
+                                    .tag("display-name")
+                                    .or_else(|| msg.tag("login"))
+                                    .unwrap_or("An anonymous gifter")
+                                    .to_string();
+                                let recipient = msg
+                                    .tag("msg-param-recipient-display-name")
+                                    .or_else(|| msg.tag("msg-param-recipient-user-name"))
+                                    .map(str::to_string);
+                                let count = msg
+                                    .tag("msg-param-mass-gift-count")
+                                    .and_then(|c| c.parse::<u32>().ok());
+                                let tier = match msg.tag("msg-param-sub-plan") {
+                                    Some("2000") => "Tier 2".to_string(),
+                                    Some("3000") => "Tier 3".to_string(),
+                                    _ => "Tier 1".to_string(),
+                                };
+                                self.enqueue_alert(AlertEvent {
+                                    id: msg.tag("id").map(str::to_string).unwrap_or_else(|| {
+                                        format!("gift-{gifter}-{}", now.elapsed().as_nanos())
+                                    }),
+                                    kind: AlertKind::Subscription {
+                                        user: recipient.unwrap_or_else(|| {
+                                            format!("{} community members", count.unwrap_or(1))
+                                        }),
+                                        tier,
+                                        months: 1,
+                                        is_gift: true,
+                                        gifter: Some(gifter),
+                                        message: None,
+                                    },
+                                    timestamp: now,
+                                });
+                            }
+                        }
+                        "raid" => {
+                            if self.config.alert_raids {
+                                let raider = msg
+                                    .tag("msg-param-displayName")
+                                    .or_else(|| msg.tag("msg-param-login"))
+                                    .unwrap_or("A raider")
+                                    .to_string();
+                                let viewers = msg
+                                    .tag("msg-param-viewerCount")
+                                    .and_then(|v| v.parse::<u32>().ok())
+                                    .unwrap_or(0);
+                                self.enqueue_alert(AlertEvent {
+                                    id: msg.tag("id").map(str::to_string).unwrap_or_else(|| {
+                                        format!("raid-{raider}-{}", now.elapsed().as_nanos())
+                                    }),
+                                    kind: AlertKind::Raid {
+                                        user: raider,
+                                        viewers,
+                                    },
+                                    timestamp: now,
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 if let Some(system) = msg.tag("system-msg") {
                     self.messages.push_back(ChatMessage::system(system, now));
                 }
@@ -940,5 +1150,129 @@ mod tests {
             }
         }
         assert_eq!(overlaps, 0, "{ys:?}");
+    }
+
+    #[test]
+    fn video_alerts_parsed_from_irc_and_filter_settings() {
+        let mut state = TwitchState::default();
+        let now = Instant::now();
+
+        // 1. Alerts disabled by default -> nothing enqueued
+        state.handle_irc(
+            &irc("@bits=100;display-name=CheerGuy :cheerguy!cheerguy@tmi.twitch.tv PRIVMSG #c :cheer100 awesome!"),
+            now,
+        );
+        assert!(state.alerts.queue.is_empty());
+
+        // 2. Enable alerts
+        state.config.alerts_enabled = true;
+        state.handle_irc(
+            &irc("@id=b1;bits=100;display-name=CheerGuy :cheerguy!cheerguy@tmi.twitch.tv PRIVMSG #c :cheer100 awesome!"),
+            now,
+        );
+        assert_eq!(state.alerts.queue.len(), 1);
+        let alert = state.alerts.queue.pop_front().unwrap();
+        assert_eq!(
+            alert.kind,
+            AlertKind::Bits {
+                user: "CheerGuy".to_string(),
+                amount: 100,
+                message: Some("cheer100 awesome!".to_string()),
+            }
+        );
+
+        // 3. Min bits filter
+        state.config.alert_min_bits = 500;
+        state.handle_irc(
+            &irc("@id=b2;bits=250;display-name=SmallCheer :sc!sc@tmi.twitch.tv PRIVMSG #c :cheer250"),
+            now,
+        );
+        assert!(state.alerts.queue.is_empty(), "cheer below min bits ignored");
+
+        state.handle_irc(
+            &irc("@id=b3;bits=500;display-name=BigCheer :bc!bc@tmi.twitch.tv PRIVMSG #c :cheer500"),
+            now,
+        );
+        assert_eq!(state.alerts.queue.len(), 1);
+        state.alerts.queue.clear();
+        state.config.alert_min_bits = 1;
+
+        // 4. Sub and Resub
+        state.handle_irc(
+            &irc("@id=s1;msg-id=sub;display-name=SubViewer;msg-param-sub-plan=1000 :tmi.twitch.tv USERNOTICE #c :Hyped!"),
+            now,
+        );
+        assert_eq!(state.alerts.queue.len(), 1);
+        let alert = state.alerts.queue.pop_front().unwrap();
+        assert_eq!(
+            alert.kind,
+            AlertKind::Subscription {
+                user: "SubViewer".to_string(),
+                tier: "Tier 1".to_string(),
+                months: 1,
+                is_gift: false,
+                gifter: None,
+                message: Some("Hyped!".to_string()),
+            }
+        );
+
+        // 5. Gift Sub
+        state.handle_irc(
+            &irc("@id=g1;msg-id=subgift;display-name=GenerousGifter;msg-param-recipient-display-name=LuckyRecipient;msg-param-sub-plan=2000 :tmi.twitch.tv USERNOTICE #c"),
+            now,
+        );
+        assert_eq!(state.alerts.queue.len(), 1);
+        let alert = state.alerts.queue.pop_front().unwrap();
+        assert_eq!(
+            alert.kind,
+            AlertKind::Subscription {
+                user: "LuckyRecipient".to_string(),
+                tier: "Tier 2".to_string(),
+                months: 1,
+                is_gift: true,
+                gifter: Some("GenerousGifter".to_string()),
+                message: None,
+            }
+        );
+
+        // 6. Raid
+        state.handle_irc(
+            &irc("@id=r1;msg-id=raid;msg-param-displayName=FellowStreamer;msg-param-viewerCount=75 :tmi.twitch.tv USERNOTICE #c"),
+            now,
+        );
+        assert_eq!(state.alerts.queue.len(), 1);
+        let alert = state.alerts.queue.pop_front().unwrap();
+        assert_eq!(
+            alert.kind,
+            AlertKind::Raid {
+                user: "FellowStreamer".to_string(),
+                viewers: 75,
+            }
+        );
+
+        // 7. Individual type toggles
+        state.config.alert_raids = false;
+        state.handle_irc(
+            &irc("@id=r2;msg-id=raid;msg-param-displayName=AnotherRaider;msg-param-viewerCount=10 :tmi.twitch.tv USERNOTICE #c"),
+            now,
+        );
+        assert!(state.alerts.queue.is_empty(), "raid alerts disabled");
+    }
+
+    #[test]
+    fn test_alert_sound_dispatch_on_activation() {
+        let mut state = TwitchState::default();
+        state.config.alerts_enabled = true;
+        let tap = Arc::new(crate::replay::AudioTap::default());
+        state.audio_tap = Some(tap.clone());
+
+        state.alerts.trigger_test(AlertTestKind::Follow);
+        assert!(state.alerts.active.is_none());
+        assert_eq!(state.alerts.queue.len(), 1);
+
+        // When poll runs, alert is activated and play_alert_sound is called
+        let ctx = egui::Context::default();
+        state.poll(&ctx);
+        assert!(state.alerts.active.is_some());
     }
 }

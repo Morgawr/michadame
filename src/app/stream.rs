@@ -595,6 +595,7 @@ impl AppState {
                 .send(crate::video::player::PlayerCommand::SetVolume(volume));
         }
         self.replay.set_game_volume(volume);
+        self.twitch.set_master_volume(volume);
     }
 }
 
@@ -862,14 +863,17 @@ mod tests {
         state.set_master_volume(0.5);
         assert_eq!(state.hardware.master_volume, 0.5);
         assert_eq!(state.replay.audio.game_volume(), 0.5);
+        assert_eq!(state.twitch.alert_player.volume(), 0.5);
 
         // Clamping bounds
         state.set_master_volume(-0.5);
         assert_eq!(state.hardware.master_volume, 0.0);
         assert_eq!(state.replay.audio.game_volume(), 0.0);
+        assert_eq!(state.twitch.alert_player.volume(), 0.0);
 
         state.set_master_volume(1.5);
         assert_eq!(state.hardware.master_volume, 1.0);
         assert_eq!(state.replay.audio.game_volume(), 1.0);
+        assert_eq!(state.twitch.alert_player.volume(), 1.0);
     }
 }

@@ -411,7 +411,7 @@ fn write_raw(stream: &mut TlsStream, data: &str) -> std::io::Result<()> {
     stream.flush()
 }
 
-fn tls_config() -> Arc<rustls::ClientConfig> {
+pub(crate) fn tls_config() -> Arc<rustls::ClientConfig> {
     static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
     CONFIG
         .get_or_init(|| {

@@ -204,6 +204,9 @@ pub struct CrtFilterRenderer {
     /// Niconico chat comments, drawn under the CRT post effects and kept in
     /// replays/mining captures.
     pub comment_primitives: Vec<egui::ClippedPrimitive>,
+    /// Twitch video alerts, drawn under the CRT post effects and kept in
+    /// replays/mining captures.
+    pub alert_primitives: Vec<egui::ClippedPrimitive>,
     popup_prog: glow::Program,
     popup_vao: glow::VertexArray,
     popup_vbo: glow::Buffer,
@@ -903,6 +906,7 @@ impl CrtFilterRenderer {
                 night_glow_intensity_loc,
                 popup_primitives: Vec::new(),
                 comment_primitives: Vec::new(),
+                alert_primitives: Vec::new(),
                 popup_prog,
                 popup_vao,
                 popup_vbo,
@@ -1598,7 +1602,8 @@ impl CrtFilterRenderer {
                 .unwrap_or(false);
             let has_popup = !skip_popup && !self.popup_primitives.is_empty();
             let has_comments = !self.comment_primitives.is_empty();
-            let has_overlay = has_popup || has_comments;
+            let has_alerts = !self.alert_primitives.is_empty();
+            let has_overlay = has_popup || has_comments || has_alerts;
             let has_mouse = software_mouse_pos.is_some();
             let has_post = run_cathode || run_glass || has_overlay || has_mouse;
 
@@ -1768,6 +1773,22 @@ impl CrtFilterRenderer {
                     b_boost,
                 );
                 self.comment_primitives.clear();
+            }
+
+            if has_alerts {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
+                gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+                self.draw_overlay_primitives(
+                    gl,
+                    painter,
+                    &self.alert_primitives,
+                    output_size,
+                    widget_rect,
+                    s_mask,
+                    scan_str,
+                    b_boost,
+                );
+                self.alert_primitives.clear();
             }
 
             if has_popup {
@@ -2118,7 +2139,8 @@ impl CrtFilterRenderer {
                 .unwrap_or(false);
             let has_popup = !self.popup_primitives.is_empty();
             let has_comments = !self.comment_primitives.is_empty();
-            let has_overlay = has_popup || has_comments;
+            let has_alerts = !self.alert_primitives.is_empty();
+            let has_overlay = has_popup || has_comments || has_alerts;
             let has_post = run_cathode || run_glass || has_overlay;
 
             let (upstream_target_fbo, cathode_target_fbo, glass_target_fbo) =
@@ -2175,6 +2197,22 @@ impl CrtFilterRenderer {
                     1.0,
                 );
                 self.comment_primitives.clear();
+            }
+
+            if has_alerts {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
+                gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+                self.draw_overlay_primitives(
+                    gl,
+                    painter,
+                    &self.alert_primitives,
+                    output_size,
+                    widget_rect,
+                    0.0,
+                    0.0,
+                    1.0,
+                );
+                self.alert_primitives.clear();
             }
 
             if has_popup {

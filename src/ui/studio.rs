@@ -51,6 +51,7 @@ pub enum DeckButtonKind {
     ReplayBuffer,
     Microphone,
     ScrollingChat,
+    Alerts,
 }
 
 /// Renders a square "Stream Deck" hardware button.
@@ -274,6 +275,46 @@ pub fn draw_deck_button(
                         egui::pos2(icon_center.x + 6.0, icon_center.y + 0.5),
                     ],
                     egui::Stroke::new(1.8, icon_color),
+                );
+            }
+            DeckButtonKind::Alerts => {
+                // Vector notification bell icon
+                // 1. Top hanger loop
+                painter.circle_stroke(
+                    egui::pos2(icon_center.x, icon_center.y - 10.5),
+                    2.2,
+                    egui::Stroke::new(1.8, icon_color),
+                );
+
+                // 2. Bell dome body
+                let bell_pts = [
+                    egui::pos2(icon_center.x - 3.5, icon_center.y - 8.5),
+                    egui::pos2(icon_center.x + 3.5, icon_center.y - 8.5),
+                    egui::pos2(icon_center.x + 6.5, icon_center.y - 2.0),
+                    egui::pos2(icon_center.x + 10.0, icon_center.y + 4.0),
+                    egui::pos2(icon_center.x - 10.0, icon_center.y + 4.0),
+                    egui::pos2(icon_center.x - 6.5, icon_center.y - 2.0),
+                ];
+                painter.add(egui::Shape::convex_polygon(
+                    bell_pts.to_vec(),
+                    icon_color,
+                    egui::Stroke::NONE,
+                ));
+
+                // 3. Bell bottom rim
+                painter.line_segment(
+                    [
+                        egui::pos2(icon_center.x - 11.0, icon_center.y + 5.0),
+                        egui::pos2(icon_center.x + 11.0, icon_center.y + 5.0),
+                    ],
+                    egui::Stroke::new(2.2, icon_color),
+                );
+
+                // 4. Clapper bead at bottom
+                painter.circle_filled(
+                    egui::pos2(icon_center.x, icon_center.y + 7.5),
+                    2.8,
+                    icon_color,
                 );
             }
         }
@@ -651,11 +692,11 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
 
     ui.add_space(10.0);
 
-    // 3. Mini-grid of 3 Stream Deck square buttons side-by-side
-    // Replay buffer | Microphone | Scrolling chat
-    let btn_size = 100.0;
-    let btn_gap = 18.0;
-    let total_grid_w = 3.0 * btn_size + 2.0 * btn_gap;
+    // 3. Mini-grid of 4 Stream Deck square buttons side-by-side
+    // Replay buffer | Microphone | Scrolling chat | Video alerts
+    let btn_size = 92.0;
+    let btn_gap = 12.0;
+    let total_grid_w = 4.0 * btn_size + 3.0 * btn_gap;
     let side_padding = ((ui.available_width() - total_grid_w) / 2.0).max(0.0);
 
     ui.horizontal(|ui| {
@@ -728,6 +769,26 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
         .clicked()
         {
             state.twitch.config.niconico_enabled = !state.twitch.config.niconico_enabled;
+            state.twitch.config_dirty = false;
+            crate::config::save_config(state);
+            changed = true;
+        }
+
+        ui.add_space(btn_gap);
+
+        // Deck Button 4: Video Alerts
+        let alerts_enabled = state.twitch.config.alerts_enabled;
+        if draw_deck_button(
+            ui,
+            DeckButtonKind::Alerts,
+            "ALERTS",
+            alerts_enabled,
+            "Video Alerts: Click to toggle on-screen event notices (followers, subs, bits, raids)",
+            btn_size,
+        )
+        .clicked()
+        {
+            state.twitch.config.alerts_enabled = !state.twitch.config.alerts_enabled;
             state.twitch.config_dirty = false;
             crate::config::save_config(state);
             changed = true;
@@ -1005,5 +1066,13 @@ mod tests {
         assert!(!state.twitch.config.niconico_enabled);
         state.twitch.config.niconico_enabled = true;
         assert!(state.twitch.config.niconico_enabled);
+    }
+
+    #[test]
+    fn test_alerts_toggle_state() {
+        let mut state = AppState::default();
+        assert!(!state.twitch.config.alerts_enabled);
+        state.twitch.config.alerts_enabled = true;
+        assert!(state.twitch.config.alerts_enabled);
     }
 }
