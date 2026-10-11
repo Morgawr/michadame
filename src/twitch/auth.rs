@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 /// Client ID of the registered (public) Michadame Twitch application.
 pub const DEFAULT_CLIENT_ID: &str = "mzzs95mdev74cqzysuvfnmv5ux6abj";
-pub const SCOPES: &str = "chat:read chat:edit channel:read:stream_key";
+pub const SCOPES: &str = "chat:read chat:edit channel:read:stream_key channel:manage:broadcast";
 
 const DEVICE_URL: &str = "https://id.twitch.tv/oauth2/device";
 const TOKEN_URL: &str = "https://id.twitch.tv/oauth2/token";

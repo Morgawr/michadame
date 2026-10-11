@@ -61,6 +61,10 @@ pub fn draw_twitch_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
     ui.add_space(4.0);
 
+    changed |= draw_stream_info_group(ui, state);
+
+    ui.add_space(4.0);
+
     changed |= draw_broadcast_group(ui, state, &mut save_now);
 
     ui.add_space(4.0);
@@ -628,4 +632,345 @@ fn draw_broadcast_group(ui: &mut egui::Ui, state: &mut AppState, save_now: &mut 
     });
     changed
 }
+
+fn draw_stream_info_group(ui: &mut egui::Ui, state: &mut AppState) -> bool {
+    let mut changed = false;
+    technical_group(ui, "Edit Stream Info:", |ui| {
+        let has_token = state.twitch.token.is_some();
+        if !has_token {
+            note(
+                ui,
+                "Log in with Twitch below under 'Twitch Account' to view and edit your stream info.",
+            );
+            return;
+        }
+
+        let ctx = ui.ctx().clone();
+        let info = &mut state.twitch.stream_info;
+
+        // Title section
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Title")
+                    .size(11.5)
+                    .strong()
+                    .color(egui::Color32::WHITE),
+            );
+        });
+
+        // 140 max character limit
+        let char_count = info.title_input.chars().count();
+        let title_edit = ui.add(
+            egui::TextEdit::singleline(&mut info.title_input)
+                .hint_text("Enter stream title…")
+                .desired_width(ui.available_width() - 8.0),
+        );
+        if title_edit.changed() {
+            if info.title_input.chars().count() > 140 {
+                info.title_input = info.title_input.chars().take(140).collect();
+            }
+            changed = true;
+        }
+
+        ui.add_space(2.0);
+
+        // Character counter (bottom right of title)
+        let count_color = if char_count >= 135 {
+            egui::Color32::from_rgb(230, 100, 60)
+        } else {
+            MUTED
+        };
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(format!("{char_count}/140"))
+                        .monospace()
+                        .size(10.5)
+                        .color(count_color),
+                );
+            });
+        });
+
+        ui.add_space(4.0);
+
+        // Category section
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Category")
+                    .size(11.5)
+                    .strong()
+                    .color(egui::Color32::WHITE),
+            );
+        });
+
+        // If category is selected, render custom card matching Creator Dashboard
+        if let Some(cat) = &info.category {
+            let cat_clone = cat.clone();
+            let mut clear_clicked = false;
+
+            egui::Frame::none()
+                .fill(egui::Color32::from_rgb(34, 34, 37))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(55, 55, 60)))
+                .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                .rounding(egui::Rounding::same(6.0))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        // Box art thumbnail (approx 36x48 px)
+                        if let Some(tex) = info.box_art_cache.texture(&cat_clone.box_art_url) {
+                            ui.add(egui::Image::new(tex).fit_to_exact_size(egui::vec2(36.0, 48.0)));
+                        } else {
+                            info.box_art_cache.request(&cat_clone.box_art_url, &ctx);
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(36.0, 48.0),
+                                egui::Sense::hover(),
+                            );
+                            ui.painter().rect_filled(
+                                rect,
+                                4.0,
+                                egui::Color32::from_rgb(45, 45, 50),
+                            );
+                            ui.painter().text(
+                                rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "🎮",
+                                egui::FontId::proportional(18.0),
+                                egui::Color32::from_rgb(140, 140, 150),
+                            );
+                        }
+
+                        ui.add_space(8.0);
+
+                        // Center info
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new(&cat_clone.name)
+                                    .size(12.5)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            );
+                            if let Some(followers) = cat_clone.followers {
+                                ui.label(
+                                    egui::RichText::new(format!("{followers} Followers"))
+                                        .size(10.5)
+                                        .color(MUTED),
+                                );
+                            }
+
+                            if !cat_clone.tags.is_empty() {
+                                ui.horizontal_wrapped(|ui| {
+                                    for tag in cat_clone.tags.iter().take(4) {
+                                        egui::Frame::none()
+                                            .fill(egui::Color32::from_rgb(52, 52, 58))
+                                            .rounding(egui::Rounding::same(10.0))
+                                            .inner_margin(egui::Margin::symmetric(7.0, 2.0))
+                                            .show(ui, |ui| {
+                                                ui.label(
+                                                    egui::RichText::new(tag)
+                                                        .size(9.5)
+                                                        .color(egui::Color32::from_rgb(
+                                                            220, 220, 225,
+                                                        )),
+                                                );
+                                            });
+                                    }
+                                });
+                            }
+                        });
+
+                        // Clear button on the right (vector-drawn "X" so it never renders as a font tofu box)
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let (rect, resp) = ui.allocate_exact_size(
+                                egui::vec2(22.0, 22.0),
+                                egui::Sense::click(),
+                            );
+                            let hovered = resp.hovered();
+                            if hovered {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                let bg = if resp.is_pointer_button_down_on() {
+                                    egui::Color32::from_rgb(72, 72, 80)
+                                } else {
+                                    egui::Color32::from_rgb(56, 56, 62)
+                                };
+                                ui.painter().circle_filled(rect.center(), 11.0, bg);
+                            }
+                            let stroke_color = if hovered {
+                                egui::Color32::WHITE
+                            } else {
+                                egui::Color32::from_rgb(180, 180, 185)
+                            };
+                            let center = rect.center();
+                            let arm = 4.5;
+                            let stroke = egui::Stroke::new(2.0, stroke_color);
+                            ui.painter().line_segment(
+                                [center + egui::vec2(-arm, -arm), center + egui::vec2(arm, arm)],
+                                stroke,
+                            );
+                            ui.painter().line_segment(
+                                [center + egui::vec2(-arm, arm), center + egui::vec2(arm, -arm)],
+                                stroke,
+                            );
+                            if resp
+                                .on_hover_text("Remove category to search for another")
+                                .clicked()
+                            {
+                                clear_clicked = true;
+                            }
+                        });
+                    });
+                });
+
+            if clear_clicked {
+                info.category = None;
+                info.search_input.clear();
+                info.search_results.clear();
+                changed = true;
+            }
+        } else {
+            // Search input field with autocomplete
+            ui.horizontal(|ui| {
+                let search_edit = ui.add(
+                    egui::TextEdit::singleline(&mut info.search_input)
+                        .hint_text("Search for a game or category…")
+                        .desired_width(260.0),
+                );
+                if search_edit.changed() {
+                    info.search_debounce = Some(Instant::now());
+                    changed = true;
+                }
+                if info.is_searching {
+                    ui.spinner();
+                }
+            });
+
+            // Autocomplete results
+            if !info.search_results.is_empty() && !info.search_input.trim().is_empty() {
+                ui.add_space(2.0);
+                egui::Frame::none()
+                    .fill(egui::Color32::from_rgb(26, 26, 28))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 50, 54)))
+                    .inner_margin(egui::Margin::symmetric(6.0, 4.0))
+                    .rounding(egui::Rounding::same(4.0))
+                    .show(ui, |ui| {
+                        let results = info.search_results.clone();
+                        let mut selected_result = None;
+
+                        egui::ScrollArea::vertical()
+                            .max_height(160.0)
+                            .show(ui, |ui| {
+                                for cat in results.iter().take(8) {
+                                    ui.horizontal(|ui| {
+                                        if let Some(tex) =
+                                            info.box_art_cache.texture(&cat.box_art_url)
+                                        {
+                                            ui.add(egui::Image::new(tex).fit_to_exact_size(egui::vec2(24.0, 32.0)));
+                                        } else {
+                                            info.box_art_cache.request(&cat.box_art_url, &ctx);
+                                            let (rect, _) = ui.allocate_exact_size(
+                                                egui::vec2(24.0, 32.0),
+                                                egui::Sense::hover(),
+                                            );
+                                            ui.painter().rect_filled(
+                                                rect,
+                                                2.0,
+                                                egui::Color32::from_rgb(40, 40, 44),
+                                            );
+                                        }
+
+                                        let text_label = egui::RichText::new(&cat.name).size(11.5);
+                                        let btn = ui.add(
+                                            egui::Button::new(text_label).frame(false).min_size(
+                                                egui::vec2(ui.available_width() - 30.0, 24.0),
+                                            ),
+                                        );
+                                        if btn.clicked() {
+                                            selected_result = Some(cat.clone());
+                                        }
+                                    });
+                                    ui.add_space(2.0);
+                                }
+                            });
+
+                        if let Some(chosen) = selected_result {
+                            info.category = Some(chosen);
+                            info.search_results.clear();
+                            info.search_input.clear();
+                            changed = true;
+                        }
+                    });
+            }
+        }
+
+        ui.add_space(6.0);
+
+        // Action bar: Save Changes & Refresh
+        ui.horizontal(|ui| {
+            let has_changes = info.has_changes();
+            let is_saving = info.is_saving;
+            let is_loading = info.is_loading;
+
+            let save_btn = egui::Button::new(
+                egui::RichText::new("Save Changes")
+                    .monospace()
+                    .size(11.0)
+                    .strong()
+                    .color(if has_changes && !is_saving {
+                        egui::Color32::WHITE
+                    } else {
+                        MUTED
+                    }),
+            )
+            .fill(if has_changes && !is_saving {
+                egui::Color32::from_rgb(145, 70, 255)
+            } else {
+                egui::Color32::from_rgb(50, 50, 55)
+            });
+
+            if ui.add_enabled(has_changes && !is_saving, save_btn).clicked() {
+                if let Some(token) = &state.twitch.token {
+                    info.save_channel(token, &ctx);
+                    changed = true;
+                }
+            }
+
+            if ui
+                .button("Refresh")
+                .on_hover_text("Reload stream info from Twitch")
+                .clicked()
+            {
+                if let Some(token) = &state.twitch.token {
+                    info.fetch_channel(token, &ctx);
+                    changed = true;
+                }
+            }
+
+            if is_saving {
+                ui.spinner();
+                ui.label(
+                    egui::RichText::new("Saving…")
+                        .monospace()
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(230, 190, 60)),
+                );
+            } else if is_loading {
+                ui.spinner();
+                ui.label(
+                    egui::RichText::new("Loading…")
+                        .monospace()
+                        .size(11.0)
+                        .color(MUTED),
+                );
+            } else if let Some((is_err, msg)) = &info.status_message {
+                let color = if *is_err {
+                    egui::Color32::from_rgb(240, 70, 70)
+                } else {
+                    egui::Color32::from_rgb(80, 220, 120)
+                };
+                ui.label(egui::RichText::new(msg).monospace().size(11.0).color(color));
+            }
+        });
+    });
+    changed
+}
+
 

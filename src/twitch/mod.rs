@@ -5,9 +5,12 @@ pub mod broadcast;
 pub mod emotes;
 pub mod irc;
 pub mod live;
+pub mod stream_info;
 
 pub use broadcast::{BroadcastHandle, BroadcastMetrics, BroadcastStatus};
 pub use live::StreamStatus;
+#[allow(unused_imports)]
+pub use stream_info::{StreamCategory, StreamInfo, StreamInfoState};
 
 use crate::config::TwitchConfig;
 use auth::{DeviceFlowEvent, StoredToken};
@@ -118,6 +121,10 @@ pub struct TwitchState {
     pub show_stream_key: bool,
     pub broadcast_last_status: Option<BroadcastStatus>,
 
+    // Stream info (Title & Category)
+    pub stream_info: StreamInfoState,
+    pub stream_info_loaded: bool,
+
     self_display_name: Option<String>,
     self_color: Option<egui::Color32>,
     worker: Option<irc::WorkerHandle>,
@@ -150,6 +157,8 @@ impl Default for TwitchState {
             stream_key_input: String::new(),
             show_stream_key: false,
             broadcast_last_status: None,
+            stream_info: StreamInfoState::default(),
+            stream_info_loaded: false,
             self_display_name: None,
             self_color: None,
             worker: None,
@@ -324,6 +333,13 @@ impl TwitchState {
         }
         changed |= self.poll_auth_flow(ctx);
         self.sync_connection(ctx);
+        if self.token.is_some() && !self.stream_info_loaded {
+            self.stream_info_loaded = true;
+            if let Some(token) = &self.token {
+                self.stream_info.fetch_channel(token, ctx);
+            }
+        }
+        changed |= self.stream_info.poll(ctx);
 
         if let Some(handle) = &self.broadcast {
             let status = handle.status();
@@ -672,6 +688,8 @@ impl TwitchState {
         auth::delete_token();
         self.self_display_name = None;
         self.self_color = None;
+        self.stream_info = StreamInfoState::default();
+        self.stream_info_loaded = false;
     }
 
     fn poll_auth_flow(&mut self, ctx: &egui::Context) -> bool {
@@ -700,6 +718,7 @@ impl TwitchState {
                     }
                     self.notify_info(format!("Logged in to Twitch as {}.", token.login));
                     self.token = Some(token);
+                    self.stream_info_loaded = false;
                     self.auth_rx = None;
                     self.auth_cancel = None;
                     self.auth_flow = AuthFlow::Idle;
