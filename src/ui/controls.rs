@@ -249,6 +249,14 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             .desired_width(120.0)
                             .rounding(egui::Rounding::ZERO);
                         ui.add(meter);
+
+                        ui.add_space(8.0);
+                        // Same toggle as the Audio / Replay tab; both reflect `replay.runtime`.
+                        crate::replay::ui::draw_toggle(
+                            &mut state.replay,
+                            ui,
+                            state.ui.video_window_open,
+                        );
                     });
 
                     ui.add_space(5.0);
@@ -268,6 +276,30 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         .size(10.5)
                         .color(egui::Color32::from_rgb(119, 119, 119)),
                     );
+
+                    ui.add_space(5.0);
+
+                    // Row 4: Master Volume horizontal slider
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Master Volume:")
+                                .monospace()
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(150, 150, 150)),
+                        );
+                        let mut vol = state.hardware.master_volume;
+                        let slider = percent_slider(&mut vol, 0.0..=1.0);
+                        if ui
+                            .add(slider)
+                            .on_hover_text("Controls the overall master volume of the stream (both live stream and file playback streams)")
+                            .changed()
+                        {
+                            state.set_master_volume(vol);
+                            crate::config::save_config(state);
+                            crate::config::save_global_hardware_config(state);
+                            changed = true;
+                        }
+                    });
                 });
             });
         });
@@ -295,6 +327,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     (SettingsTab::Effects, "Effects / Bezel"),
                     (SettingsTab::Devices, "Capture Devices"),
                     (SettingsTab::AudioReplay, "Audio / Replay"),
+                    (SettingsTab::Mic, "Mic"),
                     (SettingsTab::OcrDict, "OCR / Dictionaries"),
                     (SettingsTab::Twitch, "Twitch"),
                     (SettingsTab::Hotkeys, "Hotkeys"),
@@ -374,6 +407,9 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             state.error(format!("Could not save replay settings: {error}"));
                         }
                     }
+                }
+                SettingsTab::Mic => {
+                    changed |= crate::ui::mic::draw_mic_tab(ui, state);
                 }
                 SettingsTab::OcrDict => {
                     draw_ocr_dict_tab(ui, state, &mut changed);

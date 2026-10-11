@@ -25,6 +25,7 @@ impl Default for AppState {
                 audio_buffer_size: 1024,
                 audio_sample_rate: 48000,
                 audio_sample_format: "S16LE".to_string(),
+                master_volume: 1.0,
                 video_devices: Vec::new(),
                 usb_devices: Vec::new(),
                 selected_usb_device: None,
@@ -154,6 +155,7 @@ impl Default for AppState {
             dict: crate::dict::DictState::default(),
             bank: crate::bank::BankState::default(),
             twitch: crate::twitch::TwitchState::default(),
+            mic: crate::app::models::MicState::default(),
             config_load_error: None,
             config_quarantine_path: None,
         }
@@ -177,6 +179,7 @@ impl AppState {
                 if let Ok(cfg) = confy::load::<config::MichadameConfig>("michadame", None) {
                     config::apply_config(self, &cfg);
                 }
+                self.sync_mic_stream();
                 self.info("Devices loaded successfully.");
                 true
             }
@@ -320,6 +323,7 @@ impl eframe::App for AppState {
             }
         }
         self.stop_stream_resources();
+        self.mic.active_stream = None;
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {

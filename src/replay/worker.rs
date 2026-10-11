@@ -17,6 +17,8 @@ struct Session {
     epoch: i64,
     schedule: VideoSchedule,
     audio_clock: AudioClock,
+    mic_clock: AudioClock,
+    mixer: TimelineMixer,
     generation: u64,
 }
 fn invalidate_changed_surface(
@@ -231,12 +233,146 @@ impl AudioClock {
     }
 }
 
+/// Audio sources mixed into the replay track.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MixSource {
+    Game = 0,
+    Mic = 1,
+}
+const MIX_SOURCES: usize = 2;
+
+/// A source that falls this far (in 48 kHz samples) behind the furthest source
+/// is treated as silent so a stopped/unplugged input cannot stall the recording.
+const MIX_MAX_LAG: i64 = 48_000;
+/// Forward jumps larger than this (10 s) restart the mix timeline.
+const MIX_MAX_GAP: i64 = 10 * 48_000;
+
+/// Sums independently clocked sources onto one 48 kHz timeline.
+///
+/// A frame is only encoded once every *live* source has delivered audio for
+/// that whole span. Emitting as soon as one source is ready (the previous
+/// behavior) dropped the other source's late samples, so game and microphone
+/// audio alternately cut each other out.
+pub(super) struct TimelineMixer {
+    /// Unlimited sums, starting at `next_out`.
+    pending: VecDeque<[f32; 2]>,
+    next_out: i64,
+    started: bool,
+    emitted: bool,
+    /// Absolute end (exclusive) of the samples each source has delivered.
+    ends: [Option<i64>; MIX_SOURCES],
+}
+
+impl TimelineMixer {
+    pub(super) fn new() -> Self {
+        Self {
+            pending: VecDeque::new(),
+            next_out: 0,
+            started: false,
+            emitted: false,
+            ends: [None; MIX_SOURCES],
+        }
+    }
+
+    pub(super) fn push(
+        &mut self,
+        source: MixSource,
+        start_sample: i64,
+        samples: &[[f32; 2]],
+        volume: f32,
+    ) {
+        if samples.is_empty() {
+            return;
+        }
+        let end = start_sample + samples.len() as i64;
+        let slot = &mut self.ends[source as usize];
+        *slot = Some(slot.map_or(end, |e| e.max(end)));
+
+        if !self.started {
+            self.next_out = start_sample;
+            self.started = true;
+        } else if start_sample - self.next_out > MIX_MAX_GAP {
+            // A long pause/re-anchor: don't buffer seconds of silence. The encoder
+            // PTS carries the gap, exactly like an AudioClock re-anchor.
+            self.pending.clear();
+            self.next_out = start_sample;
+        } else if start_sample < self.next_out && !self.emitted {
+            // Nothing encoded yet: extend the timeline back so a source that
+            // started slightly earlier is not truncated.
+            for _ in 0..(self.next_out - start_sample) {
+                self.pending.push_front([0.0; 2]);
+            }
+            self.next_out = start_sample;
+        }
+
+        // Samples for already-encoded time cannot be mixed in anymore.
+        let skip = (self.next_out - start_sample).max(0) as usize;
+        if skip >= samples.len() {
+            return;
+        }
+        let offset = (start_sample + skip as i64 - self.next_out) as usize;
+        let valid = &samples[skip..];
+        if self.pending.len() < offset + valid.len() {
+            self.pending.resize(offset + valid.len(), [0.0; 2]);
+        }
+        for (i, s) in valid.iter().enumerate() {
+            let out = &mut self.pending[offset + i];
+            out[0] += s[0] * volume;
+            out[1] += s[1] * volume;
+        }
+    }
+
+    /// End of the span for which every live source has delivered audio.
+    fn ready_end(&self) -> Option<i64> {
+        let leader = self.ends.iter().flatten().copied().max()?;
+        self.ends
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|&end| leader - end <= MIX_MAX_LAG)
+            .min()
+    }
+
+    pub(super) fn take(&mut self) -> Option<(i64, Vec<[f32; 2]>)> {
+        let frame = config::AUDIO_FRAME_SIZE;
+        if self.pending.len() < frame || self.next_out + frame as i64 > self.ready_end()? {
+            return None;
+        }
+        let at = self.next_out;
+        self.next_out += frame as i64;
+        self.emitted = true;
+        Some((
+            at,
+            self.pending
+                .drain(..frame)
+                .map(|[l, r]| [soft_limit(l), soft_limit(r)])
+                .collect(),
+        ))
+    }
+}
+
+/// Transparent below -0.9 dBFS; above it, smoothly saturates towards ±1.0
+/// instead of hard clipping when game and microphone peaks coincide.
+#[inline]
+fn soft_limit(x: f32) -> f32 {
+    const KNEE: f32 = 0.9;
+    let a = x.abs();
+    if a <= KNEE {
+        x
+    } else {
+        let over = (a - KNEE) / (1.0 - KNEE);
+        (KNEE + (1.0 - KNEE) * over.tanh()).copysign(x)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run(
     config: ReplayConfig,
     queue: &queue::WorkQueue,
     audio_rx: Receiver<AudioBlock>,
     audio_free: Sender<AudioBlock>,
+    mic_rx: Receiver<AudioBlock>,
+    mic_free: Sender<AudioBlock>,
     saves: Receiver<Save>,
     shared: &Arc<Shared>,
 ) -> Result<()> {
@@ -256,6 +392,7 @@ pub(super) fn run(
     let mut last_input = Instant::now();
     let mut waiting_for_video = false;
     let mut pending_audio: Option<AudioBlock> = None;
+    let mut pending_mic: Option<AudioBlock> = None;
     let mut prepared_generation = None;
     let mut previous_drops = 0;
     while !shared.stop.load(Ordering::Acquire) {
@@ -318,6 +455,8 @@ pub(super) fn run(
                     epoch: frame.at,
                     schedule: VideoSchedule::new(frame.at),
                     audio_clock: AudioClock::new(),
+                    mic_clock: AudioClock::new(),
+                    mixer: TimelineMixer::new(),
                     generation: frame.generation,
                 });
                 limit = config
@@ -353,7 +492,7 @@ pub(super) fn run(
             queue.recycle(frame.generation, frame.rgba);
         }
 
-        // A fixed bound also prevents capture bursts from starving the video branch.
+        // Drain game audio blocks into game audio clock
         for _ in 0..32 {
             if session.is_none() {
                 break;
@@ -374,24 +513,56 @@ pub(super) fn run(
                         );
                     }
                     while let Some((at, samples)) = s.audio_clock.take() {
-                        for mut packet in s.audio.encode(&samples, at)? {
-                            // Preserve the encoder's Opus lookahead offset.
-                            packet
-                                .packet
-                                .set_pts(packet.packet.pts().map(|t| t + s.epoch));
-                            packet
-                                .packet
-                                .set_dts(packet.packet.dts().map(|t| t + s.epoch));
-                            packet.start += s.epoch;
-                            packet.end += s.epoch;
-                            if packet.start >= s.epoch {
-                                history.push(packet, limit);
-                            }
-                        }
+                        let vol = f32::from_bits(shared.game_volume.load(Ordering::Relaxed));
+                        s.mixer.push(MixSource::Game, at, &samples, vol);
                     }
                 }
             }
             let _ = audio_free.try_send(block);
+        }
+
+        // Drain microphone audio blocks into mic audio clock
+        for _ in 0..32 {
+            if session.is_none() {
+                break;
+            }
+            let Some(block) = next_audio_block(
+                &mut pending_mic,
+                &mic_rx,
+                shared.processed_at.load(Ordering::Acquire),
+                queue.len() > 0 || shared.gpu_pending.load(Ordering::Relaxed) > 0,
+            ) else {
+                break;
+            };
+            if let Some(s) = session.as_mut() {
+                if block.at >= s.epoch - 200_000 && block.at <= now_us() {
+                    let _ = s.mic_clock.append_recovering(&block, s.epoch);
+                    while let Some((at, samples)) = s.mic_clock.take() {
+                        s.mixer.push(MixSource::Mic, at, &samples, 1.0);
+                    }
+                }
+            }
+            let _ = mic_free.try_send(block);
+        }
+
+        // Encode mixed frames from TimelineMixer
+        if let Some(s) = session.as_mut() {
+            while let Some((at, samples)) = s.mixer.take() {
+                for mut packet in s.audio.encode(&samples, at)? {
+                    // Preserve the encoder's Opus lookahead offset.
+                    packet
+                        .packet
+                        .set_pts(packet.packet.pts().map(|t| t + s.epoch));
+                    packet
+                        .packet
+                        .set_dts(packet.packet.dts().map(|t| t + s.epoch));
+                    packet.start += s.epoch;
+                    packet.end += s.epoch;
+                    if packet.start >= s.epoch {
+                        history.push(packet, limit);
+                    }
+                }
+            }
         }
         if last_input.elapsed() > Duration::from_secs(1) && session.is_some() && !waiting_for_video
         {
@@ -1024,4 +1195,88 @@ mod tests {
         assert_eq!(after, 60 * 48000);
         assert!(clock.pending.len() < 1920);
     }
+    #[test]
+    fn timeline_mixer_single_stream_and_mixing() {
+        let n = config::AUDIO_FRAME_SIZE;
+        let mut mixer = TimelineMixer::new();
+
+        // 1. Single stream
+        mixer.push(MixSource::Game, 0, &vec![[0.2, 0.3]; n], 1.0);
+        let (at, frame) = mixer.take().expect("Should output one frame");
+        assert_eq!(at, 0);
+        assert_eq!(frame.len(), n);
+        assert_eq!(frame[0], [0.2, 0.3]);
+        assert!(mixer.take().is_none());
+
+        // 2. Mixing two streams overlapping at the next frame
+        mixer.push(MixSource::Game, n as i64, &vec![[0.4, 0.1]; n], 1.0);
+        mixer.push(MixSource::Mic, n as i64, &vec![[0.3, 0.5]; n], 1.0);
+        let (at2, frame2) = mixer.take().expect("Should output mixed frame");
+        assert_eq!(at2, n as i64);
+        assert!((frame2[0][0] - 0.7).abs() < 1e-6);
+        assert!((frame2[0][1] - 0.6).abs() < 1e-6);
+
+        // 3. Loud coincident peaks are soft-limited, never exceeding full scale
+        mixer.push(MixSource::Game, 2 * n as i64, &vec![[0.8, -0.9]; n], 1.0);
+        mixer.push(MixSource::Mic, 2 * n as i64, &vec![[0.6, -0.5]; n], 1.0);
+        let (_, frame3) = mixer.take().expect("Should output limited frame");
+        assert!(frame3[0][0] > 0.99 && frame3[0][0] <= 1.0);
+        assert!(frame3[0][1] < -0.99 && frame3[0][1] >= -1.0);
+    }
+
+    #[test]
+    fn timeline_mixer_waits_for_the_slower_source_instead_of_dropping_it() {
+        let n = config::AUDIO_FRAME_SIZE;
+        let mut mixer = TimelineMixer::new();
+        mixer.push(MixSource::Mic, 0, &vec![[0.1, 0.1]; n], 1.0);
+        mixer.push(MixSource::Game, 0, &vec![[0.2, 0.2]; n], 1.0);
+        mixer.take().unwrap();
+
+        // Game runs ahead by several frames; mic is still in flight.
+        for i in 1..5 {
+            mixer.push(MixSource::Game, (i * n) as i64, &vec![[0.2, 0.2]; n], 1.0);
+        }
+        assert!(mixer.take().is_none(), "must not encode before the mic arrives");
+
+        for i in 1..5 {
+            mixer.push(MixSource::Mic, (i * n) as i64, &vec![[0.1, 0.1]; n], 1.0);
+        }
+        for _ in 1..5 {
+            let (_, frame) = mixer.take().unwrap();
+            assert!(frame.iter().all(|s| (s[0] - 0.3).abs() < 1e-6));
+        }
+        assert!(mixer.take().is_none());
+    }
+
+    #[test]
+    fn timeline_mixer_does_not_stall_when_a_source_stops() {
+        let n = config::AUDIO_FRAME_SIZE;
+        let mut mixer = TimelineMixer::new();
+        mixer.push(MixSource::Mic, 0, &vec![[0.1, 0.1]; n], 1.0);
+        // Game continues for well over MIX_MAX_LAG while the mic is silent.
+        let frames = (MIX_MAX_LAG as usize / n) + 4;
+        for i in 0..frames {
+            mixer.push(MixSource::Game, (i * n) as i64, &vec![[0.2, 0.2]; n], 1.0);
+        }
+        let mut emitted = 0;
+        while mixer.take().is_some() {
+            emitted += 1;
+        }
+        assert!(emitted >= frames - 1, "emitted {emitted} of {frames}");
+    }
+
+    #[test]
+    fn timeline_mixer_scales_game_volume_without_affecting_mic() {
+        let n = config::AUDIO_FRAME_SIZE;
+        let mut mixer = TimelineMixer::new();
+        // Game audio at 0.4 scaled by 0.5 = 0.2
+        mixer.push(MixSource::Game, 0, &vec![[0.4, 0.4]; n], 0.5);
+        // Mic audio at 0.3 with factor 1.0 = 0.3
+        mixer.push(MixSource::Mic, 0, &vec![[0.3, 0.3]; n], 1.0);
+        let (_, frame) = mixer.take().expect("Should output mixed frame");
+        // Sum: 0.2 + 0.3 = 0.5
+        assert!((frame[0][0] - 0.5).abs() < 1e-6);
+        assert!((frame[0][1] - 0.5).abs() < 1e-6);
+    }
+
 }

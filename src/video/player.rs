@@ -98,6 +98,7 @@ pub enum PlayerCommand {
     TogglePause,
     Seek(f64),
     Stop,
+    SetVolume(f32),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -129,6 +130,7 @@ pub struct VideoFileConfig {
     pub peak_amplitude: Arc<AtomicU64>,
     pub audio_latency_ms: Arc<AtomicU64>,
     pub replay_audio: Arc<crate::replay::AudioTap>,
+    pub master_volume: f32,
 }
 
 struct SharedAudioQueue {
@@ -370,6 +372,7 @@ pub fn video_file_thread_main(
         peak_amplitude,
         audio_latency_ms,
         replay_audio,
+        master_volume,
     } = config;
 
     let mut ictx = ffmpeg_next::format::input(&file_path)
@@ -472,6 +475,7 @@ pub fn video_file_thread_main(
                             local_batch: Vec::with_capacity(512),
                         };
                         sink.append(audio_source);
+                        sink.set_volume(master_volume);
                         sink.play();
                         audio_sink = Some(sink);
                         _audio_guard = Some(guard);
@@ -932,6 +936,11 @@ pub fn video_file_thread_main(
                     }
                     mono_clock.pause();
                     request_repaint();
+                }
+                PlayerCommand::SetVolume(vol) => {
+                    if let Some(ref sink) = audio_sink {
+                        sink.set_volume(vol);
+                    }
                 }
                 PlayerCommand::Seek(mut target_secs) => {
                     // Coalesce consecutive Seek commands

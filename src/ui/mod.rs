@@ -8,6 +8,7 @@ pub mod devices;
 pub mod dialogs;
 pub mod fft_mask;
 pub mod filters;
+pub mod mic;
 pub mod networking;
 pub mod profiles;
 pub mod tag_input;

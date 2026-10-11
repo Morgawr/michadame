@@ -10,7 +10,7 @@ mod worker;
 use config::{Rate, ReplayConfig};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use std::sync::{
-    atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering},
     Arc, Mutex,
 };
 
@@ -55,12 +55,87 @@ struct AudioRoute {
     next_continuous: bool,
     format: Option<(u32, u16)>,
 }
-/// Only the ALSA capture thread touches this tap; the playback callback is unchanged.
+fn submit_to_route(
+    route_mutex: &Mutex<Option<AudioRoute>>,
+    discontinuity: &AtomicBool,
+    samples: &[f32],
+    rate: u32,
+    channels: u16,
+    at: i64,
+) {
+    let Ok(mut route) = route_mutex.try_lock() else {
+        discontinuity.store(true, Ordering::Relaxed);
+        return;
+    };
+    let Some(route) = route.as_mut() else {
+        return;
+    };
+    if route.stop.load(Ordering::Relaxed) || channels == 0 || rate == 0 {
+        return;
+    }
+    let channels_usize = channels as usize;
+    let frames = (rate as usize / 25)
+        .max(1)
+        .min(AUDIO_SAMPLES / channels_usize);
+    let chunk_len = frames * channels_usize;
+    if chunk_len == 0 {
+        return;
+    }
+    let changed = route
+        .format
+        .is_some_and(|format| format != (rate, channels));
+    route.format = Some((rate, channels));
+    if discontinuity.swap(false, Ordering::Relaxed) || changed {
+        if let Some(block) = route.partial.take() {
+            if route.ready.try_send(block).is_err() {
+                route.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        route.next_continuous = false;
+    }
+    let mut offset = 0;
+    let len = samples.len() / channels_usize * channels_usize;
+    while offset < len {
+        if route.partial.is_none() {
+            let Ok(mut block) = route.free.try_recv() else {
+                route.dropped.fetch_add(1, Ordering::Relaxed);
+                route.next_continuous = false;
+                return;
+            };
+            block.len = 0;
+            block.rate = rate;
+            block.channels = channels;
+            block.at = at + offset as i64 * 1_000_000 / (rate as i64 * channels as i64);
+            block.continuous = route.next_continuous;
+            route.partial = Some(block);
+        }
+        let block = route.partial.as_mut().unwrap();
+        let count = (chunk_len - block.len).min(len - offset);
+        block.samples[block.len..block.len + count]
+            .copy_from_slice(&samples[offset..offset + count]);
+        block.len += count;
+        offset += count;
+        if block.len == chunk_len {
+            let block = route.partial.take().unwrap();
+            route.next_continuous = true;
+            if route.ready.try_send(block).is_err() {
+                route.dropped.fetch_add(1, Ordering::Relaxed);
+                route.next_continuous = false;
+                return;
+            }
+        }
+    }
+}
+
+/// ALSA capture and microphone capture threads submit audio through this tap.
 pub struct AudioTap {
     enabled: AtomicBool,
     discontinuity: AtomicBool,
+    mic_discontinuity: AtomicBool,
     route: Mutex<Option<AudioRoute>>,
+    mic_route: Mutex<Option<AudioRoute>>,
     pub filter: std::sync::RwLock<crate::replay::config::AudioFilterConfig>,
+    game_volume: Arc<AtomicU32>,
 }
 
 impl Default for AudioTap {
@@ -68,8 +143,11 @@ impl Default for AudioTap {
         Self {
             enabled: AtomicBool::new(false),
             discontinuity: AtomicBool::new(false),
+            mic_discontinuity: AtomicBool::new(false),
             route: Mutex::new(None),
+            mic_route: Mutex::new(None),
             filter: std::sync::RwLock::new(crate::replay::config::AudioFilterConfig::default()),
+            game_volume: Arc::new(AtomicU32::new(1.0f32.to_bits())),
         }
     }
 }
@@ -83,83 +161,37 @@ impl AudioTap {
             *w = config;
         }
     }
+    pub fn set_game_volume(&self, volume: f32) {
+        self.game_volume.store(volume.to_bits(), Ordering::Relaxed);
+    }
+    #[allow(dead_code)]
+    pub fn game_volume(&self) -> f32 {
+        f32::from_bits(self.game_volume.load(Ordering::Relaxed))
+    }
     /// Called on ALSA restart/recovery, independently of whether replay is enabled.
     pub fn mark_discontinuity(&self) {
         self.discontinuity.store(true, Ordering::Relaxed);
+    }
+    /// Called on microphone restart/recovery.
+    pub fn mark_mic_discontinuity(&self) {
+        self.mic_discontinuity.store(true, Ordering::Relaxed);
     }
     pub fn submit(&self, samples: &[f32], rate: u32, channels: u16, at: i64) {
         if !self.enabled.load(Ordering::Relaxed) {
             return;
         }
-        let Ok(mut route) = self.route.try_lock() else {
-            self.mark_discontinuity();
-            return;
-        };
-        let Some(route) = route.as_mut() else {
-            return;
-        };
-        if route.stop.load(Ordering::Relaxed) || channels == 0 || rate == 0 {
+        submit_to_route(&self.route, &self.discontinuity, samples, rate, channels, at);
+    }
+    pub fn submit_mic(&self, samples: &[f32], rate: u32, channels: u16, at: i64) {
+        if !self.enabled.load(Ordering::Relaxed) {
             return;
         }
-        let channels_usize = channels as usize;
-        // Batch short ALSA reads into ~40ms recording blocks. Pool capacity is
-        // measured in audio time, not in unpredictable read calls (1.28s at
-        // 48kHz stereo). This never delays samples going to live playback.
-        let frames = (rate as usize / 25)
-            .max(1)
-            .min(AUDIO_SAMPLES / channels_usize);
-        let chunk_len = frames * channels_usize;
-        if chunk_len == 0 {
-            return;
-        }
-        let changed = route
-            .format
-            .is_some_and(|format| format != (rate, channels));
-        route.format = Some((rate, channels));
-        if self.discontinuity.swap(false, Ordering::Relaxed) || changed {
-            if let Some(block) = route.partial.take() {
-                if route.ready.try_send(block).is_err() {
-                    route.dropped.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            route.next_continuous = false;
-        }
-        let mut offset = 0;
-        let len = samples.len() / channels_usize * channels_usize;
-        while offset < len {
-            if route.partial.is_none() {
-                let Ok(mut block) = route.free.try_recv() else {
-                    route.dropped.fetch_add(1, Ordering::Relaxed);
-                    route.next_continuous = false;
-                    return;
-                };
-                block.len = 0;
-                block.rate = rate;
-                block.channels = channels;
-                block.at = at + offset as i64 * 1_000_000 / (rate as i64 * channels as i64);
-                block.continuous = route.next_continuous;
-                route.partial = Some(block);
-            }
-            let block = route.partial.as_mut().unwrap();
-            let count = (chunk_len - block.len).min(len - offset);
-            block.samples[block.len..block.len + count]
-                .copy_from_slice(&samples[offset..offset + count]);
-            block.len += count;
-            offset += count;
-            if block.len == chunk_len {
-                let block = route.partial.take().unwrap();
-                route.next_continuous = true;
-                if route.ready.try_send(block).is_err() {
-                    route.dropped.fetch_add(1, Ordering::Relaxed);
-                    route.next_continuous = false;
-                    return;
-                }
-            }
-        }
+        submit_to_route(&self.mic_route, &self.mic_discontinuity, samples, rate, channels, at);
     }
     fn disable(&self) {
         self.enabled.store(false, Ordering::Release);
         *self.route.lock().unwrap() = None;
+        *self.mic_route.lock().unwrap() = None;
     }
 }
 #[derive(Default, Clone)]
@@ -204,6 +236,7 @@ pub struct Shared {
     pub processed_at: AtomicI64,
     pub status: Mutex<Status>,
     pub saving_bytes: std::sync::atomic::AtomicUsize,
+    pub game_volume: Arc<AtomicU32>,
 }
 impl Shared {
     /// Worker only: keep the reason visible after ordinary progress messages.
@@ -274,6 +307,10 @@ impl Replay {
         self.audio.set_filter_config(self.config.audio_filter.clone());
     }
 
+    pub fn set_game_volume(&self, volume: f32) {
+        self.audio.set_game_volume(volume);
+    }
+
     pub fn enable(&mut self) -> anyhow::Result<()> {
         self.config.validate()?;
         anyhow::ensure!(self.runtime.is_none(), "Replay is already enabled");
@@ -308,6 +345,7 @@ impl Replay {
                 ..Default::default()
             }),
             saving_bytes: Default::default(),
+            game_volume: self.audio.game_volume.clone(),
         });
         let queue = Arc::new(queue::WorkQueue::new());
         let worker_queue = queue.clone();
@@ -323,6 +361,18 @@ impl Replay {
                 continuous: false,
             })?;
         }
+        let (mic_atx, mic_arx) = bounded(AUDIO_BLOCKS);
+        let (mic_free_tx, mic_free_rx) = bounded(AUDIO_BLOCKS);
+        for _ in 0..AUDIO_BLOCKS {
+            mic_free_tx.send(AudioBlock {
+                samples: Box::new([0.; AUDIO_SAMPLES]),
+                len: 0,
+                rate: 48000,
+                channels: 2,
+                at: 0,
+                continuous: false,
+            })?;
+        }
         let (save, saves) = bounded(1);
         let config = self.config.clone();
         let worker_shared = shared.clone();
@@ -330,7 +380,16 @@ impl Replay {
             .name("replay-encode".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    worker::run(config, &worker_queue, arx, free_tx, saves, &worker_shared)
+                    worker::run(
+                        config,
+                        &worker_queue,
+                        arx,
+                        free_tx,
+                        mic_arx,
+                        mic_free_tx,
+                        saves,
+                        &worker_shared,
+                    )
                 }))
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("Recording worker panicked")));
                 if let Err(e) = result {
@@ -349,6 +408,15 @@ impl Replay {
         *self.audio.route.lock().unwrap() = Some(AudioRoute {
             ready: atx,
             free: free_rx,
+            stop: shared.stop.clone(),
+            dropped: shared.audio_dropped.clone(),
+            partial: None,
+            next_continuous: false,
+            format: None,
+        });
+        *self.audio.mic_route.lock().unwrap() = Some(AudioRoute {
+            ready: mic_atx,
+            free: mic_free_rx,
             stop: shared.stop.clone(),
             dropped: shared.audio_dropped.clone(),
             partial: None,

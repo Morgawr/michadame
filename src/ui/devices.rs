@@ -426,5 +426,70 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             });
     });
 
+    ui.add_space(4.0);
+
+    // --- Microphone Device ---
+    technical_group(ui, "Microphone Device:", |ui| {
+        ui.horizontal_wrapped(|ui| {
+            let mut mic_enabled = state.mic.config.enabled;
+            if ui
+                .checkbox(&mut mic_enabled, "Enable Microphone")
+                .on_hover_text("Enables microphone audio input capture and recording into the replay buffer.")
+                .changed()
+            {
+                state.mic.config.enabled = mic_enabled;
+                if mic_enabled && state.mic.config.device_name.is_none() {
+                    state.mic.config.device_name = state
+                        .hardware
+                        .audio_sources
+                        .first()
+                        .map(|(_, name)| name.clone());
+                }
+                crate::config::save_config(state);
+                crate::config::save_global_hardware_config(state);
+                state.sync_mic_stream();
+                changed = true;
+            }
+
+            ui.add_space(8.0);
+
+            ui.label(
+                egui::RichText::new("Mic Input:")
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(170, 170, 170)),
+            );
+
+            let selected_mic_desc = state
+                .hardware
+                .audio_sources
+                .iter()
+                .find(|(_, name)| Some(name) == state.mic.config.device_name.as_ref())
+                .map(|(desc, _)| desc.clone())
+                .unwrap_or_else(|| "Select a Microphone".to_string());
+
+            egui::ComboBox::from_id_source("mic_device_selector")
+                .selected_text(selected_mic_desc)
+                .show_ui(ui, |ui| {
+                    let mut combo_changed = false;
+                    for (desc, name) in &state.hardware.audio_sources {
+                        combo_changed |= ui
+                            .selectable_value(
+                                &mut state.mic.config.device_name,
+                                Some(name.clone()),
+                                desc,
+                            )
+                            .changed();
+                    }
+                    if combo_changed {
+                        crate::config::save_config(state);
+                        crate::config::save_global_hardware_config(state);
+                        state.sync_mic_stream();
+                        changed = true;
+                    }
+                });
+        });
+    });
+
     changed
 }

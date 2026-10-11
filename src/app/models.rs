@@ -5,7 +5,7 @@ use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, AtomicU8},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8},
     Arc, Mutex,
 };
 use std::thread::JoinHandle;
@@ -18,6 +18,7 @@ pub struct HardwareState {
     pub audio_buffer_size: u32,
     pub audio_sample_rate: u32,
     pub audio_sample_format: String,
+    pub master_volume: f32,
     pub video_devices: Vec<String>,
     pub usb_devices: Vec<(String, String)>,
     pub selected_usb_device: Option<String>,
@@ -38,6 +39,7 @@ pub enum SettingsTab {
     Geometry,
     Effects,
     Devices,
+    Mic,
     AudioReplay,
     OcrDict,
     Twitch,
@@ -218,6 +220,26 @@ pub struct VideoPlayerState {
     pub player_thread: Option<JoinHandle<()>>,
 }
 
+pub struct MicState {
+    pub config: crate::config::MicConfig,
+    pub active_stream: Option<crate::devices::mic::MicStreamHandle>,
+    pub current_level_db: Arc<AtomicU32>,
+    pub peak_level_db: Arc<AtomicU32>,
+    pub is_clipping: Arc<AtomicBool>,
+}
+
+impl Default for MicState {
+    fn default() -> Self {
+        Self {
+            config: crate::config::MicConfig::default(),
+            active_stream: None,
+            current_level_db: Arc::new(AtomicU32::new((-100.0f32).to_bits())),
+            peak_level_db: Arc::new(AtomicU32::new((-100.0f32).to_bits())),
+            is_clipping: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
 pub struct AppState {
     pub replay: crate::replay::Replay,
     pub hardware: HardwareState,
@@ -279,6 +301,7 @@ pub struct AppState {
     pub dict: crate::dict::DictState,
     pub bank: crate::bank::BankState,
     pub twitch: crate::twitch::TwitchState,
+    pub mic: MicState,
     pub config_load_error: Option<String>,
     pub config_quarantine_path: Option<std::path::PathBuf>,
 }
@@ -316,6 +339,7 @@ mod tests {
         assert_eq!(state.hardware.audio_buffer_size, 1024);
         assert_eq!(state.hardware.audio_sample_rate, 48000);
         assert_eq!(state.hardware.audio_sample_format, "S16LE");
+        assert_eq!(state.hardware.master_volume, 1.0);
         assert!(state.hardware.video_devices.is_empty());
     }
 

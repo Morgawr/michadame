@@ -48,6 +48,96 @@ impl Default for TwitchConfig {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct NoiseGateConfig {
+    pub enabled: bool,
+    pub close_threshold_db: f32,
+    pub open_threshold_db: f32,
+    pub attack_time_ms: f32,
+    pub hold_time_ms: f32,
+    pub release_time_ms: f32,
+}
+
+impl Default for NoiseGateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            close_threshold_db: -52.0,
+            open_threshold_db: -42.0,
+            attack_time_ms: 0.0,
+            hold_time_ms: 400.0,
+            release_time_ms: 0.0,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct GainConfig {
+    pub enabled: bool,
+    pub gain_db: f32,
+}
+
+impl Default for GainConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            gain_db: 6.0,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct CompressorConfig {
+    pub enabled: bool,
+    pub ratio: f32,
+    pub threshold_db: f32,
+    pub attack_time_ms: f32,
+    pub release_time_ms: f32,
+    pub output_gain_db: f32,
+}
+
+impl Default for CompressorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ratio: 4.0,
+            threshold_db: -18.0,
+            attack_time_ms: 6.0,
+            release_time_ms: 60.0,
+            output_gain_db: -4.0,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct MicConfig {
+    pub enabled: bool,
+    pub device_name: Option<String>,
+    pub volume: f32,
+    pub monitor: bool,
+    pub noise_gate: NoiseGateConfig,
+    pub gain: GainConfig,
+    pub compressor: CompressorConfig,
+}
+
+impl Default for MicConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            device_name: None,
+            volume: 1.0,
+            monitor: false,
+            noise_gate: NoiseGateConfig::default(),
+            gain: GainConfig::default(),
+            compressor: CompressorConfig::default(),
+        }
+    }
+}
+
 #[derive(Default, Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct Profile {
@@ -150,6 +240,7 @@ pub struct Profile {
     pub audio_buffer_size: Option<u32>,
     pub audio_sample_rate: Option<u32>,
     pub audio_sample_format: Option<String>,
+    pub master_volume: Option<f32>,
 
     pub popup_under_crt: Option<bool>,
 
@@ -184,6 +275,7 @@ pub struct LegacyConfig {
     pub audio_buffer_size: Option<u32>,
     pub audio_sample_rate: Option<u32>,
     pub audio_sample_format: Option<String>,
+    pub master_volume: Option<f32>,
     pub crt_hard_scan: Option<f32>,
     pub crt_warp_x: Option<f32>,
     pub crt_warp_y: Option<f32>,
@@ -266,6 +358,8 @@ pub struct LegacyConfig {
     pub video_profile: Option<Profile>,
     #[serde(default)]
     pub twitch: TwitchConfig,
+    #[serde(default)]
+    pub mic: MicConfig,
 }
 
 impl Default for LegacyConfig {
@@ -290,6 +384,7 @@ impl Default for LegacyConfig {
             audio_buffer_size: None,
             audio_sample_rate: None,
             audio_sample_format: None,
+            master_volume: None,
             crt_hard_scan: None,
             crt_warp_x: None,
             crt_warp_y: None,
@@ -368,6 +463,7 @@ impl Default for LegacyConfig {
             popup_under_crt: None,
             video_profile: None,
             twitch: TwitchConfig::default(),
+            mic: MicConfig::default(),
         }
     }
 }
@@ -389,6 +485,7 @@ pub struct MichadameConfig {
     pub audio_buffer_size: Option<u32>,
     pub audio_sample_rate: Option<u32>,
     pub audio_sample_format: Option<String>,
+    pub master_volume: Option<f32>,
     pub active_profile: String,
     pub ocr_sticky_distance: Option<f32>,
     pub ocr_hide_overlay: Option<bool>,
@@ -401,6 +498,7 @@ pub struct MichadameConfig {
     pub default_halo: Option<crate::app::models::HaloSettings>,
     pub default_cathode_interference: Option<crate::app::models::CathodeInterferenceSettings>,
     pub twitch: TwitchConfig,
+    pub mic: MicConfig,
     // confy's TOML serializer requires scalar fields before nested tables.
     pub replay: crate::replay::config::ReplayConfig,
     #[serde(default)]
@@ -424,6 +522,7 @@ impl Default for MichadameConfig {
             audio_buffer_size: None,
             audio_sample_rate: None,
             audio_sample_format: None,
+            master_volume: None,
             active_profile: "Default".to_string(),
             ocr_sticky_distance: Some(0.6),
             ocr_hide_overlay: Some(false),
@@ -431,6 +530,7 @@ impl Default for MichadameConfig {
             default_halo: None,
             default_cathode_interference: None,
             twitch: TwitchConfig::default(),
+            mic: MicConfig::default(),
             bank_current_tag: None,
             bank_compact_mode: None,
             popup_under_crt: Some(false),

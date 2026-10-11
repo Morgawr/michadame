@@ -168,6 +168,7 @@ impl AppState {
             self.replay.audio.clone(),
         ) {
             Ok(handle) => {
+                handle.set_volume(self.hardware.master_volume);
                 self.hardware.active_audio_stream = Some(handle);
                 self.info("Stream started.");
                 self.fullscreen_toggle_frame_count = Some(0);
@@ -319,12 +320,59 @@ impl AppState {
                 self.replay.audio.clone(),
             ) {
                 Ok(handle) => {
+                    handle.set_volume(self.hardware.master_volume);
                     self.hardware.active_audio_stream = Some(handle);
                     self.info("Audio stream restarted with new buffer size.");
                 }
                 Err(e) => {
                     self.error(format!("Failed to restart audio: {}", e));
                 }
+            }
+        }
+    }
+
+    pub fn sync_mic_stream(&mut self) {
+        if !self.mic.config.enabled {
+            if self.mic.active_stream.is_some() {
+                self.info("Microphone stream stopped.");
+                self.mic.active_stream = None;
+            }
+            return;
+        }
+
+        let device_name = match &self.mic.config.device_name {
+            Some(name) if !name.is_empty() => name.clone(),
+            _ => {
+                self.mic.active_stream = None;
+                return;
+            }
+        };
+
+        if let Some(stream) = &self.mic.active_stream {
+            if stream.device_name == device_name {
+                if let Ok(mut cfg) = stream.config.write() {
+                    *cfg = self.mic.config.clone();
+                }
+                return;
+            }
+        }
+
+        self.mic.active_stream = None;
+
+        match crate::devices::mic::start_mic_stream(
+            &device_name,
+            self.mic.config.clone(),
+            self.mic.current_level_db.clone(),
+            self.mic.peak_level_db.clone(),
+            self.mic.is_clipping.clone(),
+            self.replay.audio.clone(),
+        ) {
+            Ok(handle) => {
+                self.info(format!("Microphone capture started for {device_name}."));
+                self.mic.active_stream = Some(handle);
+            }
+            Err(e) => {
+                self.error(format!("Failed to start microphone ({device_name}): {e}"));
             }
         }
     }
@@ -397,6 +445,7 @@ impl AppState {
             peak_amplitude: Arc::clone(&self.hardware.audio_peak_amplitude),
             audio_latency_ms: Arc::clone(&self.hardware.audio_latency_ms),
             replay_audio: self.replay.audio.clone(),
+            master_volume: self.hardware.master_volume,
         };
 
         let pos_clone = Arc::clone(&position_us);
@@ -528,6 +577,20 @@ impl AppState {
             }
         }
         handled
+    }
+
+    pub fn set_master_volume(&mut self, volume: f32) {
+        let volume = volume.clamp(0.0, 1.0);
+        self.hardware.master_volume = volume;
+        if let Some(ref audio_stream) = self.hardware.active_audio_stream {
+            audio_stream.set_volume(volume);
+        }
+        if let Some(ref player) = self.video_player {
+            let _ = player
+                .command_sender
+                .send(crate::video::player::PlayerCommand::SetVolume(volume));
+        }
+        self.replay.set_game_volume(volume);
     }
 }
 
@@ -786,5 +849,23 @@ mod tests {
         // 4. Dreamcast profile settings should be intact and restored
         assert_eq!(state.crt.hard_scan, -12.0);
         assert_eq!(state.video.vibrance, 1.2);
+    }
+
+    #[test]
+    fn test_set_master_volume_clamps_and_syncs_replay() {
+        let mut state = AppState::default();
+        assert_eq!(state.hardware.master_volume, 1.0);
+        state.set_master_volume(0.5);
+        assert_eq!(state.hardware.master_volume, 0.5);
+        assert_eq!(state.replay.audio.game_volume(), 0.5);
+
+        // Clamping bounds
+        state.set_master_volume(-0.5);
+        assert_eq!(state.hardware.master_volume, 0.0);
+        assert_eq!(state.replay.audio.game_volume(), 0.0);
+
+        state.set_master_volume(1.5);
+        assert_eq!(state.hardware.master_volume, 1.0);
+        assert_eq!(state.replay.audio.game_volume(), 1.0);
     }
 }

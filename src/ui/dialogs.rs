@@ -86,7 +86,13 @@ pub fn show_stop_stream_dialog(
             ui.add_space(15.0);
             ui.horizontal(|ui| {
                 if ui.button("Yes, stop stream").clicked() {
+                    // Stopping first clears `video_window_open`, so the root close
+                    // request below is not intercepted by the quit confirmation.
                     state.stop_stream(main_ctx);
+                    main_ctx.send_viewport_cmd_to(
+                        egui::ViewportId::ROOT,
+                        egui::ViewportCommand::Close,
+                    );
                 }
                 if ui.button("Cancel").clicked() {
                     state.ui.show_stop_stream_dialog = false;

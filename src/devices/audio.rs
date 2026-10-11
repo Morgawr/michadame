@@ -48,6 +48,10 @@ impl AudioStreamHandle {
     pub fn take_capture_failure(&self) -> Option<String> {
         self.capture_failure_receiver.try_recv().ok()
     }
+
+    pub fn set_volume(&self, volume: f32) {
+        self.sink.set_volume(volume);
+    }
 }
 
 fn reap_alsa_capture_thread(handle: thread::JoinHandle<()>) {
@@ -290,6 +294,56 @@ extern "C" fn alsa_error_handler(
 ) {
 }
 
+pub fn is_usable_input_device(name: &str, desc: &str, direction: Option<alsa::Direction>) -> bool {
+    // If ALSA explicitly flagged it as Playback (output), skip it
+    if direction == Some(alsa::Direction::Playback) {
+        return false;
+    }
+
+    let name_lower = name.to_lowercase();
+    let desc_lower = desc.to_lowercase();
+
+    // Skip ALSA internal plugins and virtual devices that are not physical/server capture endpoints
+    if name_lower == "null"
+        || name_lower == "jack"
+        || name_lower.starts_with("jack:")
+        || name_lower == "oss"
+        || name_lower.contains("oss")
+        || name_lower == "samplerate"
+        || name_lower == "speexrate"
+        || name_lower == "lavrate"
+        || name_lower == "speex"
+        || name_lower == "upmix"
+        || name_lower == "vdownmix"
+        || name_lower == "dmix"
+        || name_lower == "dsnoop"
+    {
+        return false;
+    }
+
+    // Skip surround and playback-only profiles
+    if name_lower.starts_with("surround")
+        || name_lower.starts_with("iec958")
+        || name_lower.starts_with("spdif")
+        || name_lower.starts_with("hdmi")
+        || name_lower.starts_with("usbstream")
+    {
+        return false;
+    }
+
+    // Skip duplicate sysdefault (default:CARD=... already covers the card)
+    if name_lower.starts_with("sysdefault") {
+        return false;
+    }
+
+    // If description explicitly indicates an output-only profile and not input, skip
+    if desc_lower.contains("output") && !desc_lower.contains("input") {
+        return false;
+    }
+
+    true
+}
+
 pub fn find_audio_devices() -> Result<Vec<(String, String)>> {
     unsafe {
         use libc::{c_int, c_void};
@@ -300,6 +354,7 @@ pub fn find_audio_devices() -> Result<Vec<(String, String)>> {
     }
 
     let mut sources = Vec::new();
+    let mut seen_card_keys = std::collections::HashSet::new();
     let mut seen_names = std::collections::HashSet::new();
 
     use alsa::pcm::PCM;
@@ -308,7 +363,7 @@ pub fn find_audio_devices() -> Result<Vec<(String, String)>> {
     if let Ok(hints) = HintIter::new_str(None, "pcm") {
         for hint in hints {
             if let (Some(name), Some(desc)) = (hint.name, hint.desc) {
-                if name == "null" || name.contains("oss") {
+                if !is_usable_input_device(&name, &desc, hint.direction) {
                     continue;
                 }
 
@@ -323,11 +378,36 @@ pub fn find_audio_devices() -> Result<Vec<(String, String)>> {
                     _ => false,
                 };
 
-                if is_input {
-                    let display_name = desc.replace("\n", " - ");
-                    sources.push((display_name, name.clone()));
-                    seen_names.insert(name);
+                if !is_input {
+                    continue;
                 }
+
+                // Deduplicate multiple PCM interfaces for the same physical card/device (preferring default:CARD=...)
+                if let Some(card_part) = name.split(':').nth(1) {
+                    let mut parts = card_part.split(',');
+                    let card = parts.next().unwrap_or("");
+                    if card.starts_with("CARD=") {
+                        let dev = parts.find(|p| p.starts_with("DEV=")).unwrap_or("DEV=0");
+                        let card_key = format!("{card}:{dev}");
+                        if !seen_card_keys.insert(card_key) {
+                            continue;
+                        }
+                    }
+                }
+
+                seen_names.insert(name.clone());
+
+                let display_name = if let Some((first, second)) = desc.split_once('\n') {
+                    if second.trim() == "Default Audio Device" {
+                        first.trim().to_string()
+                    } else {
+                        format!("{} - {}", first.trim(), second.trim())
+                    }
+                } else {
+                    desc.replace('\n', " - ")
+                };
+
+                sources.push((display_name, name));
             }
         }
     }
@@ -941,5 +1021,58 @@ mod tests {
             1_160
         );
         assert_eq!(source.statistics.silence_frames.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_is_usable_input_device_filtering() {
+        use alsa::Direction;
+
+        // Valid input devices
+        assert!(is_usable_input_device("pulse", "PulseAudio Sound Server", None));
+        assert!(is_usable_input_device("pipewire", "PipeWire Sound Server", None));
+        assert!(is_usable_input_device("default", "Default Audio Device", None));
+        assert!(is_usable_input_device("default:CARD=PCH", "HDA Intel PCH, ALC1220 Analog\nDefault Audio Device", None));
+        assert!(is_usable_input_device("default:CARD=U25773", "UGREEN 25773, USB Audio\nDefault Audio Device", Some(Direction::Capture)));
+        assert!(is_usable_input_device("front:CARD=PCH,DEV=0", "HDA Intel PCH, ALC1220 Analog\nFront output / input", None));
+
+        // Output-only direction
+        assert!(!is_usable_input_device("anything", "Any device", Some(Direction::Playback)));
+
+        // Output descriptions
+        assert!(!is_usable_input_device("hdmi:CARD=HDMI,DEV=0", "HDA ATI HDMI, LG ULTRAFINE\nHDMI Audio Output", None));
+        assert!(!is_usable_input_device("iec958:CARD=PCH,DEV=0", "HDA Intel PCH\nIEC958 (S/PDIF) Digital Audio Output", None));
+        assert!(!is_usable_input_device("surround51:CARD=PCH,DEV=0", "5.1 Surround output to Front, Center, Rear and Subwoofer speakers", None));
+        assert!(!is_usable_input_device("usbstream:CARD=PCH", "USB Stream Output", None));
+
+        // ALSA plugins & internal endpoints
+        assert!(!is_usable_input_device("null", "Discard all samples", None));
+        assert!(!is_usable_input_device("samplerate", "Rate Converter Plugin", None));
+        assert!(!is_usable_input_device("speexrate", "Rate Converter Plugin", None));
+        assert!(!is_usable_input_device("lavrate", "Rate Converter Plugin", None));
+        assert!(!is_usable_input_device("upmix", "Plugin for channel upmix", None));
+        assert!(!is_usable_input_device("vdownmix", "Plugin for channel downmix", None));
+        assert!(!is_usable_input_device("jack", "JACK Audio Connection Kit", None));
+        assert!(!is_usable_input_device("oss", "Open Sound System", None));
+
+        // Duplicates
+        assert!(!is_usable_input_device("sysdefault:CARD=PCH", "Default Audio Device", None));
+    }
+
+    #[test]
+    fn test_find_audio_devices_only_returns_usable_inputs() {
+        let devices = find_audio_devices().expect("find_audio_devices should succeed");
+
+        for (desc, name) in &devices {
+            let n = name.to_lowercase();
+            let d = desc.to_lowercase();
+
+            assert!(!n.starts_with("surround"), "Surround output device listed: {}", name);
+            assert!(!n.starts_with("iec958"), "IEC958 output device listed: {}", name);
+            assert!(!n.starts_with("hdmi"), "HDMI output device listed: {}", name);
+            assert!(!n.starts_with("usbstream"), "USBStream output device listed: {}", name);
+            assert!(!n.starts_with("sysdefault"), "Duplicate sysdefault listed: {}", name);
+            assert!(n != "null" && n != "samplerate" && n != "speexrate" && n != "upmix" && n != "vdownmix", "Plugin listed: {}", name);
+            assert!(!d.contains("output to") && !d.contains("digital audio output") && !d.contains("hdmi audio output"), "Output-only description listed: {}", desc);
+        }
     }
 }

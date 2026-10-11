@@ -91,5 +91,12 @@ fn main() -> Result<(), eframe::Error> {
         Box::new(app::init_app_state(cc)) as Box<dyn eframe::App>
     };
 
-    eframe::run_native("Michadame Viewer", options, Box::new(creator))
+    let res = eframe::run_native("Michadame Viewer", options, Box::new(creator));
+    match res {
+        Ok(()) => std::process::exit(0),
+        Err(e) => {
+            tracing::error!("Application error: {e}");
+            std::process::exit(1);
+        }
+    }
 }

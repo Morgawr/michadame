@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod dsp_filter;
 pub mod filter_type;
+pub mod mic;
 pub mod usb;
 pub mod video;
 use anyhow::Result;

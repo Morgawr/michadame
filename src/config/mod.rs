@@ -99,6 +99,7 @@ impl From<LegacyConfig> for MichadameConfig {
                 audio_sample_rate: legacy.audio_sample_rate,
                 audio_sample_format: legacy.audio_sample_format.clone(),
                 audio_filter: Some(legacy.replay.audio_filter.clone()),
+                master_volume: legacy.master_volume,
                 popup_under_crt: legacy.popup_under_crt,
             };
             profiles.insert("Default".to_string(), legacy_profile);
@@ -117,6 +118,7 @@ impl From<LegacyConfig> for MichadameConfig {
             audio_buffer_size: legacy.audio_buffer_size,
             audio_sample_rate: legacy.audio_sample_rate,
             audio_sample_format: legacy.audio_sample_format,
+            master_volume: legacy.master_volume,
             active_profile,
             ocr_sticky_distance: legacy.ocr_sticky_distance,
             ocr_hide_overlay: legacy.ocr_hide_overlay,
@@ -127,6 +129,7 @@ impl From<LegacyConfig> for MichadameConfig {
             bank_compact_mode: legacy.bank_compact_mode,
             popup_under_crt: legacy.popup_under_crt,
             twitch: legacy.twitch,
+            mic: legacy.mic,
             video_profile: legacy.video_profile,
             profiles,
         }
@@ -159,6 +162,7 @@ mod tests {
             audio_buffer_size: Some(1024),
             audio_sample_rate: Some(48000),
             audio_sample_format: Some("S16LE".to_string()),
+            master_volume: Some(0.8),
             crt_hard_scan: Some(-8.0),
             crt_warp_x: Some(0.031),
             crt_warp_y: Some(0.041),
@@ -238,6 +242,7 @@ mod tests {
             popup_under_crt: Some(false),
             video_profile: None,
             twitch: Default::default(),
+            mic: Default::default(),
         };
 
         let config: MichadameConfig = MichadameConfig::from(legacy);
@@ -257,6 +262,8 @@ mod tests {
         assert_eq!(profile.audio_source, Some("mic".to_string()));
         assert_eq!(profile.audio_buffer_size, Some(1024));
         assert_eq!(profile.audio_sample_rate, Some(48000));
+        assert_eq!(profile.master_volume, Some(0.8));
+        assert_eq!(config.master_volume, Some(0.8));
         assert!(profile.audio_filter.is_some());
     }
 
@@ -291,6 +298,7 @@ mod tests {
             audio_buffer_size: None,
             audio_sample_rate: None,
             audio_sample_format: None,
+            master_volume: None,
             crt_hard_scan: None,
             crt_warp_x: None,
             crt_warp_y: None,
@@ -369,6 +377,7 @@ mod tests {
             popup_under_crt: None,
             video_profile: None,
             twitch: Default::default(),
+            mic: Default::default(),
         };
 
         let config: MichadameConfig = MichadameConfig::from(legacy);

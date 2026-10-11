@@ -237,6 +237,7 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         audio_buffer_size: Some(state.hardware.audio_buffer_size),
         audio_sample_rate: Some(state.hardware.audio_sample_rate),
         audio_sample_format: Some(state.hardware.audio_sample_format.clone()),
+        master_volume: Some(state.hardware.master_volume),
 
         audio_filter: Some(state.replay.config.audio_filter.clone()),
         popup_under_crt: Some(state.dict.popup_under_crt),
@@ -288,6 +289,7 @@ pub fn save_config_at(path: &Path, state: &mut AppState) -> Result<(), confy::Co
     cfg.audio_buffer_size = Some(state.hardware.audio_buffer_size);
     cfg.audio_sample_rate = Some(state.hardware.audio_sample_rate);
     cfg.audio_sample_format = Some(state.hardware.audio_sample_format.clone());
+    cfg.master_volume = Some(state.hardware.master_volume);
     cfg.ocr_sticky_distance = Some(state.ocr.sticky_distance);
     cfg.ocr_hide_overlay = Some(state.ocr.hide_overlay);
     cfg.ocr_timeout_seconds = Some(state.ocr.timeout_seconds);
@@ -297,6 +299,7 @@ pub fn save_config_at(path: &Path, state: &mut AppState) -> Result<(), confy::Co
     cfg.default_cathode_interference = Some(state.cathode_interference_defaults.clone());
     cfg.popup_under_crt = Some(state.dict.popup_under_crt);
     cfg.twitch = state.twitch.config.clone();
+    cfg.mic = state.mic.config.clone();
 
     if state.video_player.is_some() {
         let current_profile_data = build_profile_from_state(state);
@@ -365,6 +368,7 @@ pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(
     cfg.audio_buffer_size = Some(state.hardware.audio_buffer_size);
     cfg.audio_sample_rate = Some(state.hardware.audio_sample_rate);
     cfg.audio_sample_format = Some(state.hardware.audio_sample_format.clone());
+    cfg.master_volume = Some(state.hardware.master_volume);
     cfg.ocr_sticky_distance = Some(state.ocr.sticky_distance);
     cfg.ocr_hide_overlay = Some(state.ocr.hide_overlay);
     cfg.ocr_timeout_seconds = Some(state.ocr.timeout_seconds);
@@ -372,6 +376,7 @@ pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(
     cfg.bank_compact_mode = Some(state.bank.compact_mode);
     cfg.default_halo = Some(state.halo_defaults.clone());
     cfg.twitch = state.twitch.config.clone();
+    cfg.mic = state.mic.config.clone();
 
     store_config_atomic_at(path, &cfg)
 }
@@ -592,6 +597,10 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) -> bool {
         state.dict.popup_under_crt = under;
     }
 
+    if let Some(vol) = profile.master_volume {
+        state.set_master_volume(vol);
+    }
+
     audio_hardware_changed
 }
 
@@ -633,6 +642,9 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
         .audio_sample_format
         .clone()
         .unwrap_or_else(|| "S16LE".to_string());
+    if let Some(vol) = cfg.master_volume {
+        state.set_master_volume(vol);
+    }
 
     if !state.hardware.selected_video_device.is_empty() {
         crate::video::types::apply_saved_format_config(state, cfg);
@@ -659,6 +671,7 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     state.bank.saved_current_tag = state.bank.current_tag.clone();
     state.bank.compact_mode = cfg.bank_compact_mode.unwrap_or(false);
     state.twitch.apply_config(cfg.twitch.clone());
+    state.mic.config = cfg.mic.clone();
     if let Some(defaults) = &cfg.default_halo {
         state.halo_defaults = defaults.clone();
     }
@@ -747,8 +760,10 @@ mod tests {
             crate::devices::filter_type::CrtFilter::Lottes as u8,
             Ordering::Relaxed,
         );
+        state.hardware.master_volume = 0.75;
 
         let profile = build_profile_from_state(&state);
+        assert_eq!(profile.master_volume, Some(0.75));
         assert_eq!(profile.crt_hard_scan, Some(-12.0));
         assert_eq!(profile.halo_brightboost, Some(2.1));
         assert_eq!(profile.cathode_interference_enabled, Some(true));
@@ -778,10 +793,12 @@ mod tests {
             cathode_frequency: Some(2.0),
             cathode_lightbulb_effect: Some(0.65),
             crt_filter: Some(crate::devices::filter_type::CrtFilter::Lottes as u8),
+            master_volume: Some(0.6),
             ..Default::default()
         };
 
         apply_profile_to_state(&mut state, &profile);
+        assert_eq!(state.hardware.master_volume, 0.6);
         assert_eq!(state.crt.hard_scan, -15.0);
         assert_eq!(state.halo.brightboost, 2.5);
         assert!(state.cathode_interference.enabled);
@@ -806,10 +823,12 @@ mod tests {
             video_device: Some("/dev/video0".to_string()),
             audio_source: Some("Mic".to_string()),
             audio_buffer_size: Some(2048),
+            master_volume: Some(0.4),
             ..Default::default()
         };
 
         apply_config(&mut state, &cfg);
+        assert_eq!(state.hardware.master_volume, 0.4);
         assert_eq!(state.hardware.selected_video_device, "/dev/video0");
         assert_eq!(
             state.hardware.selected_audio_source_name,
