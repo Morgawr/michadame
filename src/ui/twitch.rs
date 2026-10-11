@@ -375,6 +375,7 @@ fn draw_broadcast_group(ui: &mut egui::Ui, state: &mut AppState, save_now: &mut 
                 .fill(egui::Color32::from_rgb(145, 70, 255));
                 if ui.add_sized([160.0, 26.0], btn).clicked() {
                     let audio_tap = state.replay.audio.clone();
+                    audio_tap.set_game_volume(state.hardware.master_volume);
                     let render_dev = state.replay.config.render_device.clone();
                     if let Err(_) = state.twitch.start_broadcast(audio_tap, &render_dev) {
                         // Error notification is dispatched inside start_broadcast

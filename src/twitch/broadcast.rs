@@ -808,5 +808,60 @@ mod tests {
         assert_eq!(config.ingest_server, "rtmps://live.twitch.tv:443/app/");
         assert!(config.stream_key.is_empty());
     }
+
+    #[test]
+    fn test_broadcast_audio_tap_volume_control() {
+        let tap = crate::replay::AudioTap::default();
+        assert_eq!(tap.game_volume(), 1.0);
+
+        tap.set_game_volume(0.75);
+        assert_eq!(tap.game_volume(), 0.75);
+
+        tap.set_game_volume(0.0);
+        assert_eq!(tap.game_volume(), 0.0);
+
+        tap.set_game_volume(0.5);
+        assert_eq!(tap.game_volume(), 0.5);
+    }
+
+    #[test]
+    fn test_broadcast_mixer_respects_master_game_volume() {
+        let n = crate::replay::config::AUDIO_FRAME_SIZE;
+
+        let mut mixer = TimelineMixer::new();
+        // Game audio fed with volume = 0.75 (raw amplitude 0.4 -> 0.3)
+        let game_samples = vec![[0.4, 0.4]; n];
+        mixer.push(MixSource::Game, 0, &game_samples, 0.75);
+
+        // Mic audio fed with volume = 1.0 (raw amplitude 0.2 -> 0.2)
+        let mic_samples = vec![[0.2, 0.2]; n];
+        mixer.push(MixSource::Mic, 0, &mic_samples, 1.0);
+
+        let (_, mixed) = mixer.take().expect("Should produce mixed frame");
+        // Expected: 0.4 * 0.75 + 0.2 * 1.0 = 0.3 + 0.2 = 0.5
+        assert_eq!(mixed.len(), n);
+        assert!((mixed[0][0] - 0.5).abs() < 1e-6);
+        assert!((mixed[0][1] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_broadcast_mixer_muted_game_volume_leaves_only_mic() {
+        let n = crate::replay::config::AUDIO_FRAME_SIZE;
+
+        let mut mixer = TimelineMixer::new();
+        // Game audio muted (volume = 0.0)
+        let game_samples = vec![[0.8, 0.8]; n];
+        mixer.push(MixSource::Game, 0, &game_samples, 0.0);
+
+        // Mic audio at 0.35
+        let mic_samples = vec![[0.35, 0.35]; n];
+        mixer.push(MixSource::Mic, 0, &mic_samples, 1.0);
+
+        let (_, mixed) = mixer.take().expect("Should produce mixed frame");
+        // Expected: 0.8 * 0.0 + 0.35 = 0.35
+        assert_eq!(mixed.len(), n);
+        assert!((mixed[0][0] - 0.35).abs() < 1e-6);
+        assert!((mixed[0][1] - 0.35).abs() < 1e-6);
+    }
 }
 

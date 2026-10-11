@@ -608,6 +608,7 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
             changed = true;
         } else {
             let audio_tap = state.replay.audio.clone();
+            audio_tap.set_game_volume(state.hardware.master_volume);
             let render_dev = state.replay.config.render_device.clone();
             if let Err(_) = state.twitch.start_broadcast(audio_tap, &render_dev) {
                 // Error notification is dispatched inside start_broadcast

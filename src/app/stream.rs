@@ -169,6 +169,7 @@ impl AppState {
         ) {
             Ok(handle) => {
                 handle.set_volume(self.hardware.master_volume);
+                self.replay.set_game_volume(self.hardware.master_volume);
                 self.hardware.active_audio_stream = Some(handle);
                 self.info("Stream started.");
                 self.fullscreen_toggle_frame_count = Some(0);
@@ -321,6 +322,7 @@ impl AppState {
             ) {
                 Ok(handle) => {
                     handle.set_volume(self.hardware.master_volume);
+                    self.replay.set_game_volume(self.hardware.master_volume);
                     self.hardware.active_audio_stream = Some(handle);
                     self.info("Audio stream restarted with new buffer size.");
                 }
@@ -435,6 +437,8 @@ impl AppState {
         let request_repaint: Arc<dyn Fn() + Send + Sync> =
             Arc::new(move || repaint_context.request_repaint());
         let notify_event = Arc::clone(&request_repaint);
+
+        self.replay.set_game_volume(self.hardware.master_volume);
 
         let config = crate::video::player::VideoFileConfig {
             file_path: path.to_path_buf(),
