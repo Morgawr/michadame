@@ -1,16 +1,15 @@
-//! Studio window (`L` hotkey): quick-access dashboard for Twitch streaming,
-//! audio volumes, microphone toggles, replay buffer, and stream diagnostics.
+//! Studio window (`L` hotkey): Stream-Deck style hardware dashboard for Twitch
+//! broadcast control, stream title, quick hardware toggles, audio faders, and stream diagnostics.
 
 use crate::app::AppState;
 use crate::twitch::BroadcastStatus;
-use crate::ui::controls::technical_group;
 use eframe::egui;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 const LABEL_COLOR: egui::Color32 = egui::Color32::from_rgb(153, 153, 153);
 const MUTED_COLOR: egui::Color32 = egui::Color32::from_rgb(119, 119, 119);
-pub const STUDIO_WINDOW_SIZE: [f32; 2] = [540.0, 440.0];
+pub const STUDIO_WINDOW_SIZE: [f32; 2] = [480.0, 410.0];
 
 /// Computes the stream health status string and display color based on broadcast state and dropped frames.
 pub fn evaluate_stream_health(
@@ -46,15 +45,275 @@ pub fn format_stream_duration(duration: Duration) -> String {
     format!("{hours:02}:{mins:02}:{secs:02}")
 }
 
-/// Renders a hardware-style studio volume mixer slider with an embedded live audio feedback VU meter.
+/// Type of toggle icon for the Stream Deck buttons.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DeckButtonKind {
+    ReplayBuffer,
+    Microphone,
+    ScrollingChat,
+}
+
+/// Renders a square "Stream Deck" hardware button.
 ///
 /// Features:
-/// - Recessed track with subtle border and dark background.
-/// - Live VU meter bar dynamically filling the track behind the fader thumb (green -> orange -> red).
-/// - Tactile hardware fader thumb with center indicator stripe and grip texture.
-/// - Full click, drag, and mouse-wheel support.
-/// - Clean percentage readout without duplicate `%` characters.
-/// - Proper disabled styling when unusable (e.g. microphone disabled).
+/// - Beveled hardware keycap styling.
+/// - Clearly distinguishable vector icon.
+/// - Enabled state: illuminated green keycap, green border, green icon.
+/// - Disabled state: dark keycap, red border, and a bold oblique diagonal strike-out bar across the icon.
+pub fn draw_deck_button(
+    ui: &mut egui::Ui,
+    kind: DeckButtonKind,
+    label: &str,
+    enabled: bool,
+    tooltip: &str,
+    size: f32,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let is_hovered = response.hovered();
+
+        // 1. Hardware Stream Deck Keycap Body
+        let (bg_color, stroke_color, stroke_width) = if enabled {
+            if is_hovered {
+                (
+                    egui::Color32::from_rgb(18, 42, 26),
+                    egui::Color32::from_rgb(52, 224, 126),
+                    2.0,
+                )
+            } else {
+                (
+                    egui::Color32::from_rgb(14, 34, 20),
+                    egui::Color32::from_rgb(46, 204, 113),
+                    1.8,
+                )
+            }
+        } else {
+            if is_hovered {
+                (
+                    egui::Color32::from_rgb(32, 24, 24),
+                    egui::Color32::from_rgb(120, 48, 48),
+                    1.5,
+                )
+            } else {
+                (
+                    egui::Color32::from_rgb(22, 20, 20),
+                    egui::Color32::from_rgb(60, 36, 36),
+                    1.2,
+                )
+            }
+        };
+
+        painter.rect_filled(rect, egui::Rounding::same(8.0), bg_color);
+        painter.rect_stroke(
+            rect,
+            egui::Rounding::same(8.0),
+            egui::Stroke::new(stroke_width, stroke_color),
+        );
+
+        // Top-edge subtle highlight
+        if enabled {
+            painter.line_segment(
+                [
+                    egui::pos2(rect.min.x + 8.0, rect.min.y + 2.0),
+                    egui::pos2(rect.max.x - 8.0, rect.min.y + 2.0),
+                ],
+                egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(46, 204, 113, 100)),
+            );
+        } else {
+            painter.line_segment(
+                [
+                    egui::pos2(rect.min.x + 8.0, rect.min.y + 2.0),
+                    egui::pos2(rect.max.x - 8.0, rect.min.y + 2.0),
+                ],
+                egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 255, 255, 20)),
+            );
+        }
+
+        // 2. Icon Area
+        let icon_center = egui::pos2(rect.center().x, rect.center().y - 10.0);
+        let icon_color = if enabled {
+            egui::Color32::from_rgb(46, 204, 113)
+        } else {
+            egui::Color32::from_rgb(140, 60, 60)
+        };
+
+        match kind {
+            DeckButtonKind::ReplayBuffer => {
+                // Circular replay / rewind arrow loop with center play triangle
+                let radius = 12.0;
+                let num_steps = 22;
+                let mut pts = Vec::with_capacity(num_steps + 1);
+                for i in 0..=num_steps {
+                    let frac = i as f32 / num_steps as f32;
+                    let angle = 0.55 + frac * 4.95;
+                    let px = icon_center.x + radius * angle.cos();
+                    let py = icon_center.y + radius * angle.sin();
+                    pts.push(egui::pos2(px, py));
+                }
+                for i in 0..pts.len() - 1 {
+                    painter.line_segment(
+                        [pts[i], pts[i + 1]],
+                        egui::Stroke::new(2.2, icon_color),
+                    );
+                }
+                // Arrowhead
+                let tip = pts[0];
+                painter.line_segment(
+                    [tip, egui::pos2(tip.x - 4.5, tip.y - 5.0)],
+                    egui::Stroke::new(2.2, icon_color),
+                );
+                painter.line_segment(
+                    [tip, egui::pos2(tip.x + 5.0, tip.y - 4.5)],
+                    egui::Stroke::new(2.2, icon_color),
+                );
+                // Center play triangle
+                let tri_pts = [
+                    egui::pos2(icon_center.x - 3.5, icon_center.y - 4.5),
+                    egui::pos2(icon_center.x + 4.5, icon_center.y),
+                    egui::pos2(icon_center.x - 3.5, icon_center.y + 4.5),
+                ];
+                painter.add(egui::Shape::convex_polygon(
+                    tri_pts.to_vec(),
+                    icon_color,
+                    egui::Stroke::NONE,
+                ));
+            }
+            DeckButtonKind::Microphone => {
+                // Studio capsule microphone
+                let cap_rect = egui::Rect::from_center_size(
+                    egui::pos2(icon_center.x, icon_center.y - 3.5),
+                    egui::vec2(8.5, 15.0),
+                );
+                painter.rect_filled(cap_rect, egui::Rounding::same(4.25), icon_color);
+
+                // U-shaped cradle bracket
+                let num_cradle = 12;
+                let mut cradle_pts = Vec::with_capacity(num_cradle + 1);
+                for i in 0..=num_cradle {
+                    let frac = i as f32 / num_cradle as f32;
+                    let angle = std::f32::consts::PI * frac;
+                    let cx = icon_center.x - 7.5 * angle.cos();
+                    let cy = (icon_center.y - 2.5) + 8.0 * angle.sin();
+                    cradle_pts.push(egui::pos2(cx, cy));
+                }
+                for i in 0..cradle_pts.len() - 1 {
+                    painter.line_segment(
+                        [cradle_pts[i], cradle_pts[i + 1]],
+                        egui::Stroke::new(2.0, icon_color),
+                    );
+                }
+
+                // Stem and Base
+                painter.line_segment(
+                    [
+                        egui::pos2(icon_center.x, icon_center.y + 5.5),
+                        egui::pos2(icon_center.x, icon_center.y + 11.0),
+                    ],
+                    egui::Stroke::new(2.0, icon_color),
+                );
+                painter.line_segment(
+                    [
+                        egui::pos2(icon_center.x - 6.5, icon_center.y + 11.0),
+                        egui::pos2(icon_center.x + 6.5, icon_center.y + 11.0),
+                    ],
+                    egui::Stroke::new(2.0, icon_color),
+                );
+            }
+            DeckButtonKind::ScrollingChat => {
+                // Speech bubble with flying chat lines
+                let bubble_rect = egui::Rect::from_center_size(
+                    egui::pos2(icon_center.x, icon_center.y - 2.0),
+                    egui::vec2(25.0, 16.0),
+                );
+                painter.rect_stroke(
+                    bubble_rect,
+                    egui::Rounding::same(3.0),
+                    egui::Stroke::new(2.0, icon_color),
+                );
+
+                // Bottom tail
+                let tail = [
+                    egui::pos2(bubble_rect.min.x + 3.0, bubble_rect.max.y),
+                    egui::pos2(bubble_rect.min.x + 1.0, bubble_rect.max.y + 4.0),
+                    egui::pos2(bubble_rect.min.x + 7.0, bubble_rect.max.y),
+                ];
+                painter.add(egui::Shape::convex_polygon(
+                    tail.to_vec(),
+                    icon_color,
+                    egui::Stroke::NONE,
+                ));
+
+                // Flying motion lines with arrows
+                painter.line_segment(
+                    [
+                        egui::pos2(icon_center.x - 7.0, icon_center.y - 4.5),
+                        egui::pos2(icon_center.x + 3.0, icon_center.y - 4.5),
+                    ],
+                    egui::Stroke::new(1.8, icon_color),
+                );
+                painter.line_segment(
+                    [
+                        egui::pos2(icon_center.x + 1.0, icon_center.y - 6.5),
+                        egui::pos2(icon_center.x + 3.0, icon_center.y - 4.5),
+                    ],
+                    egui::Stroke::new(1.8, icon_color),
+                );
+
+                painter.line_segment(
+                    [
+                        egui::pos2(icon_center.x - 4.0, icon_center.y + 0.5),
+                        egui::pos2(icon_center.x + 6.0, icon_center.y + 0.5),
+                    ],
+                    egui::Stroke::new(1.8, icon_color),
+                );
+                painter.line_segment(
+                    [
+                        egui::pos2(icon_center.x + 4.0, icon_center.y - 1.5),
+                        egui::pos2(icon_center.x + 6.0, icon_center.y + 0.5),
+                    ],
+                    egui::Stroke::new(1.8, icon_color),
+                );
+            }
+        }
+
+        // 3. Oblique diagonal strike-out bar when disabled
+        if !enabled {
+            let slash_p1 = egui::pos2(icon_center.x - 15.0, icon_center.y - 15.0);
+            let slash_p2 = egui::pos2(icon_center.x + 15.0, icon_center.y + 15.0);
+
+            // Dark background cutout stroke under the slash
+            painter.line_segment(
+                [slash_p1, slash_p2],
+                egui::Stroke::new(4.5, bg_color),
+            );
+            // Bright red oblique bar on top
+            painter.line_segment(
+                [slash_p1, slash_p2],
+                egui::Stroke::new(2.5, egui::Color32::from_rgb(231, 76, 60)),
+            );
+        }
+
+        // 4. Label at bottom of keycap
+        let text_color = if enabled {
+            egui::Color32::from_rgb(46, 204, 113)
+        } else {
+            egui::Color32::from_rgb(160, 80, 80)
+        };
+        painter.text(
+            egui::pos2(rect.center().x, rect.max.y - 14.0),
+            egui::Align2::CENTER_CENTER,
+            label,
+            egui::FontId::monospace(10.5),
+            text_color,
+        );
+    }
+
+    response.on_hover_text(tooltip)
+}
+
+/// Renders a hardware-style studio volume mixer slider with an embedded live audio feedback VU meter.
 pub fn studio_mixer_slider(
     ui: &mut egui::Ui,
     value: &mut f32,
@@ -319,434 +578,368 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
 
     ui.add_space(2.0);
 
-    // --- Section 1: Twitch Broadcast & Chat ---
-    technical_group(ui, "Twitch Broadcast & Chat:", |ui| {
-        let status = state.twitch.broadcast_status();
-        let is_live = matches!(status, BroadcastStatus::Live { .. });
-        let is_connecting = matches!(status, BroadcastStatus::Connecting);
-        let active = is_live || is_connecting;
+    // 1. Giant "GO LIVE ON TWITCH" / "STOP STREAMING" button (no channel name)
+    let status = state.twitch.broadcast_status();
+    let is_live = matches!(status, BroadcastStatus::Live { .. });
+    let is_connecting = matches!(status, BroadcastStatus::Connecting);
+    let active = is_live || is_connecting;
 
-        ui.horizontal(|ui| {
-            if active {
-                let btn = egui::Button::new(
-                    egui::RichText::new("■ Stop Streaming")
-                        .monospace()
-                        .strong()
-                        .size(12.0)
-                        .color(egui::Color32::WHITE),
-                )
-                .fill(egui::Color32::from_rgb(204, 51, 51));
-                if ui.add_sized([160.0, 28.0], btn).clicked() {
-                    state.twitch.stop_broadcast();
-                    changed = true;
-                }
-            } else {
-                let btn = egui::Button::new(
-                    egui::RichText::new("● Go Live on Twitch")
-                        .monospace()
-                        .strong()
-                        .size(12.0)
-                        .color(egui::Color32::WHITE),
-                )
-                .fill(egui::Color32::from_rgb(145, 70, 255));
-                if ui.add_sized([160.0, 28.0], btn).clicked() {
-                    let audio_tap = state.replay.audio.clone();
-                    let render_dev = state.replay.config.render_device.clone();
-                    if let Err(_) = state.twitch.start_broadcast(audio_tap, &render_dev) {
-                        // Error notification is dispatched inside start_broadcast
-                    }
-                    changed = true;
-                }
+    let (btn_text, btn_fill) = if is_live {
+        ("■ STOP STREAMING", egui::Color32::from_rgb(204, 51, 51))
+    } else if is_connecting {
+        ("CONNECTING TO TWITCH...", egui::Color32::from_rgb(212, 136, 0))
+    } else {
+        ("● GO LIVE ON TWITCH", egui::Color32::from_rgb(145, 70, 255))
+    };
+
+    let giant_btn = egui::Button::new(
+        egui::RichText::new(btn_text)
+            .monospace()
+            .strong()
+            .size(15.0)
+            .color(egui::Color32::WHITE),
+    )
+    .fill(btn_fill)
+    .rounding(egui::Rounding::same(6.0));
+
+    if ui.add_sized([ui.available_width(), 46.0], giant_btn).clicked() {
+        if active {
+            state.twitch.stop_broadcast();
+            changed = true;
+        } else {
+            let audio_tap = state.replay.audio.clone();
+            let render_dev = state.replay.config.render_device.clone();
+            if let Err(_) = state.twitch.start_broadcast(audio_tap, &render_dev) {
+                // Error notification is dispatched inside start_broadcast
             }
+            changed = true;
+        }
+    }
 
-            ui.add_space(8.0);
+    ui.add_space(6.0);
 
-            // Channel Indicator
-            if state.twitch.config.channel.is_empty() {
-                ui.label(
-                    egui::RichText::new("Channel: (not configured)")
-                        .monospace()
-                        .size(11.0)
-                        .color(MUTED_COLOR),
-                );
-            } else {
-                ui.label(
-                    egui::RichText::new(format!("#{}", state.twitch.config.channel))
-                        .monospace()
-                        .size(11.0)
-                        .strong()
-                        .color(egui::Color32::from_rgb(190, 150, 255)),
-                );
-            }
-        });
+    // 2. Stream Title Label (non-editable, shows stream title regardless if live or not)
+    let stream_title = if !state.twitch.stream_info.title_input.trim().is_empty() {
+        state.twitch.stream_info.title_input.trim()
+    } else if !state.twitch.stream_info.original_title.trim().is_empty() {
+        state.twitch.stream_info.original_title.trim()
+    } else {
+        ""
+    };
 
-        ui.add_space(5.0);
-
-        // Row 2: Niconico Style Chat Toggle
-        ui.horizontal(|ui| {
-            let mut nico_enabled = state.twitch.config.niconico_enabled;
-            if ui
-                .checkbox(&mut nico_enabled, "Niconico Style Chat")
-                .on_hover_text(
-                    "Fly live chat messages across the video screen from right to left (niconico style).\nComments are drawn under the CRT effects and are included in replays.",
-                )
-                .changed()
-            {
-                state.twitch.config.niconico_enabled = nico_enabled;
-                state.twitch.config_dirty = false;
-                crate::config::save_config(state);
-                changed = true;
-            }
-
-            ui.add_space(10.0);
-
-            if nico_enabled {
-                ui.label(
-                    egui::RichText::new("● Comments Active")
-                        .color(egui::Color32::from_rgb(46, 204, 113))
-                        .strong()
-                        .monospace()
-                        .size(10.5),
-                );
-            } else {
-                ui.label(
-                    egui::RichText::new("○ Comments Disabled")
-                        .color(MUTED_COLOR)
-                        .monospace()
-                        .size(10.5),
-                );
-            }
-        });
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("Title:")
+                .monospace()
+                .size(11.0)
+                .color(LABEL_COLOR),
+        );
+        let (display_text, display_color) = if stream_title.is_empty() {
+            ("(No stream title set)".to_string(), MUTED_COLOR)
+        } else {
+            (stream_title.to_string(), egui::Color32::from_rgb(220, 220, 220))
+        };
+        ui.label(
+            egui::RichText::new(display_text)
+                .monospace()
+                .strong()
+                .size(11.0)
+                .color(display_color),
+        );
     });
 
-    ui.add_space(5.0);
+    ui.add_space(10.0);
 
-    // --- Section 2: Twitch Stream Diagnostics ---
-    technical_group(ui, "Twitch Stream Diagnostics:", |ui| {
-        let status = state.twitch.broadcast_status();
-        let (fps, kbps, vdrop, adrop) = if let Some(m) = state.twitch.broadcast_metrics() {
-            let fps = m.current_fps.load(Ordering::Relaxed) as f32 / 10.0;
-            let kbps = m.current_bitrate_kbps.load(Ordering::Relaxed);
-            let vdrop = m.video_dropped.load(Ordering::Relaxed);
-            let adrop = m.audio_dropped.load(Ordering::Relaxed);
-            (fps, kbps, vdrop, adrop)
-        } else {
-            (0.0, 0, 0, 0)
-        };
+    // 3. Mini-grid of 3 Stream Deck square buttons side-by-side
+    // Replay buffer | Microphone | Scrolling chat
+    let btn_size = 100.0;
+    let btn_gap = 18.0;
+    let total_grid_w = 3.0 * btn_size + 2.0 * btn_gap;
+    let side_padding = ((ui.available_width() - total_grid_w) / 2.0).max(0.0);
 
-        let (health_str, health_color) = evaluate_stream_health(&status, vdrop, adrop);
-        let viewer_count = state.twitch.viewer_count();
+    ui.horizontal(|ui| {
+        ui.add_space(side_padding);
 
-        match &status {
-            BroadcastStatus::Live { started_at } => {
-                let duration_str = format_stream_duration(started_at.elapsed());
-                let viewers_str = match viewer_count {
-                    Some(v) => format!("{v}"),
-                    None => "--".to_string(),
-                };
-
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "● LIVE {duration_str}  |  {fps:.1} FPS  |  "
-                        ))
-                        .monospace()
-                        .strong()
-                        .size(11.0)
-                        .color(egui::Color32::from_rgb(80, 220, 120)),
-                    );
-                    ui.label(
-                        egui::RichText::new(format!("Health: {health_str}"))
-                            .monospace()
-                            .strong()
-                            .size(11.0)
-                            .color(health_color),
-                    );
-                    ui.label(
-                        egui::RichText::new(format!("  |  Viewers: {viewers_str}"))
-                            .monospace()
-                            .strong()
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(80, 220, 120)),
-                    );
-                });
-
-                ui.add_space(3.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "Bitrate: {kbps} kbps  |  Dropped Frames: V {vdrop} / A {adrop}"
-                        ))
-                        .monospace()
-                        .size(10.5)
-                        .color(LABEL_COLOR),
-                    );
-                });
+        // Deck Button 1: Replay Buffer
+        let replay_enabled = state.replay.runtime.is_some();
+        if draw_deck_button(
+            ui,
+            DeckButtonKind::ReplayBuffer,
+            "REPLAY",
+            replay_enabled,
+            "Replay Buffer: Click to toggle continuous clip recording",
+            btn_size,
+        )
+        .clicked()
+        {
+            if replay_enabled {
+                state.replay.disable();
+            } else {
+                if let Err(e) = state.replay.enable() {
+                    state.replay.last_status.message = e.to_string();
+                    state.error(format!("Failed to enable replay buffer: {e}"));
+                }
             }
-            BroadcastStatus::Connecting => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(
-                        egui::RichText::new("Connecting to Twitch ingest…")
-                            .monospace()
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(230, 190, 60)),
-                    );
-                });
+            changed = true;
+        }
+
+        ui.add_space(btn_gap);
+
+        // Deck Button 2: Microphone
+        let mic_enabled = state.mic.config.enabled;
+        if draw_deck_button(
+            ui,
+            DeckButtonKind::Microphone,
+            "MIC",
+            mic_enabled,
+            "Microphone: Click to toggle microphone audio capture",
+            btn_size,
+        )
+        .clicked()
+        {
+            let new_enabled = !state.mic.config.enabled;
+            state.mic.config.enabled = new_enabled;
+            if new_enabled && state.mic.config.device_name.is_none() {
+                state.mic.config.device_name = state
+                    .hardware
+                    .audio_sources
+                    .first()
+                    .map(|(_, name)| name.clone());
             }
-            BroadcastStatus::Error(err) => {
-                ui.label(
-                    egui::RichText::new(format!("Stream Error: {err}"))
-                        .monospace()
-                        .size(11.0)
-                        .color(egui::Color32::from_rgb(240, 70, 70)),
-                );
-            }
-            BroadcastStatus::Offline => {
-                let viewers_str = match viewer_count {
-                    Some(v) => format!("{v}"),
-                    None => "0".to_string(),
-                };
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "○ Stream Offline  |  FPS: --  |  Health: Offline  |  Viewers: {viewers_str}"
-                        ))
-                        .monospace()
-                        .size(11.0)
-                        .color(MUTED_COLOR),
-                    );
-                });
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("Bitrate: 0 kbps  |  Dropped Frames: V 0 / A 0")
-                            .monospace()
-                            .size(10.5)
-                            .color(MUTED_COLOR),
-                    );
-                });
-            }
+            crate::config::save_config(state);
+            crate::config::save_global_hardware_config(state);
+            state.sync_mic_stream();
+            changed = true;
+        }
+
+        ui.add_space(btn_gap);
+
+        // Deck Button 3: Scrolling Chat
+        let chat_enabled = state.twitch.config.niconico_enabled;
+        if draw_deck_button(
+            ui,
+            DeckButtonKind::ScrollingChat,
+            "CHAT",
+            chat_enabled,
+            "Scrolling Chat: Click to toggle niconico flying comments across the video",
+            btn_size,
+        )
+        .clicked()
+        {
+            state.twitch.config.niconico_enabled = !state.twitch.config.niconico_enabled;
+            state.twitch.config_dirty = false;
+            crate::config::save_config(state);
+            changed = true;
         }
     });
 
-    ui.add_space(5.0);
+    ui.add_space(14.0);
 
-    // --- Section 3: Audio Controls with Studio Mixer Sliders ---
-    technical_group(ui, "Audio Controls:", |ui| {
-        let label_width = 125.0;
-        let readout_width = 46.0;
+    // 4. Two horizontal bars with volume sliders (as implemented with embedded VU meters)
+    let label_width = 115.0;
+    let readout_width = 46.0;
 
-        // Row 1: Master Volume slider with live audio peak feedback
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                [label_width, 22.0],
-                egui::Label::new(
-                    egui::RichText::new("Master Volume:")
-                        .monospace()
-                        .size(11.0)
-                        .color(LABEL_COLOR),
-                ),
-            );
-            let slider_width = (ui.available_width() - readout_width - 8.0).max(100.0);
-            let mut vol = state.hardware.master_volume;
-            let peak = state.hardware.live_audio_peak;
-            let resp = studio_mixer_slider(ui, &mut vol, 0.0..=1.0, peak, true, slider_width);
-            if resp.changed() {
-                state.set_master_volume(vol);
-                crate::config::save_config(state);
-                crate::config::save_global_hardware_config(state);
-                changed = true;
-            }
-            ui.add_sized(
-                [readout_width, 22.0],
-                egui::Label::new(
-                    egui::RichText::new(format!("{:.0}%", vol * 100.0))
-                        .monospace()
-                        .size(11.0)
-                        .strong()
-                        .color(egui::Color32::WHITE),
-                ),
-            );
-        });
-
-        ui.add_space(5.0);
-
-        // Row 2: Microphone Toggle & Live Status Indicator (NO emoji!)
-        ui.horizontal(|ui| {
-            let mut mic_enabled = state.mic.config.enabled;
-            if ui
-                .checkbox(&mut mic_enabled, "Enable Microphone")
-                .on_hover_text("Enables microphone audio input capture and recording into the replay buffer.")
-                .changed()
-            {
-                state.mic.config.enabled = mic_enabled;
-                if mic_enabled && state.mic.config.device_name.is_none() {
-                    state.mic.config.device_name = state
-                        .hardware
-                        .audio_sources
-                        .first()
-                        .map(|(_, name)| name.clone());
-                }
-                crate::config::save_config(state);
-                crate::config::save_global_hardware_config(state);
-                state.sync_mic_stream();
-                changed = true;
-            }
-
-            ui.add_space(10.0);
-
-            let is_stream_active = state.mic.active_stream.is_some();
-            if is_stream_active {
-                ui.label(
-                    egui::RichText::new("● Mic Active")
-                        .color(egui::Color32::from_rgb(46, 204, 113))
-                        .strong()
-                        .monospace()
-                        .size(10.5),
-                );
-            } else if state.mic.config.enabled {
-                ui.label(
-                    egui::RichText::new("○ Connecting...")
-                        .color(egui::Color32::from_rgb(241, 196, 15))
-                        .monospace()
-                        .size(10.5),
-                );
-            } else {
-                ui.label(
-                    egui::RichText::new("○ Mic Disabled")
-                        .color(MUTED_COLOR)
-                        .monospace()
-                        .size(10.5),
-                );
-            }
-        });
-
-        ui.add_space(5.0);
-
-        // Row 3: Microphone Volume slider with live mic peak feedback
-        // Kept visible at all times, but unusable and greyed out when microphone is disabled
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                [label_width, 22.0],
-                egui::Label::new(
-                    egui::RichText::new("Mic Volume:")
-                        .monospace()
-                        .size(11.0)
-                        .color(LABEL_COLOR),
-                ),
-            );
-
-            let slider_width = (ui.available_width() - readout_width - 8.0).max(100.0);
-            let mut mic_vol = state.mic.config.volume;
-            let mic_peak = state.hardware.live_mic_peak;
-            let mic_enabled = state.mic.config.enabled;
-            let resp = studio_mixer_slider(
-                ui,
-                &mut mic_vol,
-                0.0..=1.5,
-                mic_peak,
-                mic_enabled,
-                slider_width,
-            );
-            if resp.changed() {
-                state.mic.config.volume = mic_vol;
-                if let Some(stream) = &state.mic.active_stream {
-                    if let Ok(mut w) = stream.config.write() {
-                        *w = state.mic.config.clone();
-                    }
-                }
-                crate::config::save_global_hardware_config(state);
-                changed = true;
-            }
-
-            let readout_color = if mic_enabled {
-                egui::Color32::WHITE
-            } else {
-                MUTED_COLOR
-            };
-            ui.add_sized(
-                [readout_width, 22.0],
-                egui::Label::new(
-                    egui::RichText::new(format!("{:.0}%", mic_vol * 100.0))
-                        .monospace()
-                        .size(11.0)
-                        .strong()
-                        .color(readout_color),
-                ),
-            );
-        });
+    // Master Volume Slider
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [label_width, 22.0],
+            egui::Label::new(
+                egui::RichText::new("Master Volume:")
+                    .monospace()
+                    .size(11.0)
+                    .color(LABEL_COLOR),
+            ),
+        );
+        let slider_width = (ui.available_width() - readout_width - 8.0).max(100.0);
+        let mut vol = state.hardware.master_volume;
+        let peak = state.hardware.live_audio_peak;
+        let resp = studio_mixer_slider(ui, &mut vol, 0.0..=1.0, peak, true, slider_width);
+        if resp.changed() {
+            state.set_master_volume(vol);
+            crate::config::save_config(state);
+            crate::config::save_global_hardware_config(state);
+            changed = true;
+        }
+        ui.add_sized(
+            [readout_width, 22.0],
+            egui::Label::new(
+                egui::RichText::new(format!("{:.0}%", vol * 100.0))
+                    .monospace()
+                    .size(11.0)
+                    .strong()
+                    .color(egui::Color32::WHITE),
+            ),
+        );
     });
 
-    ui.add_space(5.0);
+    ui.add_space(6.0);
 
-    // --- Section 4: Replay Buffer ---
-    technical_group(ui, "Replay Buffer:", |ui| {
-        let mut replay_enabled = state.replay.runtime.is_some();
-        let streaming = state.ui.video_window_open;
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    streaming || replay_enabled,
-                    egui::Checkbox::new(&mut replay_enabled, "Enable Replay Buffer"),
-                )
-                .on_hover_text("Enables the continuous live replay buffer for clipping.")
-                .changed()
-            {
-                if replay_enabled {
-                    if let Err(e) = state.replay.enable() {
-                        state.replay.last_status.message = e.to_string();
-                        state.error(format!("Failed to enable replay buffer: {e}"));
-                    }
-                } else {
-                    state.replay.disable();
+    // Microphone Volume Slider
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [label_width, 22.0],
+            egui::Label::new(
+                egui::RichText::new("Mic Volume:")
+                    .monospace()
+                    .size(11.0)
+                    .color(LABEL_COLOR),
+            ),
+        );
+
+        let slider_width = (ui.available_width() - readout_width - 8.0).max(100.0);
+        let mut mic_vol = state.mic.config.volume;
+        let mic_peak = state.hardware.live_mic_peak;
+        let mic_active = state.mic.config.enabled;
+        let resp = studio_mixer_slider(
+            ui,
+            &mut mic_vol,
+            0.0..=1.5,
+            mic_peak,
+            mic_active,
+            slider_width,
+        );
+        if resp.changed() {
+            state.mic.config.volume = mic_vol;
+            if let Some(stream) = &state.mic.active_stream {
+                if let Ok(mut w) = stream.config.write() {
+                    *w = state.mic.config.clone();
                 }
-                changed = true;
             }
+            crate::config::save_global_hardware_config(state);
+            changed = true;
+        }
 
-            ui.add_space(10.0);
+        let readout_color = if mic_active {
+            egui::Color32::WHITE
+        } else {
+            MUTED_COLOR
+        };
+        ui.add_sized(
+            [readout_width, 22.0],
+            egui::Label::new(
+                egui::RichText::new(format!("{:.0}%", mic_vol * 100.0))
+                    .monospace()
+                    .size(11.0)
+                    .strong()
+                    .color(readout_color),
+            ),
+        );
+    });
 
-            if replay_enabled {
-                ui.label(
-                    egui::RichText::new("● Buffer Active")
-                        .color(egui::Color32::from_rgb(46, 204, 113))
-                        .strong()
-                        .monospace()
-                        .size(10.5),
-                );
-            } else {
-                ui.label(
-                    egui::RichText::new("○ Buffer Idle")
-                        .color(MUTED_COLOR)
-                        .monospace()
-                        .size(10.5),
-                );
-            }
-        });
+    ui.add_space(14.0);
 
-        let status = state.replay.status();
-        if !status.message.is_empty() || status.saving {
-            ui.add_space(3.0);
-            ui.horizontal(|ui| {
-                if status.saving {
-                    ui.label(
-                        egui::RichText::new("Saving clip…")
-                            .monospace()
-                            .size(10.5)
-                            .color(egui::Color32::from_rgb(241, 196, 15)),
-                    );
-                }
-                if !status.message.is_empty() {
-                    ui.label(
-                        egui::RichText::new(&status.message)
+    // 5. Stream Diagnostic Data at the bottom
+    let (fps, kbps, vdrop, adrop) = if let Some(m) = state.twitch.broadcast_metrics() {
+        let fps = m.current_fps.load(Ordering::Relaxed) as f32 / 10.0;
+        let kbps = m.current_bitrate_kbps.load(Ordering::Relaxed);
+        let vdrop = m.video_dropped.load(Ordering::Relaxed);
+        let adrop = m.audio_dropped.load(Ordering::Relaxed);
+        (fps, kbps, vdrop, adrop)
+    } else {
+        (0.0, 0, 0, 0)
+    };
+
+    let (health_str, health_color) = evaluate_stream_health(&status, vdrop, adrop);
+    let viewer_count = state.twitch.viewer_count();
+
+    egui::Frame::none()
+        .fill(egui::Color32::from_rgb(18, 18, 20))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 42, 46)))
+        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+        .rounding(egui::Rounding::same(4.0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+
+            match &status {
+                BroadcastStatus::Live { started_at } => {
+                    let duration_str = format_stream_duration(started_at.elapsed());
+                    let viewers_str = match viewer_count {
+                        Some(v) => format!("{v}"),
+                        None => "--".to_string(),
+                    };
+
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("● LIVE {duration_str}  |  {fps:.1} FPS  |  "))
+                                .monospace()
+                                .strong()
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(80, 220, 120)),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("Health: {health_str}"))
+                                .monospace()
+                                .strong()
+                                .size(11.0)
+                                .color(health_color),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("  |  Viewers: {viewers_str}"))
+                                .monospace()
+                                .strong()
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(80, 220, 120)),
+                        );
+                    });
+
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Bitrate: {kbps} kbps  |  Dropped Frames: V {vdrop} / A {adrop}"
+                            ))
                             .monospace()
                             .size(10.5)
                             .color(LABEL_COLOR),
+                        );
+                    });
+                }
+                BroadcastStatus::Connecting => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(
+                            egui::RichText::new("Connecting to Twitch ingest…")
+                                .monospace()
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(230, 190, 60)),
+                        );
+                    });
+                }
+                BroadcastStatus::Error(err) => {
+                    ui.label(
+                        egui::RichText::new(format!("Stream Error: {err}"))
+                            .monospace()
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(240, 70, 70)),
                     );
                 }
-            });
-        }
-    });
+                BroadcastStatus::Offline => {
+                    let viewers_str = match viewer_count {
+                        Some(v) => format!("{v}"),
+                        None => "0".to_string(),
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "○ Stream Offline  |  FPS: --  |  Health: Offline  |  Viewers: {viewers_str}"
+                            ))
+                            .monospace()
+                            .size(11.0)
+                            .color(MUTED_COLOR),
+                        );
+                    });
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Bitrate: 0 kbps  |  Dropped Frames: V 0 / A 0")
+                                .monospace()
+                                .size(10.5)
+                                .color(MUTED_COLOR),
+                        );
+                    });
+                }
+            }
+        });
 
     changed
 }
