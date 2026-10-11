@@ -767,7 +767,7 @@ fn push_to_ring(
     let _ = samples_captured.fetch_add(sample_count as u64, Ordering::Relaxed);
 }
 
-fn initialize_rodio_playback() -> Result<(OutputStream, rodio::OutputStreamHandle)> {
+pub(crate) fn initialize_rodio_playback() -> Result<(OutputStream, rodio::OutputStreamHandle)> {
     // On Linux, the "default" host is ALSA, but for output we want to hit the sound server (Pulse/PipeWire).
     // If we can find a Host for PulseAudio or if the default host has a "pulse"/"pipewire" device, we prefer it.
     let host = cpal::default_host();

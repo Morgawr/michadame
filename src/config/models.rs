@@ -263,6 +263,8 @@ pub struct LegacyConfig {
     pub bank_compact_mode: Option<bool>,
     pub popup_under_crt: Option<bool>,
     #[serde(default)]
+    pub video_profile: Option<Profile>,
+    #[serde(default)]
     pub twitch: TwitchConfig,
 }
 
@@ -364,6 +366,7 @@ impl Default for LegacyConfig {
             bank_current_tag: None,
             bank_compact_mode: None,
             popup_under_crt: None,
+            video_profile: None,
             twitch: TwitchConfig::default(),
         }
     }
@@ -400,6 +403,8 @@ pub struct MichadameConfig {
     pub twitch: TwitchConfig,
     // confy's TOML serializer requires scalar fields before nested tables.
     pub replay: crate::replay::config::ReplayConfig,
+    #[serde(default)]
+    pub video_profile: Option<Profile>,
     pub profiles: BTreeMap<String, Profile>,
 }
 
@@ -429,6 +434,7 @@ impl Default for MichadameConfig {
             bank_current_tag: None,
             bank_compact_mode: None,
             popup_under_crt: Some(false),
+            video_profile: None,
             profiles,
         }
     }

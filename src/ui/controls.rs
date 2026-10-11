@@ -162,11 +162,17 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     );
                     ui.add_space(6.0);
 
-                    // Row 1: Stream Start/Stop + Compact Audio Meter (120x16)
+                    // Row 1: Stream Start/Stop / Video File + Compact Audio Meter (120x16)
                     ui.horizontal(|ui| {
                         if state.ui.video_window_open {
+                            let is_file_mode = state.video_player.is_some();
+                            let label = if is_file_mode {
+                                "Stop Video"
+                            } else {
+                                "Stop Stream"
+                            };
                             let stop_btn = egui::Button::new(
-                                egui::RichText::new("Stop Stream")
+                                egui::RichText::new(label)
                                     .size(11.0)
                                     .color(egui::Color32::from_rgb(255, 204, 204)),
                             )
@@ -175,7 +181,11 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             .rounding(egui::Rounding::ZERO);
                             if ui.add(stop_btn).clicked() {
                                 state.stop_stream(ui.ctx());
-                                state.info("Stream stopped.");
+                                state.info(if is_file_mode {
+                                    "Video playback stopped."
+                                } else {
+                                    "Stream stopped."
+                                });
                             }
                         } else {
                             let can_stream = !state.hardware.selected_video_device.is_empty()
@@ -192,9 +202,22 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                 state.start_stream(ui.ctx());
                                 state.info("Stream starting...");
                             }
+
+                            let open_btn = egui::Button::new(
+                                egui::RichText::new("Open Video File")
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(204, 230, 255)),
+                            )
+                            .fill(egui::Color32::from_rgb(24, 50, 80)) // #183250
+                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 80, 130)))
+                            .rounding(egui::Rounding::ZERO);
+                            if ui.add(open_btn).clicked() {
+                                state.open_video_file_dialog(ui.ctx());
+                            }
+
                             if !can_stream {
                                 ui.label(
-                                    egui::RichText::new("Select Video Format/Resolution first.")
+                                    egui::RichText::new("Select format for capture card, or open local video.")
                                         .weak()
                                         .small(),
                                 );
@@ -644,6 +667,8 @@ fn draw_hotkeys_tab(ui: &mut egui::Ui) {
                     ("Q", "Stop Stream Confirmation Dialog"),
                     ("T", "Hide / Show Twitch Chat Overlay (when enabled)"),
                     ("Escape", "Exit Fullscreen / Close Dialogs / Dismiss Popups"),
+                    ("P", "Toggle Play / Pause (Video Player Mode)"),
+                    ("← / →", "Seek -5s / +5s (Video Player Mode)"),
                     ("Space", "Capture OCR (Google Lens)"),
                     ("Shift + Space", "Clear OCR Bounding Boxes"),
                     ("Ctrl + C", "Export 15s Replay Clip to Clipboard"),

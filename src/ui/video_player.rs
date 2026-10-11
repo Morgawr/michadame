@@ -124,7 +124,15 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         let ppp = ctx.pixels_per_point();
         let output_size = (response.rect.width() * ppp, response.rect.height() * ppp);
         let latest_frame_dim = state.latest_frame.as_ref().map(|f| (f.width, f.height));
-        let res = latest_frame_dim.unwrap_or((texture_size.x as u32, texture_size.y as u32));
+        let res = latest_frame_dim
+            .or_else(|| {
+                if state.hardware.selected_resolution.0 > 0 {
+                    Some(state.hardware.selected_resolution)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or((texture_size.x as u32, texture_size.y as u32));
         let rendered_area_geom = crate::video::gpu::geometry::RenderedArea::fit(
             res,
             output_size,
@@ -178,7 +186,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         let is_on_crt_surface = pointer_pos.map_or(false, |pos| {
             crt_surface.contains(pos) && !state.twitch.overlay_contains(pos)
         });
-        let software_mouse_active = is_software_mouse_active(state, is_on_crt_surface);
+        let is_hovering_controls = is_hovering_video_controls(state, pointer_pos, response.rect);
+        let software_mouse_active =
+            is_software_mouse_active(state, is_on_crt_surface) && !is_hovering_controls;
 
         let (software_mouse_pos, software_mouse_clip) = if software_mouse_active {
             let pos = pointer_pos.map(|pos| {
@@ -258,6 +268,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 let bank_capture_cb = bank_capture.clone();
 
                 let capture_overlays = state.replay.config.capture_overlays;
+                let stream_res = state.hardware.selected_resolution;
 
                 let callback = egui::PaintCallback {
                     rect: response.rect,
@@ -270,6 +281,13 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                             let res = latest_frame
                                 .as_ref()
                                 .map(|f| (f.width, f.height))
+                                .or_else(|| {
+                                    if stream_res.0 > 0 {
+                                        Some(stream_res)
+                                    } else {
+                                        None
+                                    }
+                                })
                                 .unwrap_or((texture_size.x as u32, texture_size.y as u32));
 
                             let is_mining_capture = bank_capture_cb.has_pending();
@@ -468,6 +486,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             let ocr_req_sender_cb = ocr_req_sender.clone();
             let bank_capture_cb = bank_capture.clone();
             let capture_overlays = state.replay.config.capture_overlays;
+            let stream_res = state.hardware.selected_resolution;
 
             let callback = egui::PaintCallback {
                 rect,
@@ -476,6 +495,13 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     let res = latest_frame
                         .as_ref()
                         .map(|f| (f.width, f.height))
+                        .or_else(|| {
+                            if stream_res.0 > 0 {
+                                Some(stream_res)
+                            } else {
+                                None
+                            }
+                        })
                         .unwrap_or((texture_size.x as u32, texture_size.y as u32));
                     let rendered_area = renderer_clone.lock().unwrap().draw_passthrough(
                         painter.gl(),
@@ -578,6 +604,11 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         // Niconico chat comments, drawn by the renderer under the CRT effects.
         crate::ui::niconico::update(state, ctx, video_rect);
 
+        // Extra widget for local video player mode (scrub bar, play/pause/stop)
+        if state.video_player.is_some() {
+            draw_video_file_controls(state, ui, ctx, response.rect);
+        }
+
         if software_mouse_active {
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
         }
@@ -656,9 +687,289 @@ pub fn is_software_mouse_active(state: &AppState, is_on_crt_surface: bool) -> bo
         && !(popup_active && !popup_under_crt)
 }
 
+/// Checks if the mouse cursor is hovering over or near the bottom video controls widget.
+pub fn is_hovering_video_controls(
+    state: &AppState,
+    pointer_pos: Option<egui::Pos2>,
+    window_rect: egui::Rect,
+) -> bool {
+    if state.video_player.is_none() {
+        return false;
+    }
+    let bar_height = 46.0;
+    let hover_zone = egui::Rect::from_min_max(
+        egui::pos2(
+            window_rect.min.x,
+            (window_rect.max.y - bar_height - 35.0).max(window_rect.min.y),
+        ),
+        window_rect.max,
+    );
+    pointer_pos.is_some_and(|pos| hover_zone.contains(pos))
+        || state.video_player.as_ref().is_some_and(|p| p.is_seeking)
+}
+
+/// Draws the auto-hiding playback control widget with scrub bar, play, pause, and stop buttons.
+pub fn draw_video_file_controls(
+    state: &mut AppState,
+    _ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    screen_rect: egui::Rect,
+) {
+    let pointer_pos = ctx.input(|i| i.pointer.hover_pos());
+    if !is_hovering_video_controls(state, pointer_pos, screen_rect) {
+        return;
+    }
+
+    let Some(ref mut player) = state.video_player else {
+        return;
+    };
+
+    let bar_height = 46.0;
+    let bar_rect = egui::Rect::from_min_max(
+        egui::pos2(screen_rect.min.x, screen_rect.max.y - bar_height),
+        egui::pos2(screen_rect.max.x, screen_rect.max.y),
+    );
+
+    let mut should_stop = false;
+
+    egui::Area::new(egui::Id::new("video_file_bottom_bar"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(bar_rect.min)
+        .show(ctx, |ui| {
+            ui.set_min_width(bar_rect.width());
+            ui.set_max_width(bar_rect.width());
+            egui::Frame::none()
+                .fill(egui::Color32::from_rgba_unmultiplied(16, 16, 16, 235))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 50, 50)))
+                .inner_margin(egui::Margin::symmetric(14.0, 8.0))
+                .show(ui, |ui| {
+                    ui.set_min_width((bar_rect.width() - 28.0).max(0.0));
+                    ui.set_max_width((bar_rect.width() - 28.0).max(0.0));
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(10.0, 0.0);
+
+                        // Play / Pause button
+                        let is_paused = player.is_paused;
+                        let play_pause_icon = if is_paused { "▶" } else { "⏸" };
+                        let play_pause_tip = if is_paused { "Play (P)" } else { "Pause (P)" };
+                        let play_btn = egui::Button::new(
+                            egui::RichText::new(play_pause_icon)
+                                .size(13.0)
+                                .strong()
+                                .color(egui::Color32::WHITE),
+                        )
+                        .fill(egui::Color32::from_rgb(34, 34, 34))
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(68, 68, 68)))
+                        .rounding(egui::Rounding::same(2.0));
+
+                        if ui.add(play_btn).on_hover_text(play_pause_tip).clicked() {
+                            let cmd = if is_paused {
+                                crate::video::player::PlayerCommand::Play
+                            } else {
+                                crate::video::player::PlayerCommand::Pause
+                            };
+                            let _ = player.command_sender.send(cmd);
+                            ctx.request_repaint();
+                        }
+
+                        // Stop button (resets to 0 and pauses)
+                        let stop_btn = egui::Button::new(
+                            egui::RichText::new("⏹")
+                                .size(12.0)
+                                .strong()
+                                .color(egui::Color32::WHITE),
+                        )
+                        .fill(egui::Color32::from_rgb(34, 34, 34))
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(68, 68, 68)))
+                        .rounding(egui::Rounding::same(2.0));
+
+                        if ui
+                            .add(stop_btn)
+                            .on_hover_text("Stop (Reset to beginning)")
+                            .clicked()
+                        {
+                            let _ = player
+                                .command_sender
+                                .send(crate::video::player::PlayerCommand::Stop);
+                            ctx.request_repaint();
+                        }
+
+                        // Current time / Total duration label
+                        let cur_str = crate::video::player::format_time_with_duration(
+                            player.current_position_secs,
+                            player.duration_secs,
+                        );
+                        let dur_str = crate::video::player::format_time(player.duration_secs);
+                        ui.label(
+                            egui::RichText::new(format!("{} / {}", cur_str, dur_str))
+                                .monospace()
+                                .size(11.5)
+                                .strong()
+                                .color(egui::Color32::from_rgb(220, 220, 220)),
+                        );
+
+                        // Horizontal seek / scrub bar filling the entire middle width
+                        let exit_btn_width = 85.0;
+                        let item_spacing = ui.spacing().item_spacing.x;
+                        let remaining_width = ui.available_width();
+                        let seek_width = (remaining_width - exit_btn_width - item_spacing).max(60.0);
+
+                        let duration = player.duration_secs.max(0.1);
+                        let current_pos = player.current_position_secs.clamp(0.0, duration);
+
+                        let (seek_rect, seek_resp) = ui.allocate_exact_size(
+                            egui::vec2(seek_width, 22.0),
+                            egui::Sense::click_and_drag(),
+                        );
+
+                        if seek_resp.drag_started() {
+                            player.is_seeking = true;
+                            player.was_playing_before_scrub = !player.is_paused;
+                            if player.was_playing_before_scrub {
+                                let _ = player
+                                    .command_sender
+                                    .send(crate::video::player::PlayerCommand::Pause);
+                            }
+                        }
+
+                        if seek_resp.dragged() {
+                            if let Some(mouse_pos) = seek_resp.interact_pointer_pos() {
+                                let fraction = ((mouse_pos.x - seek_rect.min.x) / seek_rect.width())
+                                    .clamp(0.0, 1.0);
+                                let seek_target = fraction as f64 * duration;
+                                player.current_position_secs = seek_target;
+                                let _ = player
+                                    .command_sender
+                                    .send(crate::video::player::PlayerCommand::Seek(seek_target));
+                                ctx.request_repaint();
+                            }
+                        }
+
+                        if seek_resp.drag_stopped() {
+                            player.is_seeking = false;
+                            if let Some(mouse_pos) = seek_resp.interact_pointer_pos() {
+                                let fraction = ((mouse_pos.x - seek_rect.min.x) / seek_rect.width())
+                                    .clamp(0.0, 1.0);
+                                let seek_target = fraction as f64 * duration;
+                                player.current_position_secs = seek_target;
+                                let _ = player
+                                    .command_sender
+                                    .send(crate::video::player::PlayerCommand::Seek(seek_target));
+                            }
+                            if player.was_playing_before_scrub {
+                                let _ = player
+                                    .command_sender
+                                    .send(crate::video::player::PlayerCommand::Play);
+                            }
+                            player.was_playing_before_scrub = false;
+                            ctx.request_repaint();
+                        }
+
+                        if seek_resp.clicked() && !seek_resp.dragged() {
+                            if let Some(mouse_pos) = seek_resp.interact_pointer_pos() {
+                                let fraction = ((mouse_pos.x - seek_rect.min.x) / seek_rect.width())
+                                    .clamp(0.0, 1.0);
+                                let seek_target = fraction as f64 * duration;
+                                player.current_position_secs = seek_target;
+                                let _ = player
+                                    .command_sender
+                                    .send(crate::video::player::PlayerCommand::Seek(seek_target));
+                                ctx.request_repaint();
+                            }
+                        }
+
+                        // Hover timestamp tooltip
+                        if let Some(hover_pos) = seek_resp.hover_pos() {
+                            let hover_fraction = ((hover_pos.x - seek_rect.min.x) / seek_rect.width())
+                                .clamp(0.0, 1.0);
+                            let hover_secs = hover_fraction as f64 * duration;
+                            seek_resp.clone().on_hover_ui_at_pointer(|ui| {
+                                ui.label(
+                                    egui::RichText::new(crate::video::player::format_time_with_duration(
+                                        hover_secs,
+                                        duration,
+                                    ))
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(egui::Color32::WHITE),
+                                );
+                            });
+                        }
+
+                        // Paint seek track and thumb handle
+                        let painter = ui.painter();
+                        let track_center_y = seek_rect.center().y;
+                        let track_h = if seek_resp.hovered() || seek_resp.dragged() {
+                            6.0
+                        } else {
+                            4.0
+                        };
+                        let track_rect = egui::Rect::from_min_max(
+                            egui::pos2(seek_rect.min.x, track_center_y - track_h / 2.0),
+                            egui::pos2(seek_rect.max.x, track_center_y + track_h / 2.0),
+                        );
+                        painter.rect_filled(
+                            track_rect,
+                            egui::Rounding::same(track_h / 2.0),
+                            egui::Color32::from_rgb(55, 55, 55),
+                        );
+
+                        let progress_fraction = (current_pos / duration).clamp(0.0, 1.0) as f32;
+                        let progress_x = seek_rect.min.x + progress_fraction * seek_rect.width();
+                        let progress_rect = egui::Rect::from_min_max(
+                            track_rect.min,
+                            egui::pos2(progress_x, track_rect.max.y),
+                        );
+                        painter.rect_filled(
+                            progress_rect,
+                            egui::Rounding::same(track_h / 2.0),
+                            egui::Color32::from_rgb(45, 140, 255),
+                        );
+
+                        let pip_radius = if seek_resp.dragged() {
+                            7.0
+                        } else if seek_resp.hovered() {
+                            6.0
+                        } else {
+                            4.5
+                        };
+                        painter.circle_filled(
+                            egui::pos2(progress_x, track_center_y),
+                            pip_radius,
+                            egui::Color32::WHITE,
+                        );
+
+                        // Stop & Exit video mode button
+                        let exit_btn = egui::Button::new(
+                            egui::RichText::new("Stop & Exit")
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(255, 180, 180)),
+                        )
+                        .fill(egui::Color32::from_rgb(60, 20, 20))
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 30, 30)))
+                        .rounding(egui::Rounding::same(2.0));
+
+                        if ui
+                            .add_sized([exit_btn_width, 22.0], exit_btn)
+                            .on_hover_text("Exit video player and return to main controls")
+                            .clicked()
+                        {
+                            should_stop = true;
+                        }
+                    });
+                });
+        });
+
+    if should_stop {
+        state.stop_stream(ctx);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
 
     #[test]
     fn test_is_software_mouse_active_conditions() {
@@ -730,5 +1041,50 @@ mod tests {
         // Popup active UNDER CRT -> software mouse remains active
         state.dict.popup_under_crt = true;
         assert!(is_software_mouse_active(&state, true));
+    }
+
+    #[test]
+    fn test_is_hovering_video_controls() {
+        let mut state = AppState::default();
+        let window_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(640.0, 480.0));
+
+        // When no video player active, always false
+        assert!(!is_hovering_video_controls(&state, Some(egui::pos2(320.0, 460.0)), window_rect));
+
+        // When video player is active
+        let (cmd_tx, _cmd_rx) = crossbeam_channel::unbounded();
+        state.video_player = Some(crate::app::models::VideoPlayerState {
+            file_path: std::path::PathBuf::from("test.mp4"),
+            duration_secs: 100.0,
+            current_position_secs: 10.0,
+            is_paused: false,
+            is_eof: false,
+            is_seeking: false,
+            was_playing_before_scrub: false,
+            command_sender: cmd_tx,
+            position_us: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            duration_us: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            is_paused_shared: Arc::new(AtomicBool::new(false)),
+            is_eof_shared: Arc::new(AtomicBool::new(false)),
+            stop_requested: Arc::new(AtomicBool::new(false)),
+            file_width: 640,
+            file_height: 480,
+            player_thread: None,
+        });
+
+        // Near top/middle of screen -> false
+        assert!(!is_hovering_video_controls(&state, Some(egui::pos2(320.0, 240.0)), window_rect));
+        assert!(!is_hovering_video_controls(&state, Some(egui::pos2(320.0, 100.0)), window_rect));
+
+        // Near bottom of screen within hover zone -> true
+        assert!(is_hovering_video_controls(&state, Some(egui::pos2(320.0, 460.0)), window_rect));
+        assert!(is_hovering_video_controls(&state, Some(egui::pos2(320.0, 440.0)), window_rect));
+
+        // When actively seeking/dragging, remains true even if cursor moves away
+        if let Some(ref mut p) = state.video_player {
+            p.is_seeking = true;
+        }
+        assert!(is_hovering_video_controls(&state, Some(egui::pos2(320.0, 100.0)), window_rect));
+        assert!(is_hovering_video_controls(&state, None, window_rect));
     }
 }

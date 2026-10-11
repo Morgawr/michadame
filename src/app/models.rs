@@ -198,6 +198,26 @@ pub struct PendingAudioStream {
     pub sample_format: String,
 }
 
+pub struct VideoPlayerState {
+    pub file_path: std::path::PathBuf,
+    pub duration_secs: f64,
+    pub current_position_secs: f64,
+    pub is_paused: bool,
+    pub is_eof: bool,
+    pub is_seeking: bool,
+    pub was_playing_before_scrub: bool,
+    pub command_sender: crossbeam_channel::Sender<crate::video::player::PlayerCommand>,
+    pub position_us: Arc<std::sync::atomic::AtomicI64>,
+    #[allow(dead_code)]
+    pub duration_us: Arc<std::sync::atomic::AtomicI64>,
+    pub is_paused_shared: Arc<AtomicBool>,
+    pub is_eof_shared: Arc<AtomicBool>,
+    pub stop_requested: Arc<AtomicBool>,
+    pub file_width: u32,
+    pub file_height: u32,
+    pub player_thread: Option<JoinHandle<()>>,
+}
+
 pub struct AppState {
     pub replay: crate::replay::Replay,
     pub hardware: HardwareState,
@@ -218,6 +238,10 @@ pub struct AppState {
     pub frame_receiver: Option<crossbeam_channel::Receiver<Arc<RawFrame>>>,
     pub video_status_receiver:
         Option<crossbeam_channel::Receiver<crate::video::decoder::VideoThreadEvent>>,
+    pub video_player: Option<VideoPlayerState>,
+    pub video_player_event_receiver:
+        Option<crossbeam_channel::Receiver<crate::video::player::PlayerEvent>>,
+    pub video_file_dialog_receiver: Option<crossbeam_channel::Receiver<std::path::PathBuf>>,
     pub pending_audio_stream: Option<PendingAudioStream>,
     pub device_scan_receiver: Option<crossbeam_channel::Receiver<devices::DeviceScanResult>>,
     pub logo_texture: Option<egui::TextureHandle>,
@@ -237,6 +261,10 @@ pub struct AppState {
     pub profiles: BTreeMap<String, config::Profile>,
     pub active_profile: String,
     pub new_profile_name: String,
+    pub video_profile: config::Profile,
+    pub previous_normal_profile: Option<String>,
+    pub previous_capture_resolution: (u32, u32),
+    pub previous_capture_framerate: u32,
 
     pub fft_filter: Option<Arc<Mutex<crate::video::gpu::FftFilter>>>,
     pub fft_mask_data: Vec<u8>,

@@ -112,6 +112,9 @@ impl Default for AppState {
             video_texture: None,
             frame_receiver: None,
             video_status_receiver: None,
+            video_player: None,
+            video_player_event_receiver: None,
+            video_file_dialog_receiver: None,
             pending_audio_stream: None,
             device_scan_receiver: None,
             logo_texture: None,
@@ -134,6 +137,10 @@ impl Default for AppState {
             },
             active_profile: "Default".to_string(),
             new_profile_name: String::new(),
+            video_profile: config::Profile::default(),
+            previous_normal_profile: None,
+            previous_capture_resolution: (0, 0),
+            previous_capture_framerate: 0,
             fft_filter: None,
             fft_mask_data: Vec::new(),
             fft_mask_dirty: false,
@@ -225,10 +232,24 @@ impl AppState {
 
         let audio_latency = self.hardware.audio_latency_ms.load(Ordering::Relaxed);
 
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-            "Michadame Viewer | UI: {:.0} FPS | Video: {:.0} FPS | Audio Latency: {} ms",
-            self.gui_fps, self.video_fps, audio_latency
-        )));
+        let title = if let Some(player) = &self.video_player {
+            let filename = player
+                .file_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Video File".to_string());
+            format!(
+                "Michadame Viewer | {} | UI: {:.0} FPS | Video: {:.0} FPS | Audio Latency: {} ms",
+                filename, self.gui_fps, self.video_fps, audio_latency
+            )
+        } else {
+            format!(
+                "Michadame Viewer | UI: {:.0} FPS | Video: {:.0} FPS | Audio Latency: {} ms",
+                self.gui_fps, self.video_fps, audio_latency
+            )
+        };
+
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
     }
 
     pub fn info(&mut self, text: impl Into<String>) {
@@ -441,11 +462,59 @@ impl eframe::App for AppState {
             }
         }
 
+        // Playback hotkeys when in video file mode
+        if !typing && self.video_player.is_some() && self.ui.video_window_open {
+            if ctx.input(|i| i.key_pressed(egui::Key::P)) {
+                if let Some(ref p) = self.video_player {
+                    let _ = p
+                        .command_sender
+                        .send(crate::video::player::PlayerCommand::TogglePause);
+                    repaint_requested = true;
+                }
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+                if let Some(ref p) = self.video_player {
+                    let target = (p.current_position_secs - 5.0).max(0.0);
+                    let _ = p
+                        .command_sender
+                        .send(crate::video::player::PlayerCommand::Seek(target));
+                    repaint_requested = true;
+                }
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+                if let Some(ref p) = self.video_player {
+                    let target = (p.current_position_secs + 5.0).min(p.duration_secs);
+                    let _ = p
+                        .command_sender
+                        .send(crate::video::player::PlayerCommand::Seek(target));
+                    repaint_requested = true;
+                }
+            }
+        }
+
         if ctx.input(|i| i.viewport().close_requested()) {
             if self.ui.video_window_open && !self.ui.show_quit_dialog {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.ui.show_quit_dialog = true;
             }
+            repaint_requested = true;
+        }
+
+        if let Some(rx) = &self.video_file_dialog_receiver {
+            if let Ok(path) = rx.try_recv() {
+                self.start_video_file(&path, ctx);
+                repaint_requested = true;
+            }
+        }
+
+        let dropped_file = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .first()
+                .and_then(|f| f.path.clone())
+        });
+        if let Some(path) = dropped_file {
+            self.start_video_file(&path, ctx);
             repaint_requested = true;
         }
 
@@ -459,6 +528,16 @@ impl eframe::App for AppState {
 
         repaint_requested |= self.handle_video_thread_events(ctx);
         repaint_requested |= self.handle_audio_thread_events(ctx);
+        repaint_requested |= self.handle_video_file_player_events(ctx);
+
+        if let Some(ref mut p) = self.video_player {
+            if !p.is_seeking {
+                p.current_position_secs =
+                    p.position_us.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+            }
+            p.is_paused = p.is_paused_shared.load(Ordering::Relaxed);
+            p.is_eof = p.is_eof_shared.load(Ordering::Relaxed);
+        }
 
         if let Some(rx) = &self.frame_receiver {
             if let Ok(frame) = rx.try_recv() {

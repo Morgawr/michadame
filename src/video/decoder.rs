@@ -86,7 +86,7 @@ unsafe extern "C" fn video_interrupt_callback(opaque: *mut c_void) -> libc::c_in
     (state.stop_requested.load(Ordering::Relaxed) || state.timed_out()) as libc::c_int
 }
 
-fn renderable_pixel_format(format: ffmpeg_next::format::Pixel) -> ffmpeg_next::format::Pixel {
+pub(crate) fn renderable_pixel_format(format: ffmpeg_next::format::Pixel) -> ffmpeg_next::format::Pixel {
     use ffmpeg_next::format::Pixel;
 
     match format {
@@ -109,7 +109,7 @@ fn plane_tight_row_bytes(frame: &ffmpeg_next::frame::Video, plane: usize) -> Res
     }
 }
 
-fn copy_frame_tightly(frame: &ffmpeg_next::frame::Video) -> Result<Vec<u8>> {
+pub(crate) fn copy_frame_tightly(frame: &ffmpeg_next::frame::Video) -> Result<Vec<u8>> {
     let mut data = Vec::new();
     for plane in 0..frame.planes() {
         let row_bytes = plane_tight_row_bytes(frame, plane)?;

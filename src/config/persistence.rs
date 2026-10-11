@@ -78,6 +78,9 @@ pub fn prune_old_backups(dir: &Path, max_keep: usize) {
 
 #[allow(dead_code)]
 pub fn store_config_atomic(cfg: &MichadameConfig) -> Result<(), confy::ConfyError> {
+    if cfg!(test) {
+        return Ok(());
+    }
     let path = confy::get_configuration_file_path("michadame", None)?;
     store_config_atomic_at(&path, cfg)
 }
@@ -241,6 +244,9 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
 }
 
 pub fn save_config(state: &mut AppState) {
+    if cfg!(test) {
+        return;
+    }
     let Ok(path) = confy::get_configuration_file_path("michadame", None) else {
         tracing::error!("Failed to get configuration file path for save_config");
         return;
@@ -292,18 +298,28 @@ pub fn save_config_at(path: &Path, state: &mut AppState) -> Result<(), confy::Co
     cfg.popup_under_crt = Some(state.dict.popup_under_crt);
     cfg.twitch = state.twitch.config.clone();
 
-    let current_profile_data = build_profile_from_state(state);
-    state
-        .profiles
-        .insert(state.active_profile.clone(), current_profile_data);
+    if state.video_player.is_some() {
+        let current_profile_data = build_profile_from_state(state);
+        state.video_profile = current_profile_data.clone();
+        cfg.video_profile = Some(current_profile_data);
+    } else {
+        let current_profile_data = build_profile_from_state(state);
+        state
+            .profiles
+            .insert(state.active_profile.clone(), current_profile_data);
 
-    cfg.active_profile = state.active_profile.clone();
-    cfg.profiles = state.profiles.clone();
+        cfg.active_profile = state.active_profile.clone();
+        cfg.profiles = state.profiles.clone();
+        cfg.video_profile = Some(state.video_profile.clone());
+    }
 
     store_config_atomic_at(path, &cfg)
 }
 
 pub fn save_global_hardware_config(state: &AppState) {
+    if cfg!(test) {
+        return;
+    }
     let Ok(path) = confy::get_configuration_file_path("michadame", None) else {
         tracing::error!("Failed to get configuration file path for save_global_hardware_config");
         return;
@@ -329,16 +345,20 @@ pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(
     cfg.replay = state.replay.config.clone();
     cfg.video_device = Some(state.hardware.selected_video_device.clone());
     cfg.usb_device = state.hardware.selected_usb_device.clone();
-    cfg.video_resolution = if state.hardware.selected_resolution.0 > 0 {
-        Some(state.hardware.selected_resolution)
-    } else {
-        None
-    };
-    cfg.video_framerate = if state.hardware.selected_framerate > 0 {
-        Some(state.hardware.selected_framerate)
-    } else {
-        None
-    };
+    if state.video_player.is_none() {
+        cfg.video_resolution = if state.hardware.selected_resolution.0 > 0 {
+            Some(state.hardware.selected_resolution)
+        } else {
+            None
+        };
+        cfg.video_framerate = if state.hardware.selected_framerate > 0 {
+            Some(state.hardware.selected_framerate)
+        } else {
+            None
+        };
+        cfg.active_profile = state.active_profile.clone();
+        cfg.profiles = state.profiles.clone();
+    }
     cfg.reset_usb_on_startup = Some(state.ui.reset_usb_on_startup);
     cfg.has_shown_first_run_warning = Some(!state.ui.show_first_run_dialog);
     cfg.audio_source = state.hardware.selected_audio_source_name.clone();
@@ -352,9 +372,6 @@ pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(
     cfg.bank_compact_mode = Some(state.bank.compact_mode);
     cfg.default_halo = Some(state.halo_defaults.clone());
     cfg.twitch = state.twitch.config.clone();
-
-    cfg.active_profile = state.active_profile.clone();
-    cfg.profiles = state.profiles.clone();
 
     store_config_atomic_at(path, &cfg)
 }
@@ -583,6 +600,7 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     state.replay.sync_audio_filter();
     state.profiles = cfg.profiles.clone();
     state.active_profile = cfg.active_profile.clone();
+    state.video_profile = cfg.video_profile.clone().unwrap_or_default();
 
     if let Some(saved_device) = &cfg.video_device {
         if state.hardware.video_devices.contains(saved_device) {
@@ -1646,6 +1664,81 @@ crt_brightboost = 1.6
         apply_config(&mut restarted, &loaded);
         assert_eq!(restarted.twitch.config, state.twitch.config);
         assert_eq!(restarted.twitch.channel_input, "some_streamer");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("toml.bak"));
+    }
+
+    #[test]
+    fn test_video_profile_isolation_in_persistence() {
+        let path = std::env::temp_dir().join(format!(
+            "michadame-video-profile-test-{}-{}.toml",
+            std::process::id(),
+            crate::replay::now_us()
+        ));
+
+        let mut state = AppState::default();
+        let retro_profile = Profile {
+            crt_hard_scan: Some(-15.0),
+            vibrance: Some(1.3),
+            video_resolution: Some((640, 480)),
+            ..Default::default()
+        };
+        state.profiles.insert("Retro".to_string(), retro_profile);
+        state.active_profile = "Retro".to_string();
+        state.crt.hard_scan = -15.0;
+        state.video.vibrance = 1.3;
+        state.hardware.selected_resolution = (640, 480);
+
+        // 1. Normal save: writes to Retro profile
+        save_config_at(&path, &mut state).unwrap();
+        let loaded: MichadameConfig = confy::load_path(&path).unwrap();
+        assert_eq!(loaded.active_profile, "Retro");
+        assert_eq!(loaded.profiles.get("Retro").unwrap().crt_hard_scan, Some(-15.0));
+
+        // 2. Switch to video mode
+        let (cmd_tx, _cmd_rx) = crossbeam_channel::unbounded();
+        state.video_player = Some(crate::app::models::VideoPlayerState {
+            file_path: std::path::PathBuf::from("clip.mp4"),
+            duration_secs: 10.0,
+            current_position_secs: 2.0,
+            is_paused: false,
+            is_eof: false,
+            is_seeking: false,
+            was_playing_before_scrub: false,
+            command_sender: cmd_tx,
+            position_us: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            duration_us: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            is_paused_shared: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            is_eof_shared: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            stop_requested: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            file_width: 1920,
+            file_height: 1080,
+            player_thread: None,
+        });
+
+        // Tweak settings in video mode
+        state.crt.hard_scan = -3.0;
+        state.video.vibrance = 2.0;
+
+        // Save config in video mode
+        save_config_at(&path, &mut state).unwrap();
+
+        // 3. Verify on disk that video_profile received the changes and Retro was untouched
+        let reloaded: MichadameConfig = confy::load_path(&path).unwrap();
+        assert_eq!(reloaded.active_profile, "Retro");
+        assert_eq!(
+            reloaded.profiles.get("Retro").unwrap().crt_hard_scan,
+            Some(-15.0)
+        );
+        assert_eq!(
+            reloaded.profiles.get("Retro").unwrap().vibrance,
+            Some(1.3)
+        );
+
+        let vid_prof = reloaded.video_profile.expect("video_profile must be saved");
+        assert_eq!(vid_prof.crt_hard_scan, Some(-3.0));
+        assert_eq!(vid_prof.vibrance, Some(2.0));
+
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("toml.bak"));
     }

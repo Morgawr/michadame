@@ -127,6 +127,7 @@ impl From<LegacyConfig> for MichadameConfig {
             bank_compact_mode: legacy.bank_compact_mode,
             popup_under_crt: legacy.popup_under_crt,
             twitch: legacy.twitch,
+            video_profile: legacy.video_profile,
             profiles,
         }
     }
@@ -235,6 +236,7 @@ mod tests {
             bank_current_tag: None,
             bank_compact_mode: None,
             popup_under_crt: Some(false),
+            video_profile: None,
             twitch: Default::default(),
         };
 
@@ -365,6 +367,7 @@ mod tests {
             bank_current_tag: None,
             bank_compact_mode: None,
             popup_under_crt: None,
+            video_profile: None,
             twitch: Default::default(),
         };
 
