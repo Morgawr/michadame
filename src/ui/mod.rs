@@ -15,6 +15,7 @@ pub mod tag_input;
 pub mod twitch;
 pub mod twitch_overlay;
 pub mod niconico;
+pub mod studio;
 pub mod video_player;
 
 pub use networking::send_ws_command;
@@ -90,8 +91,26 @@ pub fn setup_style(ctx: &eframe::egui::Context) {
     ctx.set_style(style);
 }
 
+/// Checks whether a shortcut key was pressed (ignoring active text input)
+/// and consumes the key event so other views in the same frame do not see it.
+pub fn check_toggle_key(ctx: &egui::Context, key: egui::Key) -> bool {
+    !ctx.wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key))
+}
+
 pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
     state.replay.shortcuts(ctx);
+    let mut hotkey_repaint = false;
+    if check_toggle_key(ctx, egui::Key::L) {
+        state.ui.studio_window_open = !state.ui.studio_window_open;
+        hotkey_repaint = true;
+    }
+    if check_toggle_key(ctx, egui::Key::B) {
+        state.bank.window_open = !state.bank.window_open;
+        if !state.bank.window_open {
+            state.bank.enlarged = None;
+        }
+        hotkey_repaint = true;
+    }
     // Ignore Space while typing in a text field (e.g. the mining tag).
     if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
         if ctx.input(|i| i.modifiers.shift) {
@@ -109,7 +128,7 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
                 .inner_margin(egui::Margin::same(8.0)),
         )
         .show(ctx, |ui| {
-            let mut repaint_requested = false;
+            let mut repaint_requested = hotkey_repaint;
             if state.config_load_error.is_some() && !state.ui.dismissed_config_error {
                 repaint_requested |= dialogs::show_config_error_dialog(state, ctx, ui);
             }
@@ -143,4 +162,43 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
             repaint_requested
         })
         .inner
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_check_toggle_key_consumes_event() {
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        input.events.push(egui::Event::Key {
+            key: egui::Key::L,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let _ = ctx.run(input, |ctx| {
+            assert!(check_toggle_key(ctx, egui::Key::L));
+            // Second call in the same frame returns false because it was consumed
+            assert!(!check_toggle_key(ctx, egui::Key::L));
+        });
+    }
+
+    #[test]
+    fn test_check_toggle_key_ignores_modifiers() {
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        input.events.push(egui::Event::Key {
+            key: egui::Key::L,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL, // ctrl+L should be ignored
+        });
+        let _ = ctx.run(input, |ctx| {
+            assert!(!check_toggle_key(ctx, egui::Key::L));
+        });
+    }
 }

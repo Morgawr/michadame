@@ -105,7 +105,7 @@ fn draw_header(ui: &mut egui::Ui, tw: &mut TwitchState, header: egui::Rect) {
 
     // Right side: whether the stream is actually on air (Helix API), never guessed.
     let (dot, live_text) = match &tw.stream_status {
-        StreamStatus::Live => (egui::Color32::from_rgb(80, 200, 120), "LIVE"),
+        StreamStatus::Live { .. } => (egui::Color32::from_rgb(80, 200, 120), "LIVE"),
         StreamStatus::Offline => (egui::Color32::from_rgb(220, 70, 70), "offline"),
         StreamStatus::Unknown(_) => (egui::Color32::from_gray(110), "unknown"),
     };

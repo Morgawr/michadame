@@ -18,20 +18,22 @@ const RETRY_AFTER_ERROR: Duration = Duration::from_secs(15);
 pub enum StreamStatus {
     /// Not known (not logged in, request failed, ...). Carries the reason.
     Unknown(String),
-    Live,
+    Live { viewer_count: Option<u32> },
     Offline,
 }
 
 /// Interpret a Helix `/streams` response body.
 pub fn parse_streams_response(body: &serde_json::Value) -> Option<StreamStatus> {
     let data = body.get("data")?.as_array()?;
-    let live = data
+    let live_stream = data
         .iter()
-        .any(|s| s.get("type").and_then(|t| t.as_str()) == Some("live"));
-    Some(if live {
-        StreamStatus::Live
-    } else {
-        StreamStatus::Offline
+        .find(|s| s.get("type").and_then(|t| t.as_str()) == Some("live"));
+    Some(match live_stream {
+        Some(s) => {
+            let viewer_count = s.get("viewer_count").and_then(|v| v.as_u64()).map(|v| v as u32);
+            StreamStatus::Live { viewer_count }
+        }
+        None => StreamStatus::Offline,
     })
 }
 
@@ -111,8 +113,10 @@ mod tests {
 
     #[test]
     fn parses_live_offline_and_garbage() {
-        let live = serde_json::json!({"data": [{"type": "live", "user_login": "x"}], "pagination": {}});
-        assert_eq!(parse_streams_response(&live), Some(StreamStatus::Live));
+        let live = serde_json::json!({"data": [{"type": "live", "user_login": "x", "viewer_count": 42}], "pagination": {}});
+        assert_eq!(parse_streams_response(&live), Some(StreamStatus::Live { viewer_count: Some(42) }));
+        let live_no_viewers = serde_json::json!({"data": [{"type": "live", "user_login": "x"}], "pagination": {}});
+        assert_eq!(parse_streams_response(&live_no_viewers), Some(StreamStatus::Live { viewer_count: None }));
         let offline = serde_json::json!({"data": [], "pagination": {}});
         assert_eq!(parse_streams_response(&offline), Some(StreamStatus::Offline));
         // Anything other than type "live" is not considered live.

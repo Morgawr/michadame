@@ -19,6 +19,8 @@ pub struct HardwareState {
     pub audio_sample_rate: u32,
     pub audio_sample_format: String,
     pub master_volume: f32,
+    pub live_audio_peak: f32,
+    pub live_mic_peak: f32,
     pub video_devices: Vec<String>,
     pub usb_devices: Vec<(String, String)>,
     pub selected_usb_device: Option<String>,
@@ -55,6 +57,7 @@ pub struct UiState {
     pub show_stop_stream_dialog: bool,
     pub video_window_open: bool,
     pub control_window_open: bool,
+    pub studio_window_open: bool,
     pub dismissed_config_error: bool,
     pub active_settings_tab: SettingsTab,
 }
@@ -319,6 +322,7 @@ mod tests {
         assert!(state.hardware.video_devices.is_empty());
         assert!(!state.ui.is_fullscreen);
         assert!(state.ui.control_window_open);
+        assert!(!state.ui.studio_window_open);
         assert!(!state.ui.video_window_open);
         assert!(state.video_status_receiver.is_none());
         assert!(state.pending_audio_stream.is_none());
@@ -340,6 +344,8 @@ mod tests {
         assert_eq!(state.hardware.audio_sample_rate, 48000);
         assert_eq!(state.hardware.audio_sample_format, "S16LE");
         assert_eq!(state.hardware.master_volume, 1.0);
+        assert_eq!(state.hardware.live_audio_peak, 0.0);
+        assert_eq!(state.hardware.live_mic_peak, 0.0);
         assert!(state.hardware.video_devices.is_empty());
     }
 

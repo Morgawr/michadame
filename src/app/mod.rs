@@ -26,6 +26,8 @@ impl Default for AppState {
                 audio_sample_rate: 48000,
                 audio_sample_format: "S16LE".to_string(),
                 master_volume: 1.0,
+                live_audio_peak: 0.0,
+                live_mic_peak: 0.0,
                 video_devices: Vec::new(),
                 usb_devices: Vec::new(),
                 selected_usb_device: None,
@@ -47,6 +49,7 @@ impl Default for AppState {
                 show_stop_stream_dialog: false,
                 video_window_open: false,
                 control_window_open: true,
+                studio_window_open: false,
                 dismissed_config_error: false,
                 active_settings_tab: crate::app::models::SettingsTab::default(),
             },
@@ -327,6 +330,21 @@ impl eframe::App for AppState {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let raw_audio_peak = self
+            .hardware
+            .audio_peak_amplitude
+            .swap(0, Ordering::Relaxed) as f32
+            / 1000.0;
+        self.hardware.live_audio_peak = raw_audio_peak.max(self.hardware.live_audio_peak * 0.88);
+
+        let mic_db = f32::from_bits(self.mic.current_level_db.load(Ordering::Relaxed));
+        let raw_mic = if self.mic.config.enabled && self.mic.active_stream.is_some() && mic_db > -80.0 {
+            ((mic_db + 60.0) / 60.0).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        self.hardware.live_mic_peak = raw_mic.max(self.hardware.live_mic_peak * 0.88);
+
         self.replay.update();
         if let Some(message) = self.replay.notification() {
             self.info(message);
@@ -456,6 +474,10 @@ impl eframe::App for AppState {
         }
         if !typing && ctx.input(|i| i.key_pressed(egui::Key::M)) {
             self.ui.control_window_open = !self.ui.control_window_open;
+        }
+        if crate::ui::check_toggle_key(ctx, egui::Key::L) {
+            self.ui.studio_window_open = !self.ui.studio_window_open;
+            repaint_requested = true;
         }
         if !ctx.wants_keyboard_input()
             && ctx.input(|i| i.modifiers.is_none() && i.key_pressed(egui::Key::B))
@@ -740,7 +762,9 @@ impl eframe::App for AppState {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
         ui::bank::draw_bank_window(self, ctx);
+        repaint_requested |= ui::studio::draw_studio_window(self, ctx);
 
+        self.twitch.studio_active = self.ui.studio_window_open;
         repaint_requested |= self.twitch.poll(ctx);
         for (is_error, message) in self.twitch.take_notifications() {
             if is_error {
@@ -905,5 +929,15 @@ mod tests {
         let visuals = egui::Visuals::default();
         let color = eframe::App::clear_color(&state, &visuals);
         assert_eq!(color, [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_studio_window_toggle() {
+        let mut state = AppState::default();
+        assert!(!state.ui.studio_window_open);
+        state.ui.studio_window_open = !state.ui.studio_window_open;
+        assert!(state.ui.studio_window_open);
+        state.ui.studio_window_open = !state.ui.studio_window_open;
+        assert!(!state.ui.studio_window_open);
     }
 }

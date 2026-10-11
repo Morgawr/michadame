@@ -225,11 +225,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         }
 
                         // Compact mechanical audio meter bar
-                        let peak = state
-                            .hardware
-                            .audio_peak_amplitude
-                            .swap(0, Ordering::Relaxed) as f32
-                            / 1000.0;
+                        let peak = state.hardware.live_audio_peak;
                         let color = if peak > 0.9 {
                             egui::Color32::RED
                         } else if peak > 0.7 {
@@ -257,6 +253,41 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             ui,
                             state.ui.video_window_open,
                         );
+
+                        ui.add_space(8.0);
+                        let studio_btn = egui::Button::new(
+                            egui::RichText::new("Studio (L)")
+                                .monospace()
+                                .strong()
+                                .size(10.5)
+                                .color(if state.ui.studio_window_open {
+                                    egui::Color32::from_rgb(190, 150, 255)
+                                } else {
+                                    egui::Color32::from_rgb(208, 208, 208)
+                                }),
+                        )
+                        .fill(if state.ui.studio_window_open {
+                            egui::Color32::from_rgb(60, 20, 100)
+                        } else {
+                            egui::Color32::from_rgb(44, 44, 44)
+                        })
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            if state.ui.studio_window_open {
+                                egui::Color32::from_rgb(145, 70, 255)
+                            } else {
+                                egui::Color32::from_rgb(72, 72, 72)
+                            },
+                        ))
+                        .rounding(egui::Rounding::ZERO);
+                        if ui
+                            .add(studio_btn)
+                            .on_hover_text("Open Twitch Studio dashboard window (hotkey: L)")
+                            .clicked()
+                        {
+                            state.ui.studio_window_open = !state.ui.studio_window_open;
+                            changed = true;
+                        }
                     });
 
                     ui.add_space(5.0);
@@ -697,6 +728,7 @@ fn draw_hotkeys_tab(ui: &mut egui::Ui) {
                     ("F", "Toggle Fullscreen"),
                     ("M", "Toggle Controls (Settings Window)"),
                     ("B", "Toggle Mining Bank Window"),
+                    ("L", "Toggle Studio Window"),
                     ("C", "Cycle CRT Filter (Off / Lottes / Halo)"),
                     ("K", "Toggle Lights Off Night Mode"),
                     ("G", "Toggle 480p Pixelate Filter"),

@@ -124,6 +124,7 @@ pub struct TwitchState {
     // Stream info (Title & Category)
     pub stream_info: StreamInfoState,
     pub stream_info_loaded: bool,
+    pub studio_active: bool,
 
     self_display_name: Option<String>,
     self_color: Option<egui::Color32>,
@@ -159,6 +160,7 @@ impl Default for TwitchState {
             broadcast_last_status: None,
             stream_info: StreamInfoState::default(),
             stream_info_loaded: false,
+            studio_active: false,
             self_display_name: None,
             self_color: None,
             worker: None,
@@ -227,6 +229,13 @@ impl TwitchState {
             .as_ref()
             .map(|b| b.status())
             .unwrap_or(BroadcastStatus::Offline)
+    }
+
+    pub fn viewer_count(&self) -> Option<u32> {
+        match self.stream_status {
+            StreamStatus::Live { viewer_count } => viewer_count,
+            _ => None,
+        }
     }
 
     pub fn start_broadcast(
@@ -395,7 +404,8 @@ impl TwitchState {
     /// token (public client); otherwise the status is reported as unknown.
     fn sync_live_poller(&mut self, ctx: &egui::Context) {
         let channel = self.config.channel.clone();
-        if !self.config.chat_overlay_enabled || channel.is_empty() {
+        let wanted = (self.config.chat_overlay_enabled || self.is_broadcasting() || self.studio_active) && !channel.is_empty();
+        if !wanted {
             self.live_poller = None;
             self.stream_status = StreamStatus::Unknown(String::new());
             return;
@@ -848,7 +858,7 @@ mod tests {
         assert!(state.live_poller.is_none());
         assert!(matches!(state.stream_status, StreamStatus::Unknown(ref r) if r.contains("log in")));
         // Even if a stale "live" result was around, disabling clears it.
-        state.stream_status = StreamStatus::Live;
+        state.stream_status = StreamStatus::Live { viewer_count: None };
         state.config.chat_overlay_enabled = false;
         state.sync_live_poller(&ctx);
         assert!(matches!(state.stream_status, StreamStatus::Unknown(_)));

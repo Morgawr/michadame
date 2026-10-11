@@ -50,7 +50,13 @@ pub fn draw_twitch_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         ui.label(egui::RichText::new(text).monospace().size(11.0).color(color));
         if state.twitch.config.chat_overlay_enabled && !state.twitch.config.channel.is_empty() {
             let (color, text) = match &state.twitch.stream_status {
-                StreamStatus::Live => (egui::Color32::from_rgb(80, 200, 120), "Stream: LIVE".to_string()),
+                StreamStatus::Live { viewer_count: Some(count) } => (
+                    egui::Color32::from_rgb(80, 200, 120),
+                    format!("Stream: LIVE ({count} viewers)"),
+                ),
+                StreamStatus::Live { viewer_count: None } => {
+                    (egui::Color32::from_rgb(80, 200, 120), "Stream: LIVE".to_string())
+                }
                 StreamStatus::Offline => (egui::Color32::from_rgb(220, 70, 70), "Stream: offline".to_string()),
                 StreamStatus::Unknown(reason) if reason.is_empty() => (MUTED, "Stream: unknown".to_string()),
                 StreamStatus::Unknown(reason) => (MUTED, format!("Stream: unknown ({reason})")),
@@ -375,6 +381,20 @@ fn draw_broadcast_group(ui: &mut egui::Ui, state: &mut AppState, save_now: &mut 
                     }
                     changed = true;
                 }
+            }
+
+            let studio_btn = egui::Button::new(
+                egui::RichText::new("Studio (L)")
+                    .monospace()
+                    .size(11.0),
+            );
+            if ui
+                .add(studio_btn)
+                .on_hover_text("Open Twitch Studio dashboard window (hotkey: L)")
+                .clicked()
+            {
+                state.ui.studio_window_open = !state.ui.studio_window_open;
+                changed = true;
             }
 
             match &status {

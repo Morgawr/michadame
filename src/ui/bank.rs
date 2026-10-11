@@ -57,12 +57,14 @@ fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
         state.bank.enlarged = None;
     } else if state.bank.add_name_dialog.open && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         state.bank.add_name_dialog.open = false;
-    } else if !ctx.wants_keyboard_input()
-        && ctx.input(|i| i.modifiers.is_none() && i.key_pressed(egui::Key::B))
-    {
+    } else if crate::ui::check_toggle_key(ctx, egui::Key::B) {
         state.bank.window_open = false;
         state.bank.enlarged = None;
         return;
+    }
+
+    if crate::ui::check_toggle_key(ctx, egui::Key::L) {
+        state.ui.studio_window_open = !state.ui.studio_window_open;
     }
 
     egui::TopBottomPanel::top("bank_header").show(ctx, |ui| {

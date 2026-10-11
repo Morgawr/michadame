@@ -79,7 +79,6 @@ pub fn draw_mic_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             if ui
                 .add(
                     egui::Slider::new(&mut vol_percent, 0.0..=150.0)
-                        .suffix("%")
                         .custom_formatter(|val, _| format!("{:.0}%", val)),
                 )
                 .changed()
