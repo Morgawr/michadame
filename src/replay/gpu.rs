@@ -4,6 +4,13 @@ use super::{config::Rate, Runtime, VideoFrame};
 use crate::video::gpu::geometry::RenderedArea;
 use eframe::glow::{self, HasContext};
 use std::{collections::VecDeque, sync::atomic::Ordering};
+
+#[derive(Clone)]
+pub struct BroadcastSink {
+    pub tx: crossbeam_channel::Sender<VideoFrame>,
+    pub free_rx: crossbeam_channel::Receiver<Vec<u8>>,
+    pub dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
 struct Slot {
     buffer: glow::Buffer,
     fence: glow::Fence,
@@ -87,6 +94,7 @@ impl Readback {
         &mut self,
         gl: &glow::Context,
         runtime: Option<&RuntimeView>,
+        broadcast: Option<&BroadcastSink>,
         area: RenderedArea,
         at: i64,
         rate: Rate,
@@ -97,19 +105,25 @@ impl Readback {
             width,
             height,
         } = area;
-        let Some(runtime) = runtime.filter(|r| !r.shared.stop.load(Ordering::Acquire)) else {
+        let running_replay = runtime.filter(|r| !r.shared.stop.load(Ordering::Acquire));
+        if running_replay.is_none() && broadcast.is_none() {
             self.destroy(gl);
             return;
-        };
-        if self
-            .active
-            .as_ref()
-            .and_then(|w| w.upgrade())
-            .is_none_or(|old| !std::sync::Arc::ptr_eq(&old, &runtime.shared))
-        {
-            self.destroy(gl);
-            self.active = Some(std::sync::Arc::downgrade(&runtime.shared));
         }
+        if let Some(runtime) = running_replay {
+            if self
+                .active
+                .as_ref()
+                .and_then(|w| w.upgrade())
+                .is_none_or(|old| !std::sync::Arc::ptr_eq(&old, &runtime.shared))
+            {
+                self.destroy(gl);
+                self.active = Some(std::sync::Arc::downgrade(&runtime.shared));
+            }
+        } else if self.active.is_some() {
+            self.active = None;
+        }
+
         // Missing/stale capture timestamps cannot establish a new recording
         // epoch. Real stream restarts already disable replay. In particular,
         // never confuse an out-of-order frame with a backwards system clock.
@@ -118,47 +132,55 @@ impl Readback {
         };
         if resized {
             self.release_buffers(gl);
-            runtime.shared.generation.fetch_add(1, Ordering::AcqRel);
+            if let Some(runtime) = running_replay {
+                runtime.shared.generation.fetch_add(1, Ordering::AcqRel);
+            }
         }
-        let Some(plan) = runtime.config.queue_plan(width, height) else {
-            runtime.shared.message(
-                "Replay stopped: work queue or RAM budget is too small for this image size",
-            );
-            runtime.shared.stop.store(true, Ordering::Release);
-            return;
+
+        let (slots, bytes, generation) = if let Some(runtime) = running_replay {
+            let Some(plan) = runtime.config.queue_plan(width, height) else {
+                runtime.shared.message(
+                    "Replay stopped: work queue or RAM budget is too small for this image size",
+                );
+                runtime.shared.stop.store(true, Ordering::Release);
+                return;
+            };
+            if plan
+                .overhead
+                .saturating_add(runtime.shared.clipboard.bytes())
+                >= runtime.config.budget()
+            {
+                runtime.shared.message(
+                    "Replay stopped: RAM budget is too small for this surface and the clipboard clip",
+                );
+                runtime.shared.stop.store(true, Ordering::Release);
+                return;
+            }
+            let gen = runtime.shared.generation.load(Ordering::Acquire);
+            runtime
+                .shared
+                .staging_bytes
+                .fetch_max(plan.overhead, Ordering::AcqRel);
+            runtime
+                .shared
+                .queue_slots
+                .store(plan.slots, Ordering::Relaxed);
+            runtime
+                .shared
+                .queue_bytes
+                .store(plan.queue_bytes, Ordering::Relaxed);
+            if self.requested != Some(gen)
+                && runtime
+                    .queue
+                    .request(super::queue::PoolRequest { generation: gen, plan })
+            {
+                self.requested = Some(gen);
+            }
+            (plan.slots, plan.frame_bytes, gen)
+        } else {
+            (4, width as usize * height as usize * 4, 0)
         };
-        if plan
-            .overhead
-            .saturating_add(runtime.shared.clipboard.bytes())
-            >= runtime.config.budget()
-        {
-            runtime.shared.message(
-                "Replay stopped: RAM budget is too small for this surface and the clipboard clip",
-            );
-            runtime.shared.stop.store(true, Ordering::Release);
-            return;
-        }
-        let generation = runtime.shared.generation.load(Ordering::Acquire);
-        runtime
-            .shared
-            .staging_bytes
-            .fetch_max(plan.overhead, Ordering::AcqRel);
-        runtime
-            .shared
-            .queue_slots
-            .store(plan.slots, Ordering::Relaxed);
-        runtime
-            .shared
-            .queue_bytes
-            .store(plan.queue_bytes, Ordering::Relaxed);
-        if self.requested != Some(generation)
-            && runtime
-                .queue
-                .request(super::queue::PoolRequest { generation, plan })
-        {
-            self.requested = Some(generation);
-        }
-        let bytes = plan.frame_bytes;
+
         unsafe {
             let old = gl.get_parameter_i32(glow::PIXEL_PACK_BUFFER_BINDING);
             let alignment = gl.get_parameter_i32(glow::PACK_ALIGNMENT);
@@ -179,44 +201,118 @@ impl Readback {
                 };
                 let result = gl.client_wait_sync(slot.fence, 0, 0);
                 if result == glow::WAIT_FAILED {
-                    runtime
-                        .shared
-                        .message("Replay stopped: GPU readback fence failed");
-                    runtime.shared.stop.store(true, Ordering::Release);
+                    if let Some(runtime) = running_replay {
+                        runtime
+                            .shared
+                            .message("Replay stopped: GPU readback fence failed");
+                        runtime.shared.stop.store(true, Ordering::Release);
+                    }
                     break;
                 }
                 if result != glow::ALREADY_SIGNALED && result != glow::CONDITION_SATISFIED {
                     break;
                 }
-                let Some(mut rgba) = runtime.queue.buffer(generation) else {
-                    break;
-                };
                 let slot = self.pending.pop_front().unwrap();
-                debug_assert_eq!(rgba.len(), bytes);
-                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(slot.buffer));
-                gl.get_buffer_sub_data(glow::PIXEL_PACK_BUFFER, 0, &mut rgba);
-                if let Err(error) = runtime.queue.submit(VideoFrame {
-                    rgba,
-                    width,
-                    height,
-                    at: slot.at,
-                    rate: slot.rate,
-                    generation,
-                }) {
-                    runtime.queue.recycle(generation, error.into_inner().rgba);
-                    runtime.shared.video_dropped.fetch_add(1, Ordering::Relaxed);
+
+                if let Some(runtime) = running_replay {
+                    if let Some(mut rgba) = runtime.queue.buffer(generation) {
+                        debug_assert_eq!(rgba.len(), bytes);
+                        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(slot.buffer));
+                        gl.get_buffer_sub_data(glow::PIXEL_PACK_BUFFER, 0, &mut rgba);
+
+                        if let Some(bc) = broadcast {
+                            if let Ok(mut b_buf) = bc.free_rx.try_recv() {
+                                if b_buf.len() != bytes {
+                                    b_buf.resize(bytes, 0);
+                                }
+                                b_buf.copy_from_slice(&rgba);
+                                if bc.tx.try_send(VideoFrame {
+                                    rgba: b_buf,
+                                    width,
+                                    height,
+                                    at: slot.at,
+                                    rate: slot.rate,
+                                    generation: 0,
+                                }).is_err() {
+                                    bc.dropped.fetch_add(1, Ordering::Relaxed);
+                                }
+                            } else {
+                                bc.dropped.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+
+                        if let Err(error) = runtime.queue.submit(VideoFrame {
+                            rgba,
+                            width,
+                            height,
+                            at: slot.at,
+                            rate: slot.rate,
+                            generation,
+                        }) {
+                            runtime.queue.recycle(generation, error.into_inner().rgba);
+                            runtime.shared.video_dropped.fetch_add(1, Ordering::Relaxed);
+                        }
+                    } else {
+                        if let Some(bc) = broadcast {
+                            if let Ok(mut b_buf) = bc.free_rx.try_recv() {
+                                if b_buf.len() != bytes {
+                                    b_buf.resize(bytes, 0);
+                                }
+                                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(slot.buffer));
+                                gl.get_buffer_sub_data(glow::PIXEL_PACK_BUFFER, 0, &mut b_buf);
+                                if bc.tx.try_send(VideoFrame {
+                                    rgba: b_buf,
+                                    width,
+                                    height,
+                                    at: slot.at,
+                                    rate: slot.rate,
+                                    generation: 0,
+                                }).is_err() {
+                                    bc.dropped.fetch_add(1, Ordering::Relaxed);
+                                }
+                            } else {
+                                bc.dropped.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        runtime.shared.video_dropped.fetch_add(1, Ordering::Relaxed);
+                    }
+                } else if let Some(bc) = broadcast {
+                    if let Ok(mut b_buf) = bc.free_rx.try_recv() {
+                        if b_buf.len() != bytes {
+                            b_buf.resize(bytes, 0);
+                        }
+                        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(slot.buffer));
+                        gl.get_buffer_sub_data(glow::PIXEL_PACK_BUFFER, 0, &mut b_buf);
+                        if bc.tx.try_send(VideoFrame {
+                            rgba: b_buf,
+                            width,
+                            height,
+                            at: slot.at,
+                            rate: slot.rate,
+                            generation: 0,
+                        }).is_err() {
+                            bc.dropped.fetch_add(1, Ordering::Relaxed);
+                        }
+                    } else {
+                        bc.dropped.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
+
                 gl.delete_sync(slot.fence);
                 self.free.push(slot.buffer);
                 if copying_started.elapsed() >= std::time::Duration::from_millis(2) {
                     break;
                 }
             }
-            if at > self.last_at && !runtime.shared.stop.load(Ordering::Relaxed) {
+
+            let stop_flag = running_replay.map_or(false, |r| r.shared.stop.load(Ordering::Relaxed));
+            if at > self.last_at && !stop_flag {
                 self.last_at = at;
-                runtime.shared.captured_at.store(at, Ordering::Relaxed);
+                if let Some(runtime) = running_replay {
+                    runtime.shared.captured_at.store(at, Ordering::Relaxed);
+                }
                 let buffer = self.free.pop().or_else(|| {
-                    if self.pending.len() < plan.slots {
+                    if self.pending.len() < slots {
                         match gl.create_buffer() {
                             Ok(buffer) => {
                                 gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(buffer));
@@ -224,14 +320,18 @@ impl Readback {
                                 let error = gl.get_error();
                                 if error == glow::NO_ERROR { Some(buffer) } else {
                                     gl.delete_buffer(buffer);
-                                    runtime.shared.message(format!("Replay stopped: cannot allocate GPU work buffer (GL {error:#x})"));
-                                    runtime.shared.stop.store(true, Ordering::Release);
+                                    if let Some(r) = running_replay {
+                                        r.shared.message(format!("Replay stopped: cannot allocate GPU work buffer (GL {error:#x})"));
+                                        r.shared.stop.store(true, Ordering::Release);
+                                    }
                                     None
                                 }
                             }
                             Err(error) => {
-                                runtime.shared.message(format!("Replay stopped: cannot create GPU work buffer: {error}"));
-                                runtime.shared.stop.store(true, Ordering::Release);
+                                if let Some(r) = running_replay {
+                                    r.shared.message(format!("Replay stopped: cannot create GPU work buffer: {error}"));
+                                    r.shared.stop.store(true, Ordering::Release);
+                                }
                                 None
                             }
                         }
@@ -262,18 +362,24 @@ impl Readback {
                         }
                         Err(e) => {
                             gl.delete_buffer(buffer);
-                            runtime.shared.message(format!("Replay stopped: {e}"));
-                            runtime.shared.stop.store(true, Ordering::Release);
+                            if let Some(r) = running_replay {
+                                r.shared.message(format!("Replay stopped: {e}"));
+                                r.shared.stop.store(true, Ordering::Release);
+                            }
                         }
                     }
                 } else {
-                    runtime.shared.video_dropped.fetch_add(1, Ordering::Relaxed);
+                    if let Some(r) = running_replay {
+                        r.shared.video_dropped.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if let Some(bc) = broadcast {
+                        bc.dropped.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
-            runtime
-                .shared
-                .gpu_pending
-                .store(self.pending.len(), Ordering::Relaxed);
+            if let Some(r) = running_replay {
+                r.shared.gpu_pending.store(self.pending.len(), Ordering::Relaxed);
+            }
             gl.bind_buffer(
                 glow::PIXEL_PACK_BUFFER,
                 std::num::NonZeroU32::new(old as u32).map(glow::NativeBuffer),

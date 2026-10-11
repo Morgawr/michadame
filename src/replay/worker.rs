@@ -133,7 +133,7 @@ impl VideoSchedule {
 
 /// Maps timestamped capture samples to a fixed 48 kHz timeline. Resampling and gap
 /// repair affect only the recording, never the playback source.
-struct AudioClock {
+pub(crate) struct AudioClock {
     pending: VecDeque<[f32; 2]>,
     next: i64,
     frame_start: i64,
@@ -141,7 +141,7 @@ struct AudioClock {
     clock_error: f64,
 }
 impl AudioClock {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             pending: VecDeque::new(),
             next: 0,
@@ -150,7 +150,7 @@ impl AudioClock {
             clock_error: 0.,
         }
     }
-    fn append(&mut self, block: &AudioBlock, epoch: i64) -> Result<()> {
+    pub(crate) fn append(&mut self, block: &AudioBlock, epoch: i64) -> Result<()> {
         ensure!(block.rate > 0 && block.channels > 0, "Invalid audio format");
         let channels = block.channels as usize;
         let observed_start = (block.at - epoch) as f64 * 48000. / 1e6;
@@ -213,7 +213,7 @@ impl AudioClock {
         }
         Ok(())
     }
-    fn append_recovering(&mut self, block: &AudioBlock, epoch: i64) -> Result<bool> {
+    pub(crate) fn append_recovering(&mut self, block: &AudioBlock, epoch: i64) -> Result<bool> {
         if self.append(block, epoch).is_ok() {
             return Ok(false);
         }
@@ -223,7 +223,7 @@ impl AudioClock {
         self.append(block, epoch)?;
         Ok(true)
     }
-    fn take(&mut self) -> Option<(i64, Vec<[f32; 2]>)> {
+    pub(crate) fn take(&mut self) -> Option<(i64, Vec<[f32; 2]>)> {
         if self.pending.len() < config::AUDIO_FRAME_SIZE {
             return None;
         }
@@ -235,7 +235,7 @@ impl AudioClock {
 
 /// Audio sources mixed into the replay track.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum MixSource {
+pub(crate) enum MixSource {
     Game = 0,
     Mic = 1,
 }
@@ -253,7 +253,7 @@ const MIX_MAX_GAP: i64 = 10 * 48_000;
 /// that whole span. Emitting as soon as one source is ready (the previous
 /// behavior) dropped the other source's late samples, so game and microphone
 /// audio alternately cut each other out.
-pub(super) struct TimelineMixer {
+pub(crate) struct TimelineMixer {
     /// Unlimited sums, starting at `next_out`.
     pending: VecDeque<[f32; 2]>,
     next_out: i64,
@@ -264,7 +264,7 @@ pub(super) struct TimelineMixer {
 }
 
 impl TimelineMixer {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             pending: VecDeque::new(),
             next_out: 0,
@@ -274,7 +274,7 @@ impl TimelineMixer {
         }
     }
 
-    pub(super) fn push(
+    pub(crate) fn push(
         &mut self,
         source: MixSource,
         start_sample: i64,
@@ -333,7 +333,7 @@ impl TimelineMixer {
             .min()
     }
 
-    pub(super) fn take(&mut self) -> Option<(i64, Vec<[f32; 2]>)> {
+    pub(crate) fn take(&mut self) -> Option<(i64, Vec<[f32; 2]>)> {
         let frame = config::AUDIO_FRAME_SIZE;
         if self.pending.len() < frame || self.next_out + frame as i64 > self.ready_end()? {
             return None;

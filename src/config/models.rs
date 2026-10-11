@@ -1,6 +1,19 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum StreamingVideoEncoder {
+    #[default]
+    SoftwareX264,
+    HardwareVaapi,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum StreamingAudioEncoder {
+    #[default]
+    Aac,
+}
+
 /// Global Twitch integration settings (not tied to a profile).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
@@ -27,6 +40,15 @@ pub struct TwitchConfig {
     pub niconico_duration_secs: f32,
     /// Most comments on screen at once (oldest dropped first). 0 = unlimited.
     pub niconico_max_comments: u32,
+
+    // Twitch Live Streaming Output settings
+    pub video_bitrate_kbps: u32,
+    pub audio_bitrate_kbps: u32,
+    pub video_encoder: StreamingVideoEncoder,
+    pub encoder_preset: String,
+    pub audio_encoder: StreamingAudioEncoder,
+    pub ingest_server: String,
+    pub stream_key: String,
 }
 
 impl Default for TwitchConfig {
@@ -44,6 +66,14 @@ impl Default for TwitchConfig {
             niconico_size_pct: 0.06,
             niconico_duration_secs: 7.0,
             niconico_max_comments: 0,
+
+            video_bitrate_kbps: 6000,
+            audio_bitrate_kbps: 160,
+            video_encoder: StreamingVideoEncoder::SoftwareX264,
+            encoder_preset: "veryfast".into(),
+            audio_encoder: StreamingAudioEncoder::Aac,
+            ingest_server: "rtmps://live.twitch.tv:443/app/".into(),
+            stream_key: String::new(),
         }
     }
 }

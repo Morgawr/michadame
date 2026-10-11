@@ -7,6 +7,8 @@ mod ring;
 pub mod ui;
 mod worker;
 
+pub(crate) use worker::{AudioClock, MixSource, TimelineMixer};
+
 use config::{Rate, ReplayConfig};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use std::sync::{
@@ -35,25 +37,25 @@ pub struct VideoFrame {
     pub rate: Rate,
     pub generation: u64,
 }
-const AUDIO_SAMPLES: usize = 8192;
-const AUDIO_BLOCKS: usize = 256;
-struct AudioBlock {
-    samples: Box<[f32; AUDIO_SAMPLES]>,
-    len: usize,
-    rate: u32,
-    channels: u16,
-    at: i64,
+pub(crate) const AUDIO_SAMPLES: usize = 8192;
+pub(crate) const AUDIO_BLOCKS: usize = 256;
+pub(crate) struct AudioBlock {
+    pub samples: Box<[f32; AUDIO_SAMPLES]>,
+    pub len: usize,
+    pub rate: u32,
+    pub channels: u16,
+    pub at: i64,
     /// All samples since the preceding block were captured and queued.
-    continuous: bool,
+    pub continuous: bool,
 }
-struct AudioRoute {
-    ready: Sender<AudioBlock>,
-    free: Receiver<AudioBlock>,
-    stop: Arc<AtomicBool>,
-    dropped: Arc<AtomicU64>,
-    partial: Option<AudioBlock>,
-    next_continuous: bool,
-    format: Option<(u32, u16)>,
+pub(crate) struct AudioRoute {
+    pub ready: Sender<AudioBlock>,
+    pub free: Receiver<AudioBlock>,
+    pub stop: Arc<AtomicBool>,
+    pub dropped: Arc<AtomicU64>,
+    pub partial: Option<AudioBlock>,
+    pub next_continuous: bool,
+    pub format: Option<(u32, u16)>,
 }
 fn submit_to_route(
     route_mutex: &Mutex<Option<AudioRoute>>,
@@ -134,6 +136,10 @@ pub struct AudioTap {
     mic_discontinuity: AtomicBool,
     route: Mutex<Option<AudioRoute>>,
     mic_route: Mutex<Option<AudioRoute>>,
+    broadcast_discontinuity: AtomicBool,
+    broadcast_mic_discontinuity: AtomicBool,
+    broadcast_route: Mutex<Option<AudioRoute>>,
+    broadcast_mic_route: Mutex<Option<AudioRoute>>,
     pub filter: std::sync::RwLock<crate::replay::config::AudioFilterConfig>,
     game_volume: Arc<AtomicU32>,
 }
@@ -146,6 +152,10 @@ impl Default for AudioTap {
             mic_discontinuity: AtomicBool::new(false),
             route: Mutex::new(None),
             mic_route: Mutex::new(None),
+            broadcast_discontinuity: AtomicBool::new(false),
+            broadcast_mic_discontinuity: AtomicBool::new(false),
+            broadcast_route: Mutex::new(None),
+            broadcast_mic_route: Mutex::new(None),
             filter: std::sync::RwLock::new(crate::replay::config::AudioFilterConfig::default()),
             game_volume: Arc::new(AtomicU32::new(1.0f32.to_bits())),
         }
@@ -171,27 +181,46 @@ impl AudioTap {
     /// Called on ALSA restart/recovery, independently of whether replay is enabled.
     pub fn mark_discontinuity(&self) {
         self.discontinuity.store(true, Ordering::Relaxed);
+        self.broadcast_discontinuity.store(true, Ordering::Relaxed);
     }
     /// Called on microphone restart/recovery.
     pub fn mark_mic_discontinuity(&self) {
         self.mic_discontinuity.store(true, Ordering::Relaxed);
+        self.broadcast_mic_discontinuity.store(true, Ordering::Relaxed);
     }
     pub fn submit(&self, samples: &[f32], rate: u32, channels: u16, at: i64) {
         if !self.enabled.load(Ordering::Relaxed) {
             return;
         }
         submit_to_route(&self.route, &self.discontinuity, samples, rate, channels, at);
+        submit_to_route(&self.broadcast_route, &self.broadcast_discontinuity, samples, rate, channels, at);
     }
     pub fn submit_mic(&self, samples: &[f32], rate: u32, channels: u16, at: i64) {
         if !self.enabled.load(Ordering::Relaxed) {
             return;
         }
         submit_to_route(&self.mic_route, &self.mic_discontinuity, samples, rate, channels, at);
+        submit_to_route(&self.broadcast_mic_route, &self.broadcast_mic_discontinuity, samples, rate, channels, at);
     }
     fn disable(&self) {
-        self.enabled.store(false, Ordering::Release);
         *self.route.lock().unwrap() = None;
         *self.mic_route.lock().unwrap() = None;
+        self.refresh_enabled();
+    }
+    pub fn register_broadcast_routes(&self, game: AudioRoute, mic: AudioRoute) {
+        *self.broadcast_route.lock().unwrap() = Some(game);
+        *self.broadcast_mic_route.lock().unwrap() = Some(mic);
+        self.refresh_enabled();
+    }
+    pub fn unregister_broadcast_routes(&self) {
+        *self.broadcast_route.lock().unwrap() = None;
+        *self.broadcast_mic_route.lock().unwrap() = None;
+        self.refresh_enabled();
+    }
+    fn refresh_enabled(&self) {
+        let replay_on = self.route.lock().unwrap().is_some();
+        let broadcast_on = self.broadcast_route.lock().unwrap().is_some();
+        self.enabled.store(replay_on || broadcast_on, Ordering::Release);
     }
 }
 #[derive(Default, Clone)]
@@ -423,7 +452,7 @@ impl Replay {
             next_continuous: false,
             format: None,
         });
-        self.audio.enabled.store(true, Ordering::Release);
+        self.audio.refresh_enabled();
         self.available_before = Some(available);
         self.runtime = Some(Runtime {
             queue,

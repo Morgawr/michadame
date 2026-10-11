@@ -1,10 +1,12 @@
 //! Twitch integration: chat connection state, messages and login.
 
 pub mod auth;
+pub mod broadcast;
 pub mod emotes;
 pub mod irc;
 pub mod live;
 
+pub use broadcast::{BroadcastHandle, BroadcastMetrics, BroadcastStatus};
 pub use live::StreamStatus;
 
 use crate::config::TwitchConfig;
@@ -110,6 +112,12 @@ pub struct TwitchState {
     /// Niconico comments currently on screen.
     pub comments: VecDeque<Comment>,
 
+    // Twitch live streaming client state
+    pub broadcast: Option<BroadcastHandle>,
+    pub stream_key_input: String,
+    pub show_stream_key: bool,
+    pub broadcast_last_status: Option<BroadcastStatus>,
+
     self_display_name: Option<String>,
     self_color: Option<egui::Color32>,
     worker: Option<irc::WorkerHandle>,
@@ -138,6 +146,10 @@ impl Default for TwitchState {
             auth_flow: AuthFlow::Idle,
             stream_status: StreamStatus::Unknown(String::new()),
             comments: VecDeque::new(),
+            broadcast: None,
+            stream_key_input: String::new(),
+            show_stream_key: false,
+            broadcast_last_status: None,
             self_display_name: None,
             self_color: None,
             worker: None,
@@ -189,7 +201,87 @@ impl TwitchState {
     pub fn apply_config(&mut self, config: TwitchConfig) {
         self.channel_input = config.channel.clone();
         self.client_id_input = config.client_id.clone();
+        self.stream_key_input = config.stream_key.clone();
         self.config = config;
+    }
+
+    pub fn is_broadcasting(&self) -> bool {
+        self.broadcast.as_ref().map_or(false, |b| b.is_live())
+    }
+
+    pub fn broadcast_metrics(&self) -> Option<Arc<BroadcastMetrics>> {
+        self.broadcast.as_ref().map(|b| b.metrics.clone())
+    }
+
+    pub fn broadcast_status(&self) -> BroadcastStatus {
+        self.broadcast
+            .as_ref()
+            .map(|b| b.status())
+            .unwrap_or(BroadcastStatus::Offline)
+    }
+
+    pub fn start_broadcast(
+        &mut self,
+        audio_tap: Arc<crate::replay::AudioTap>,
+        render_device: &str,
+    ) -> Result<(), String> {
+        if self.broadcast.is_some() {
+            return Err("Broadcast is already active".into());
+        }
+        let stream_key = self.config.stream_key.trim();
+        if stream_key.is_empty() {
+            let err = "No stream key set. Please enter or fetch your Twitch stream key.".to_string();
+            self.notify_error(&err);
+            return Err(err);
+        }
+        let config = broadcast::BroadcastConfig {
+            video_bitrate_kbps: self.config.video_bitrate_kbps,
+            audio_bitrate_kbps: self.config.audio_bitrate_kbps,
+            video_encoder: self.config.video_encoder,
+            encoder_preset: self.config.encoder_preset.clone(),
+            audio_encoder: self.config.audio_encoder,
+            ingest_server: self.config.ingest_server.clone(),
+            stream_key: stream_key.to_string(),
+            render_device: render_device.to_string(),
+        };
+        match broadcast::start_broadcast(config, audio_tap) {
+            Ok(handle) => {
+                self.broadcast = Some(handle);
+                self.notify_info("Connecting to Twitch live stream…");
+                Ok(())
+            }
+            Err(e) => {
+                let msg = format!("Failed to start broadcast: {e:#}");
+                self.notify_error(&msg);
+                Err(msg)
+            }
+        }
+    }
+
+    pub fn stop_broadcast(&mut self) {
+        if let Some(mut handle) = self.broadcast.take() {
+            handle.stop();
+            self.broadcast_last_status = None;
+            self.notify_info("Twitch broadcast stopped");
+        }
+    }
+
+    pub fn try_fetch_stream_key(&mut self) {
+        let Some(token) = &self.token else {
+            self.notify_error("Log in to Twitch first to fetch your stream key");
+            return;
+        };
+        match auth::fetch_stream_key(token) {
+            Ok(key) => {
+                self.config.stream_key = key.clone();
+                self.stream_key_input = key;
+                self.config_dirty = true;
+                self.notify_info("Twitch stream key fetched from account!");
+            }
+            Err(e) => {
+                self.notify_error(format!("Could not fetch stream key: {e}"));
+            }
+        }
     }
 
     pub fn client_id(&self) -> String {
@@ -232,6 +324,19 @@ impl TwitchState {
         }
         changed |= self.poll_auth_flow(ctx);
         self.sync_connection(ctx);
+
+        if let Some(handle) = &self.broadcast {
+            let status = handle.status();
+            if let BroadcastStatus::Error(ref err) = status {
+                self.notify_error(format!("Broadcast error: {err}"));
+                self.broadcast = None;
+                self.broadcast_last_status = None;
+                changed = true;
+            } else if self.broadcast_last_status.as_ref() != Some(&status) {
+                self.broadcast_last_status = Some(status);
+                changed = true;
+            }
+        }
 
         let events: Vec<IrcEvent> = self
             .worker

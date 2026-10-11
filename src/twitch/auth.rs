@@ -13,12 +13,13 @@ use std::time::{Duration, Instant};
 
 /// Client ID of the registered (public) Michadame Twitch application.
 pub const DEFAULT_CLIENT_ID: &str = "mzzs95mdev74cqzysuvfnmv5ux6abj";
-pub const SCOPES: &str = "chat:read chat:edit";
+pub const SCOPES: &str = "chat:read chat:edit channel:read:stream_key";
 
 const DEVICE_URL: &str = "https://id.twitch.tv/oauth2/device";
 const TOKEN_URL: &str = "https://id.twitch.tv/oauth2/token";
 const VALIDATE_URL: &str = "https://id.twitch.tv/oauth2/validate";
 const REVOKE_URL: &str = "https://id.twitch.tv/oauth2/revoke";
+const STREAM_KEY_URL: &str = "https://api.twitch.tv/helix/streams/key";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StoredToken {
@@ -174,6 +175,51 @@ pub fn revoke_in_background(token: StoredToken) {
             &[("client_id", &token.client_id), ("token", &token.access_token)],
         );
     });
+}
+
+/// Fetch the broadcaster's live stream key using Helix API.
+pub fn fetch_stream_key(token: &StoredToken) -> Result<String, AuthError> {
+    if token.user_id.is_empty() {
+        return Err(AuthError::Invalid("User ID is missing from login token".into()));
+    }
+    let result = agent()
+        .get(STREAM_KEY_URL)
+        .query("broadcaster_id", &token.user_id)
+        .set("Client-Id", &token.client_id)
+        .set("Authorization", &format!("Bearer {}", token.access_token))
+        .call();
+    match result {
+        Ok(resp) => {
+            let body = read_json(resp);
+            let key = body
+                .get("data")
+                .and_then(|d| d.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|obj| obj.get("stream_key"))
+                .and_then(|k| k.as_str())
+                .unwrap_or_default();
+            if key.is_empty() {
+                return Err(AuthError::Network("Twitch did not return a stream key".into()));
+            }
+            Ok(key.to_string())
+        }
+        Err(ureq::Error::Status(401, resp)) => {
+            let body = read_json(resp);
+            let msg = message_of(&body);
+            if msg.contains("Missing scope") || msg.contains("channel:read:stream_key") {
+                Err(AuthError::Invalid(
+                    "Missing permission: your login was created before stream key support was added. Please click 'Log out' and 'Log in with Twitch' under 'Twitch Account' to re-authorize.".into(),
+                ))
+            } else {
+                Err(AuthError::Invalid(format!("Twitch login expired or unauthorized ({msg})")))
+            }
+        }
+        Err(ureq::Error::Status(code, resp)) => Err(AuthError::Network(format!(
+            "Helix API error {code}: {}",
+            message_of(&read_json(resp))
+        ))),
+        Err(e) => Err(AuthError::Network(e.to_string())),
+    }
 }
 
 #[derive(Debug)]

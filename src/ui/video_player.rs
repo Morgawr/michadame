@@ -421,6 +421,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 replay_gpu.lock().unwrap().capture(
                                     painter.gl(),
                                     replay.as_ref(),
+                                    None,
                                     full_or_rendered_area,
                                     at,
                                     rate,
@@ -588,6 +589,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         replay_gpu.lock().unwrap().capture(
                             painter.gl(),
                             replay.as_ref(),
+                            None,
                             full_or_rendered_area,
                             at,
                             rate,
@@ -613,15 +615,27 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
         }
 
-        // When capturing overlays in the replay buffer, capture the frame after egui has
-        // rendered the interactive OCR boxes and dictionary popup in the Foreground layer.
-        if state.replay.config.capture_overlays {
+        // When capturing overlays in the replay buffer or when broadcasting to Twitch,
+        // capture the frame after egui has rendered the interactive OCR boxes and dictionary popup.
+        let is_broadcasting = state.twitch.is_broadcasting();
+        if state.replay.config.capture_overlays || is_broadcasting {
             let replay_gpu = state.replay.gpu.clone();
-            let replay = state
-                .replay
-                .runtime
-                .as_ref()
-                .map(crate::replay::gpu::RuntimeView::new);
+            let replay = if state.replay.config.capture_overlays {
+                state
+                    .replay
+                    .runtime
+                    .as_ref()
+                    .map(crate::replay::gpu::RuntimeView::new)
+            } else {
+                None
+            };
+            let broadcast_sink = state.twitch.broadcast.as_ref().map(|b| {
+                crate::replay::gpu::BroadcastSink {
+                    tx: b.video_tx.clone(),
+                    free_rx: b.video_free_rx.clone(),
+                    dropped: b.metrics.video_dropped.clone(),
+                }
+            });
             let (at, rate) = state
                 .latest_frame
                 .as_ref()
@@ -642,6 +656,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         replay_gpu.lock().unwrap().capture(
                             painter.gl(),
                             replay.as_ref(),
+                            broadcast_sink.as_ref(),
                             rendered_area,
                             at,
                             rate,
