@@ -66,6 +66,7 @@ pub fn format_stream_duration(duration: Duration) -> String {
 pub enum DeckButtonKind {
     ReplayBuffer,
     Microphone,
+    Webcam,
     ScrollingChat,
     Alerts,
 }
@@ -331,6 +332,50 @@ pub fn draw_deck_button(
                     egui::pos2(icon_center.x, icon_center.y + 7.5),
                     2.8,
                     icon_color,
+                );
+            }
+            DeckButtonKind::Webcam => {
+                // Vector camera icon
+                // 1. Camera main body
+                let body_rect = egui::Rect::from_center_size(
+                    egui::pos2(icon_center.x - 3.0, icon_center.y + 1.0),
+                    egui::vec2(16.0, 13.0),
+                );
+                painter.rect_filled(body_rect, egui::Rounding::ZERO, icon_color);
+
+                // 2. Front projection lens trapezoid
+                let lens_pts = [
+                    egui::pos2(body_rect.max.x + 1.0, icon_center.y - 3.5),
+                    egui::pos2(body_rect.max.x + 8.0, icon_center.y - 6.5),
+                    egui::pos2(body_rect.max.x + 8.0, icon_center.y + 8.5),
+                    egui::pos2(body_rect.max.x + 1.0, icon_center.y + 5.5),
+                ];
+                painter.add(egui::Shape::convex_polygon(
+                    lens_pts.to_vec(),
+                    icon_color,
+                    egui::Stroke::NONE,
+                ));
+
+                // 3. Dual film spool / tape reels on top of camera
+                painter.circle_filled(
+                    egui::pos2(icon_center.x - 7.5, icon_center.y - 7.5),
+                    3.2,
+                    icon_color,
+                );
+                painter.circle_filled(
+                    egui::pos2(icon_center.x + 1.5, icon_center.y - 7.5),
+                    3.2,
+                    icon_color,
+                );
+                painter.circle_filled(
+                    egui::pos2(icon_center.x - 7.5, icon_center.y - 7.5),
+                    1.2,
+                    bg_color,
+                );
+                painter.circle_filled(
+                    egui::pos2(icon_center.x + 1.5, icon_center.y - 7.5),
+                    1.2,
+                    bg_color,
                 );
             }
         }
@@ -718,16 +763,19 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
 
     ui.add_space(10.0);
 
-    // 3. Mini-grid of 4 Stream Deck square buttons side-by-side
-    // Replay buffer | Microphone | Scrolling chat | Video alerts
-    let btn_size = 92.0;
+    // 3. Mini-grid of 5 Stream Deck square buttons side-by-side
+    // Replay buffer | Microphone | Webcam | Scrolling chat | Video alerts
+    let btn_size = 78.0;
     let btn_gap = 12.0;
-    let total_grid_w = 4.0 * btn_size + 3.0 * btn_gap;
-    let content_w = ui.available_width().min(STUDIO_WINDOW_SIZE[0] - 16.0);
-    let side_padding = ((content_w - total_grid_w) / 2.0).max(0.0);
+    let total_grid_w = 5.0 * btn_size + 4.0 * btn_gap;
+    let avail_w = ui.available_width();
+    let side_padding = ((avail_w - total_grid_w) / 2.0).max(0.0);
 
     ui.horizontal(|ui| {
-        ui.add_space(side_padding);
+        ui.spacing_mut().item_spacing.x = 0.0;
+        if side_padding > 0.0 {
+            ui.add_space(side_padding);
+        }
 
         // Deck Button 1: Replay Buffer
         let replay_enabled = state.replay.runtime.is_some();
@@ -783,7 +831,44 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
 
         ui.add_space(btn_gap);
 
-        // Deck Button 3: Scrolling Chat
+        // Deck Button 3: Webcam
+        let webcam_enabled = state.webcam.config.enabled;
+        if draw_deck_button(
+            ui,
+            DeckButtonKind::Webcam,
+            "CAM",
+            webcam_enabled,
+            "Webcam: Click to toggle webcam overlay feed",
+            btn_size,
+        )
+        .clicked()
+        {
+            let new_enabled = !state.webcam.config.enabled;
+            state.webcam.config.enabled = new_enabled;
+            if new_enabled && state.webcam.config.device.is_none() {
+                state.webcam.config.device = state.hardware.video_devices.first().cloned();
+                if let Some(dev) = &state.webcam.config.device {
+                    if let Ok(formats) = crate::devices::video::find_video_formats(dev) {
+                        state.webcam.supported_formats = formats;
+                        if let Some(first_fmt) = state.webcam.supported_formats.first() {
+                            state.webcam.config.format_fourcc = Some(first_fmt.fourcc.clone());
+                            if let Some(first_res) = first_fmt.resolutions.first() {
+                                state.webcam.config.resolution = Some((first_res.width, first_res.height));
+                                state.webcam.config.framerate = first_res.framerates.first().cloned();
+                            }
+                        }
+                    }
+                }
+            }
+            crate::config::save_config(state);
+            crate::config::save_global_hardware_config(state);
+            state.sync_webcam_stream(Some(ui.ctx()));
+            changed = true;
+        }
+
+        ui.add_space(btn_gap);
+
+        // Deck Button 4: Scrolling Chat
         let chat_enabled = state.twitch.config.niconico_enabled;
         if draw_deck_button(
             ui,
@@ -803,7 +888,7 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
 
         ui.add_space(btn_gap);
 
-        // Deck Button 4: Video Alerts
+        // Deck Button 5: Video Alerts
         let alerts_enabled = state.twitch.config.alerts_enabled;
         if draw_deck_button(
             ui,
@@ -819,6 +904,10 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
             state.twitch.config_dirty = false;
             crate::config::save_config(state);
             changed = true;
+        }
+
+        if side_padding > 0.0 {
+            ui.add_space(side_padding);
         }
     });
 
@@ -1138,5 +1227,51 @@ mod tests {
                 draw_studio_contents(&mut state, ui);
             });
         });
+    }
+
+    #[test]
+    fn test_webcam_toggle_state() {
+        let mut state = AppState::default();
+        assert!(!state.webcam.config.enabled);
+        state.webcam.config.enabled = true;
+        assert!(state.webcam.config.enabled);
+    }
+
+    #[test]
+    fn test_no_emojis_in_studio_buttons_or_tooltips() {
+        let quick_buttons = [
+            ("CHAT", "Twitch Chat: Click to toggle on-screen transparent chat overlay"),
+            ("NICO", "Niconico: Click to toggle horizontal floating barrage comments"),
+            ("ALERTS", "Alerts: Click to toggle animated on-screen event popups"),
+            ("MIC", "Microphone: Click to toggle live voice capture into the stream"),
+            ("CAM", "Webcam: Click to toggle webcam overlay feed"),
+        ];
+        for (label, tooltip) in quick_buttons {
+            assert!(label.chars().all(|c| c.is_ascii()), "Label contains non-ascii: {}", label);
+            assert!(tooltip.chars().all(|c| c.is_ascii()), "Tooltip contains non-ascii: {}", tooltip);
+        }
+    }
+
+    #[test]
+    fn test_studio_quick_deck_buttons_equal_padding_and_no_overflow() {
+        let avail_w: f32 = 464.0; // STUDIO_WINDOW_SIZE[0] (480.0) - 16.0 (central panel margins)
+        let btn_size: f32 = 78.0;
+        let btn_gap: f32 = 12.0;
+        let num_buttons: f32 = 5.0;
+        let total_grid_w = num_buttons * btn_size + (num_buttons - 1.0) * btn_gap;
+        let side_padding = ((avail_w - total_grid_w) / 2.0).max(0.0);
+
+        // Verify total width fits within available width
+        assert!(total_grid_w <= avail_w);
+        assert_eq!(total_grid_w, 438.0);
+        assert_eq!(side_padding, 13.0);
+
+        // Distance from left window edge: 8.0 panel margin + 13.0 side padding = 21.0
+        let left_dist = 8.0 + side_padding;
+        // Distance from right window edge: 480.0 - (8.0 + side_padding + total_grid_w) = 21.0
+        let right_dist = 480.0 - (8.0 + side_padding + total_grid_w);
+        assert!((left_dist - right_dist).abs() < 1e-4);
+        assert_eq!(left_dist, 21.0);
+        assert_eq!(right_dist, 21.0);
     }
 }

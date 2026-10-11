@@ -162,6 +162,7 @@ impl Default for AppState {
             bank: crate::bank::BankState::default(),
             twitch,
             mic: crate::app::models::MicState::default(),
+            webcam: crate::app::models::WebcamState::default(),
             config_load_error: None,
             config_quarantine_path: None,
         }
@@ -186,6 +187,7 @@ impl AppState {
                     config::apply_config(self, &cfg);
                 }
                 self.sync_mic_stream();
+                self.sync_webcam_stream(None);
                 self.info("Devices loaded successfully.");
                 true
             }
@@ -330,6 +332,7 @@ impl eframe::App for AppState {
         }
         self.stop_stream_resources();
         self.mic.active_stream = None;
+        self.webcam.active_stream = None;
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {

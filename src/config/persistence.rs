@@ -377,6 +377,7 @@ pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(
     cfg.default_halo = Some(state.halo_defaults.clone());
     cfg.twitch = state.twitch.config.clone();
     cfg.mic = state.mic.config.clone();
+    cfg.webcam = state.webcam.config.clone();
 
     store_config_atomic_at(path, &cfg)
 }
@@ -677,6 +678,25 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     }
     if let Some(defaults) = &cfg.default_cathode_interference {
         state.cathode_interference_defaults = defaults.clone();
+    }
+
+    state.webcam.config = cfg.webcam.clone();
+    if let Some(dev) = &state.webcam.config.device {
+        if state.hardware.video_devices.contains(dev) {
+            if let Ok(formats) = crate::devices::video::find_video_formats(dev) {
+                state.webcam.supported_formats = formats;
+                if let Some(saved_fourcc) = &state.webcam.config.format_fourcc {
+                    if let Some(idx) = state
+                        .webcam
+                        .supported_formats
+                        .iter()
+                        .position(|f| f.fourcc == *saved_fourcc)
+                    {
+                        state.webcam.selected_format_index = idx;
+                    }
+                }
+            }
+        }
     }
 
     state.active_profile = cfg.active_profile.clone();
@@ -1757,6 +1777,62 @@ crt_brightboost = 1.6
         let vid_prof = reloaded.video_profile.expect("video_profile must be saved");
         assert_eq!(vid_prof.crt_hard_scan, Some(-3.0));
         assert_eq!(vid_prof.vibrance, Some(2.0));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("toml.bak"));
+    }
+
+    #[test]
+    fn test_webcam_hardware_persistence_roundtrip() {
+        let path = std::env::temp_dir().join(format!(
+            "michadame_webcam_test_{}_{}.toml",
+            std::process::id(),
+            crate::replay::now_us()
+        ));
+        let mut state = AppState::default();
+        state.webcam.config.enabled = true;
+        state.webcam.config.device = Some("/dev/video2".to_string());
+        state.webcam.config.format_fourcc = Some("MJPG".to_string());
+        state.webcam.config.resolution = Some((1280, 720));
+        state.webcam.config.framerate = Some(30);
+        state.webcam.config.pos_x_pct = 0.55;
+        state.webcam.config.pos_y_pct = 0.45;
+        state.webcam.config.width_pct = 0.30;
+        state.webcam.config.cutout.left = 12;
+        state.webcam.config.cutout.right = 14;
+        state.webcam.config.cutout.top = 16;
+        state.webcam.config.cutout.bottom = 18;
+
+        save_global_hardware_config_at(&path, &state).unwrap();
+
+        let loaded: MichadameConfig = confy::load_path(&path).unwrap();
+        assert_eq!(loaded.webcam.enabled, true);
+        assert_eq!(loaded.webcam.device, Some("/dev/video2".to_string()));
+        assert_eq!(loaded.webcam.format_fourcc, Some("MJPG".to_string()));
+        assert_eq!(loaded.webcam.resolution, Some((1280, 720)));
+        assert_eq!(loaded.webcam.framerate, Some(30));
+        assert!((loaded.webcam.pos_x_pct - 0.55).abs() < 1e-4);
+        assert!((loaded.webcam.pos_y_pct - 0.45).abs() < 1e-4);
+        assert!((loaded.webcam.width_pct - 0.30).abs() < 1e-4);
+        assert_eq!(loaded.webcam.cutout.left, 12);
+        assert_eq!(loaded.webcam.cutout.right, 14);
+        assert_eq!(loaded.webcam.cutout.top, 16);
+        assert_eq!(loaded.webcam.cutout.bottom, 18);
+
+        let mut fresh_state = AppState::default();
+        apply_config(&mut fresh_state, &loaded);
+        assert_eq!(fresh_state.webcam.config.enabled, true);
+        assert_eq!(fresh_state.webcam.config.device, Some("/dev/video2".to_string()));
+        assert_eq!(fresh_state.webcam.config.format_fourcc, Some("MJPG".to_string()));
+        assert_eq!(fresh_state.webcam.config.resolution, Some((1280, 720)));
+        assert_eq!(fresh_state.webcam.config.framerate, Some(30));
+        assert!((fresh_state.webcam.config.pos_x_pct - 0.55).abs() < 1e-4);
+        assert!((fresh_state.webcam.config.pos_y_pct - 0.45).abs() < 1e-4);
+        assert!((fresh_state.webcam.config.width_pct - 0.30).abs() < 1e-4);
+        assert_eq!(fresh_state.webcam.config.cutout.left, 12);
+        assert_eq!(fresh_state.webcam.config.cutout.right, 14);
+        assert_eq!(fresh_state.webcam.config.cutout.top, 16);
+        assert_eq!(fresh_state.webcam.config.cutout.bottom, 18);
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("toml.bak"));

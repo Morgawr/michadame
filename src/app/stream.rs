@@ -379,6 +379,82 @@ impl AppState {
         }
     }
 
+    pub fn sync_webcam_stream(&mut self, ctx: Option<&egui::Context>) {
+        if !self.webcam.config.enabled {
+            if self.webcam.active_stream.is_some() {
+                self.info("Webcam stream stopped.");
+                self.webcam.active_stream = None;
+                self.webcam.frame_receiver = None;
+                self.webcam.latest_frame = None;
+            }
+            return;
+        }
+
+        let device_name = match &self.webcam.config.device {
+            Some(dev) if !dev.is_empty() => dev.clone(),
+            _ => {
+                self.webcam.active_stream = None;
+                self.webcam.frame_receiver = None;
+                self.webcam.latest_frame = None;
+                return;
+            }
+        };
+
+        let format = if let Some(fmt) = self
+            .webcam
+            .supported_formats
+            .get(self.webcam.selected_format_index)
+        {
+            fmt.clone()
+        } else {
+            crate::video::types::VideoFormat::default()
+        };
+
+        let resolution = self.webcam.config.resolution.unwrap_or((640, 480));
+        let framerate = self.webcam.config.framerate.unwrap_or(30);
+
+        if let Some(stream) = &self.webcam.active_stream {
+            if stream.device == device_name
+                && stream.format_fourcc == format.fourcc
+                && stream.resolution == resolution
+                && stream.framerate == framerate
+            {
+                return;
+            }
+        }
+
+        self.webcam.active_stream = None;
+        self.webcam.frame_receiver = None;
+        self.webcam.latest_frame = None;
+
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.webcam.frame_receiver = Some(rx);
+
+        let repaint_ctx = ctx.cloned();
+        let request_repaint: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Some(ctx) = &repaint_ctx {
+                ctx.request_repaint();
+            }
+        });
+
+        match crate::devices::webcam::start_webcam_stream(
+            &device_name,
+            format,
+            resolution,
+            framerate,
+            tx,
+            request_repaint,
+        ) {
+            Ok(handle) => {
+                self.info(format!("Webcam capture started for {device_name}."));
+                self.webcam.active_stream = Some(handle);
+            }
+            Err(e) => {
+                self.error(format!("Failed to start webcam ({device_name}): {e}"));
+            }
+        }
+    }
+
     pub fn start_video_file(&mut self, path: &std::path::Path, ctx: &egui::Context) {
         self.stop_stream_resources();
 

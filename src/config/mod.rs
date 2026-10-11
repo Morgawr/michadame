@@ -130,6 +130,7 @@ impl From<LegacyConfig> for MichadameConfig {
             popup_under_crt: legacy.popup_under_crt,
             twitch: legacy.twitch,
             mic: legacy.mic,
+            webcam: legacy.webcam,
             video_profile: legacy.video_profile,
             profiles,
         }
@@ -243,6 +244,7 @@ mod tests {
             video_profile: None,
             twitch: Default::default(),
             mic: Default::default(),
+            webcam: Default::default(),
         };
 
         let config: MichadameConfig = MichadameConfig::from(legacy);
@@ -378,6 +380,7 @@ mod tests {
             video_profile: None,
             twitch: Default::default(),
             mic: Default::default(),
+            webcam: Default::default(),
         };
 
         let config: MichadameConfig = MichadameConfig::from(legacy);

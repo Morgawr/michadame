@@ -18,6 +18,7 @@ pub mod niconico;
 pub mod alerts;
 pub mod studio;
 pub mod video_player;
+pub mod webcam_overlay;
 
 pub use networking::send_ws_command;
 pub use video_player::draw_video_player;

@@ -185,6 +185,56 @@ impl Default for MicConfig {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct WebcamCutout {
+    pub left: u32,
+    pub right: u32,
+    pub top: u32,
+    pub bottom: u32,
+}
+
+impl Default for WebcamCutout {
+    fn default() -> Self {
+        Self {
+            left: 0,
+            right: 0,
+            top: 0,
+            bottom: 0,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct WebcamConfig {
+    pub enabled: bool,
+    pub device: Option<String>,
+    pub format_fourcc: Option<String>,
+    pub resolution: Option<(u32, u32)>,
+    pub framerate: Option<u32>,
+    pub pos_x_pct: f32,
+    pub pos_y_pct: f32,
+    pub width_pct: f32,
+    pub cutout: WebcamCutout,
+}
+
+impl Default for WebcamConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            device: None,
+            format_fourcc: None,
+            resolution: None,
+            framerate: None,
+            pos_x_pct: 0.72,
+            pos_y_pct: 0.65,
+            width_pct: 0.24,
+            cutout: WebcamCutout::default(),
+        }
+    }
+}
+
 #[derive(Default, Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct Profile {
@@ -407,6 +457,8 @@ pub struct LegacyConfig {
     pub twitch: TwitchConfig,
     #[serde(default)]
     pub mic: MicConfig,
+    #[serde(default)]
+    pub webcam: WebcamConfig,
 }
 
 impl Default for LegacyConfig {
@@ -511,6 +563,7 @@ impl Default for LegacyConfig {
             video_profile: None,
             twitch: TwitchConfig::default(),
             mic: MicConfig::default(),
+            webcam: WebcamConfig::default(),
         }
     }
 }
@@ -546,6 +599,7 @@ pub struct MichadameConfig {
     pub default_cathode_interference: Option<crate::app::models::CathodeInterferenceSettings>,
     pub twitch: TwitchConfig,
     pub mic: MicConfig,
+    pub webcam: WebcamConfig,
     // confy's TOML serializer requires scalar fields before nested tables.
     pub replay: crate::replay::config::ReplayConfig,
     #[serde(default)]
@@ -578,6 +632,7 @@ impl Default for MichadameConfig {
             default_cathode_interference: None,
             twitch: TwitchConfig::default(),
             mic: MicConfig::default(),
+            webcam: WebcamConfig::default(),
             bank_current_tag: None,
             bank_compact_mode: None,
             popup_under_crt: Some(false),

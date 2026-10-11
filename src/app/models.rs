@@ -243,6 +243,52 @@ impl Default for MicState {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebcamResizeCorner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+pub struct WebcamState {
+    pub config: crate::config::WebcamConfig,
+    pub supported_formats: Vec<VideoFormat>,
+    pub selected_format_index: usize,
+    pub active_stream: Option<crate::devices::webcam::WebcamStreamHandle>,
+    pub texture: Option<egui::TextureHandle>,
+    pub latest_frame: Option<Arc<crate::devices::webcam::WebcamFrame>>,
+    pub frame_receiver: Option<crossbeam_channel::Receiver<Arc<crate::devices::webcam::WebcamFrame>>>,
+    pub is_dragging: bool,
+    pub drag_start_pointer: Option<egui::Pos2>,
+    pub drag_start_pos: Option<[f32; 2]>,
+    pub resizing_corner: Option<WebcamResizeCorner>,
+    pub resize_start_pointer: Option<egui::Pos2>,
+    pub resize_start_width_pct: Option<f32>,
+    pub resize_start_pos: Option<[f32; 2]>,
+}
+
+impl Default for WebcamState {
+    fn default() -> Self {
+        Self {
+            config: crate::config::WebcamConfig::default(),
+            supported_formats: Vec::new(),
+            selected_format_index: 0,
+            active_stream: None,
+            texture: None,
+            latest_frame: None,
+            frame_receiver: None,
+            is_dragging: false,
+            drag_start_pointer: None,
+            drag_start_pos: None,
+            resizing_corner: None,
+            resize_start_pointer: None,
+            resize_start_width_pct: None,
+            resize_start_pos: None,
+        }
+    }
+}
+
 pub struct AppState {
     pub replay: crate::replay::Replay,
     pub hardware: HardwareState,
@@ -305,6 +351,7 @@ pub struct AppState {
     pub bank: crate::bank::BankState,
     pub twitch: crate::twitch::TwitchState,
     pub mic: MicState,
+    pub webcam: WebcamState,
     pub config_load_error: Option<String>,
     pub config_quarantine_path: Option<std::path::PathBuf>,
 }

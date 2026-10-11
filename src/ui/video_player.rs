@@ -268,6 +268,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 let bank_capture_cb = bank_capture.clone();
 
                 let capture_overlays = state.replay.config.capture_overlays;
+                let webcam_enabled = state.webcam.config.enabled;
                 let stream_res = state.hardware.selected_resolution;
 
                 let callback = egui::PaintCallback {
@@ -417,7 +418,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 bank_capture_cb.save(request, shot);
                             }
 
-                            if !capture_overlays {
+                            if !capture_overlays && !webcam_enabled {
                                 replay_gpu.lock().unwrap().capture(
                                     painter.gl(),
                                     replay.as_ref(),
@@ -487,6 +488,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             let ocr_req_sender_cb = ocr_req_sender.clone();
             let bank_capture_cb = bank_capture.clone();
             let capture_overlays = state.replay.config.capture_overlays;
+            let webcam_enabled = state.webcam.config.enabled;
             let stream_res = state.hardware.selected_resolution;
 
             let callback = egui::PaintCallback {
@@ -585,7 +587,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         bank_capture_cb.save(request, shot);
                     }
 
-                    if !capture_overlays {
+                    if !capture_overlays && !webcam_enabled {
                         replay_gpu.lock().unwrap().capture(
                             painter.gl(),
                             replay.as_ref(),
@@ -618,12 +620,16 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
         }
 
-        // When capturing overlays in the replay buffer or when broadcasting to Twitch,
-        // capture the frame after egui has rendered the interactive OCR boxes and dictionary popup.
+        // Draw webcam overlay on top of everything
+        crate::ui::webcam_overlay::draw_webcam_overlay(state, ui, ctx, response.rect);
+
+        // When capturing overlays in the replay buffer, when webcam is enabled, or when broadcasting to Twitch,
+        // capture the frame after egui has rendered the interactive OCR boxes, dictionary popup, and webcam overlay.
         let is_broadcasting = state.twitch.is_broadcasting();
-        if state.replay.config.capture_overlays || is_broadcasting {
+        let capture_replay_here = state.replay.config.capture_overlays || state.webcam.config.enabled;
+        if capture_replay_here || is_broadcasting {
             let replay_gpu = state.replay.gpu.clone();
-            let replay = if state.replay.config.capture_overlays {
+            let replay = if capture_replay_here {
                 state
                     .replay
                     .runtime
@@ -703,6 +709,8 @@ pub fn is_software_mouse_active(state: &AppState, is_on_crt_surface: bool) -> bo
         && is_on_crt_surface
         && !has_system_dialog
         && !(popup_active && !popup_under_crt)
+        && !(state.webcam.config.enabled
+            && (state.webcam.is_dragging || state.webcam.resizing_corner.is_some()))
 }
 
 /// Checks if the mouse cursor is hovering over or near the bottom video controls widget.
