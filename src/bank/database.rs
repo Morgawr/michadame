@@ -21,6 +21,8 @@ pub struct BankEntryMeta {
     pub has_screenshot: bool,
     /// Optional single tag (e.g. the game the word was mined from).
     pub tag: Option<String>,
+    /// Optional Twitch clip URL if a clip was captured for this word.
+    pub twitch_clip_url: Option<String>,
 }
 
 /// A fully-prepared entry ready to be inserted.
@@ -39,6 +41,7 @@ pub struct NewBankEntry {
     /// Encoded (JPEG) thumbnail for list previews.
     pub thumbnail: Option<Vec<u8>>,
     pub tag: Option<String>,
+    pub twitch_clip_url: Option<String>,
 }
 
 /// A custom name dictionary entry.
@@ -111,6 +114,13 @@ impl BankDatabase {
         if !has_tag {
             conn.execute_batch("ALTER TABLE mined_words ADD COLUMN tag TEXT;")?;
         }
+        // Migration: databases created before twitch_clip_url was introduced lack the column.
+        let has_clip = conn
+            .prepare("SELECT 1 FROM pragma_table_info('mined_words') WHERE name = 'twitch_clip_url'")?
+            .exists([])?;
+        if !has_clip {
+            conn.execute_batch("ALTER TABLE mined_words ADD COLUMN twitch_clip_url TEXT;")?;
+        }
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_mined_words_tag ON mined_words(tag);
              CREATE TABLE IF NOT EXISTS custom_names (
@@ -132,8 +142,8 @@ impl BankDatabase {
     pub fn insert(&self, entry: &NewBankEntry) -> Result<BankEntryMeta> {
         self.conn.execute(
             "INSERT INTO mined_words (created_at, term, reading, definition_text, definition_json,
-                 sentence, word_start, word_end, source_text, screenshot, thumbnail, tag)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 sentence, word_start, word_end, source_text, screenshot, thumbnail, tag, twitch_clip_url)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 entry.created_at,
                 entry.term,
@@ -147,6 +157,7 @@ impl BankDatabase {
                 entry.screenshot,
                 entry.thumbnail,
                 entry.tag,
+                entry.twitch_clip_url,
             ],
         )?;
         Ok(BankEntryMeta {
@@ -160,6 +171,7 @@ impl BankDatabase {
             word_range: entry.word_range,
             has_screenshot: entry.screenshot.is_some(),
             tag: entry.tag.clone(),
+            twitch_clip_url: entry.twitch_clip_url.clone(),
         })
     }
 
@@ -167,7 +179,7 @@ impl BankDatabase {
     pub fn list_meta(&self) -> Result<Vec<BankEntryMeta>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, created_at, term, reading, definition_text, sentence, word_start, word_end,
-                    screenshot IS NOT NULL, definition_json, tag
+                    screenshot IS NOT NULL, definition_json, tag, twitch_clip_url
              FROM mined_words ORDER BY created_at DESC, id DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -182,6 +194,7 @@ impl BankDatabase {
                 has_screenshot: row.get(8)?,
                 definition_json: row.get(9)?,
                 tag: row.get(10)?,
+                twitch_clip_url: row.get(11)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -209,6 +222,34 @@ impl BankDatabase {
         self.conn
             .execute("UPDATE mined_words SET tag = ?1 WHERE id = ?2", params![tag, id])?;
         Ok(())
+    }
+
+    /// Sets (or, with `None`, removes) the Twitch clip URL of an entry by ID.
+    pub fn set_twitch_clip_url(&self, id: i64, clip_url: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE mined_words SET twitch_clip_url = ?1 WHERE id = ?2",
+            params![clip_url, id],
+        )?;
+        Ok(())
+    }
+
+    /// Sets the Twitch clip URL for the entry with matching `created_at`.
+    /// Returns the ID of the matched entry if found.
+    pub fn set_twitch_clip_url_by_created_at(
+        &self,
+        created_at: i64,
+        clip_url: &str,
+    ) -> Result<Option<i64>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM mined_words WHERE created_at = ?1 LIMIT 1")?;
+        let id: Option<i64> = stmt
+            .query_row(params![created_at], |row| row.get(0))
+            .optional()?;
+        if let Some(id) = id {
+            self.set_twitch_clip_url(id, Some(clip_url))?;
+        }
+        Ok(id)
     }
 
     pub fn delete(&self, id: i64) -> Result<()> {
@@ -282,6 +323,7 @@ mod tests {
             screenshot: shot.then(|| vec![1, 2, 3]),
             thumbnail: shot.then(|| vec![4, 5]),
             tag: None,
+            twitch_clip_url: None,
         }
     }
 
@@ -330,6 +372,30 @@ mod tests {
     }
 
     #[test]
+    fn twitch_clip_urls_round_trip_and_can_be_edited() {
+        let db = BankDatabase::open_in_memory().unwrap();
+        let a = db
+            .insert(&NewBankEntry {
+                twitch_clip_url: Some("https://clips.twitch.tv/ClipA".into()),
+                ..entry("猫", 1_000, false)
+            })
+            .unwrap();
+        assert_eq!(a.twitch_clip_url.as_deref(), Some("https://clips.twitch.tv/ClipA"));
+        let b = db.insert(&entry("犬", 2_000, false)).unwrap();
+        assert_eq!(b.twitch_clip_url, None);
+
+        let list = db.list_meta().unwrap();
+        assert_eq!(list[1].twitch_clip_url.as_deref(), Some("https://clips.twitch.tv/ClipA"));
+        assert_eq!(list[0].twitch_clip_url, None);
+
+        db.set_twitch_clip_url(b.id, Some("https://clips.twitch.tv/ClipB")).unwrap();
+        db.set_twitch_clip_url_by_created_at(1_000, "https://clips.twitch.tv/ClipAUpdated").unwrap();
+        let list = db.list_meta().unwrap();
+        assert_eq!(list[0].twitch_clip_url.as_deref(), Some("https://clips.twitch.tv/ClipB"));
+        assert_eq!(list[1].twitch_clip_url.as_deref(), Some("https://clips.twitch.tv/ClipAUpdated"));
+    }
+
+    #[test]
     fn databases_without_tag_column_are_migrated() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -348,8 +414,12 @@ mod tests {
         let list = db.list_meta().unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].tag, None);
+        assert_eq!(list[0].twitch_clip_url, None);
         db.set_tag(list[0].id, Some("Grandia 2")).unwrap();
-        assert_eq!(db.list_meta().unwrap()[0].tag.as_deref(), Some("Grandia 2"));
+        db.set_twitch_clip_url(list[0].id, Some("https://clips.twitch.tv/Grandia")).unwrap();
+        let list = db.list_meta().unwrap();
+        assert_eq!(list[0].tag.as_deref(), Some("Grandia 2"));
+        assert_eq!(list[0].twitch_clip_url.as_deref(), Some("https://clips.twitch.tv/Grandia"));
     }
 
     #[test]

@@ -468,6 +468,17 @@ fn draw_row(
                                     state.bank.pending_delete = Some(entry.id);
                                 }
                                 ui.add_space(8.0);
+                                if let Some(clip_url) = &entry.twitch_clip_url {
+                                    let clip_btn = ui.link(
+                                        RichText::new("🎬 Clip")
+                                            .color(Color32::from_rgb(168, 85, 247))
+                                            .font(egui::FontId::proportional(12.5)),
+                                    );
+                                    if clip_btn.on_hover_text(format!("Open Twitch clip:\n{clip_url}")).clicked() {
+                                        ctx.output_mut(|o| o.open_url = Some(egui::output::OpenUrl::same_tab(clip_url)));
+                                    }
+                                    ui.add_space(8.0);
+                                }
                                 ui.label(
                                     RichText::new(format_friendly_timestamp(entry.created_at))
                                         .font(egui::FontId::proportional(12.5))
@@ -1225,6 +1236,7 @@ mod tests {
             word_range: (0, 0),
             has_screenshot: false,
             tag: Some("インタールード".into()),
+            twitch_clip_url: None,
         };
 
         egui::CentralPanel::default().show(&ctx, |ui| {

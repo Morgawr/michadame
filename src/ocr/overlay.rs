@@ -358,6 +358,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
                     })
                 });
                 if let Some((request, term, reading)) = entry_data {
+                    let created_at = request.created_at;
                     if !state.bank.request_mine(request) {
                         state.error("Another word is still being mined, try again.");
                     } else {
@@ -366,8 +367,13 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
                             &reading,
                             tag.as_deref(),
                         );
-                        if let Err(e) = state.twitch.request_clip(clip_title, ui.ctx()) {
+                        if let Err(e) = state.twitch.request_clip(clip_title, Some(created_at), ui.ctx()) {
                             state.error(format!("Could not create Twitch clip: {e}"));
+                        } else {
+                            state.info(format!(
+                                "Creating Twitch clip for '{term}' (buffering {}s)...",
+                                crate::twitch::clips::PRE_CLIP_BUFFER.as_secs()
+                            ));
                         }
                     }
                     ui.ctx().request_repaint();

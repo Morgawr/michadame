@@ -153,6 +153,9 @@ pub struct TwitchState {
     auth_cancel: Option<Arc<AtomicBool>>,
     token_loaded: bool,
     notifications: Vec<(bool, String)>,
+    pub ready_mined_clips: Vec<(i64, String)>,
+    was_stream_live: bool,
+    warmup_clip_deadline: Option<Instant>,
 }
 
 impl Default for TwitchState {
@@ -195,6 +198,9 @@ impl Default for TwitchState {
             auth_cancel: None,
             token_loaded: false,
             notifications: Vec::new(),
+            ready_mined_clips: Vec::new(),
+            was_stream_live: false,
+            warmup_clip_deadline: None,
         }
     }
 }
@@ -279,16 +285,27 @@ impl TwitchState {
         None
     }
 
-    /// Initiates an asynchronous Twitch clip creation.
-    pub fn request_clip(&self, title: String, ctx: &egui::Context) -> Result<(), String> {
+    /// Initiates an asynchronous Twitch clip creation, optionally bound to a mined word.
+    pub fn request_clip(
+        &self,
+        title: String,
+        mined_created_at: Option<i64>,
+        ctx: &egui::Context,
+    ) -> Result<(), String> {
         let Some(token) = &self.token else {
             return Err("Twitch login required to create clips".into());
         };
         let Some(broadcaster_id) = self.live_broadcaster_id() else {
             return Err("Cannot determine live stream broadcaster ID".into());
         };
-        self.clips.trigger_clip(broadcaster_id, title, token.clone(), ctx.clone());
+        self.clips
+            .trigger_clip(broadcaster_id, title, token.clone(), ctx.clone(), mined_created_at);
         Ok(())
+    }
+
+    /// Drains Twitch clips that have completed and were bound to a mined word timestamp.
+    pub fn take_ready_mined_clips(&mut self) -> Vec<(i64, String)> {
+        std::mem::take(&mut self.ready_mined_clips)
     }
 
     pub fn broadcast_metrics(&self) -> Option<Arc<BroadcastMetrics>> {
@@ -588,6 +605,31 @@ impl TwitchState {
                 changed = true;
             }
         }
+
+        let is_live_now = self.is_stream_live();
+        if is_live_now && !self.was_stream_live {
+            self.was_stream_live = true;
+            let deadline = now + Duration::from_secs(10);
+            tracing::info!(
+                "Twitch stream detected as live. Scheduling warm-up clip in 10s (preempting first-clip bug #935)..."
+            );
+            self.warmup_clip_deadline = Some(deadline);
+            ctx.request_repaint_after(Duration::from_secs(10));
+        } else if !is_live_now && self.was_stream_live {
+            self.was_stream_live = false;
+            self.warmup_clip_deadline = None;
+        }
+
+        if let Some(deadline) = self.warmup_clip_deadline {
+            if now >= deadline {
+                self.warmup_clip_deadline = None;
+                if let (Some(token), Some(broadcaster_id)) = (&self.token, self.live_broadcaster_id()) {
+                    clips::trigger_warmup_clip(broadcaster_id, token.clone());
+                }
+            } else {
+                ctx.request_repaint_after(deadline.saturating_duration_since(now));
+            }
+        }
         self.sync_eventsub(ctx);
         if let Some(es) = &self.eventsub {
             let new_events: Vec<AlertEvent> = es.events.try_iter().collect();
@@ -611,10 +653,15 @@ impl TwitchState {
         for event in self.clips.poll() {
             changed = true;
             match event {
-                clips::ClipEvent::Ready { clip_url, .. } => {
+                clips::ClipEvent::Ready { title, clip_url, mined_created_at } => {
                     self.send_chat_message(&clip_url);
+                    self.notify_info(format!("Twitch clip ready for '{title}'!"));
+                    if let Some(created_at) = mined_created_at {
+                        self.ready_mined_clips.push((created_at, clip_url));
+                    }
                 }
-                clips::ClipEvent::Failed { title, error } => {
+                clips::ClipEvent::Failed { title, error, .. } => {
+                    tracing::error!("Twitch clip creation failed for '{title}': {error}");
                     self.notify_error(format!("Failed to create clip for '{title}': {error}"));
                 }
             }
@@ -1616,9 +1663,11 @@ mod tests {
         let (worker, cmd_rx) = irc::WorkerHandle::mock("streamer".into(), Some("streamer".into()));
         state.worker = Some(worker);
 
-        // Trigger Ready clip event
+        // Trigger Ready clip event with mined word binding
         state.clips.send_event_for_test(clips::ClipEvent::Ready {
+            title: "TestClip".into(),
             clip_url: "https://clips.twitch.tv/TestClip123".into(),
+            mined_created_at: Some(12345),
         });
 
         state.poll(&ctx);
@@ -1627,13 +1676,19 @@ mod tests {
         assert_eq!(state.messages.len(), 1);
         let msg = state.messages.back().unwrap();
         assert_eq!(msg.fragments, vec![Fragment::Text("https://clips.twitch.tv/TestClip123".into())]);
-        // And NO in-app confirmation popup was displayed
-        assert!(state.take_notifications().is_empty());
+        // And ready_mined_clips was queued for the word bank
+        assert_eq!(state.take_ready_mined_clips(), vec![(12345, "https://clips.twitch.tv/TestClip123".into())]);
+        // And in-app confirmation popup was displayed
+        let notifs = state.take_notifications();
+        assert_eq!(notifs.len(), 1);
+        assert!(!notifs[0].0); // is_error == false (info toast)
+        assert!(notifs[0].1.contains("Twitch clip ready"));
 
         // Trigger Failed clip event
         state.clips.send_event_for_test(clips::ClipEvent::Failed {
             title: "飽きる(あきる)".into(),
             error: "Something went wrong".into(),
+            mined_created_at: Some(12345),
         });
 
         state.poll(&ctx);
@@ -1642,5 +1697,50 @@ mod tests {
         assert_eq!(notifs.len(), 1);
         assert!(notifs[0].0); // is_error == true
         assert!(notifs[0].1.contains("Something went wrong"));
+    }
+
+    #[test]
+    fn test_warmup_clip_scheduled_on_stream_live() {
+        let ctx = egui::Context::default();
+        let mut state = TwitchState::default();
+        state.token_loaded = true;
+        state.config.channel = "morgstream".into();
+        state.config.chat_overlay_enabled = true;
+        let token = StoredToken {
+            access_token: "tok".into(),
+            refresh_token: None,
+            login: "morgstream".into(),
+            user_id: "12345".into(),
+            client_id: "cid".into(),
+        };
+        state.token = Some(token.clone());
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        state.live_poller = Some(live::LivePoller::mock(
+            "morgstream".into(),
+            token.access_token.clone(),
+            rx,
+        ));
+
+        assert!(!state.is_stream_live());
+        assert!(state.warmup_clip_deadline.is_none());
+
+        // Channel goes live via poller
+        tx.send(StreamStatus::Live {
+            viewer_count: Some(5),
+            broadcaster_id: Some("12345".into()),
+        })
+        .unwrap();
+        state.poll(&ctx);
+        assert!(state.is_stream_live());
+        assert!(state.was_stream_live);
+        assert!(state.warmup_clip_deadline.is_some());
+
+        // Channel goes offline via poller -> timer is cleared
+        tx.send(StreamStatus::Offline).unwrap();
+        state.poll(&ctx);
+        assert!(!state.is_stream_live());
+        assert!(!state.was_stream_live);
+        assert!(state.warmup_clip_deadline.is_none());
     }
 }

@@ -259,6 +259,7 @@ fn save_entry(
         screenshot,
         thumbnail,
         tag: request.tag,
+        twitch_clip_url: None,
     };
     let guard = db.lock().map_err(|_| anyhow::anyhow!("bank database lock poisoned"))?;
     let db = guard
@@ -368,6 +369,8 @@ pub struct BankState {
     pub add_name_dialog: AddNameDialogState,
     /// Entries newly saved in the most recent poll ticks, drained by the app to share with chat.
     pub newly_mined: Vec<BankEntryMeta>,
+    /// Pending Twitch clips keyed by mined word timestamp, for attaching when the entry finishes saving.
+    pending_clips: HashMap<i64, String>,
 }
 
 /// Modal dialog state for adding a custom name in the word bank window.
@@ -452,6 +455,7 @@ impl BankState {
             custom_names_generation: 1,
             add_name_dialog: AddNameDialogState::default(),
             newly_mined: Vec::new(),
+            pending_clips: HashMap::new(),
         };
         state.rebuild_keys();
         state
@@ -673,7 +677,15 @@ impl BankState {
         let mut messages = Vec::new();
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
-                BankEvent::Saved(meta) => {
+                BankEvent::Saved(mut meta) => {
+                    if let Some(clip_url) = self.pending_clips.remove(&meta.created_at) {
+                        if let Ok(guard) = self.db.lock() {
+                            if let Some(db) = guard.as_ref() {
+                                let _ = db.set_twitch_clip_url(meta.id, Some(&clip_url));
+                            }
+                        }
+                        meta.twitch_clip_url = Some(clip_url);
+                    }
                     let key = (meta.term.clone(), meta.reading.clone(), meta.sentence.clone());
                     self.in_flight.remove(&key);
                     self.mined_keys.insert(key);
@@ -706,6 +718,28 @@ impl BankState {
             }
         }
         messages
+    }
+
+    /// Attaches a Twitch clip URL to a mined word identified by its `created_at` timestamp.
+    /// Updates both the persistent SQLite database and the in-memory entry list.
+    /// If the word is still being saved, the clip URL is queued and attached on completion.
+    pub fn attach_twitch_clip(&mut self, created_at: i64, clip_url: &str) -> anyhow::Result<bool> {
+        let mut attached = false;
+        if let Ok(guard) = self.db.lock() {
+            if let Some(db) = guard.as_ref() {
+                if let Some(_id) = db.set_twitch_clip_url_by_created_at(created_at, clip_url)? {
+                    attached = true;
+                }
+            }
+        }
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.created_at == created_at) {
+            entry.twitch_clip_url = Some(clip_url.to_string());
+            attached = true;
+        }
+        if !attached {
+            self.pending_clips.insert(created_at, clip_url.to_string());
+        }
+        Ok(attached)
     }
 
     /// Drains entries that were newly saved during recent `poll` updates.
@@ -1205,5 +1239,63 @@ mod tests {
         // Delete cleans up expanded_entries
         bank.delete(20).unwrap();
         assert!(!bank.expanded_entries.contains(&20));
+    }
+
+    #[test]
+    fn test_attach_twitch_clip_existing_and_pending() {
+        let mut bank = BankState::new();
+
+        // 1. Attach to existing entry
+        let req = MineRequest {
+            created_at: 10_000,
+            term: "猫".into(),
+            reading: "ねこ".into(),
+            definition_text: "cat".into(),
+            definition_json: "[]".into(),
+            sentence: "猫がいる".into(),
+            word_range: (0, 1),
+            source_text: "猫がいる".into(),
+            tag: None,
+            requested_at: Instant::now(),
+        };
+        bank.capture_handle().save(req, None);
+        while bank.entries.is_empty() {
+            let _ = bank.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert_eq!(bank.entries[0].twitch_clip_url, None);
+        bank.attach_twitch_clip(10_000, "https://clips.twitch.tv/NekoClip").unwrap();
+        assert_eq!(
+            bank.entries[0].twitch_clip_url.as_deref(),
+            Some("https://clips.twitch.tv/NekoClip")
+        );
+
+        // 2. Attach before save completes (pending queue)
+        let req2 = MineRequest {
+            created_at: 20_000,
+            term: "犬".into(),
+            reading: "いぬ".into(),
+            definition_text: "dog".into(),
+            definition_json: "[]".into(),
+            sentence: "犬がいる".into(),
+            word_range: (0, 1),
+            source_text: "犬がいる".into(),
+            tag: None,
+            requested_at: Instant::now(),
+        };
+        // Queue clip first
+        bank.attach_twitch_clip(20_000, "https://clips.twitch.tv/InuClip").unwrap();
+        // Now save entry
+        bank.capture_handle().save(req2, None);
+        while bank.entries.len() < 2 {
+            let _ = bank.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let inu = bank.entries.iter().find(|e| e.term == "犬").unwrap();
+        assert_eq!(
+            inu.twitch_clip_url.as_deref(),
+            Some("https://clips.twitch.tv/InuClip")
+        );
     }
 }

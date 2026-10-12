@@ -83,6 +83,18 @@ impl Drop for LivePoller {
     }
 }
 
+impl LivePoller {
+    #[cfg(test)]
+    pub fn mock(channel: String, access_token: String, results: Receiver<StreamStatus>) -> Self {
+        Self {
+            channel,
+            access_token,
+            results,
+            stop: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
 pub fn spawn(channel: String, token: StoredToken, ctx: egui::Context) -> LivePoller {
     let (tx, rx) = crossbeam_channel::unbounded();
     let stop = Arc::new(AtomicBool::new(false));

@@ -807,6 +807,11 @@ impl eframe::App for AppState {
 
         self.twitch.studio_active = self.ui.studio_window_open;
         repaint_requested |= self.twitch.poll(ctx);
+        for (created_at, clip_url) in self.twitch.take_ready_mined_clips() {
+            if let Err(e) = self.bank.attach_twitch_clip(created_at, &clip_url) {
+                tracing::warn!("Mining bank: failed to attach Twitch clip: {e}");
+            }
+        }
         for (is_error, message) in self.twitch.take_notifications() {
             if is_error {
                 self.error(message);
@@ -1000,6 +1005,7 @@ mod tests {
             word_range: (14, 17),
             has_screenshot: false,
             tag: None,
+            twitch_clip_url: None,
         };
 
         // 1. Disabled toggle -> does nothing

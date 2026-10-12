@@ -8,8 +8,15 @@ use std::time::Duration;
 
 const CLIPS_URL: &str = "https://api.twitch.tv/helix/clips";
 const MAX_TITLE_CHARS: usize = 100;
-const MAX_POLL_ATTEMPTS: usize = 30;
-const POLL_INTERVAL: Duration = Duration::from_millis(2500);
+/// Poll up to 10 times at 1.5s intervals (15 seconds total), matching Twitch's official
+/// recommendation to assume failure if Get Clips does not return after 15 seconds.
+const MAX_POLL_ATTEMPTS: usize = 10;
+const POLL_INTERVAL: Duration = Duration::from_millis(1500);
+/// Delay before triggering Twitch clip capture so viewers see context after clicking (post-click context).
+pub const PRE_CLIP_BUFFER: Duration = Duration::from_secs(8);
+/// Total length of the clip requested from Twitch in seconds (valid range: 5.0 to 60.0, default 30.0).
+/// With an 8s post-click buffer, a 20.0s clip captures ~12s before the click and ~8s after.
+pub const CLIP_DURATION_SECS: f32 = 20.0;
 
 /// Formats a clip title: `"Word(Reading) - (tag)"` or `"Word - (tag)"` if reading
 /// is empty or matches the word. Truncates to Twitch's 100 character limit.
@@ -39,8 +46,17 @@ pub fn format_clip_title(term: &str, reading: &str, tag: Option<&str>) -> String
 
 #[derive(Clone, Debug)]
 pub enum ClipEvent {
-    Ready { clip_url: String },
-    Failed { title: String, error: String },
+    Ready {
+        title: String,
+        clip_url: String,
+        mined_created_at: Option<i64>,
+    },
+    Failed {
+        title: String,
+        error: String,
+        #[allow(dead_code)]
+        mined_created_at: Option<i64>,
+    },
 }
 
 pub struct ClipManager {
@@ -73,18 +89,20 @@ impl ClipManager {
         title: String,
         token: StoredToken,
         ctx: egui::Context,
+        mined_created_at: Option<i64>,
     ) {
         let tx = self.event_tx.clone();
+        let clip_title = title.clone();
         let _ = std::thread::Builder::new()
             .name("twitch-clip".to_string())
             .spawn(move || {
                 let result = create_and_poll_clip(&broadcaster_id, &title, &token);
                 match result {
                     Ok(clip_url) => {
-                        let _ = tx.send(ClipEvent::Ready { clip_url });
+                        let _ = tx.send(ClipEvent::Ready { title: clip_title, clip_url, mined_created_at });
                     }
                     Err(error) => {
-                        let _ = tx.send(ClipEvent::Failed { title, error });
+                        let _ = tx.send(ClipEvent::Failed { title: clip_title, error, mined_created_at });
                     }
                 }
                 ctx.request_repaint();
@@ -92,29 +110,27 @@ impl ClipManager {
     }
 }
 
-fn create_and_poll_clip(
+fn post_create_clip(
+    agent: &ureq::Agent,
     broadcaster_id: &str,
     title: &str,
     token: &StoredToken,
 ) -> Result<String, String> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(15))
-        .build();
-
-    // 1. POST /helix/clips?broadcaster_id=...&title=...&duration=20.0
+    tracing::info!("Requesting Twitch clip for broadcaster '{broadcaster_id}' with title: '{title}'");
     let resp = agent
         .post(CLIPS_URL)
         .query("broadcaster_id", broadcaster_id)
         .query("title", title)
-        .query("duration", "20.0")
+        .query("duration", &format!("{CLIP_DURATION_SECS:.1}"))
         .set("Client-Id", &token.client_id)
         .set("Authorization", &format!("Bearer {}", token.access_token))
-        .call();
+        .send_bytes(&[]);
 
     let post_resp = match resp {
         Ok(r) => r,
         Err(ureq::Error::Status(401, resp)) => {
             let msg = resp.into_string().unwrap_or_default();
+            tracing::error!("Twitch clip creation unauthorized (401): {msg}");
             if msg.contains("clips:edit") || msg.contains("Missing scope") {
                 return Err(
                     "Missing permission: your login lacks 'clips:edit'. Please log out and log in again under the Twitch tab."
@@ -123,11 +139,20 @@ fn create_and_poll_clip(
             }
             return Err(format!("Twitch unauthorized (401): {msg}"));
         }
+        Err(ureq::Error::Status(404, resp)) => {
+            let msg = resp.into_string().unwrap_or_default();
+            tracing::error!("Twitch clip creation failed (404): {msg}");
+            return Err("Twitch reports the channel is offline or cannot be clipped right now.".into());
+        }
         Err(ureq::Error::Status(code, resp)) => {
             let msg = resp.into_string().unwrap_or_default();
+            tracing::error!("Twitch clip creation failed ({code}): {msg}");
             return Err(format!("Twitch API error ({code}): {msg}"));
         }
-        Err(e) => return Err(format!("Network error: {e}")),
+        Err(e) => {
+            tracing::error!("Twitch clip network error: {e}");
+            return Err(format!("Network error: {e}"));
+        }
     };
 
     let body: serde_json::Value = post_resp
@@ -145,17 +170,21 @@ fn create_and_poll_clip(
         .ok_or_else(|| "Twitch clip response missing clip ID".to_string())?
         .to_string();
 
-    // 2. Poll GET /helix/clips?id=<clip_id> until clip is processed
-    let poll_agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(10))
-        .build();
+    tracing::info!("Twitch clip created with ID '{clip_id}'. Polling for completion...");
+    Ok(clip_id)
+}
 
+fn poll_clip_ready(
+    agent: &ureq::Agent,
+    clip_id: &str,
+    token: &StoredToken,
+) -> Result<Option<String>, String> {
     for _ in 0..MAX_POLL_ATTEMPTS {
         std::thread::sleep(POLL_INTERVAL);
 
-        let get_resp = poll_agent
+        let get_resp = agent
             .get(CLIPS_URL)
-            .query("id", &clip_id)
+            .query("id", clip_id)
             .set("Client-Id", &token.client_id)
             .set("Authorization", &format!("Bearer {}", token.access_token))
             .call();
@@ -175,7 +204,8 @@ fn create_and_poll_clip(
                             .and_then(|u| u.as_str())
                             .map(str::to_string)
                             .unwrap_or_else(|| format!("https://clips.twitch.tv/{clip_id}"));
-                        return Ok(url);
+                        tracing::info!("Twitch clip '{clip_id}' is ready: {url}");
+                        return Ok(Some(url));
                     }
                 }
             }
@@ -184,6 +214,7 @@ fn create_and_poll_clip(
             }
             Err(ureq::Error::Status(code, resp)) => {
                 let msg = resp.into_string().unwrap_or_default();
+                tracing::error!("Twitch clip check failed ({code}): {msg}");
                 return Err(format!("Twitch clip check failed ({code}): {msg}"));
             }
             Err(e) => {
@@ -191,7 +222,58 @@ fn create_and_poll_clip(
             }
         }
     }
+    Ok(None)
+}
 
+/// Triggers a fire-and-forget warm-up clip request to initialize Twitch's
+/// clipping pipeline (preempting known Twitch issue #935 where the first clip fails).
+pub fn trigger_warmup_clip(broadcaster_id: String, token: StoredToken) {
+    let _ = std::thread::Builder::new()
+        .name("twitch-warmup-clip".to_string())
+        .spawn(move || {
+            let agent = ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(10))
+                .build();
+            tracing::info!(
+                "Sending background Twitch stream warm-up clip for broadcaster '{broadcaster_id}' (preempting issue #935)..."
+            );
+            let resp = agent
+                .post(CLIPS_URL)
+                .query("broadcaster_id", &broadcaster_id)
+                .query("title", "michadame-stream-warmup")
+                .set("Client-Id", &token.client_id)
+                .set("Authorization", &format!("Bearer {}", token.access_token))
+                .send_bytes(&[]);
+            match resp {
+                Ok(_) => {
+                    tracing::info!("Twitch stream warm-up clip request accepted by Twitch.");
+                }
+                Err(e) => {
+                    tracing::debug!("Twitch stream warm-up clip response: {e}");
+                }
+            }
+        });
+}
+
+fn create_and_poll_clip(
+    broadcaster_id: &str,
+    title: &str,
+    token: &StoredToken,
+) -> Result<String, String> {
+    // Wait for the post-click buffer so the clip includes context after the word was clicked.
+    tracing::info!("Waiting {PRE_CLIP_BUFFER:?} buffer before requesting clip for '{title}'...");
+    std::thread::sleep(PRE_CLIP_BUFFER);
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(10))
+        .build();
+
+    let clip_id = post_create_clip(&agent, broadcaster_id, title, token)?;
+    if let Some(url) = poll_clip_ready(&agent, &clip_id, token)? {
+        return Ok(url);
+    }
+
+    tracing::error!("Timed out waiting for clip '{clip_id}' to be processed by Twitch.");
     Err(format!(
         "Timed out waiting for clip '{clip_id}' to be processed by Twitch."
     ))
@@ -255,5 +337,43 @@ mod tests {
         let title = format_clip_title("単語", "たんご", Some(&long_tag));
         assert_eq!(title.chars().count(), 100);
         assert!(title.starts_with("単語(たんご) - aaaaa"));
+    }
+
+    #[test]
+    fn test_post_clip_sends_content_length() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = stream.read(&mut buf).unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            stream
+                .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\n\r\n{\"data\":[{\"id\":\"TestSlug123\",\"edit_url\":\"https://clips.twitch.tv/TestSlug123/edit\"}]}")
+                .unwrap();
+            req
+        });
+
+        let agent = ureq::AgentBuilder::new().build();
+        let resp = agent
+            .post(&format!("http://127.0.0.1:{port}/helix/clips"))
+            .query("broadcaster_id", "89884001")
+            .query("title", "頻繁(ひんぱん) - 二重影")
+            .query("duration", &format!("{CLIP_DURATION_SECS:.1}"))
+            .set("Client-Id", "test-client-id")
+            .set("Authorization", "Bearer test-token")
+            .send_bytes(&[]);
+
+        assert!(resp.is_ok());
+        let req_str = handle.join().unwrap();
+        assert!(req_str.starts_with("POST /helix/clips?"));
+        assert!(req_str.contains("Content-Length: 0"));
+        assert!(req_str.contains("Client-Id: test-client-id"));
+        assert!(req_str.contains("Authorization: Bearer test-token"));
+        assert!(req_str.contains("duration=20.0"));
     }
 }
