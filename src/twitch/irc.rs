@@ -151,6 +151,22 @@ impl WorkerHandle {
     pub fn send_privmsg(&self, text: &str) {
         let _ = self.cmd_tx.send(text.to_string());
     }
+
+    #[cfg(test)]
+    pub fn mock(channel: String, login: Option<String>) -> (Self, Receiver<String>) {
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+        let (_ev_tx, ev_rx) = crossbeam_channel::unbounded();
+        (
+            Self {
+                channel,
+                login,
+                cmd_tx,
+                events: ev_rx,
+                stop: Arc::new(AtomicBool::new(false)),
+            },
+            cmd_rx,
+        )
+    }
 }
 
 impl Drop for WorkerHandle {

@@ -1004,7 +1004,7 @@ mod tests {
 
         // 1. Disabled toggle -> does nothing
         state.twitch.config.share_mined_words_to_chat = false;
-        state.twitch.stream_status = crate::twitch::StreamStatus::Live { viewer_count: Some(5) };
+        state.twitch.stream_status = crate::twitch::StreamStatus::Live { viewer_count: Some(5), broadcaster_id: None };
         state.maybe_share_mined_word_to_twitch(&entry);
         assert_eq!(state.twitch.messages.len(), 0);
 
@@ -1020,7 +1020,7 @@ mod tests {
         assert_eq!(state.twitch.messages.len(), 0);
 
         // 4. Enabled toggle, stream is live, but not connected/authenticated -> does nothing
-        state.twitch.stream_status = crate::twitch::StreamStatus::Live { viewer_count: Some(5) };
+        state.twitch.stream_status = crate::twitch::StreamStatus::Live { viewer_count: Some(5), broadcaster_id: None };
         assert!(!state.twitch.can_send());
         state.maybe_share_mined_word_to_twitch(&entry);
         assert_eq!(state.twitch.messages.len(), 0);

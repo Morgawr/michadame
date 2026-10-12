@@ -4,6 +4,7 @@ pub mod alerts;
 pub mod alert_audio;
 pub mod auth;
 pub mod broadcast;
+pub mod clips;
 pub mod emotes;
 pub mod eventsub;
 pub mod irc;
@@ -137,6 +138,7 @@ pub struct TwitchState {
     pub alerts: AlertsState,
     pub alert_player: alert_audio::AlertSoundPlayer,
     pub audio_tap: Option<Arc<crate::replay::AudioTap>>,
+    pub clips: clips::ClipManager,
 
     // Pre-roll video player
     pub preroll: Option<PrerollPlayer>,
@@ -181,6 +183,7 @@ impl Default for TwitchState {
             alerts: AlertsState::default(),
             alert_player: alert_audio::AlertSoundPlayer::default(),
             audio_tap: None,
+            clips: clips::ClipManager::default(),
             preroll: None,
             preroll_file_dialog_receiver: None,
             self_display_name: None,
@@ -263,6 +266,31 @@ impl TwitchState {
         self.is_broadcasting() || matches!(self.stream_status, StreamStatus::Live { .. })
     }
 
+    /// Resolves the broadcaster Twitch user ID for the current live stream.
+    pub fn live_broadcaster_id(&self) -> Option<String> {
+        if let StreamStatus::Live { broadcaster_id: Some(ref id), .. } = self.stream_status {
+            return Some(id.clone());
+        }
+        if let Some(token) = &self.token {
+            if !token.user_id.is_empty() {
+                return Some(token.user_id.clone());
+            }
+        }
+        None
+    }
+
+    /// Initiates an asynchronous Twitch clip creation.
+    pub fn request_clip(&self, title: String, ctx: &egui::Context) -> Result<(), String> {
+        let Some(token) = &self.token else {
+            return Err("Twitch login required to create clips".into());
+        };
+        let Some(broadcaster_id) = self.live_broadcaster_id() else {
+            return Err("Cannot determine live stream broadcaster ID".into());
+        };
+        self.clips.trigger_clip(broadcaster_id, title, token.clone(), ctx.clone());
+        Ok(())
+    }
+
     pub fn broadcast_metrics(&self) -> Option<Arc<BroadcastMetrics>> {
         self.broadcast.as_ref().map(|b| b.metrics.clone())
     }
@@ -292,7 +320,7 @@ impl TwitchState {
 
     pub fn viewer_count(&self) -> Option<u32> {
         match self.stream_status {
-            StreamStatus::Live { viewer_count } => viewer_count,
+            StreamStatus::Live { viewer_count, .. } => viewer_count,
             _ => None,
         }
     }
@@ -578,6 +606,18 @@ impl TwitchState {
         }
         if self.config.alerts_enabled && self.alerts.take_just_activated() {
             self.play_alert_sound();
+        }
+
+        for event in self.clips.poll() {
+            changed = true;
+            match event {
+                clips::ClipEvent::Ready { clip_url, .. } => {
+                    self.send_chat_message(&clip_url);
+                }
+                clips::ClipEvent::Failed { title, error } => {
+                    self.notify_error(format!("Failed to create clip for '{title}': {error}"));
+                }
+            }
         }
 
         self.trim_messages(now);
@@ -1272,7 +1312,7 @@ mod tests {
         assert!(state.live_poller.is_none());
         assert!(matches!(state.stream_status, StreamStatus::Unknown(ref r) if r.contains("log in")));
         // Even if a stale "live" result was around, disabling clears it.
-        state.stream_status = StreamStatus::Live { viewer_count: None };
+        state.stream_status = StreamStatus::Live { viewer_count: None, broadcaster_id: None };
         state.config.chat_overlay_enabled = false;
         state.sync_live_poller(&ctx);
         assert!(matches!(state.stream_status, StreamStatus::Unknown(_)));
@@ -1532,5 +1572,75 @@ mod tests {
         let ctx = egui::Context::default();
         state.poll(&ctx);
         assert!(state.alerts.active.is_some());
+    }
+
+    #[test]
+    fn test_live_broadcaster_id_resolution() {
+        let mut state = TwitchState::default();
+        assert_eq!(state.live_broadcaster_id(), None);
+
+        // From StoredToken
+        state.token = Some(StoredToken {
+            access_token: "tok".into(),
+            refresh_token: None,
+            login: "streamer".into(),
+            user_id: "999".into(),
+            client_id: "cid".into(),
+        });
+        assert_eq!(state.live_broadcaster_id(), Some("999".into()));
+
+        // From StreamStatus::Live overrides
+        state.stream_status = StreamStatus::Live {
+            viewer_count: Some(10),
+            broadcaster_id: Some("888".into()),
+        };
+        assert_eq!(state.live_broadcaster_id(), Some("888".into()));
+    }
+
+    #[test]
+    fn test_poll_clip_events_dispatches_chat_and_error() {
+        let ctx = egui::Context::default();
+        let mut state = TwitchState::default();
+        state.token_loaded = true;
+        state.config.channel = "streamer".into();
+        state.config.chat_overlay_enabled = true;
+        state.status = ConnectionStatus::Connected { authenticated: true };
+        let token = StoredToken {
+            access_token: "tok".into(),
+            refresh_token: None,
+            login: "streamer".into(),
+            user_id: "999".into(),
+            client_id: "cid".into(),
+        };
+        state.token = Some(token);
+        let (worker, cmd_rx) = irc::WorkerHandle::mock("streamer".into(), Some("streamer".into()));
+        state.worker = Some(worker);
+
+        // Trigger Ready clip event
+        state.clips.send_event_for_test(clips::ClipEvent::Ready {
+            clip_url: "https://clips.twitch.tv/TestClip123".into(),
+        });
+
+        state.poll(&ctx);
+        // Clip url was posted to chat and sent to IRC worker
+        assert_eq!(cmd_rx.try_recv().unwrap(), "https://clips.twitch.tv/TestClip123");
+        assert_eq!(state.messages.len(), 1);
+        let msg = state.messages.back().unwrap();
+        assert_eq!(msg.fragments, vec![Fragment::Text("https://clips.twitch.tv/TestClip123".into())]);
+        // And NO in-app confirmation popup was displayed
+        assert!(state.take_notifications().is_empty());
+
+        // Trigger Failed clip event
+        state.clips.send_event_for_test(clips::ClipEvent::Failed {
+            title: "飽きる(あきる)".into(),
+            error: "Something went wrong".into(),
+        });
+
+        state.poll(&ctx);
+        // Error notification WAS generated
+        let notifs = state.take_notifications();
+        assert_eq!(notifs.len(), 1);
+        assert!(notifs[0].0); // is_error == true
+        assert!(notifs[0].1.contains("Something went wrong"));
     }
 }

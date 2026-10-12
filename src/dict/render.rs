@@ -60,18 +60,21 @@ const CIRCLED_NUMBERS: &[&str] = &[
 pub enum EntryAction {
     None,
     Mine,
+    MineAndClip,
     DeleteCustomName(i64),
 }
 
 /// Renders a single dictionary entry inside the popup scroll area.
 /// Renders a dictionary entry. If `mine_status` is given, a mining button (`+`) is drawn at
-/// the right of the header row. If the entry is a custom name, a delete button is also drawn.
+/// the right of the header row. If `can_clip` is true, a `++` button is also drawn next to it.
+/// If the entry is a custom name, a delete button is also drawn.
 pub fn render_term_entry(
     ui: &mut egui::Ui,
     entry: &TermEntry,
     index: usize,
     mine_status: Option<crate::bank::MineStatus>,
     is_mined: bool,
+    can_clip: bool,
 ) -> EntryAction {
     if index > 0 {
         ui.add_space(14.0);
@@ -86,8 +89,11 @@ pub fn render_term_entry(
         // Reserve room on the right for action buttons.
         let button_size = 56.0;
         let has_mine = mine_status.is_some();
+        let has_clip = has_mine && can_clip;
         let has_del = entry.custom_name_id.is_some();
-        let num_buttons = (if has_mine { 1.0 } else { 0.0 }) + (if has_del { 1.0 } else { 0.0 });
+        let num_buttons = (if has_mine { 1.0 } else { 0.0 })
+            + (if has_clip { 1.0 } else { 0.0 })
+            + (if has_del { 1.0 } else { 0.0 });
         let buttons_width = if num_buttons > 0.0 {
             num_buttons * button_size + (num_buttons - 1.0) * 8.0
         } else {
@@ -108,6 +114,12 @@ pub fn render_term_entry(
                 if let Some(status) = mine_status {
                     if render_mine_button(ui, status, button_size) {
                         action = EntryAction::Mine;
+                    }
+                    if has_clip {
+                        ui.add_space(8.0);
+                        if render_mine_and_clip_button(ui, status, button_size) {
+                            action = EntryAction::MineAndClip;
+                        }
                     }
                     if has_del {
                         ui.add_space(8.0);
@@ -220,6 +232,47 @@ fn render_mine_button(ui: &mut egui::Ui, status: crate::bank::MineStatus, size: 
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
             response.on_hover_text("Add to mining bank (B)")
+        }
+        MineStatus::Pending => response.on_hover_text("Saving…"),
+        MineStatus::Mined => response.on_hover_text("Already in the mining bank"),
+    };
+    status == MineStatus::Available && response.clicked()
+}
+
+/// Round `++` / `…` / `✔` button used to add an entry to the mining bank and create a Twitch clip.
+fn render_mine_and_clip_button(ui: &mut egui::Ui, status: crate::bank::MineStatus, size: f32) -> bool {
+    use crate::bank::MineStatus;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    let hovered = response.hovered() && status == MineStatus::Available;
+    let (fill, stroke, glyph, glyph_color) = match status {
+        MineStatus::Available => (
+            if hovered {
+                Color32::from_rgb(126, 34, 206)
+            } else {
+                COLOR_TAG_BG
+            },
+            Color32::from_rgb(168, 85, 247),
+            "++",
+            COLOR_HEADWORD,
+        ),
+        MineStatus::Pending => (COLOR_TAG_BG, COLOR_TAG_BORDER, "…", COLOR_TAG_TEXT),
+        MineStatus::Mined => (COLOR_FREQ_BG, COLOR_FREQ_BORDER, "✔", COLOR_FREQ_TEXT),
+    };
+    ui.painter()
+        .circle(rect.center(), size / 2.0 - 1.0, fill, egui::Stroke::new(1.5, stroke));
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        FontId::proportional(if glyph == "++" { size * 0.45 } else { size * 0.6 }),
+        glyph_color,
+    );
+    let response = match status {
+        MineStatus::Available => {
+            if hovered {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            response.on_hover_text("Add to mining bank and create 20s Twitch clip")
         }
         MineStatus::Pending => response.on_hover_text("Saving…"),
         MineStatus::Mined => response.on_hover_text("Already in the mining bank"),
@@ -2103,6 +2156,39 @@ mod tests {
         assert_eq!(truncated.chars().count(), 500);
         assert!(truncated.ends_with("..."));
         assert_eq!(truncated, format!("{}...", "a".repeat(497)));
+    }
+
+    #[test]
+    fn test_render_term_entry_with_clip() {
+        let ctx = egui::Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        let prop = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
+        fonts.families.insert(egui::FontFamily::Name("GothicCJK".into()), prop);
+        ctx.set_fonts(fonts);
+
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let entry = TermEntry {
+                    term: "飽きる".into(),
+                    reading: "あきる".into(),
+                    definition_tags: None,
+                    rules: String::new(),
+                    score: 0.0,
+                    glossary: vec![],
+                    sequence: 1,
+                    term_tags: None,
+                    inflection_reasons: vec![],
+                    frequency: None,
+                    custom_name_id: None,
+                    custom_tag: None,
+                };
+                let action = render_term_entry(ui, &entry, 0, Some(crate::bank::MineStatus::Available), false, true);
+                assert_eq!(action, EntryAction::None);
+
+                let action_no_clip = render_term_entry(ui, &entry, 0, Some(crate::bank::MineStatus::Available), false, false);
+                assert_eq!(action_no_clip, EntryAction::None);
+            });
+        });
     }
 }
 

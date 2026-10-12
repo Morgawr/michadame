@@ -54,6 +54,7 @@ fn popup_identity(popup: &DictPopupState) -> u64 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PopupAction {
     Mine(usize),
+    MineAndClip(usize),
     DeleteCustomName(i64),
 }
 
@@ -61,6 +62,7 @@ pub enum PopupAction {
 ///
 /// `mine_status` returns the mining-bank state of an entry (shown as a `+` button).
 /// `is_mined` returns true if the entry is already in the mined word bank (marked with an icon).
+/// `can_clip` enables drawing the `++` button for Twitch clip creation when the stream is live.
 /// Returns the action clicked by the user, if any.
 pub fn draw_dict_popup(
     ui: &mut egui::Ui,
@@ -70,6 +72,7 @@ pub fn draw_dict_popup(
     popup_under_crt: bool,
     mine_status: impl Fn(&super::models::TermEntry) -> crate::bank::MineStatus,
     is_mined: impl Fn(&super::models::TermEntry) -> bool,
+    can_clip: bool,
 ) -> (Option<PopupAction>, Vec<egui::ClippedPrimitive>) {
     let Some(popup) = popup_state else {
         return (None, Vec::new());
@@ -185,9 +188,12 @@ pub fn draw_dict_popup(
                 let scroll_output = scroll_area.show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(8.0, 5.0);
                     for (idx, entry) in popup.entries.iter().enumerate() {
-                        match render_term_entry(ui, entry, idx, Some(mine_status(entry)), is_mined(entry)) {
+                        match render_term_entry(ui, entry, idx, Some(mine_status(entry)), is_mined(entry), can_clip) {
                             crate::dict::render::EntryAction::Mine => {
                                 popup_action = Some(PopupAction::Mine(idx));
+                            }
+                            crate::dict::render::EntryAction::MineAndClip => {
+                                popup_action = Some(PopupAction::MineAndClip(idx));
                             }
                             crate::dict::render::EntryAction::DeleteCustomName(id) => {
                                 popup_action = Some(PopupAction::DeleteCustomName(id));
@@ -603,5 +609,70 @@ mod tests {
         // Popup top must be 10px below line 1 (120 + 10 = 130)
         assert!((placement_below.pos.y - 130.0).abs() < 1.0);
         assert_eq!(placement_below.pos.x, 784.0);
+    }
+
+    #[test]
+    fn test_draw_dict_popup_can_clip_flag() {
+        let ctx = egui::Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        let prop = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
+        fonts.families.insert(egui::FontFamily::Name("GothicCJK".into()), prop);
+        ctx.set_fonts(fonts);
+
+        let video_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
+        let mut popup_state = Some(DictPopupState {
+            matched_term: "飽きる".into(),
+            source_text: "飽きる".into(),
+            char_range: (0, 3),
+            word_rect: egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(40.0, 30.0)),
+            extra_word_rects: vec![],
+            box_rect: egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(100.0, 30.0)),
+            entries: vec![super::super::models::TermEntry {
+                term: "飽きる".into(),
+                reading: "あきる".into(),
+                definition_tags: None,
+                rules: String::new(),
+                score: 0.0,
+                glossary: vec![],
+                sequence: 1,
+                term_tags: None,
+                inflection_reasons: vec![],
+                frequency: None,
+                custom_name_id: None,
+                custom_tag: None,
+            }],
+            is_popup_hovered: false,
+            popup_rect: None,
+            last_hover_time: Instant::now(),
+            last_word_hover_time: Instant::now(),
+        });
+
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let (action, _) = draw_dict_popup(
+                    ui,
+                    &mut popup_state,
+                    video_rect,
+                    true,
+                    false,
+                    |_| crate::bank::MineStatus::Available,
+                    |_| false,
+                    false,
+                );
+                assert_eq!(action, None);
+
+                let (action_clip, _) = draw_dict_popup(
+                    ui,
+                    &mut popup_state,
+                    video_rect,
+                    true,
+                    false,
+                    |_| crate::bank::MineStatus::Available,
+                    |_| false,
+                    true,
+                );
+                assert_eq!(action_clip, None);
+            });
+        });
     }
 }

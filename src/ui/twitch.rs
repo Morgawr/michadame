@@ -52,11 +52,11 @@ pub fn draw_twitch_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         ui.label(egui::RichText::new(text).monospace().size(11.0).color(color));
         if state.twitch.config.chat_overlay_enabled && !state.twitch.config.channel.is_empty() {
             let (color, text) = match &state.twitch.stream_status {
-                StreamStatus::Live { viewer_count: Some(count) } => (
+                StreamStatus::Live { viewer_count: Some(count), .. } => (
                     egui::Color32::from_rgb(80, 200, 120),
                     format!("Stream: LIVE ({count} viewers)"),
                 ),
-                StreamStatus::Live { viewer_count: None } => {
+                StreamStatus::Live { viewer_count: None, .. } => {
                     (egui::Color32::from_rgb(80, 200, 120), "Stream: LIVE".to_string())
                 }
                 StreamStatus::Offline => (egui::Color32::from_rgb(220, 70, 70), "Stream: offline".to_string()),

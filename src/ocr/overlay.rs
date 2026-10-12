@@ -322,13 +322,14 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         state.dict.popup_under_crt,
         |entry| bank.status(&entry.term, &entry.reading, &popup_sentence),
         |entry| bank.is_entry_mined(&entry.term, &entry.reading, entry.sequence),
+        state.twitch.is_stream_live(),
     );
 
     if let Some(ref r) = state.crt_renderer {
         r.lock().unwrap().popup_primitives = popup_primitives;
     }
 
-    // Handle user actions in popup: mining or deleting a custom name
+    // Handle user actions in popup: mining, clipping, or deleting a custom name
     if let Some(action) = popup_action {
         match action {
             crate::dict::popup::PopupAction::Mine(idx) => {
@@ -341,6 +342,33 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
                 if let Some(request) = request {
                     if !state.bank.request_mine(request) {
                         state.error("Another word is still being mined, try again.");
+                    }
+                    ui.ctx().request_repaint();
+                }
+            }
+            crate::dict::popup::PopupAction::MineAndClip(idx) => {
+                let tag = state.bank.mining_tag();
+                let entry_data = state.dict.popup.as_ref().and_then(|p| {
+                    p.entries.get(idx).map(|e| {
+                        (
+                            crate::bank::MineRequest::from_lookup(e, &p.source_text, p.char_range, tag.clone()),
+                            e.term.clone(),
+                            e.reading.clone(),
+                        )
+                    })
+                });
+                if let Some((request, term, reading)) = entry_data {
+                    if !state.bank.request_mine(request) {
+                        state.error("Another word is still being mined, try again.");
+                    } else {
+                        let clip_title = crate::twitch::clips::format_clip_title(
+                            &term,
+                            &reading,
+                            tag.as_deref(),
+                        );
+                        if let Err(e) = state.twitch.request_clip(clip_title, ui.ctx()) {
+                            state.error(format!("Could not create Twitch clip: {e}"));
+                        }
                     }
                     ui.ctx().request_repaint();
                 }
