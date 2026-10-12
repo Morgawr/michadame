@@ -76,14 +76,6 @@ pub fn prune_old_backups(dir: &Path, max_keep: usize) {
     }
 }
 
-#[allow(dead_code)]
-pub fn store_config_atomic(cfg: &MichadameConfig) -> Result<(), confy::ConfyError> {
-    if cfg!(test) {
-        return Ok(());
-    }
-    let path = confy::get_configuration_file_path("michadame", None)?;
-    store_config_atomic_at(&path, cfg)
-}
 
 pub fn store_config_atomic_at(path: &Path, cfg: &MichadameConfig) -> Result<(), confy::ConfyError> {
     create_rotating_backup(path);
@@ -1748,7 +1740,6 @@ crt_brightboost = 1.6
             was_playing_before_scrub: false,
             command_sender: cmd_tx,
             position_us: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
-            duration_us: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
             is_paused_shared: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             is_eof_shared: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             stop_requested: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),

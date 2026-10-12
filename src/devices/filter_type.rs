@@ -14,15 +14,6 @@ impl CrtFilter {
             _ => CrtFilter::Off,
         }
     }
-
-    #[allow(dead_code)]
-    pub fn next(&self) -> Self {
-        match self {
-            CrtFilter::Off => CrtFilter::Lottes,
-            CrtFilter::Lottes => CrtFilter::Off,
-            CrtFilter::Halo => CrtFilter::Off,
-        }
-    }
 }
 
 impl std::fmt::Display for CrtFilter {
@@ -46,13 +37,6 @@ mod tests {
         assert_eq!(CrtFilter::from_u8(1), CrtFilter::Lottes);
         assert_eq!(CrtFilter::from_u8(2), CrtFilter::Halo);
         assert_eq!(CrtFilter::from_u8(3), CrtFilter::Off); // Default case
-    }
-
-    #[test]
-    fn test_crt_filter_next() {
-        assert_eq!(CrtFilter::Off.next(), CrtFilter::Lottes);
-        assert_eq!(CrtFilter::Lottes.next(), CrtFilter::Off);
-        assert_eq!(CrtFilter::Halo.next(), CrtFilter::Off);
     }
 
     #[test]

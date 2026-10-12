@@ -40,15 +40,6 @@ pub fn encode_jpeg_for_ocr(
         .map_err(|e| format!("Failed to encode JPEG for OCR: {e}"))
 }
 
-#[allow(dead_code)]
-pub fn execute_lens_ocr(
-    image_bytes: Vec<u8>,
-    width: u32,
-    height: u32,
-) -> Result<Vec<ParsedLine>, String> {
-    execute_lens_ocr_with_agent(&ureq::agent(), image_bytes, width, height)
-}
-
 pub fn execute_lens_ocr_with_agent(
     agent: &ureq::Agent,
     image_bytes: Vec<u8>,
@@ -234,7 +225,7 @@ pub fn execute_lens_ocr_and_group(
     height: u32,
     sticky_distance: f32,
 ) -> Result<Vec<OcrBox>, String> {
-    let lines = execute_lens_ocr(png_bytes, width, height)?;
+    let lines = execute_lens_ocr_with_agent(&ureq::agent(), png_bytes, width, height)?;
     Ok(group_lines_into_blocks(&lines, sticky_distance))
 }
 

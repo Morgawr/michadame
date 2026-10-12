@@ -9,7 +9,7 @@ mod worker;
 
 pub(crate) use worker::{AudioClock, MixSource, TimelineMixer};
 
-use config::{Rate, ReplayConfig};
+use config::ReplayConfig;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use std::sync::{
     atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering},
@@ -33,8 +33,6 @@ pub struct VideoFrame {
     pub width: u32,
     pub height: u32,
     pub at: i64,
-    #[allow(dead_code)]
-    pub rate: Rate,
     pub generation: u64,
 }
 pub(crate) const AUDIO_SAMPLES: usize = 8192;
@@ -185,7 +183,6 @@ impl AudioTap {
     pub fn set_game_volume(&self, volume: f32) {
         self.game_volume.store(volume.to_bits(), Ordering::Relaxed);
     }
-    #[allow(dead_code)]
     pub fn game_volume(&self) -> f32 {
         f32::from_bits(self.game_volume.load(Ordering::Relaxed))
     }
@@ -347,10 +344,6 @@ impl AudioTap {
             self.broadcast_discontinuity.store(true, Ordering::Relaxed);
             self.broadcast_mic_discontinuity.store(true, Ordering::Relaxed);
         }
-    }
-    #[allow(dead_code)]
-    pub fn is_broadcast_preroll_active(&self) -> bool {
-        self.broadcast_preroll_active.load(Ordering::Relaxed)
     }
     fn disable(&self) {
         *self.route.lock().unwrap() = None;

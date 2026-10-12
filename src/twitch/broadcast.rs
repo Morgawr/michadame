@@ -1,6 +1,6 @@
 //! Twitch live broadcast client: real-time video/audio encoding and RTMP(S) streaming.
 
-use crate::config::models::{StreamingAudioEncoder, StreamingVideoEncoder};
+use crate::config::models::StreamingVideoEncoder;
 use crate::replay::{
     AudioBlock, AudioClock, AudioRoute, MixSource, TimelineMixer, VideoFrame,
     AUDIO_BLOCKS, AUDIO_SAMPLES,
@@ -51,8 +51,6 @@ pub struct BroadcastConfig {
     pub audio_bitrate_kbps: u32,
     pub video_encoder: StreamingVideoEncoder,
     pub encoder_preset: String,
-    #[allow(dead_code)]
-    pub audio_encoder: StreamingAudioEncoder,
     pub ingest_server: String,
     pub stream_key: String,
     pub render_device: String,
@@ -443,8 +441,6 @@ impl LiveAudioEncoder {
 }
 
 pub struct BroadcastHandle {
-    #[allow(dead_code)]
-    pub config: BroadcastConfig,
     pub status: Arc<Mutex<BroadcastStatus>>,
     pub metrics: Arc<BroadcastMetrics>,
     pub stop: Arc<AtomicBool>,
@@ -573,7 +569,6 @@ pub fn start_broadcast(
         })?;
 
     Ok(BroadcastHandle {
-        config,
         status,
         metrics,
         stop,
@@ -804,7 +799,7 @@ mod tests {
         assert_eq!(config.audio_bitrate_kbps, 160);
         assert_eq!(config.video_encoder, StreamingVideoEncoder::SoftwareX264);
         assert_eq!(config.encoder_preset, "veryfast");
-        assert_eq!(config.audio_encoder, StreamingAudioEncoder::Aac);
+        assert_eq!(config.audio_encoder, crate::config::models::StreamingAudioEncoder::Aac);
         assert_eq!(config.ingest_server, "rtmps://live.twitch.tv:443/app/");
         assert!(config.stream_key.is_empty());
     }

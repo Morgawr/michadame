@@ -213,8 +213,6 @@ pub struct VideoPlayerState {
     pub was_playing_before_scrub: bool,
     pub command_sender: crossbeam_channel::Sender<crate::video::player::PlayerCommand>,
     pub position_us: Arc<std::sync::atomic::AtomicI64>,
-    #[allow(dead_code)]
-    pub duration_us: Arc<std::sync::atomic::AtomicI64>,
     pub is_paused_shared: Arc<AtomicBool>,
     pub is_eof_shared: Arc<AtomicBool>,
     pub stop_requested: Arc<AtomicBool>,

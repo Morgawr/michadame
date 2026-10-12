@@ -13,7 +13,7 @@ use crate::video::types::{ColorRange, RawFrame};
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender};
 use rodio::{buffer::SamplesBuffer, Sink};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -22,8 +22,6 @@ use std::time::{Duration, Instant};
 const DEFAULT_TRANSITION_SECS: f64 = 1.0;
 
 pub struct PrerollPlayer {
-    #[allow(dead_code)]
-    pub file_path: PathBuf,
     pub duration_secs: f64,
     pub position_us: Arc<AtomicI64>,
     pub is_finished: Arc<AtomicBool>,
@@ -89,7 +87,6 @@ impl PrerollPlayer {
             })?;
 
         Ok(Self {
-            file_path,
             duration_secs,
             position_us,
             is_finished,
@@ -100,11 +97,6 @@ impl PrerollPlayer {
             audio_tap,
             transition_duration_secs,
         })
-    }
-
-    #[allow(dead_code)]
-    pub fn file_path(&self) -> &Path {
-        &self.file_path
     }
 
     pub fn elapsed_secs(&self) -> f64 {
@@ -383,7 +375,6 @@ mod tests {
     #[test]
     fn test_fade_alpha_calculations() {
         let player = PrerollPlayer {
-            file_path: PathBuf::from("test.mp4"),
             duration_secs: 10.0,
             position_us: Arc::new(AtomicI64::new(0)),
             is_finished: Arc::new(AtomicBool::new(false)),
@@ -435,7 +426,6 @@ mod tests {
     #[test]
     fn test_remaining_secs() {
         let player = PrerollPlayer {
-            file_path: PathBuf::from("test.mp4"),
             duration_secs: 15.0,
             position_us: Arc::new(AtomicI64::new(5_000_000)),
             is_finished: Arc::new(AtomicBool::new(false)),

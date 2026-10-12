@@ -284,11 +284,6 @@ pub fn draw_replay_buffer_group(
     changed
 }
 
-#[allow(dead_code)]
-pub fn draw(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
-    draw_replay_buffer_group(replay, ui, false)
-}
-
 pub fn draw_debug(replay: &Replay, ui: &mut egui::Ui) {
     let available = replay.available_now;
     if let Some(before) = replay.available_before {
@@ -793,9 +788,4 @@ pub fn draw_audio_filter_group(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
         replay.sync_audio_filter();
     }
     changed
-}
-
-#[allow(dead_code)]
-pub fn draw_audio_filter(replay: &mut Replay, ui: &mut egui::Ui) -> bool {
-    draw_audio_filter_group(replay, ui)
 }

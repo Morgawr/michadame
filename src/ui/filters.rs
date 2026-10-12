@@ -1485,12 +1485,3 @@ pub fn draw_effects_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
     changed
 }
-
-#[allow(dead_code)]
-pub fn draw_filters(ui: &mut egui::Ui, state: &mut AppState) -> bool {
-    let mut changed = false;
-    changed |= draw_shaders_tab(ui, state);
-    changed |= draw_geometry_tab(ui, state);
-    changed |= draw_effects_tab(ui, state);
-    changed
-}

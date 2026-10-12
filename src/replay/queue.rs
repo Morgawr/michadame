@@ -147,7 +147,6 @@ mod tests {
             width: 2,
             height: 2,
             at: 10_000_000 + rate.us(tick as i64),
-            rate,
             generation,
         }
     }

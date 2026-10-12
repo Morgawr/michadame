@@ -492,8 +492,6 @@ impl AppState {
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
 
         let position_us = Arc::new(std::sync::atomic::AtomicI64::new(0));
-        let duration_us =
-            Arc::new(std::sync::atomic::AtomicI64::new((file_duration * 1_000_000.0) as i64));
         let is_paused = Arc::new(AtomicBool::new(false));
         let is_eof = Arc::new(AtomicBool::new(false));
         let stop_requested = Arc::new(AtomicBool::new(false));
@@ -529,7 +527,6 @@ impl AppState {
         };
 
         let pos_clone = Arc::clone(&position_us);
-        let dur_clone = Arc::clone(&duration_us);
         let paused_clone = Arc::clone(&is_paused);
         let eof_clone = Arc::clone(&is_eof);
 
@@ -540,7 +537,6 @@ impl AppState {
                 event_tx_clone.clone(),
                 cmd_rx,
                 pos_clone,
-                dur_clone,
                 paused_clone,
                 eof_clone,
                 config,
@@ -568,7 +564,6 @@ impl AppState {
             was_playing_before_scrub: false,
             command_sender: cmd_tx,
             position_us,
-            duration_us,
             is_paused_shared: is_paused,
             is_eof_shared: is_eof,
             stop_requested,
@@ -791,7 +786,6 @@ mod tests {
             was_playing_before_scrub: false,
             command_sender: cmd_tx,
             position_us: Arc::new(std::sync::atomic::AtomicI64::new(15_000_000)),
-            duration_us: Arc::new(std::sync::atomic::AtomicI64::new(120_000_000)),
             is_paused_shared: Arc::new(AtomicBool::new(false)),
             is_eof_shared: Arc::new(AtomicBool::new(false)),
             stop_requested: Arc::clone(&stop_requested),
@@ -825,7 +819,6 @@ mod tests {
             was_playing_before_scrub: false,
             command_sender: cmd_tx,
             position_us: Arc::new(std::sync::atomic::AtomicI64::new(0)),
-            duration_us: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             is_paused_shared: Arc::new(AtomicBool::new(false)),
             is_eof_shared: Arc::new(AtomicBool::new(false)),
             stop_requested: Arc::new(AtomicBool::new(false)),
@@ -902,7 +895,6 @@ mod tests {
             was_playing_before_scrub: false,
             command_sender: cmd_tx,
             position_us: Arc::new(std::sync::atomic::AtomicI64::new(0)),
-            duration_us: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             is_paused_shared: Arc::new(AtomicBool::new(false)),
             is_eof_shared: Arc::new(AtomicBool::new(false)),
             stop_requested: Arc::new(AtomicBool::new(false)),

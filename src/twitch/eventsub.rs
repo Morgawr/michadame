@@ -158,7 +158,6 @@ impl Worker {
                                             kind: AlertKind::Follow {
                                                 user: user_name.to_string(),
                                             },
-                                            timestamp: Instant::now(),
                                         });
                                     }
                                 }

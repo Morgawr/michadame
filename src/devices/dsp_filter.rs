@@ -317,11 +317,6 @@ impl FfmpegAfftdnStream {
         Self::frame_size_for(sample_rate) * 3
     }
 
-    #[allow(dead_code)]
-    pub fn delay_samples(&self) -> usize {
-        Self::delay_samples_for(self.sample_rate)
-    }
-
     pub fn new(
         sample_rate: u32,
         nr_db: f32,
@@ -963,13 +958,14 @@ mod tests {
             }
 
             let delay = detected_at.unwrap() as i64 - spike_at as i64;
+            let expected_delay = FfmpegAfftdnStream::delay_samples_for(48000);
             assert_eq!(
                 delay,
-                stream.delay_samples() as i64,
+                expected_delay as i64,
                 "Afftdn spike at {} had delay {} (expected {})",
                 spike_at,
                 delay,
-                stream.delay_samples()
+                expected_delay
             );
         }
     }

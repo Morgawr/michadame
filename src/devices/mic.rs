@@ -35,18 +35,6 @@ impl NoiseGateFilter {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn reset(&mut self) {
-        self.state = GateState::Closed;
-        self.gain = 0.0;
-        self.hold_countdown = 0;
-    }
-
-    #[allow(dead_code)]
-    pub fn set_sample_rate(&mut self, sample_rate: f32) {
-        self.sample_rate = sample_rate;
-    }
-
     #[inline]
     pub fn process_sample(
         &mut self,
@@ -162,16 +150,6 @@ impl CompressorFilter {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn reset(&mut self) {
-        self.env = 0.0;
-    }
-
-    #[allow(dead_code)]
-    pub fn set_sample_rate(&mut self, sample_rate: f32) {
-        self.sample_rate = sample_rate;
-    }
-
     #[inline]
     pub fn process_sample(
         &mut self,
@@ -217,8 +195,6 @@ impl CompressorFilter {
 pub struct MicDspPipeline {
     gate: NoiseGateFilter,
     compressor: CompressorFilter,
-    #[allow(dead_code)]
-    sample_rate: f32,
 }
 
 impl MicDspPipeline {
@@ -226,21 +202,7 @@ impl MicDspPipeline {
         Self {
             gate: NoiseGateFilter::new(sample_rate),
             compressor: CompressorFilter::new(sample_rate),
-            sample_rate,
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn set_sample_rate(&mut self, sample_rate: f32) {
-        self.sample_rate = sample_rate;
-        self.gate.set_sample_rate(sample_rate);
-        self.compressor.set_sample_rate(sample_rate);
-    }
-
-    #[allow(dead_code)]
-    pub fn reset(&mut self) {
-        self.gate.reset();
-        self.compressor.reset();
     }
 
     /// Process interleaved audio samples through the pipeline in order:
@@ -363,12 +325,6 @@ pub struct MicStreamHandle {
     pub stop: Arc<AtomicBool>,
     pub thread: Option<thread::JoinHandle<()>>,
     pub config: Arc<RwLock<MicConfig>>,
-    #[allow(dead_code)]
-    pub current_level_db: Arc<AtomicU32>,
-    #[allow(dead_code)]
-    pub peak_level_db: Arc<AtomicU32>,
-    #[allow(dead_code)]
-    pub is_clipping: Arc<AtomicBool>,
     _monitor_guard: Option<(OutputStream, rodio::OutputStreamHandle, Sink)>,
 }
 
@@ -454,9 +410,6 @@ pub fn start_mic_stream(
         stop,
         thread: Some(thread),
         config,
-        current_level_db,
-        peak_level_db,
-        is_clipping,
         _monitor_guard: monitor_output,
     })
 }

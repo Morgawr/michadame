@@ -1,6 +1,6 @@
 //! Read back the already-shaded game rectangle, before egui overlays. No second shader render.
 //! Budgeted fenced PBO queue; retain unfinished/blocked transfers without waiting.
-use super::{config::Rate, Runtime, VideoFrame};
+use super::{Runtime, VideoFrame};
 use crate::video::gpu::geometry::RenderedArea;
 use eframe::glow::{self, HasContext};
 use std::{collections::VecDeque, sync::atomic::Ordering};
@@ -15,7 +15,6 @@ struct Slot {
     buffer: glow::Buffer,
     fence: glow::Fence,
     at: i64,
-    rate: Rate,
 }
 // SAFETY: fence handles are opaque. Slots are only accessed by egui paint/on_exit
 // with the owning GL context current; no GL operation happens in Drop or a worker.
@@ -97,7 +96,6 @@ impl Readback {
         broadcast: Option<&BroadcastSink>,
         area: RenderedArea,
         at: i64,
-        rate: Rate,
     ) {
         let RenderedArea {
             x,
@@ -231,7 +229,6 @@ impl Readback {
                                     width,
                                     height,
                                     at: slot.at,
-                                    rate: slot.rate,
                                     generation: 0,
                                 }).is_err() {
                                     bc.dropped.fetch_add(1, Ordering::Relaxed);
@@ -246,7 +243,6 @@ impl Readback {
                             width,
                             height,
                             at: slot.at,
-                            rate: slot.rate,
                             generation,
                         }) {
                             runtime.queue.recycle(generation, error.into_inner().rgba);
@@ -265,7 +261,6 @@ impl Readback {
                                     width,
                                     height,
                                     at: slot.at,
-                                    rate: slot.rate,
                                     generation: 0,
                                 }).is_err() {
                                     bc.dropped.fetch_add(1, Ordering::Relaxed);
@@ -288,7 +283,6 @@ impl Readback {
                             width,
                             height,
                             at: slot.at,
-                            rate: slot.rate,
                             generation: 0,
                         }).is_err() {
                             bc.dropped.fetch_add(1, Ordering::Relaxed);
@@ -356,7 +350,6 @@ impl Readback {
                                 buffer,
                                 fence,
                                 at,
-                                rate,
                             });
                             self.last_at = at;
                         }
@@ -548,7 +541,6 @@ mod tests {
                             width: 2,
                             height: 2,
                             at,
-                            rate,
                             generation: 1,
                         })
                         .unwrap();

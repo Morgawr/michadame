@@ -31,8 +31,6 @@ pub enum AlertKind {
 pub struct AlertEvent {
     pub id: String,
     pub kind: AlertKind,
-    #[allow(dead_code)]
-    pub timestamp: Instant,
 }
 
 #[derive(Clone, Debug)]
@@ -132,7 +130,6 @@ impl AlertsState {
                 kind: AlertKind::Follow {
                     user: "NeonRacer".to_string(),
                 },
-                timestamp: now,
             },
             AlertTestKind::Sub => AlertEvent {
                 id: format!("test-sub-{}", now.elapsed().as_nanos()),
@@ -144,7 +141,6 @@ impl AlertsState {
                     gifter: None,
                     message: Some("Loving the retro stream vibes!".to_string()),
                 },
-                timestamp: now,
             },
             AlertTestKind::GiftSub => AlertEvent {
                 id: format!("test-giftsub-{}", now.elapsed().as_nanos()),
@@ -156,7 +152,6 @@ impl AlertsState {
                     gifter: Some("RetroLord".to_string()),
                     message: None,
                 },
-                timestamp: now,
             },
             AlertTestKind::Bits => AlertEvent {
                 id: format!("test-bits-{}", now.elapsed().as_nanos()),
@@ -165,7 +160,6 @@ impl AlertsState {
                     amount: 500,
                     message: Some("GG WP on that high score!".to_string()),
                 },
-                timestamp: now,
             },
             AlertTestKind::Raid => AlertEvent {
                 id: format!("test-raid-{}", now.elapsed().as_nanos()),
@@ -173,16 +167,9 @@ impl AlertsState {
                     user: "VaporStreamer".to_string(),
                     viewers: 42,
                 },
-                timestamp: now,
             },
         };
         self.enqueue(event);
-    }
-
-    #[allow(dead_code)]
-    pub fn clear(&mut self) {
-        self.queue.clear();
-        self.active = None;
     }
 }
 
@@ -224,21 +211,18 @@ mod tests {
     #[test]
     fn test_deduplicates_by_id() {
         let mut alerts = AlertsState::default();
-        let now = Instant::now();
 
         let ev1 = AlertEvent {
             id: "msg-123".to_string(),
             kind: AlertKind::Follow {
                 user: "User1".to_string(),
             },
-            timestamp: now,
         };
         let ev2 = AlertEvent {
             id: "msg-123".to_string(),
             kind: AlertKind::Follow {
                 user: "User1".to_string(),
             },
-            timestamp: now,
         };
 
         alerts.enqueue(ev1);

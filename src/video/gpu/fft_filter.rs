@@ -4,7 +4,6 @@ use eframe::glow::{self, HasContext};
 /// GPU-based 2D FFT filter with interactive mask editing.
 /// Operates on decoded RGB textures: forward FFT → apply mask → inverse FFT.
 /// Pads to power-of-2 internally and crops back after.
-#[allow(dead_code)]
 pub struct FftFilter {
     // Shader programs
     init_prog: glow::Program,
@@ -16,32 +15,23 @@ pub struct FftFilter {
     bitrev_prog: glow::Program,
 
     // Uniform locations (Option to handle driver optimizations)
-    init_input_loc: Option<glow::UniformLocation>,
     init_fft_size_loc: Option<glow::UniformLocation>,
     init_orig_size_loc: Option<glow::UniformLocation>,
 
-    butterfly_input_loc: Option<glow::UniformLocation>,
     butterfly_axis_loc: Option<glow::UniformLocation>,
     butterfly_stage_loc: Option<glow::UniformLocation>,
     butterfly_direction_loc: Option<glow::UniformLocation>,
     butterfly_fft_size_loc: Option<glow::UniformLocation>,
 
-    mask_fft_loc: Option<glow::UniformLocation>,
-    mask_mask_loc: Option<glow::UniformLocation>,
     mask_fft_size_loc: Option<glow::UniformLocation>,
     mask_threshold_loc: Option<glow::UniformLocation>,
 
-    extract_ifft_loc: Option<glow::UniformLocation>,
-    extract_orig_loc: Option<glow::UniformLocation>,
     extract_fft_size_loc: Option<glow::UniformLocation>,
     extract_orig_size_loc: Option<glow::UniformLocation>,
     extract_black_threshold_loc: Option<glow::UniformLocation>,
 
-    spectrum_fft_loc: Option<glow::UniformLocation>,
-    spectrum_mask_loc: Option<glow::UniformLocation>,
     spectrum_fft_size_loc: Option<glow::UniformLocation>,
 
-    bitrev_input_loc: Option<glow::UniformLocation>,
     bitrev_fft_size_loc: Option<glow::UniformLocation>,
 
     // Two textures for ping-pong (RGBA32F for complex data)
@@ -218,27 +208,18 @@ impl FftFilter {
                 spectrum_prog,
                 blit_prog,
                 bitrev_prog,
-                init_input_loc,
                 init_fft_size_loc,
                 init_orig_size_loc,
-                butterfly_input_loc,
                 butterfly_axis_loc,
                 butterfly_stage_loc,
                 butterfly_direction_loc,
                 butterfly_fft_size_loc,
-                mask_fft_loc,
-                mask_mask_loc,
                 mask_fft_size_loc,
                 mask_threshold_loc,
-                extract_ifft_loc,
-                extract_orig_loc,
                 extract_fft_size_loc,
                 extract_orig_size_loc,
                 extract_black_threshold_loc,
-                spectrum_fft_loc,
-                spectrum_mask_loc,
                 spectrum_fft_size_loc,
-                bitrev_input_loc,
                 bitrev_fft_size_loc,
                 tex,
                 fbo,

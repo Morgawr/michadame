@@ -336,7 +336,6 @@ impl TwitchState {
             audio_bitrate_kbps: self.config.audio_bitrate_kbps,
             video_encoder: self.config.video_encoder,
             encoder_preset: self.config.encoder_preset.clone(),
-            audio_encoder: self.config.audio_encoder,
             ingest_server: self.config.ingest_server.clone(),
             stream_key: stream_key.to_string(),
             render_device: render_device.to_string(),
@@ -793,7 +792,6 @@ impl TwitchState {
                                             amount: bits,
                                             message: if text.is_empty() { None } else { Some(text) },
                                         },
-                                        timestamp: now,
                                     });
                                 }
                             }
@@ -836,7 +834,6 @@ impl TwitchState {
                                         gifter: None,
                                         message,
                                     },
-                                    timestamp: now,
                                 });
                             }
                         }
@@ -873,7 +870,6 @@ impl TwitchState {
                                         gifter: Some(gifter),
                                         message: None,
                                     },
-                                    timestamp: now,
                                 });
                             }
                         }
@@ -896,7 +892,6 @@ impl TwitchState {
                                         user: raider,
                                         viewers,
                                     },
-                                    timestamp: now,
                                 });
                             }
                         }

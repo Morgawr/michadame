@@ -113,7 +113,6 @@ pub enum PlayerEvent {
         width: u32,
         height: u32,
         duration_secs: f64,
-        #[allow(dead_code)]
         framerate: f64,
     },
     Eof,
@@ -356,7 +355,6 @@ pub fn video_file_thread_main(
     status_sender: crossbeam_channel::Sender<PlayerEvent>,
     command_receiver: crossbeam_channel::Receiver<PlayerCommand>,
     position_us: Arc<AtomicI64>,
-    duration_us: Arc<AtomicI64>,
     is_paused_shared: Arc<AtomicBool>,
     is_eof_shared: Arc<AtomicBool>,
     config: VideoFileConfig,
@@ -411,7 +409,6 @@ pub fn video_file_thread_main(
     } else {
         0
     };
-    duration_us.store(file_duration_us, Ordering::Relaxed);
     let duration_secs = file_duration_us as f64 / 1_000_000.0;
 
     let mut video_decoder = ffmpeg_next::codec::context::Context::from_parameters(video_stream.parameters())?

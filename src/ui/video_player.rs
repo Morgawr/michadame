@@ -349,10 +349,10 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 current_software_mouse_clip,
                                 is_mining_capture,
                             );
-                            let (at, rate) = latest_frame
+                            let at = latest_frame
                                 .as_ref()
-                                .map(|f| (f.captured_at, f.rate))
-                                .unwrap_or((0, crate::replay::config::Rate::new(60, 1)));
+                                .map(|f| f.captured_at)
+                                .unwrap_or(0);
                             if ocr_capture_cb.swap(false, Ordering::AcqRel) {
                                 if let Some((pixels, w, h)) =
                                     capture_frame_pixels_raw(painter.gl(), rendered_area)
@@ -448,7 +448,6 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                     None,
                                     full_or_rendered_area,
                                     at,
-                                    rate,
                                 );
                             }
                         },
@@ -576,10 +575,10 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         glass_params.as_ref(),
                         0.0,
                     );
-                    let (at, rate) = latest_frame
+                    let at = latest_frame
                         .as_ref()
-                        .map(|f| (f.captured_at, f.rate))
-                        .unwrap_or((0, crate::replay::config::Rate::new(60, 1)));
+                        .map(|f| f.captured_at)
+                        .unwrap_or(0);
                     if ocr_capture_cb.swap(false, Ordering::AcqRel) {
                         if let Some((pixels, w, h)) =
                             capture_frame_pixels_raw(painter.gl(), rendered_area)
@@ -632,7 +631,6 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                             None,
                             full_or_rendered_area,
                             at,
-                            rate,
                         );
                     }
                 })),
@@ -703,10 +701,10 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     dropped: b.metrics.video_dropped.clone(),
                 }
             });
-            let (at, rate) = active_frame
+            let at = active_frame
                 .as_ref()
-                .map(|f| (f.captured_at, f.rate))
-                .unwrap_or_else(|| (crate::replay::now_us(), crate::replay::config::Rate::new(60, 1)));
+                .map(|f| f.captured_at)
+                .unwrap_or_else(crate::replay::now_us);
             let full_window_effects =
                 retro_pc_frame || night_mode_glow_intensity > 0.001;
             let rendered_area = if full_window_effects {
@@ -725,7 +723,6 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                             broadcast_sink.as_ref(),
                             rendered_area,
                             at,
-                            rate,
                         );
                     },
                 )),
@@ -1218,7 +1215,6 @@ mod tests {
             was_playing_before_scrub: false,
             command_sender: cmd_tx,
             position_us: Arc::new(std::sync::atomic::AtomicI64::new(0)),
-            duration_us: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             is_paused_shared: Arc::new(AtomicBool::new(false)),
             is_eof_shared: Arc::new(AtomicBool::new(false)),
             stop_requested: Arc::new(AtomicBool::new(false)),

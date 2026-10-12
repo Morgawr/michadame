@@ -393,4 +393,15 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, name2.id);
     }
+
+    #[test]
+    fn test_bank_database_open_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("bank.db");
+        let db = BankDatabase::open(&db_path).unwrap();
+        let list = db.list_meta().unwrap();
+        assert!(list.is_empty());
+        let resolved = crate::bank::resolve_bank_directory();
+        assert!(!resolved.as_os_str().is_empty());
+    }
 }
