@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 const AUDIO_OUTPUT_RATE: u32 = 48000;
 
-fn create_audio_resampler(
+pub(crate) fn create_audio_resampler(
     format: ffmpeg_next::format::Sample,
     layout: ffmpeg_next::ChannelLayout,
     rate: u32,
@@ -35,7 +35,7 @@ fn create_audio_resampler(
 /// second of 44.1 kHz audio. That delays all audio relative to its PTS and carries stale
 /// audio across seeks. Allocating room for the pending delay plus the converted input
 /// lets swr drain completely on every call.
-fn resample_audio_frame(
+pub(crate) fn resample_audio_frame(
     rsm: &mut ffmpeg_next::software::resampling::context::Context,
     input: &ffmpeg_next::frame::Audio,
 ) -> Option<ffmpeg_next::frame::Audio> {

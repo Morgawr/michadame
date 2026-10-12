@@ -17,6 +17,12 @@ enum Piece {
 
 /// Lay out comments for this frame and pass them to the renderer.
 pub fn update(state: &mut AppState, ctx: &egui::Context, video_rect: Rect) {
+    if state.twitch.preroll.is_some() {
+        if let Some(r) = &state.crt_renderer {
+            r.lock().unwrap().comment_primitives = Vec::new();
+        }
+        return;
+    }
     let primitives = if state.twitch.config.niconico_enabled && !state.twitch.comments.is_empty() {
         let screen = comment_area(video_rect);
         let shapes = build_shapes(&mut state.twitch, ctx, screen, Instant::now());

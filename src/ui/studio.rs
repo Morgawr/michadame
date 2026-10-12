@@ -747,16 +747,21 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
     let is_connecting = matches!(status, BroadcastStatus::Connecting);
     let active = is_live || is_connecting;
 
-    let (btn_text, btn_fill) = if is_live {
-        ("■ STOP STREAMING", egui::Color32::from_rgb(204, 51, 51))
+    let preroll_rem = state.twitch.preroll_remaining_secs();
+    let (btn_text, btn_fill) = if let Some(rem) = preroll_rem {
+        let mins = (rem / 60.0).floor() as u32;
+        let secs = (rem % 60.0).floor() as u32;
+        (format!("■ STOP (PRE-ROLL {mins:02}:{secs:02})"), egui::Color32::from_rgb(204, 51, 51))
+    } else if is_live {
+        ("■ STOP STREAMING".to_string(), egui::Color32::from_rgb(204, 51, 51))
     } else if is_connecting {
-        ("CONNECTING TO TWITCH...", egui::Color32::from_rgb(212, 136, 0))
+        ("CONNECTING TO TWITCH...".to_string(), egui::Color32::from_rgb(212, 136, 0))
     } else {
-        ("● GO LIVE ON TWITCH", egui::Color32::from_rgb(145, 70, 255))
+        ("● GO LIVE ON TWITCH".to_string(), egui::Color32::from_rgb(145, 70, 255))
     };
 
     let giant_btn = egui::Button::new(
-        egui::RichText::new(btn_text)
+        egui::RichText::new(&btn_text)
             .monospace()
             .strong()
             .size(15.0)
@@ -773,7 +778,7 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
             let audio_tap = state.replay.audio.clone();
             audio_tap.set_game_volume(state.hardware.master_volume);
             let render_dev = state.replay.config.render_device.clone();
-            if let Err(_) = state.twitch.start_broadcast(audio_tap, &render_dev) {
+            if let Err(_) = state.twitch.start_broadcast(audio_tap, &render_dev, ui.ctx()) {
                 // Error notification is dispatched inside start_broadcast
             }
             changed = true;

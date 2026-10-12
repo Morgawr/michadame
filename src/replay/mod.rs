@@ -145,6 +145,7 @@ pub struct AudioTap {
     broadcast_mic_discontinuity: AtomicBool,
     broadcast_route: Mutex<Option<AudioRoute>>,
     broadcast_mic_route: Mutex<Option<AudioRoute>>,
+    broadcast_preroll_active: AtomicBool,
     pub filter: std::sync::RwLock<crate::replay::config::AudioFilterConfig>,
     game_volume: Arc<AtomicU32>,
     active_alert: Mutex<Option<ActiveAlertAudio>>,
@@ -163,6 +164,7 @@ impl Default for AudioTap {
             broadcast_mic_discontinuity: AtomicBool::new(false),
             broadcast_route: Mutex::new(None),
             broadcast_mic_route: Mutex::new(None),
+            broadcast_preroll_active: AtomicBool::new(false),
             filter: std::sync::RwLock::new(crate::replay::config::AudioFilterConfig::default()),
             game_volume: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             active_alert: Mutex::new(None),
@@ -312,14 +314,43 @@ impl AudioTap {
         };
 
         submit_to_route(&self.route, &self.discontinuity, effective_samples, rate, channels, at);
-        submit_to_route(&self.broadcast_route, &self.broadcast_discontinuity, effective_samples, rate, channels, at);
+        if !self.broadcast_preroll_active.load(Ordering::Relaxed) {
+            submit_to_route(&self.broadcast_route, &self.broadcast_discontinuity, effective_samples, rate, channels, at);
+        }
     }
     pub fn submit_mic(&self, samples: &[f32], rate: u32, channels: u16, at: i64) {
         if !self.enabled.load(Ordering::Relaxed) {
             return;
         }
         submit_to_route(&self.mic_route, &self.mic_discontinuity, samples, rate, channels, at);
-        submit_to_route(&self.broadcast_mic_route, &self.broadcast_mic_discontinuity, samples, rate, channels, at);
+        if !self.broadcast_preroll_active.load(Ordering::Relaxed) {
+            submit_to_route(&self.broadcast_mic_route, &self.broadcast_mic_discontinuity, samples, rate, channels, at);
+        }
+    }
+    /// Submits decoded pre-roll audio directly into the live broadcast route.
+    pub fn submit_preroll_audio(&self, samples: &[f32], rate: u32, channels: u16, at: i64) {
+        if !self.enabled.load(Ordering::Relaxed) {
+            return;
+        }
+        submit_to_route(
+            &self.broadcast_route,
+            &self.broadcast_discontinuity,
+            samples,
+            rate,
+            channels,
+            at,
+        );
+    }
+    pub fn set_broadcast_preroll_active(&self, active: bool) {
+        self.broadcast_preroll_active.store(active, Ordering::SeqCst);
+        if !active {
+            self.broadcast_discontinuity.store(true, Ordering::Relaxed);
+            self.broadcast_mic_discontinuity.store(true, Ordering::Relaxed);
+        }
+    }
+    #[allow(dead_code)]
+    pub fn is_broadcast_preroll_active(&self) -> bool {
+        self.broadcast_preroll_active.load(Ordering::Relaxed)
     }
     fn disable(&self) {
         *self.route.lock().unwrap() = None;

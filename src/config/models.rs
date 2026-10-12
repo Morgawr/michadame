@@ -61,6 +61,11 @@ pub struct TwitchConfig {
 
     /// Automatically share newly mined words to Twitch chat while live streaming.
     pub share_mined_words_to_chat: bool,
+
+    /// Play a pre-roll video when going live on Twitch.
+    pub preroll_enabled: bool,
+    /// Absolute or relative path to the pre-roll video file on disk.
+    pub preroll_video_path: String,
 }
 
 impl Default for TwitchConfig {
@@ -96,6 +101,9 @@ impl Default for TwitchConfig {
             alert_min_bits: 1,
 
             share_mined_words_to_chat: false,
+
+            preroll_enabled: false,
+            preroll_video_path: String::new(),
         }
     }
 }

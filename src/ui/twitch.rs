@@ -499,7 +499,7 @@ fn draw_broadcast_group(ui: &mut egui::Ui, state: &mut AppState, save_now: &mut 
                     let audio_tap = state.replay.audio.clone();
                     audio_tap.set_game_volume(state.hardware.master_volume);
                     let render_dev = state.replay.config.render_device.clone();
-                    if let Err(_) = state.twitch.start_broadcast(audio_tap, &render_dev) {
+                    if let Err(_) = state.twitch.start_broadcast(audio_tap, &render_dev, ui.ctx()) {
                         // Error notification is dispatched inside start_broadcast
                     }
                     changed = true;
@@ -535,13 +535,24 @@ fn draw_broadcast_group(ui: &mut egui::Ui, state: &mut AppState, save_now: &mut 
                     } else {
                         (0.0, 0, 0, 0)
                     };
-                    ui.label(
-                        egui::RichText::new(format!(
+                    let live_label = if let Some(rem) = state.twitch.preroll_remaining_secs() {
+                        let rem_m = (rem / 60.0).floor() as u32;
+                        let rem_s = (rem % 60.0).floor() as u32;
+                        format!("● PRE-ROLL {rem_m:02}:{rem_s:02}  |  {fps:.1} FPS  |  {kbps} kbps")
+                    } else {
+                        format!(
                             "● LIVE {hours:02}:{mins:02}:{secs:02}  |  {fps:.1} FPS  |  {kbps} kbps  |  Drops: V {vdrop} / A {adrop}"
-                        ))
+                        )
+                    };
+                    ui.label(
+                        egui::RichText::new(live_label)
                         .monospace()
                         .size(11.0)
-                        .color(egui::Color32::from_rgb(80, 220, 120)),
+                        .color(if state.twitch.preroll.is_some() {
+                            egui::Color32::from_rgb(230, 190, 60)
+                        } else {
+                            egui::Color32::from_rgb(80, 220, 120)
+                        }),
                     );
                     ui.ctx().request_repaint_after(Duration::from_millis(500));
                 }
@@ -766,6 +777,104 @@ fn draw_broadcast_group(ui: &mut egui::Ui, state: &mut AppState, save_now: &mut 
                     fetch_btn.on_hover_text("Log in to Twitch below under 'Twitch Account' to auto-fetch your stream key");
                 }
             });
+
+            ui.add_space(3.0);
+
+            // Pre-roll Video
+            ui.horizontal(|ui| {
+                label(ui, "Pre-roll Video:");
+                if ui
+                    .checkbox(
+                        &mut state.twitch.config.preroll_enabled,
+                        "Enable pre-roll video",
+                    )
+                    .on_hover_text("Play a preset video file with audio before going live, seamlessly fading to the real stream when it ends")
+                    .changed()
+                {
+                    *save_now = true;
+                    changed = true;
+                }
+            });
+
+            if state.twitch.config.preroll_enabled {
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    label(ui, "Video File:");
+                    let path_display = if state.twitch.config.preroll_video_path.is_empty() {
+                        "(No video file selected)".to_string()
+                    } else {
+                        let p = std::path::Path::new(&state.twitch.config.preroll_video_path);
+                        p.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| state.twitch.config.preroll_video_path.clone())
+                    };
+
+                    let path_lbl = ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&path_display)
+                                .monospace()
+                                .size(11.0)
+                                .color(if state.twitch.config.preroll_video_path.is_empty() {
+                                    MUTED
+                                } else {
+                                    egui::Color32::WHITE
+                                }),
+                        )
+                        .truncate(true),
+                    );
+                    if !state.twitch.config.preroll_video_path.is_empty() {
+                        path_lbl.on_hover_text(&state.twitch.config.preroll_video_path);
+                    }
+
+                    if ui
+                        .small_button("Browse…")
+                        .on_hover_text("Pick a video file from disk (e.g. .mp4, .webm, .mkv)")
+                        .clicked()
+                    {
+                        state.twitch.open_preroll_file_dialog(ui.ctx());
+                    }
+
+                    if !state.twitch.config.preroll_video_path.is_empty() {
+                        if ui
+                            .small_button("Clear")
+                            .on_hover_text("Remove pre-roll video file selection")
+                            .clicked()
+                        {
+                            state.twitch.config.preroll_video_path.clear();
+                            *save_now = true;
+                            changed = true;
+                        }
+                    }
+                });
+
+                if !state.twitch.config.preroll_video_path.is_empty() {
+                    let p = std::path::Path::new(&state.twitch.config.preroll_video_path);
+                    if p.exists() {
+                        if let Ok(info) = crate::video::player::probe_video_file(p) {
+                            let dur_str = crate::video::player::format_time(info.duration_secs);
+                            ui.horizontal(|ui| {
+                                ui.add_space(16.0);
+                                note(
+                                    ui,
+                                    &format!(
+                                        "Duration: {} ({:.1}s) · Resolution: {}x{} · {:.1} fps",
+                                        dur_str, info.duration_secs, info.width, info.height, info.framerate
+                                    ),
+                                );
+                            });
+                        }
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.add_space(16.0);
+                            ui.label(
+                                egui::RichText::new("⚠ Selected file not found on disk")
+                                    .size(10.5)
+                                    .color(egui::Color32::from_rgb(240, 100, 100)),
+                            );
+                        });
+                    }
+                }
+            }
         });
 
         note(

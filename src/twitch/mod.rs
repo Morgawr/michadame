@@ -8,12 +8,14 @@ pub mod emotes;
 pub mod eventsub;
 pub mod irc;
 pub mod live;
+pub mod preroll;
 pub mod stream_info;
 
 #[allow(unused_imports)]
 pub use alerts::{ActiveAlert, AlertEvent, AlertKind, AlertTestKind, AlertsState};
 pub use broadcast::{BroadcastHandle, BroadcastMetrics, BroadcastStatus};
 pub use live::StreamStatus;
+pub use preroll::PrerollPlayer;
 #[allow(unused_imports)]
 pub use stream_info::{StreamCategory, StreamInfo, StreamInfoState};
 
@@ -136,6 +138,10 @@ pub struct TwitchState {
     pub alert_player: alert_audio::AlertSoundPlayer,
     pub audio_tap: Option<Arc<crate::replay::AudioTap>>,
 
+    // Pre-roll video player
+    pub preroll: Option<PrerollPlayer>,
+    pub preroll_file_dialog_receiver: Option<Receiver<std::path::PathBuf>>,
+
     self_display_name: Option<String>,
     self_color: Option<egui::Color32>,
     worker: Option<irc::WorkerHandle>,
@@ -175,6 +181,8 @@ impl Default for TwitchState {
             alerts: AlertsState::default(),
             alert_player: alert_audio::AlertSoundPlayer::default(),
             audio_tap: None,
+            preroll: None,
+            preroll_file_dialog_receiver: None,
             self_display_name: None,
             self_color: None,
             worker: None,
@@ -247,7 +255,7 @@ impl TwitchState {
     }
 
     pub fn is_broadcasting(&self) -> bool {
-        self.broadcast.as_ref().map_or(false, |b| b.is_live())
+        self.broadcast.as_ref().map_or(false, |b| b.is_live()) || self.preroll.is_some()
     }
 
     /// Returns true if Michadame is broadcasting or Twitch reports the channel as Live.
@@ -266,6 +274,22 @@ impl TwitchState {
             .unwrap_or(BroadcastStatus::Offline)
     }
 
+    pub fn preroll_remaining_secs(&self) -> Option<f64> {
+        self.preroll.as_ref().map(|p| p.remaining_secs())
+    }
+
+    pub fn preroll_fade_alpha(&self) -> f32 {
+        self.preroll.as_ref().map(|p| p.fade_alpha()).unwrap_or(0.0)
+    }
+
+    pub fn is_preroll_in_fade_in(&self) -> bool {
+        self.preroll.as_ref().map(|p| p.is_in_fade_in_phase()).unwrap_or(false)
+    }
+
+    pub fn preroll_frame(&self) -> Option<Arc<crate::video::types::RawFrame>> {
+        self.preroll.as_ref().and_then(|p| p.latest_frame.clone())
+    }
+
     pub fn viewer_count(&self) -> Option<u32> {
         match self.stream_status {
             StreamStatus::Live { viewer_count } => viewer_count,
@@ -277,6 +301,7 @@ impl TwitchState {
         &mut self,
         audio_tap: Arc<crate::replay::AudioTap>,
         render_device: &str,
+        ctx: &egui::Context,
     ) -> Result<(), String> {
         if self.broadcast.is_some() {
             return Err("Broadcast is already active".into());
@@ -287,6 +312,25 @@ impl TwitchState {
             self.notify_error(&err);
             return Err(err);
         }
+
+        let preroll_path = if self.config.preroll_enabled {
+            let trimmed = self.config.preroll_video_path.trim();
+            if trimmed.is_empty() {
+                let err = "Pre-roll video is enabled, but no video file has been selected.".to_string();
+                self.notify_error(&err);
+                return Err(err);
+            }
+            let path = std::path::PathBuf::from(trimmed);
+            if !path.exists() {
+                let err = format!("Pre-roll video file not found: {:?}", path);
+                self.notify_error(&err);
+                return Err(err);
+            }
+            Some(path)
+        } else {
+            None
+        };
+
         let config = broadcast::BroadcastConfig {
             video_bitrate_kbps: self.config.video_bitrate_kbps,
             audio_bitrate_kbps: self.config.audio_bitrate_kbps,
@@ -297,10 +341,25 @@ impl TwitchState {
             stream_key: stream_key.to_string(),
             render_device: render_device.to_string(),
         };
-        match broadcast::start_broadcast(config, audio_tap) {
+        match broadcast::start_broadcast(config, audio_tap.clone()) {
             Ok(handle) => {
                 self.broadcast = Some(handle);
-                self.notify_info("Connecting to Twitch live stream…");
+                if let Some(path) = preroll_path {
+                    let ctx_clone = ctx.clone();
+                    let repaint = Arc::new(move || ctx_clone.request_repaint());
+                    match PrerollPlayer::start(path, audio_tap, repaint) {
+                        Ok(player) => {
+                            self.preroll = Some(player);
+                            self.notify_info("Starting pre-roll video broadcast…");
+                        }
+                        Err(e) => {
+                            let msg = format!("Failed to start pre-roll video: {e:#}");
+                            self.notify_error(&msg);
+                        }
+                    }
+                } else {
+                    self.notify_info("Connecting to Twitch live stream…");
+                }
                 Ok(())
             }
             Err(e) => {
@@ -312,11 +371,39 @@ impl TwitchState {
     }
 
     pub fn stop_broadcast(&mut self) {
+        if let Some(mut player) = self.preroll.take() {
+            player.stop();
+        }
         if let Some(mut handle) = self.broadcast.take() {
             handle.stop();
             self.broadcast_last_status = None;
             self.notify_info("Twitch broadcast stopped");
         }
+    }
+
+    pub fn open_preroll_file_dialog(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.preroll_file_dialog_receiver = Some(rx);
+        let ctx_clone = ctx.clone();
+        let _ = std::thread::Builder::new()
+            .name("preroll-file-picker".to_string())
+            .spawn(move || {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter(
+                        "Video files",
+                        &[
+                            "mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "m4v", "ts", "mpg",
+                            "mpeg", "vob", "ogv", "3gp",
+                        ],
+                    )
+                    .add_filter("All files", &["*"])
+                    .set_title("Select Pre-Roll Video File")
+                    .pick_file()
+                {
+                    let _ = tx.send(path);
+                    ctx_clone.request_repaint();
+                }
+            });
     }
 
     pub fn try_fetch_stream_key(&mut self) {
@@ -408,11 +495,38 @@ impl TwitchState {
                 self.notify_error(format!("Broadcast error: {err}"));
                 self.broadcast = None;
                 self.broadcast_last_status = None;
+                if let Some(mut player) = self.preroll.take() {
+                    player.stop();
+                }
                 changed = true;
             } else if self.broadcast_last_status.as_ref() != Some(&status) {
                 self.broadcast_last_status = Some(status);
                 changed = true;
             }
+        }
+
+        if let Some(rx) = &self.preroll_file_dialog_receiver {
+            if let Ok(path) = rx.try_recv() {
+                self.config.preroll_video_path = path.to_string_lossy().to_string();
+                self.config_dirty = true;
+                changed = true;
+            }
+        }
+
+        if let Some(player) = &mut self.preroll {
+            let _ = player.poll_frame();
+            if player.is_completed() {
+                self.preroll = None;
+                self.notify_info("Pre-roll finished: stream is now live!");
+            }
+            changed = true;
+        }
+
+        if self.broadcast.is_none() && self.preroll.is_some() {
+            if let Some(mut player) = self.preroll.take() {
+                player.stop();
+            }
+            changed = true;
         }
 
         let events: Vec<IrcEvent> = self

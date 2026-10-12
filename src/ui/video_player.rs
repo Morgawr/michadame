@@ -121,9 +121,20 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         }
         let bank_capture = state.bank.capture_handle();
 
+        let is_preroll_active = state.twitch.preroll.is_some();
+        let preroll_fade_in = state.twitch.is_preroll_in_fade_in();
+        let preroll_fade_alpha = state.twitch.preroll_fade_alpha();
+        let preroll_remaining_secs = state.twitch.preroll_remaining_secs();
+        let is_showing_preroll = is_preroll_active && !preroll_fade_in;
+        let active_frame = if is_showing_preroll {
+            state.twitch.preroll_frame()
+        } else {
+            state.latest_frame.clone()
+        };
+
         let ppp = ctx.pixels_per_point();
         let output_size = (response.rect.width() * ppp, response.rect.height() * ppp);
-        let latest_frame_dim = state.latest_frame.as_ref().map(|f| (f.width, f.height));
+        let latest_frame_dim = active_frame.as_ref().map(|f| (f.width, f.height));
         let res = latest_frame_dim
             .or_else(|| {
                 if state.hardware.selected_resolution.0 > 0 {
@@ -133,10 +144,15 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 }
             })
             .unwrap_or((texture_size.x as u32, texture_size.y as u32));
+        let h_stretch = if is_showing_preroll {
+            1.0
+        } else {
+            state.video.horizontal_stretch
+        };
         let rendered_area_geom = crate::video::gpu::geometry::RenderedArea::fit(
             res,
             output_size,
-            state.video.horizontal_stretch,
+            h_stretch,
         );
         let video_rect_min = response.rect.min
             + egui::vec2(
@@ -151,13 +167,15 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
         let cathode_params = video::gpu::CathodeInterferenceShaderParams::from_state(state);
         let time = ui.input(|i| i.time) as f32;
-        let is_crt_on = filter != CrtFilter::Off;
+        let is_crt_on = !is_showing_preroll && filter != CrtFilter::Off;
         let night_mode_active = is_crt_on && state.video.lights_off_night_mode;
         let retro_pc_frame = is_crt_on && state.video.retro_pc_frame;
         let effective_dark_mode =
             is_crt_on && (state.video.retro_pc_frame_dark_mode || night_mode_active);
         let retro_pc_ambient_glow = if night_mode_active {
             (state.video.retro_pc_ambient_glow * 1.50).min(1.0)
+        } else if is_showing_preroll {
+            0.0
         } else {
             state.video.retro_pc_ambient_glow
         };
@@ -215,11 +233,16 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         if state.cathode_interference.enabled
             || retro_pc_frame
             || (night_mode_glow_intensity > 0.001)
+            || is_preroll_active
         {
             ui.ctx().request_repaint();
         }
 
-        if state.video.pixelate_filter_enabled || filter != CrtFilter::Off || state.cathode_interference.enabled {
+        if !is_showing_preroll
+            && (state.video.pixelate_filter_enabled
+                || filter != CrtFilter::Off
+                || state.cathode_interference.enabled)
+        {
             if let Some(renderer_arc) = &state.crt_renderer {
                 let renderer_clone = renderer_arc.clone();
                 let params = video::gpu::ShaderParams::from_state(state);
@@ -250,7 +273,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     filter_type,
                 );
                 let rect = response.rect;
-                let latest_frame = state.latest_frame.clone();
+                let latest_frame = active_frame.clone();
                 let video_texture_id = state.video_texture.as_ref().map(|t| t.id());
                 let fft_clone = fft_filter_ref.clone();
                 let fft_threshold = state.fft_mask_threshold;
@@ -440,42 +463,57 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 .expect("Renderer not initialized")
                 .clone();
             let rect = response.rect;
-            let background_color = if state.video.use_magenta_background {
+            let background_color = if is_showing_preroll {
+                [0.0, 0.0, 0.0]
+            } else if state.video.use_magenta_background {
                 [1.0, 0.0, 1.0]
             } else {
                 [0.0, 0.0, 0.0]
             };
-            let horizontal_stretch = state.video.horizontal_stretch;
-            let median_filter_enabled = state.video.median_filter_enabled;
-            let median_mix = state.video.median_mix;
-            let deinterlace_filter_enabled = state.video.deinterlace_filter_enabled;
-            let deinterlace_mode = state.video.deinterlace_mode;
-            let deinterlace_blend = state.video.deinterlace_blend;
-            let deinterlace_motion_threshold = state.video.deinterlace_motion_threshold;
-            let deinterlace_line_spacing = state.video.deinterlace_line_spacing;
-            let deinterlace_spatial_mix = state.video.deinterlace_spatial_mix;
-            let vibrance = state.video.vibrance;
-            let overscan_x = state.video.overscan_x;
-            let overscan_y = state.video.overscan_y;
-            let underscan_x = state.video.underscan_x;
-            let underscan_y = state.video.underscan_y;
-            let border_crop = [
-                state.video.border_crop_left,
-                state.video.border_crop_right,
-                state.video.border_crop_top,
-                state.video.border_crop_bottom,
-            ];
-            let retro_pc_ambient_glow = state.video.retro_pc_ambient_glow;
-            let scaler_filter = state
-                .scaler_filter
-                .load(Ordering::Relaxed);
-            let latest_frame = state.latest_frame.clone();
+            let horizontal_stretch = if is_showing_preroll {
+                1.0
+            } else {
+                state.video.horizontal_stretch
+            };
+            let median_filter_enabled = !is_showing_preroll && state.video.median_filter_enabled;
+            let median_mix = if is_showing_preroll { 0.0 } else { state.video.median_mix };
+            let deinterlace_filter_enabled = !is_showing_preroll && state.video.deinterlace_filter_enabled;
+            let deinterlace_mode = if is_showing_preroll { 0 } else { state.video.deinterlace_mode };
+            let deinterlace_blend = if is_showing_preroll { 0.0 } else { state.video.deinterlace_blend };
+            let deinterlace_motion_threshold = if is_showing_preroll { 0.0 } else { state.video.deinterlace_motion_threshold };
+            let deinterlace_line_spacing = if is_showing_preroll { 1.0 } else { state.video.deinterlace_line_spacing };
+            let deinterlace_spatial_mix = if is_showing_preroll { 0.0 } else { state.video.deinterlace_spatial_mix };
+            let vibrance = if is_showing_preroll { 0.0 } else { state.video.vibrance };
+            let overscan_x = if is_showing_preroll { 0.0 } else { state.video.overscan_x };
+            let overscan_y = if is_showing_preroll { 0.0 } else { state.video.overscan_y };
+            let underscan_x = if is_showing_preroll { 0.0 } else { state.video.underscan_x };
+            let underscan_y = if is_showing_preroll { 0.0 } else { state.video.underscan_y };
+            let border_crop = if is_showing_preroll {
+                [0.0, 0.0, 0.0, 0.0]
+            } else {
+                [
+                    state.video.border_crop_left,
+                    state.video.border_crop_right,
+                    state.video.border_crop_top,
+                    state.video.border_crop_bottom,
+                ]
+            };
+            let retro_pc_ambient_glow = if is_showing_preroll { 0.0 } else { retro_pc_ambient_glow };
+            let scaler_filter = if is_showing_preroll {
+                0
+            } else {
+                state.scaler_filter.load(Ordering::Relaxed)
+            };
+            let latest_frame = active_frame.clone();
             let video_texture_id = state.video_texture.as_ref().map(|t| t.id());
-            let fft_clone = fft_filter_ref.clone();
-            let fft_threshold = state.fft_mask_threshold;
-            let fft_black = state.fft_black_threshold;
-            let glass_params =
-                video::gpu::GlassShaderParams::from_state(state, [0.0, 0.0], 0.0, 0);
+            let fft_clone = if is_showing_preroll { None } else { fft_filter_ref.clone() };
+            let fft_threshold = if is_showing_preroll { 0.0 } else { state.fft_mask_threshold };
+            let fft_black = if is_showing_preroll { 0.0 } else { state.fft_black_threshold };
+            let glass_params = if is_showing_preroll {
+                None
+            } else {
+                Some(video::gpu::GlassShaderParams::from_state(state, [0.0, 0.0], 0.0, 0))
+            };
 
             let replay_gpu = state.replay.gpu.clone();
             let replay = state
@@ -535,7 +573,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         fft_threshold,
                         fft_black,
                         None,
-                        Some(&glass_params),
+                        glass_params.as_ref(),
                         0.0,
                     );
                     let (at, rate) = latest_frame
@@ -556,7 +594,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         }
                     }
 
-                    if retro_pc_frame {
+                    if retro_pc_frame && !is_showing_preroll {
                         renderer_clone.lock().unwrap().draw_retro_frame(
                             painter.gl(),
                             res,
@@ -603,29 +641,49 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         }
 
         // Draw interactive OCR bounding box overlay on top of the video image
-        crate::ocr::overlay::draw_ocr_overlay(ui, state, video_rect);
+        if !is_preroll_active {
+            crate::ocr::overlay::draw_ocr_overlay(ui, state, video_rect);
+        }
 
         // Niconico chat comments, drawn by the renderer under the CRT effects.
-        crate::ui::niconico::update(state, ctx, video_rect);
+        if !is_preroll_active {
+            crate::ui::niconico::update(state, ctx, video_rect);
+        }
 
         // Video alert notices, drawn by the renderer under the CRT effects.
-        crate::ui::alerts::update(state, ctx, video_rect);
+        if !is_preroll_active {
+            crate::ui::alerts::update(state, ctx, video_rect);
+        }
 
         // Extra widget for local video player mode (scrub bar, play/pause/stop)
         if state.video_player.is_some() {
             draw_video_file_controls(state, ui, ctx, response.rect);
         }
 
-        if software_mouse_active {
+        if software_mouse_active && !is_preroll_active {
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
         }
 
-        // Draw webcam overlay on top of everything
-        crate::ui::webcam_overlay::draw_webcam_overlay(state, ui, ctx, response.rect);
+        // Draw webcam overlay on top of everything (suppressed during pre-roll)
+        if !is_preroll_active {
+            crate::ui::webcam_overlay::draw_webcam_overlay(state, ui, ctx, response.rect);
+        }
+
+        // During pre-roll fade out / fade in transition, render a black overlay across the video
+        // surface. This is rendered on the UI painter so it will be captured into the livestream
+        // broadcast by the replay_gpu.capture callback below.
+        if is_preroll_active && preroll_fade_alpha > 0.001 {
+            let black_alpha = (preroll_fade_alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+            ui.painter().rect_filled(
+                response.rect,
+                0.0,
+                egui::Color32::from_black_alpha(black_alpha),
+            );
+        }
 
         // When capturing overlays in the replay buffer, when webcam is enabled, or when broadcasting to Twitch,
         // capture the frame after egui has rendered the interactive OCR boxes, dictionary popup, and webcam overlay.
-        let is_broadcasting = state.twitch.is_broadcasting();
+        let is_broadcasting = state.twitch.is_broadcasting() || state.twitch.broadcast.is_some();
         let capture_replay_here = state.replay.config.capture_overlays || state.webcam.config.enabled;
         if capture_replay_here || is_broadcasting {
             let replay_gpu = state.replay.gpu.clone();
@@ -645,11 +703,10 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     dropped: b.metrics.video_dropped.clone(),
                 }
             });
-            let (at, rate) = state
-                .latest_frame
+            let (at, rate) = active_frame
                 .as_ref()
                 .map(|f| (f.captured_at, f.rate))
-                .unwrap_or((0, crate::replay::config::Rate::new(60, 1)));
+                .unwrap_or_else(|| (crate::replay::now_us(), crate::replay::config::Rate::new(60, 1)));
             let full_window_effects =
                 retro_pc_frame || night_mode_glow_intensity > 0.001;
             let rendered_area = if full_window_effects {
@@ -680,6 +737,16 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             .add(callback);
         }
 
+        // Draw local streamer pre-roll countdown overlay.
+        // NOTE: This is intentionally rendered on egui::Order::Debug (which executes after egui::Order::Tooltip).
+        // That way, it is visible in the local preview window, but replay_gpu.capture (which runs in Order::Tooltip)
+        // never captures it into the livestream broadcast.
+        if is_preroll_active {
+            if let Some(rem_secs) = preroll_remaining_secs {
+                draw_preroll_counter_preview(ctx, response.rect, rem_secs);
+            }
+        }
+
         if response.double_clicked() {
             let is_fullscreen = !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(is_fullscreen));
@@ -692,6 +759,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 /// the CRT video surface, any system dialog/overlay is open, or if the
 /// dictionary popup is active and rendered on top of the CRT filter.
 pub fn is_software_mouse_active(state: &AppState, is_on_crt_surface: bool) -> bool {
+    if state.twitch.preroll.is_some() {
+        return false;
+    }
     let filter = CrtFilter::from_u8(state.crt_filter.load(Ordering::Relaxed));
     let is_crt_on = filter != CrtFilter::Off;
     let popup_active = state.dict.popup.is_some();
@@ -989,6 +1059,65 @@ pub fn draw_video_file_controls(
     if should_stop {
         state.stop_stream(ctx);
     }
+}
+
+/// Renders a local-only countdown badge over the video preview on Order::Debug.
+/// This executes after the broadcast capture layer (Order::Tooltip), ensuring that the
+/// countdown timer is visible to the streamer in preview but NEVER broadcast to Twitch.
+fn draw_preroll_counter_preview(ctx: &egui::Context, player_rect: egui::Rect, rem_secs: f64) {
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Debug,
+        egui::Id::new("preroll_countdown_preview"),
+    ));
+
+    let mins = (rem_secs / 60.0).floor() as u64;
+    let secs = (rem_secs % 60.0).floor() as u64;
+    let time_str = format!("{:02}:{:02}", mins, secs);
+
+    let badge_width = 140.0;
+    let badge_height = 42.0;
+    let margin = 16.0;
+    let badge_rect = egui::Rect::from_min_size(
+        egui::pos2(
+            player_rect.right() - badge_width - margin,
+            player_rect.top() + margin,
+        ),
+        egui::vec2(badge_width, badge_height),
+    );
+
+    // Subtle dark translucent background with amber/orange border
+    painter.rect_filled(
+        badge_rect,
+        egui::Rounding::same(6.0),
+        egui::Color32::from_rgba_premultiplied(16, 18, 24, 230),
+    );
+    painter.rect_stroke(
+        badge_rect,
+        egui::Rounding::same(6.0),
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(240, 160, 32)),
+    );
+
+    // Indicator dot
+    let dot_center = egui::pos2(badge_rect.left() + 14.0, badge_rect.top() + 13.0);
+    painter.circle_filled(dot_center, 3.5, egui::Color32::from_rgb(240, 160, 32));
+
+    // Label
+    painter.text(
+        egui::pos2(badge_rect.left() + 24.0, badge_rect.top() + 13.0),
+        egui::Align2::LEFT_CENTER,
+        "PRE-ROLL (PREVIEW)",
+        egui::FontId::monospace(9.0),
+        egui::Color32::from_gray(190),
+    );
+
+    // Digital countdown
+    painter.text(
+        egui::pos2(badge_rect.center().x, badge_rect.bottom() - 13.0),
+        egui::Align2::CENTER_CENTER,
+        time_str,
+        egui::FontId::monospace(16.0),
+        egui::Color32::from_rgb(255, 255, 255),
+    );
 }
 
 #[cfg(test)]

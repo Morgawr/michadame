@@ -22,6 +22,10 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         return;
     }
     let tw = &mut state.twitch;
+    if tw.preroll.is_some() {
+        tw.overlay_rect = None;
+        return;
+    }
     if tw.config.chat_overlay_enabled && toggle_pressed(ctx) {
         tw.overlay_hidden = !tw.overlay_hidden;
     }

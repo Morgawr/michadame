@@ -1695,6 +1695,8 @@ crt_brightboost = 1.6
         state.twitch.config.chat_overlay_enabled = true;
         state.twitch.config.overlay_width_pct = 0.3;
         state.twitch.config.message_lifetime_secs = 0;
+        state.twitch.config.preroll_enabled = true;
+        state.twitch.config.preroll_video_path = "/path/to/intro.mp4".into();
         save_config_at(&path, &mut state).unwrap();
 
         let loaded: MichadameConfig = confy::load_path(&path).unwrap();

@@ -12,6 +12,12 @@ const TRANSITION_DURATION: f32 = 0.45;
 /// Updates and lays out the active video alert notice, tessellating it and handing
 /// primitives to `CrtFilterRenderer` to be drawn on the video image.
 pub fn update(state: &mut AppState, ctx: &egui::Context, video_rect: Rect) {
+    if state.twitch.preroll.is_some() {
+        if let Some(r) = &state.crt_renderer {
+            r.lock().unwrap().alert_primitives = Vec::new();
+        }
+        return;
+    }
     let primitives = if state.twitch.config.alerts_enabled {
         if let Some(active) = &state.twitch.alerts.active {
             let now = Instant::now();
