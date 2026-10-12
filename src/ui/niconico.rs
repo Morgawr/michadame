@@ -217,6 +217,7 @@ mod tests {
             fragments: vec![Fragment::Text("こんにちは world".into())],
             kind: crate::twitch::MessageKind::Chat,
             received: start,
+            is_streamer: false,
         };
         tw.spawn_comment(&msg, start, &mut rand::thread_rng());
         let mut shapes = Vec::new();

@@ -50,6 +50,7 @@ pub struct ChatMessage {
     pub fragments: Vec<Fragment>,
     pub kind: MessageKind,
     pub received: Instant,
+    pub is_streamer: bool,
 }
 
 impl ChatMessage {
@@ -62,6 +63,7 @@ impl ChatMessage {
             fragments: vec![Fragment::Text(text.into())],
             kind: MessageKind::System,
             received: now,
+            is_streamer: false,
         }
     }
 }
@@ -538,15 +540,57 @@ impl TwitchState {
         }
     }
 
+    /// Check whether a chat message is from the streamer/broadcaster.
+    pub fn is_streamer(&self, chat: &ChatMessage) -> bool {
+        if chat.is_streamer {
+            return true;
+        }
+        if chat.login.is_empty() {
+            return false;
+        }
+        let channel = if !self.config.channel.is_empty() {
+            normalize_channel(&self.config.channel)
+        } else {
+            normalize_channel(&self.channel_input)
+        };
+        if !channel.is_empty() && chat.login.eq_ignore_ascii_case(&channel) {
+            return true;
+        }
+        if let Some(token) = &self.token {
+            if !token.login.is_empty() && chat.login.eq_ignore_ascii_case(&token.login) {
+                return true;
+            }
+        }
+        if let Some(worker) = &self.worker {
+            if let Some(login) = &worker.login {
+                if !login.is_empty() && chat.login.eq_ignore_ascii_case(login) {
+                    return true;
+                }
+            }
+        }
+        if let Some(self_name) = &self.self_display_name {
+            if !self_name.is_empty()
+                && (chat.login.eq_ignore_ascii_case(self_name)
+                    || chat.display_name.eq_ignore_ascii_case(self_name))
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Store a chat message, firing it as a niconico comment if enabled.
     fn push_chat(&mut self, chat: ChatMessage, now: Instant) {
-        if self.config.niconico_enabled && chat.kind != MessageKind::System {
+        if self.config.niconico_enabled && chat.kind != MessageKind::System && !self.is_streamer(&chat) {
             self.spawn_comment(&chat, now, &mut rand::thread_rng());
         }
         self.messages.push_back(chat);
     }
 
     pub fn spawn_comment(&mut self, chat: &ChatMessage, now: Instant, rng: &mut impl rand::Rng) {
+        if self.is_streamer(chat) {
+            return;
+        }
         let has_content = chat.fragments.iter().any(|f| match f {
             Fragment::Text(t) => !t.trim().is_empty(),
             Fragment::Emote { .. } => true,
@@ -795,6 +839,32 @@ impl TwitchState {
             .to_ascii_lowercase();
         let fragments = emotes::split_fragments(text, msg.tag("emotes"));
         self.emotes.learn(&fragments);
+        let channel_param = msg
+            .params
+            .first()
+            .map(|p| p.trim_start_matches('#'))
+            .unwrap_or("");
+        let is_broadcaster_badge = msg.tag("badges").map_or(false, |badges| {
+            badges.split(',').any(|b| b.starts_with("broadcaster/"))
+        });
+        let is_room_owner = match (msg.tag("room-id"), msg.tag("user-id")) {
+            (Some(room), Some(user)) => !room.is_empty() && room == user,
+            _ => false,
+        };
+        let channel = if !self.config.channel.is_empty() {
+            normalize_channel(&self.config.channel)
+        } else {
+            normalize_channel(&self.channel_input)
+        };
+        let is_streamer = is_broadcaster_badge
+            || is_room_owner
+            || (!login.is_empty() && !channel_param.is_empty() && login.eq_ignore_ascii_case(channel_param))
+            || (!login.is_empty() && !channel.is_empty() && login.eq_ignore_ascii_case(&channel))
+            || self
+                .token
+                .as_ref()
+                .map_or(false, |t| !t.login.is_empty() && !login.is_empty() && login.eq_ignore_ascii_case(&t.login));
+
         Some(ChatMessage {
             id: msg.tag("id").map(str::to_string),
             display_name: msg.tag("display-name").map(str::to_string).unwrap_or_else(|| login.clone()),
@@ -803,6 +873,7 @@ impl TwitchState {
             fragments,
             kind,
             received: now,
+            is_streamer,
         })
     }
 
@@ -838,6 +909,7 @@ impl TwitchState {
             fragments: emotes::split_by_known_names(body, &self.emotes.names),
             kind,
             received: now,
+            is_streamer: true,
         };
         self.push_chat(chat, now);
     }
@@ -1150,6 +1222,60 @@ mod tests {
             }
         }
         assert_eq!(overlaps, 0, "{ys:?}");
+    }
+
+    #[test]
+    fn niconico_comments_skip_streamer_chat() {
+        let mut state = TwitchState::default();
+        state.config.niconico_enabled = true;
+        state.config.channel = "coolstreamer".into();
+        let now = Instant::now();
+
+        // 1. Regular viewer chat spawns a comment and records a message.
+        state.handle_irc(&irc("@id=v1 :viewer!viewer@viewer.tmi.twitch.tv PRIVMSG #coolstreamer :hello"), now);
+        assert_eq!(state.comments.len(), 1);
+        assert_eq!(state.messages.len(), 1);
+
+        // 2. Chat from the channel broadcaster itself (same login as channel) is skipped for comments.
+        state.handle_irc(&irc("@id=s1 :coolstreamer!coolstreamer@coolstreamer.tmi.twitch.tv PRIVMSG #coolstreamer :streamer says hi"), now);
+        assert_eq!(state.comments.len(), 1, "streamer message must not spawn a niconico comment");
+        assert_eq!(state.messages.len(), 2, "streamer message is still recorded in chat overlay");
+
+        // 3. Chat with broadcaster badge is skipped even if channel name differed.
+        state.handle_irc(&irc("@id=b1;badges=broadcaster/1,subscriber/12 :someone!someone@someone.tmi.twitch.tv PRIVMSG #coolstreamer :broadcaster badge"), now);
+        assert_eq!(state.comments.len(), 1);
+        assert_eq!(state.messages.len(), 3);
+
+        // 4. Chat where user-id matches room-id is skipped.
+        state.handle_irc(&irc("@id=r1;room-id=999;user-id=999 :host!host@host.tmi.twitch.tv PRIVMSG #coolstreamer :host message"), now);
+        assert_eq!(state.comments.len(), 1);
+        assert_eq!(state.messages.len(), 4);
+
+        // 5. Chat from token login is skipped.
+        state.token = Some(StoredToken {
+            access_token: "test".into(),
+            refresh_token: None,
+            login: "tokenuser".into(),
+            user_id: "123".into(),
+            client_id: "cid".into(),
+        });
+        state.handle_irc(&irc("@id=t1 :tokenuser!tokenuser@tokenuser.tmi.twitch.tv PRIVMSG #coolstreamer :from authenticated account"), now);
+        assert_eq!(state.comments.len(), 1);
+        assert_eq!(state.messages.len(), 5);
+
+        // 6. Direct spawn_comment call on a streamer message is also skipped.
+        let streamer_msg = ChatMessage {
+            id: Some("direct".into()),
+            login: "coolstreamer".into(),
+            display_name: "CoolStreamer".into(),
+            color: None,
+            fragments: vec![Fragment::Text("direct call".into())],
+            kind: MessageKind::Chat,
+            received: now,
+            is_streamer: true,
+        };
+        state.spawn_comment(&streamer_msg, now, &mut rand::thread_rng());
+        assert_eq!(state.comments.len(), 1, "direct spawn_comment on streamer message must be skipped");
     }
 
     #[test]
