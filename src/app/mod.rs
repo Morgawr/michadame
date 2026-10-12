@@ -228,6 +228,7 @@ impl AppState {
 
         let (msg1, msg2) = crate::dict::render::format_mined_chat_messages(
             &entry.term,
+            &entry.reading,
             &entry.sentence,
             &def,
         );

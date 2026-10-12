@@ -1703,17 +1703,29 @@ pub fn compact_definition_for_chat(entry: &TermEntry) -> String {
 }
 
 /// Formats the two chat messages for a mined vocabulary entry:
-/// - MSG1: `<word> - <sentence>`
+/// - MSG1: `<word>(reading) - <sentence>` (or `<word> - <sentence>` if reading is empty or identical to word)
 /// - MSG2: `<word> - <jitendex definition>`
-pub fn format_mined_chat_messages(term: &str, sentence: &str, definition: &str) -> (String, String) {
+pub fn format_mined_chat_messages(
+    term: &str,
+    reading: &str,
+    sentence: &str,
+    definition: &str,
+) -> (String, String) {
     let clean_term = term.split_whitespace().collect::<Vec<_>>().join(" ");
+    let clean_reading = reading.split_whitespace().collect::<Vec<_>>().join(" ");
     let clean_sentence = sentence.replace(['\r', '\n'], " ").trim().to_string();
     let clean_def = definition.replace(['\r', '\n'], " ").trim().to_string();
 
-    let raw_msg1 = if clean_sentence.is_empty() {
+    let term_with_reading = if clean_reading.is_empty() || clean_reading == clean_term {
         clean_term.clone()
     } else {
-        format!("{clean_term} - {clean_sentence}")
+        format!("{clean_term}({clean_reading})")
+    };
+
+    let raw_msg1 = if clean_sentence.is_empty() {
+        term_with_reading
+    } else {
+        format!("{term_with_reading} - {clean_sentence}")
     };
 
     let raw_msg2 = if clean_def.is_empty() {
@@ -2059,14 +2071,23 @@ mod tests {
 
         let (msg1, msg2) = format_mined_chat_messages(
             &entry.term,
+            &entry.reading,
             "それは、いつまで見ていても飽きることがない。",
             &compacted,
         );
-        assert_eq!(msg1, "飽きる - それは、いつまで見ていても飽きることがない。");
+        assert_eq!(msg1, "飽きる(あきる) - それは、いつまで見ていても飽きることがない。");
         assert_eq!(
             msg2,
             "飽きる - to get tired of / to tire of / to lose interest in || to become sated / to become satiated"
         );
+
+        let (kana_msg1, _) = format_mined_chat_messages(
+            "する",
+            "する",
+            "ゲームをする。",
+            "to do",
+        );
+        assert_eq!(kana_msg1, "する - ゲームをする。");
     }
 
     #[test]
