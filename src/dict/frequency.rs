@@ -128,15 +128,23 @@ impl FreqDatabase {
     }
 
     fn query_single_term_reading(&self, term: &str, reading: &str) -> Option<TermFrequency> {
-        let mut stmt = self
-            .conn
-            .prepare_cached(
-                "SELECT rank, display_value FROM frequencies
-                 WHERE term = ?1 AND (reading = ?2 OR reading IS NULL OR reading = '')
-                 ORDER BY (CASE WHEN reading = ?2 THEN 0 ELSE 1 END), rank ASC
-                 LIMIT 1",
-            )
-            .ok()?;
+        let has_kanji = crate::dict::database::contains_kanji(term);
+        let query = if has_kanji {
+            "SELECT rank, display_value FROM frequencies
+             WHERE term = ?1 AND (reading = ?2 OR reading IS NULL OR reading = '')
+             ORDER BY (CASE WHEN reading = ?2 THEN 0 ELSE 1 END),
+                      (CASE WHEN display_value LIKE '%㋕%' THEN 1 ELSE 0 END),
+                      rank ASC
+             LIMIT 1"
+        } else {
+            "SELECT rank, display_value FROM frequencies
+             WHERE term = ?1 AND (reading = ?2 OR reading IS NULL OR reading = '')
+             ORDER BY (CASE WHEN reading = ?2 THEN 0 ELSE 1 END),
+                      (CASE WHEN display_value LIKE '%㋕%' THEN 0 ELSE 1 END),
+                      rank ASC
+             LIMIT 1"
+        };
+        let mut stmt = self.conn.prepare_cached(query).ok()?;
 
         let mut rows = stmt.query(params![term, reading]).ok()?;
         if let Ok(Some(row)) = rows.next() {
@@ -152,15 +160,21 @@ impl FreqDatabase {
     }
 
     fn query_term_any_reading(&self, term: &str) -> Option<TermFrequency> {
-        let mut stmt = self
-            .conn
-            .prepare_cached(
-                "SELECT rank, display_value FROM frequencies
-                 WHERE term = ?1
-                 ORDER BY rank ASC
-                 LIMIT 1",
-            )
-            .ok()?;
+        let has_kanji = crate::dict::database::contains_kanji(term);
+        let query = if has_kanji {
+            "SELECT rank, display_value FROM frequencies
+             WHERE term = ?1
+             ORDER BY (CASE WHEN display_value LIKE '%㋕%' THEN 1 ELSE 0 END),
+                      rank ASC
+             LIMIT 1"
+        } else {
+            "SELECT rank, display_value FROM frequencies
+             WHERE term = ?1
+             ORDER BY (CASE WHEN display_value LIKE '%㋕%' THEN 0 ELSE 1 END),
+                      rank ASC
+             LIMIT 1"
+        };
+        let mut stmt = self.conn.prepare_cached(query).ok()?;
 
         let mut rows = stmt.query(params![term]).ok()?;
         if let Ok(Some(row)) = rows.next() {
@@ -518,5 +532,49 @@ mod tests {
         let f2 = db.get_frequency("食べる", "").unwrap();
         assert_eq!(f2.rank, 150);
         assert_eq!(f2.display_value.as_deref(), Some("150㋕"));
+    }
+
+    #[test]
+    fn test_kanji_term_prefers_non_kana_frequency() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("freq_test.db");
+        let db = FreqDatabase::open_or_create(&db_path).unwrap();
+
+        db.conn
+            .execute_batch(
+                "
+                INSERT INTO frequencies VALUES ('秋', 'あき', 3170, '3170');
+                INSERT INTO frequencies VALUES ('秋', 'あき', 16132, '16132㋕');
+                INSERT INTO frequencies VALUES ('秋', 'とき', 368, '368㋕');
+                INSERT INTO frequencies VALUES ('秋', 'とき', 280329, '280329');
+                INSERT INTO frequencies VALUES ('とき', NULL, 368, '368㋕');
+                INSERT INTO frequencies VALUES ('あき', NULL, 16132, '16132㋕');
+                ",
+            )
+            .unwrap();
+
+        // Kanji term 秋 with reading あき must get 3170 (not 16132㋕)
+        let f_aki = db.get_frequency("秋", "あき").unwrap();
+        assert_eq!(f_aki.rank, 3170);
+        assert_eq!(f_aki.display_value.as_deref(), Some("3170"));
+        assert!(!f_aki.is_kana_freq());
+
+        // Kanji term 秋 with reading とき must get 280329 (not 368㋕)
+        let f_toki = db.get_frequency("秋", "とき").unwrap();
+        assert_eq!(f_toki.rank, 280329);
+        assert_eq!(f_toki.display_value.as_deref(), Some("280329"));
+        assert!(!f_toki.is_kana_freq());
+
+        // Kana term とき must get 368㋕
+        let f_kana_toki = db.get_frequency("とき", "").unwrap();
+        assert_eq!(f_kana_toki.rank, 368);
+        assert_eq!(f_kana_toki.display_value.as_deref(), Some("368㋕"));
+        assert!(f_kana_toki.is_kana_freq());
+
+        // Kana term あき must get 16132㋕
+        let f_kana_aki = db.get_frequency("あき", "").unwrap();
+        assert_eq!(f_kana_aki.rank, 16132);
+        assert_eq!(f_kana_aki.display_value.as_deref(), Some("16132㋕"));
+        assert!(f_kana_aki.is_kana_freq());
     }
 }

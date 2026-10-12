@@ -233,17 +233,39 @@ pub fn lookup_word_at_pointer(
                 for entry in &mut entries {
                     entry.frequency = fdb.get_frequency(&entry.term, &entry.reading);
                 }
-                // Sort in order of frequency: lowest rank first, unranked last
+                // Sort in order of frequency: lowest rank first, unranked last.
+                // A kana-only reading frequency (marked with ㋕) on a kanji term represents the reading in kana,
+                // not the kanji word itself. Penalize it compared to a genuine kanji frequency.
                 let by_freq = |a: &super::models::TermEntry, b: &super::models::TermEntry| {
-                    match (&a.frequency, &b.frequency) {
-                        (Some(fa), Some(fb)) => fa.rank.cmp(&fb.rank),
-                        (Some(_), None) => std::cmp::Ordering::Less,
-                        (None, Some(_)) => std::cmp::Ordering::Greater,
-                        (None, None) => std::cmp::Ordering::Equal,
+                    let a_kanji = crate::dict::database::contains_kanji(&a.term);
+                    let b_kanji = crate::dict::database::contains_kanji(&b.term);
+
+                    let a_is_kana_on_kanji =
+                        a_kanji && a.frequency.as_ref().map_or(false, |f| f.is_kana_freq());
+                    let b_is_kana_on_kanji =
+                        b_kanji && b.frequency.as_ref().map_or(false, |f| f.is_kana_freq());
+
+                    match (a_is_kana_on_kanji, b_is_kana_on_kanji) {
+                        (false, true) if a.frequency.is_some() => std::cmp::Ordering::Less,
+                        (true, false) if b.frequency.is_some() => std::cmp::Ordering::Greater,
+                        _ => match (&a.frequency, &b.frequency) {
+                            (Some(fa), Some(fb)) => fa.rank.cmp(&fb.rank),
+                            (Some(_), None) => std::cmp::Ordering::Less,
+                            (None, Some(_)) => std::cmp::Ordering::Greater,
+                            (None, None) => std::cmp::Ordering::Equal,
+                        },
                     }
                 };
                 let mut tagged: Vec<_> = groups.into_iter().zip(entries).collect();
-                tagged.sort_by(|(ga, a), (gb, b)| ga.cmp(gb).then_with(|| by_freq(a, b)));
+                tagged.sort_by(|(ga, a), (gb, b)| {
+                    ga.cmp(gb)
+                        .then_with(|| by_freq(a, b))
+                        .then_with(|| {
+                            b.score
+                                .partial_cmp(&a.score)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                });
                 entries = tagged.into_iter().map(|(_, e)| e).collect();
             }
 
@@ -929,6 +951,69 @@ mod tests {
         assert_eq!(popup.entries[1].frequency.as_ref().unwrap().rank, 800);
         assert_eq!(popup.entries[2].frequency.as_ref().unwrap().rank, 3500);
         assert!(popup.entries[3].frequency.is_none());
+    }
+
+    #[test]
+    fn test_lookup_kanji_reading_priority_over_kana_freq() {
+        let dir = tempdir().unwrap();
+        let dict_path = dir.path().join("test_dict.db");
+        let freq_path = dir.path().join("test_freq.db");
+
+        let dict_db = DictDatabase::open_or_create(&dict_path).unwrap();
+        dict_db
+            .conn
+            .execute_batch(
+                "
+                INSERT INTO terms VALUES ('秋', 'とき', 'n', '', 98.0, '[\"time\"]', 1, '');
+                INSERT INTO terms VALUES ('秋', 'あき', 'n', '', 200.0, '[\"autumn\"]', 2, '');
+                ",
+            )
+            .unwrap();
+
+        let freq_db = crate::dict::FreqDatabase::open_or_create(&freq_path).unwrap();
+        freq_db
+            .conn
+            .execute_batch(
+                "
+                INSERT INTO frequencies VALUES ('秋', 'あき', 3170, '3170');
+                INSERT INTO frequencies VALUES ('秋', 'あき', 16132, '16132㋕');
+                INSERT INTO frequencies VALUES ('秋', 'とき', 368, '368㋕');
+                INSERT INTO frequencies VALUES ('秋', 'とき', 280329, '280329');
+                INSERT INTO frequencies VALUES ('とき', NULL, 368, '368㋕');
+                ",
+            )
+            .unwrap();
+
+        let ocr_box = OcrBox {
+            text: "秋".to_string(),
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.1,
+            height: 0.1,
+            lines: Vec::new(),
+        };
+
+        let video_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
+        let popup = lookup_word_at_pointer(
+            egui::pos2(500.0, 300.0),
+            &[ocr_box],
+            video_rect,
+            Some(&dict_db),
+            Some(&freq_db),
+            global_deinflector(),
+            &[],
+            None,
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(popup.matched_term, "秋");
+        assert_eq!(popup.entries.len(), 2);
+        // 秋(あき) must be prioritized over 秋(とき)
+        assert_eq!(popup.entries[0].reading, "あき");
+        assert_eq!(popup.entries[0].frequency.as_ref().unwrap().rank, 3170);
+        assert_eq!(popup.entries[1].reading, "とき");
+        assert_eq!(popup.entries[1].frequency.as_ref().unwrap().rank, 280329);
     }
 
     /// Hovers over the first character of `text` (single-line box) and returns the popup.

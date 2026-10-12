@@ -449,6 +449,19 @@ pub fn to_alternate_kana(s: &str) -> Option<String> {
     }
 }
 
+/// Returns true if the string contains any CJK Kanji character.
+pub fn contains_kanji(s: &str) -> bool {
+    s.chars().any(|c| {
+        matches!(
+            c,
+            '\u{3400}'..='\u{4DBF}'
+                | '\u{4E00}'..='\u{9FFF}'
+                | '\u{F900}'..='\u{FAFF}'
+                | '\u{20000}'..='\u{2EBE0}'
+        )
+    })
+}
+
 /// Parses the raw JSON glossary string into `GlossaryEntry` items.
 pub fn parse_glossary_json(raw: &str) -> Vec<GlossaryEntry> {
     let Ok(val) = serde_json::from_str::<serde_json::Value>(raw) else {
@@ -577,5 +590,16 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].term, "走る");
         assert_eq!(results[0].reading, "はしる");
+    }
+
+    #[test]
+    fn test_contains_kanji() {
+        assert!(contains_kanji("秋"));
+        assert!(contains_kanji("食べる"));
+        assert!(contains_kanji("危急存亡の秋"));
+        assert!(!contains_kanji("あき"));
+        assert!(!contains_kanji("とき"));
+        assert!(!contains_kanji("ラーメン"));
+        assert!(!contains_kanji("abc 123 !?"));
     }
 }
