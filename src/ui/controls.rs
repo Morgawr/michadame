@@ -521,6 +521,20 @@ fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool
             *changed = true;
         }
 
+        if ui
+            .checkbox(
+                &mut state.twitch.config.share_mined_words_to_chat,
+                "Share mined words to Twitch chat (when live)",
+            )
+            .on_hover_text(
+                "When live streaming, automatically posts newly mined words with their sentence and Jitendex definition into Twitch chat.",
+            )
+            .changed()
+        {
+            crate::config::save_config(state);
+            *changed = true;
+        }
+
         ui.label(
             egui::RichText::new("Space = capture OCR, Shift + Space = clear OCR boxes")
                 .monospace()

@@ -69,6 +69,7 @@ pub enum DeckButtonKind {
     Webcam,
     ScrollingChat,
     Alerts,
+    ShareVocab,
 }
 
 /// Renders a square "Stream Deck" hardware button.
@@ -376,6 +377,66 @@ pub fn draw_deck_button(
                     egui::pos2(icon_center.x + 1.5, icon_center.y - 7.5),
                     1.2,
                     bg_color,
+                );
+            }
+            DeckButtonKind::ShareVocab => {
+                // Open dictionary book with text lines
+                let left_page = [
+                    egui::pos2(icon_center.x - 1.5, icon_center.y - 8.0),
+                    egui::pos2(icon_center.x - 13.0, icon_center.y - 10.0),
+                    egui::pos2(icon_center.x - 13.0, icon_center.y + 7.0),
+                    egui::pos2(icon_center.x - 1.5, icon_center.y + 9.0),
+                ];
+                painter.add(egui::Shape::convex_polygon(
+                    left_page.to_vec(),
+                    bg_color,
+                    egui::Stroke::new(1.8, icon_color),
+                ));
+                let right_page = [
+                    egui::pos2(icon_center.x + 1.5, icon_center.y - 8.0),
+                    egui::pos2(icon_center.x + 13.0, icon_center.y - 10.0),
+                    egui::pos2(icon_center.x + 13.0, icon_center.y + 7.0),
+                    egui::pos2(icon_center.x + 1.5, icon_center.y + 9.0),
+                ];
+                painter.add(egui::Shape::convex_polygon(
+                    right_page.to_vec(),
+                    bg_color,
+                    egui::Stroke::new(1.8, icon_color),
+                ));
+                painter.line_segment(
+                    [
+                        egui::pos2(icon_center.x, icon_center.y - 7.5),
+                        egui::pos2(icon_center.x, icon_center.y + 9.5),
+                    ],
+                    egui::Stroke::new(2.0, icon_color),
+                );
+                painter.line_segment(
+                    [
+                        egui::pos2(icon_center.x - 10.0, icon_center.y - 4.5),
+                        egui::pos2(icon_center.x - 4.0, icon_center.y - 3.5),
+                    ],
+                    egui::Stroke::new(1.4, icon_color),
+                );
+                painter.line_segment(
+                    [
+                        egui::pos2(icon_center.x - 10.0, icon_center.y + 0.5),
+                        egui::pos2(icon_center.x - 4.0, icon_center.y + 1.5),
+                    ],
+                    egui::Stroke::new(1.4, icon_color),
+                );
+                painter.line_segment(
+                    [
+                        egui::pos2(icon_center.x + 4.0, icon_center.y - 3.5),
+                        egui::pos2(icon_center.x + 10.0, icon_center.y - 4.5),
+                    ],
+                    egui::Stroke::new(1.4, icon_color),
+                );
+                painter.line_segment(
+                    [
+                        egui::pos2(icon_center.x + 4.0, icon_center.y + 1.5),
+                        egui::pos2(icon_center.x + 10.0, icon_center.y + 0.5),
+                    ],
+                    egui::Stroke::new(1.4, icon_color),
                 );
             }
         }
@@ -763,14 +824,16 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
 
     ui.add_space(10.0);
 
-    // 3. Mini-grid of 5 Stream Deck square buttons side-by-side
-    // Replay buffer | Microphone | Webcam | Scrolling chat | Video alerts
+    // 3. Mini-grid of 6 Stream Deck square buttons in a 3x2 grid
+    // Row 1: Replay buffer | Microphone | Webcam
+    // Row 2: Scrolling chat | Video alerts | Share mined vocab
     let btn_size = 78.0;
-    let btn_gap = 12.0;
-    let total_grid_w = 5.0 * btn_size + 4.0 * btn_gap;
+    let btn_gap = 14.0;
+    let total_grid_w = 3.0 * btn_size + 2.0 * btn_gap;
     let avail_w = ui.available_width();
     let side_padding = ((avail_w - total_grid_w) / 2.0).max(0.0);
 
+    // Row 1: Production inputs (Replay, Mic, Cam)
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         if side_padding > 0.0 {
@@ -866,7 +929,19 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
             changed = true;
         }
 
-        ui.add_space(btn_gap);
+        if side_padding > 0.0 {
+            ui.add_space(side_padding);
+        }
+    });
+
+    ui.add_space(8.0);
+
+    // Row 2: Stream interactions & overlay features (Chat, Alerts, Vocab)
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        if side_padding > 0.0 {
+            ui.add_space(side_padding);
+        }
 
         // Deck Button 4: Scrolling Chat
         let chat_enabled = state.twitch.config.niconico_enabled;
@@ -906,12 +981,32 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
             changed = true;
         }
 
+        ui.add_space(btn_gap);
+
+        // Deck Button 6: Share Mined Vocab to Chat
+        let vocab_enabled = state.twitch.config.share_mined_words_to_chat;
+        if draw_deck_button(
+            ui,
+            DeckButtonKind::ShareVocab,
+            "VOCAB",
+            vocab_enabled,
+            "Share Mined Vocab: Click to toggle sharing newly mined words to Twitch chat while live",
+            btn_size,
+        )
+        .clicked()
+        {
+            state.twitch.config.share_mined_words_to_chat = !state.twitch.config.share_mined_words_to_chat;
+            state.twitch.config_dirty = false;
+            crate::config::save_config(state);
+            changed = true;
+        }
+
         if side_padding > 0.0 {
             ui.add_space(side_padding);
         }
     });
 
-    ui.add_space(14.0);
+    ui.add_space(12.0);
 
     // 4. Two horizontal bars with volume sliders (as implemented with embedded VU meters)
     let label_width = 115.0;
@@ -1245,6 +1340,7 @@ mod tests {
             ("ALERTS", "Alerts: Click to toggle animated on-screen event popups"),
             ("MIC", "Microphone: Click to toggle live voice capture into the stream"),
             ("CAM", "Webcam: Click to toggle webcam overlay feed"),
+            ("VOCAB", "Share Mined Vocab: Click to toggle sharing newly mined words to Twitch chat while live"),
         ];
         for (label, tooltip) in quick_buttons {
             assert!(label.chars().all(|c| c.is_ascii()), "Label contains non-ascii: {}", label);
@@ -1256,22 +1352,30 @@ mod tests {
     fn test_studio_quick_deck_buttons_equal_padding_and_no_overflow() {
         let avail_w: f32 = 464.0; // STUDIO_WINDOW_SIZE[0] (480.0) - 16.0 (central panel margins)
         let btn_size: f32 = 78.0;
-        let btn_gap: f32 = 12.0;
-        let num_buttons: f32 = 5.0;
-        let total_grid_w = num_buttons * btn_size + (num_buttons - 1.0) * btn_gap;
+        let btn_gap: f32 = 14.0;
+        let cols_per_row: f32 = 3.0;
+        let total_grid_w = cols_per_row * btn_size + (cols_per_row - 1.0) * btn_gap;
         let side_padding = ((avail_w - total_grid_w) / 2.0).max(0.0);
 
         // Verify total width fits within available width
         assert!(total_grid_w <= avail_w);
-        assert_eq!(total_grid_w, 438.0);
-        assert_eq!(side_padding, 13.0);
+        assert_eq!(total_grid_w, 262.0);
+        assert_eq!(side_padding, 101.0);
 
-        // Distance from left window edge: 8.0 panel margin + 13.0 side padding = 21.0
+        // Distance from left window edge: 8.0 panel margin + 101.0 side padding = 109.0
         let left_dist = 8.0 + side_padding;
-        // Distance from right window edge: 480.0 - (8.0 + side_padding + total_grid_w) = 21.0
+        // Distance from right window edge: 480.0 - (8.0 + side_padding + total_grid_w) = 109.0
         let right_dist = 480.0 - (8.0 + side_padding + total_grid_w);
         assert!((left_dist - right_dist).abs() < 1e-4);
-        assert_eq!(left_dist, 21.0);
-        assert_eq!(right_dist, 21.0);
+        assert_eq!(left_dist, 109.0);
+        assert_eq!(right_dist, 109.0);
+    }
+
+    #[test]
+    fn test_vocab_toggle_state() {
+        let mut state = AppState::default();
+        assert!(!state.twitch.config.share_mined_words_to_chat);
+        state.twitch.config.share_mined_words_to_chat = true;
+        assert!(state.twitch.config.share_mined_words_to_chat);
     }
 }

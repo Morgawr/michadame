@@ -205,6 +205,37 @@ impl AppState {
         self.dict.popup = None;
     }
 
+    /// If live and configured, shares newly mined vocabulary to Twitch chat as two messages:
+    /// - MSG1: `<word> - <sentence>`
+    /// - MSG2: `<word> - <jitendex definition>`
+    pub fn maybe_share_mined_word_to_twitch(&mut self, entry: &crate::bank::BankEntryMeta) {
+        if !self.twitch.config.share_mined_words_to_chat {
+            return;
+        }
+        if !self.twitch.is_stream_live() {
+            return;
+        }
+        if !self.twitch.can_send() {
+            return;
+        }
+
+        let term_entry = crate::bank::entry_from_json(&entry.term, &entry.reading, &entry.definition_json);
+        let def = if let Some(e) = term_entry {
+            crate::dict::render::compact_definition_for_chat(&e)
+        } else {
+            entry.definition_text.clone()
+        };
+
+        let (msg1, msg2) = crate::dict::render::format_mined_chat_messages(
+            &entry.term,
+            &entry.sentence,
+            &def,
+        );
+
+        self.twitch.send_chat_message(&msg1);
+        self.twitch.send_chat_message(&msg2);
+    }
+
     /// Checks OCR timeout and clears expired scans when no dictionary popup is open.
     ///
     /// If a dictionary popup is open (mouse hovering on a word or inside the popup),
@@ -764,6 +795,9 @@ impl eframe::App for AppState {
             }
             repaint_requested = true;
         }
+        for mined in self.bank.take_newly_mined() {
+            self.maybe_share_mined_word_to_twitch(&mined);
+        }
         if self.bank.is_busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
@@ -945,5 +979,49 @@ mod tests {
         assert!(state.ui.studio_window_open);
         state.ui.studio_window_open = !state.ui.studio_window_open;
         assert!(!state.ui.studio_window_open);
+    }
+
+    #[test]
+    fn test_maybe_share_mined_word_to_twitch_conditions() {
+        let mut state = AppState::default();
+        let entry = crate::bank::BankEntryMeta {
+            id: 1,
+            created_at: 100,
+            term: "飽きる".into(),
+            reading: "あきる".into(),
+            definition_text: "to get tired of".into(),
+            definition_json: serde_json::json!({
+                "term": "飽きる",
+                "reading": "あきる",
+                "glossary": ["to get tired of / to tire of"]
+            }).to_string(),
+            sentence: "それは、いつまで見ていても飽きることがない。".into(),
+            word_range: (14, 17),
+            has_screenshot: false,
+            tag: None,
+        };
+
+        // 1. Disabled toggle -> does nothing
+        state.twitch.config.share_mined_words_to_chat = false;
+        state.twitch.stream_status = crate::twitch::StreamStatus::Live { viewer_count: Some(5) };
+        state.maybe_share_mined_word_to_twitch(&entry);
+        assert_eq!(state.twitch.messages.len(), 0);
+
+        // 2. Enabled toggle but stream offline -> does nothing
+        state.twitch.config.share_mined_words_to_chat = true;
+        state.twitch.stream_status = crate::twitch::StreamStatus::Offline;
+        state.maybe_share_mined_word_to_twitch(&entry);
+        assert_eq!(state.twitch.messages.len(), 0);
+
+        // 3. Enabled toggle, stream unknown -> does nothing
+        state.twitch.stream_status = crate::twitch::StreamStatus::Unknown("checking".into());
+        state.maybe_share_mined_word_to_twitch(&entry);
+        assert_eq!(state.twitch.messages.len(), 0);
+
+        // 4. Enabled toggle, stream is live, but not connected/authenticated -> does nothing
+        state.twitch.stream_status = crate::twitch::StreamStatus::Live { viewer_count: Some(5) };
+        assert!(!state.twitch.can_send());
+        state.maybe_share_mined_word_to_twitch(&entry);
+        assert_eq!(state.twitch.messages.len(), 0);
     }
 }

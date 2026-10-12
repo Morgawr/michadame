@@ -366,6 +366,8 @@ pub struct BankState {
     pub custom_names_generation: u64,
     /// Modal dialog state for adding a custom name in the word bank window.
     pub add_name_dialog: AddNameDialogState,
+    /// Entries newly saved in the most recent poll ticks, drained by the app to share with chat.
+    pub newly_mined: Vec<BankEntryMeta>,
 }
 
 /// Modal dialog state for adding a custom name in the word bank window.
@@ -449,6 +451,7 @@ impl BankState {
             custom_names,
             custom_names_generation: 1,
             add_name_dialog: AddNameDialogState::default(),
+            newly_mined: Vec::new(),
         };
         state.rebuild_keys();
         state
@@ -685,6 +688,7 @@ impl BankState {
                         .iter()
                         .position(|e| e.created_at <= meta.created_at)
                         .unwrap_or(self.entries.len());
+                    self.newly_mined.push(meta.clone());
                     self.entries.insert(pos, meta);
                     self.rebuild_known_tags();
                 }
@@ -702,6 +706,11 @@ impl BankState {
             }
         }
         messages
+    }
+
+    /// Drains entries that were newly saved during recent `poll` updates.
+    pub fn take_newly_mined(&mut self) -> Vec<BankEntryMeta> {
+        std::mem::take(&mut self.newly_mined)
     }
 
     /// True while a mining request is waiting for a capture or being saved, or copying a screenshot.

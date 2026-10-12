@@ -250,6 +250,11 @@ impl TwitchState {
         self.broadcast.as_ref().map_or(false, |b| b.is_live())
     }
 
+    /// Returns true if Michadame is broadcasting or Twitch reports the channel as Live.
+    pub fn is_stream_live(&self) -> bool {
+        self.is_broadcasting() || matches!(self.stream_status, StreamStatus::Live { .. })
+    }
+
     pub fn broadcast_metrics(&self) -> Option<Arc<BroadcastMetrics>> {
         self.broadcast.as_ref().map(|b| b.metrics.clone())
     }
@@ -490,7 +495,11 @@ impl TwitchState {
     /// token (public client); otherwise the status is reported as unknown.
     fn sync_live_poller(&mut self, ctx: &egui::Context) {
         let channel = self.config.channel.clone();
-        let wanted = (self.config.chat_overlay_enabled || self.is_broadcasting() || self.studio_active) && !channel.is_empty();
+        let wanted = (self.config.chat_overlay_enabled
+            || self.is_broadcasting()
+            || self.studio_active
+            || self.config.share_mined_words_to_chat)
+            && !channel.is_empty();
         if !wanted {
             self.live_poller = None;
             self.stream_status = StreamStatus::Unknown(String::new());
@@ -517,7 +526,10 @@ impl TwitchState {
     /// Start/stop/restart the IRC worker to match the settings.
     fn sync_connection(&mut self, ctx: &egui::Context) {
         let channel = self.config.channel.clone();
-        let wanted = (self.config.chat_overlay_enabled || self.config.niconico_enabled) && !channel.is_empty();
+        let wanted = (self.config.chat_overlay_enabled
+            || self.config.niconico_enabled
+            || self.config.share_mined_words_to_chat)
+            && !channel.is_empty();
         let login = self.token.as_ref().map(|t| t.login.clone());
         let up_to_date = self
             .worker
@@ -877,6 +889,36 @@ impl TwitchState {
         })
     }
 
+    /// Sends an arbitrary chat message over IRC and echoes it locally in chat.
+    pub fn send_chat_message(&mut self, text: &str) -> bool {
+        let text = text.trim();
+        if text.is_empty() || !self.can_send() {
+            return false;
+        }
+        let Some(worker) = &self.worker else {
+            return false;
+        };
+        worker.send_privmsg(text);
+        let now = Instant::now();
+        let login = self.token.as_ref().map(|t| t.login.clone()).unwrap_or_default();
+        let (body, kind) = match text.strip_prefix("/me ") {
+            Some(b) => (b, MessageKind::Action),
+            None => (text, MessageKind::Chat),
+        };
+        let chat = ChatMessage {
+            id: None,
+            display_name: self.self_display_name.clone().unwrap_or_else(|| login.clone()),
+            login,
+            color: self.self_color,
+            fragments: emotes::split_by_known_names(body, &self.emotes.names),
+            kind,
+            received: now,
+            is_streamer: true,
+        };
+        self.push_chat(chat, now);
+        true
+    }
+
     /// Send the current input line and echo it locally.
     pub fn send_input(&mut self) {
         let text = self.input.trim().to_string();
@@ -892,26 +934,7 @@ impl TwitchState {
             ));
             return;
         }
-        let Some(worker) = &self.worker else {
-            return;
-        };
-        worker.send_privmsg(&text);
-        let login = self.token.as_ref().map(|t| t.login.clone()).unwrap_or_default();
-        let (body, kind) = match text.strip_prefix("/me ") {
-            Some(b) => (b, MessageKind::Action),
-            None => (text.as_str(), MessageKind::Chat),
-        };
-        let chat = ChatMessage {
-            id: None,
-            display_name: self.self_display_name.clone().unwrap_or_else(|| login.clone()),
-            login,
-            color: self.self_color,
-            fragments: emotes::split_by_known_names(body, &self.emotes.names),
-            kind,
-            received: now,
-            is_streamer: true,
-        };
-        self.push_chat(chat, now);
+        self.send_chat_message(&text);
     }
 
     pub fn trim_messages(&mut self, now: Instant) {

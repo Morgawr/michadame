@@ -58,6 +58,9 @@ pub struct TwitchConfig {
     pub alert_bits: bool,
     pub alert_raids: bool,
     pub alert_min_bits: u32,
+
+    /// Automatically share newly mined words to Twitch chat while live streaming.
+    pub share_mined_words_to_chat: bool,
 }
 
 impl Default for TwitchConfig {
@@ -91,6 +94,8 @@ impl Default for TwitchConfig {
             alert_bits: true,
             alert_raids: true,
             alert_min_bits: 1,
+
+            share_mined_words_to_chat: false,
         }
     }
 }

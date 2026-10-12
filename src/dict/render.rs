@@ -1597,6 +1597,137 @@ pub fn glossary_plain_text(entry: &TermEntry) -> String {
         .join("\n")
 }
 
+/// Maximum message length supported by Twitch IRC PRIVMSG.
+pub const TWITCH_MAX_MESSAGE_CHARS: usize = 500;
+
+/// Truncates a message to `max_chars` code points, appending trailing `...` if truncated.
+pub fn truncate_chat_message(text: &str, max_chars: usize) -> String {
+    let char_count = text.chars().count();
+    if char_count <= max_chars {
+        text.to_string()
+    } else {
+        let cutoff = max_chars.saturating_sub(3);
+        let prefix: String = text.chars().take(cutoff).collect();
+        format!("{}...", prefix.trim_end())
+    }
+}
+
+/// Compacts a dictionary entry into a single-line summary suitable for Twitch chat:
+/// - Up to 3 English equivalent translations per definition/sense separated by ` / `.
+/// - Multiple definitions/senses separated by ` || `.
+/// - Omit extra details like example sentences, frequency, tags, or deinflection trail.
+pub fn compact_definition_for_chat(entry: &TermEntry) -> String {
+    let mut senses: Vec<String> = Vec::new();
+
+    for item in &entry.glossary {
+        match item {
+            GlossaryEntry::Text(text) => {
+                let text = strip_html_tags(text);
+                let text = text.replace(['\r', '\n'], " ");
+                let parts: Vec<String> = text
+                    .split(';')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .take(3)
+                    .collect();
+                if !parts.is_empty() {
+                    senses.push(parts.join(" / "));
+                }
+            }
+            GlossaryEntry::Structured(val) => {
+                if let Some((term, _reasons)) = as_deinflection_glossary(val) {
+                    senses.push(term.to_string());
+                    continue;
+                }
+                let mut sense_nodes = Vec::new();
+                collect_nodes_by_data_content(val, "sense", &mut sense_nodes);
+                if sense_nodes.is_empty() {
+                    let mut defs = Vec::new();
+                    if let Some(glossary_node) = find_node_by_data_content(val, "glossary") {
+                        collect_definitions(glossary_node, &mut defs);
+                    }
+                    let sense_str = if !defs.is_empty() {
+                        defs.into_iter()
+                            .map(|d| d.replace(['\r', '\n'], " ").trim().to_string())
+                            .filter(|d| !d.is_empty())
+                            .take(3)
+                            .collect::<Vec<_>>()
+                            .join(" / ")
+                    } else {
+                        let text = extract_plain_text_excluding_extras(val).replace(['\r', '\n'], " ");
+                        let parts: Vec<String> = text
+                            .split(';')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .take(3)
+                            .collect();
+                        parts.join(" / ")
+                    };
+                    if !sense_str.is_empty() {
+                        senses.push(sense_str);
+                    }
+                } else {
+                    for sense in sense_nodes {
+                        let mut defs = Vec::new();
+                        if let Some(glossary_node) = find_node_by_data_content(sense, "glossary") {
+                            collect_definitions(glossary_node, &mut defs);
+                        }
+                        let sense_str = if !defs.is_empty() {
+                            defs.into_iter()
+                                .map(|d| d.replace(['\r', '\n'], " ").trim().to_string())
+                                .filter(|d| !d.is_empty())
+                                .take(3)
+                                .collect::<Vec<_>>()
+                                .join(" / ")
+                        } else {
+                            let text = extract_plain_text_excluding_extras(sense).replace(['\r', '\n'], " ");
+                            let parts: Vec<String> = text
+                                .split(';')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .take(3)
+                                .collect();
+                            parts.join(" / ")
+                        };
+                        if !sense_str.is_empty() {
+                            senses.push(sense_str);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let joined = senses.join(" || ");
+    joined.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Formats the two chat messages for a mined vocabulary entry:
+/// - MSG1: `<word> - <sentence>`
+/// - MSG2: `<word> - <jitendex definition>`
+pub fn format_mined_chat_messages(term: &str, sentence: &str, definition: &str) -> (String, String) {
+    let clean_term = term.split_whitespace().collect::<Vec<_>>().join(" ");
+    let clean_sentence = sentence.replace(['\r', '\n'], " ").trim().to_string();
+    let clean_def = definition.replace(['\r', '\n'], " ").trim().to_string();
+
+    let raw_msg1 = if clean_sentence.is_empty() {
+        clean_term.clone()
+    } else {
+        format!("{clean_term} - {clean_sentence}")
+    };
+
+    let raw_msg2 = if clean_def.is_empty() {
+        clean_term
+    } else {
+        format!("{clean_term} - {clean_def}")
+    };
+
+    let msg1 = truncate_chat_message(&raw_msg1, TWITCH_MAX_MESSAGE_CHARS);
+    let msg2 = truncate_chat_message(&raw_msg2, TWITCH_MAX_MESSAGE_CHARS);
+
+    (msg1, msg2)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1867,6 +1998,90 @@ mod tests {
                 baseline_y
             );
         }
+    }
+
+    #[test]
+    fn test_compact_definition_for_chat_matching_spec() {
+        let entry = TermEntry {
+            term: "飽きる".into(),
+            reading: "あきる".into(),
+            definition_tags: None,
+            rules: "".into(),
+            score: 0.0,
+            glossary: vec![GlossaryEntry::Structured(serde_json::json!({
+                "type": "structured-content",
+                "content": [
+                    {
+                        "tag": "div",
+                        "data": { "content": "sense" },
+                        "content": [
+                            {
+                                "tag": "ul",
+                                "data": { "content": "glossary" },
+                                "content": [
+                                    { "tag": "li", "content": "to get tired of" },
+                                    { "tag": "li", "content": "to tire of" },
+                                    { "tag": "li", "content": "to lose interest in" },
+                                    { "tag": "li", "content": "to be fed up with" }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "tag": "div",
+                        "data": { "content": "sense" },
+                        "content": [
+                            {
+                                "tag": "ul",
+                                "data": { "content": "glossary" },
+                                "content": [
+                                    { "tag": "li", "content": "to become sated" },
+                                    { "tag": "li", "content": "to become satiated" }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }))],
+            sequence: 1,
+            term_tags: None,
+            inflection_reasons: vec![],
+            frequency: None,
+            custom_name_id: None,
+            custom_tag: None,
+        };
+
+        let compacted = compact_definition_for_chat(&entry);
+        assert_eq!(
+            compacted,
+            "to get tired of / to tire of / to lose interest in || to become sated / to become satiated"
+        );
+
+        let (msg1, msg2) = format_mined_chat_messages(
+            &entry.term,
+            "それは、いつまで見ていても飽きることがない。",
+            &compacted,
+        );
+        assert_eq!(msg1, "飽きる - それは、いつまで見ていても飽きることがない。");
+        assert_eq!(
+            msg2,
+            "飽きる - to get tired of / to tire of / to lose interest in || to become sated / to become satiated"
+        );
+    }
+
+    #[test]
+    fn test_truncate_chat_message_edge_cases() {
+        let short = "飽きる - 短い文";
+        assert_eq!(truncate_chat_message(short, 500), short);
+
+        let exactly_500: String = "a".repeat(500);
+        assert_eq!(truncate_chat_message(&exactly_500, 500), exactly_500);
+
+        let over_500: String = "a".repeat(505);
+        let truncated = truncate_chat_message(&over_500, 500);
+        assert_eq!(truncated.chars().count(), 500);
+        assert!(truncated.ends_with("..."));
+        assert_eq!(truncated, format!("{}...", "a".repeat(497)));
     }
 }
 
