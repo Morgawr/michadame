@@ -100,26 +100,33 @@ pub fn check_toggle_key(ctx: &egui::Context, key: egui::Key) -> bool {
 }
 
 pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
-    state.replay.shortcuts(ctx);
+    let gamescope_passthrough = state
+        .gamescope_hook
+        .as_ref()
+        .map_or(false, |h| h.is_active && h.passthrough_enabled);
+
     let mut hotkey_repaint = false;
-    if check_toggle_key(ctx, egui::Key::L) {
-        state.ui.studio_window_open = !state.ui.studio_window_open;
-        hotkey_repaint = true;
-    }
-    if check_toggle_key(ctx, egui::Key::B) {
-        state.bank.window_open = !state.bank.window_open;
-        if !state.bank.window_open {
-            state.bank.enlarged = None;
+    if !gamescope_passthrough {
+        state.replay.shortcuts(ctx);
+        if check_toggle_key(ctx, egui::Key::L) {
+            state.ui.studio_window_open = !state.ui.studio_window_open;
+            hotkey_repaint = true;
         }
-        hotkey_repaint = true;
-    }
-    // Ignore Space while typing in a text field (e.g. the mining tag).
-    if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-        if ctx.input(|i| i.modifiers.shift) {
-            state.clear_ocr();
-        } else {
-            println!("Spacebar pressed, sending command...");
-            send_ws_command(serde_json::json!({"command": "manual_ocr"}));
+        if check_toggle_key(ctx, egui::Key::B) {
+            state.bank.window_open = !state.bank.window_open;
+            if !state.bank.window_open {
+                state.bank.enlarged = None;
+            }
+            hotkey_repaint = true;
+        }
+        // Ignore Space while typing in a text field (e.g. the mining tag).
+        if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+            if ctx.input(|i| i.modifiers.shift) {
+                state.clear_ocr();
+            } else {
+                println!("Spacebar pressed, sending command...");
+                send_ws_command(serde_json::json!({"command": "manual_ocr"}));
+            }
         }
     }
 

@@ -73,8 +73,29 @@ fn capture_frame_pixels(
 pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) {
     state.ocr.start_worker(Some(ctx.clone()));
 
-    // Space to capture OCR; Shift+Space to clear OCR boxes
-    if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+    let is_gamescope = state.gamescope_hook.as_ref().map_or(false, |h| h.is_active);
+    let mut passthrough_active = false;
+    if is_gamescope {
+        let toggle_passthrough = ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
+        if toggle_passthrough {
+            if let Some(hook) = &mut state.gamescope_hook {
+                let now_enabled = hook.toggle_passthrough();
+                if !now_enabled {
+                    ctx.memory_mut(|m| {
+                        m.stop_text_input();
+                        if let Some(id) = m.focused() {
+                            m.surrender_focus(id);
+                        }
+                    });
+                }
+                ctx.request_repaint();
+            }
+        }
+        passthrough_active = state.gamescope_hook.as_ref().map_or(false, |h| h.passthrough_enabled);
+    }
+
+    // Space to capture OCR; Shift+Space to clear OCR boxes (suppressed when passthrough is active)
+    if !passthrough_active && !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
         if ctx.input(|i| i.modifiers.shift) {
             if !state.ocr.boxes.is_empty() {
                 state.clear_ocr();
@@ -137,6 +158,11 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         let latest_frame_dim = active_frame.as_ref().map(|f| (f.width, f.height));
         let res = latest_frame_dim
             .or_else(|| {
+                if let Some(hook) = &state.gamescope_hook {
+                    if hook.is_active {
+                        return Some(hook.resolution());
+                    }
+                }
                 if state.hardware.selected_resolution.0 > 0 {
                     Some(state.hardware.selected_resolution)
                 } else {
@@ -164,6 +190,22 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             rendered_area_geom.height as f32 / ppp,
         );
         let video_rect = egui::Rect::from_min_size(video_rect_min, video_rect_size);
+
+        if is_gamescope && passthrough_active {
+            if let Some(ref mut hook) = state.gamescope_hook {
+                let target_res = hook.resolution();
+                forward_gamescope_inputs(hook, ctx, video_rect, target_res);
+            }
+            if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
+                if video_rect.contains(pos) {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+                }
+            }
+            // Consume key and text events so game inputs don't leak into egui widgets while passthrough is on
+            ctx.input_mut(|i| {
+                i.events.retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
+            });
+        }
 
         let cathode_params = video::gpu::CathodeInterferenceShaderParams::from_state(state);
         let time = ui.input(|i| i.time) as f32;
@@ -292,7 +334,15 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
                 let capture_overlays = state.replay.config.capture_overlays;
                 let webcam_enabled = state.webcam.config.enabled;
-                let stream_res = state.hardware.selected_resolution;
+                let stream_res = if let Some(hook) = &state.gamescope_hook {
+                    if hook.is_active {
+                        hook.resolution()
+                    } else {
+                        state.hardware.selected_resolution
+                    }
+                } else {
+                    state.hardware.selected_resolution
+                };
 
                 let callback = egui::PaintCallback {
                     rect: response.rect,
@@ -526,7 +576,15 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             let bank_capture_cb = bank_capture.clone();
             let capture_overlays = state.replay.config.capture_overlays;
             let webcam_enabled = state.webcam.config.enabled;
-            let stream_res = state.hardware.selected_resolution;
+            let stream_res = if let Some(hook) = &state.gamescope_hook {
+                if hook.is_active {
+                    hook.resolution()
+                } else {
+                    state.hardware.selected_resolution
+                }
+            } else {
+                state.hardware.selected_resolution
+            };
 
             let callback = egui::PaintCallback {
                 rect,
@@ -639,7 +697,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         }
 
         // Draw interactive OCR bounding box overlay on top of the video image
-        if !is_preroll_active {
+        if !is_preroll_active && !passthrough_active {
             crate::ocr::overlay::draw_ocr_overlay(ui, state, video_rect);
         }
 
@@ -744,7 +802,14 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             }
         }
 
-        if response.double_clicked() {
+        // Draw gamescope input paused badge on Order::Debug when hook is active and passthrough is paused.
+        // This is rendered on egui::Order::Debug so it is visible in the local preview window,
+        // but NEVER captured into clips, replay buffer, or Twitch livestream.
+        if is_gamescope && !passthrough_active {
+            draw_gamescope_input_paused_badge(ctx, video_rect);
+        }
+
+        if !passthrough_active && response.double_clicked() {
             let is_fullscreen = !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(is_fullscreen));
         }
@@ -757,6 +822,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 /// dictionary popup is active and rendered on top of the CRT filter.
 pub fn is_software_mouse_active(state: &AppState, is_on_crt_surface: bool) -> bool {
     if state.twitch.preroll.is_some() {
+        return false;
+    }
+    if state.gamescope_hook.as_ref().map_or(false, |h| h.is_active && h.passthrough_enabled) {
         return false;
     }
     let filter = CrtFilter::from_u8(state.crt_filter.load(Ordering::Relaxed));
@@ -1114,6 +1182,128 @@ fn draw_preroll_counter_preview(ctx: &egui::Context, player_rect: egui::Rect, re
         time_str,
         egui::FontId::monospace(16.0),
         egui::Color32::from_rgb(255, 255, 255),
+    );
+}
+
+/// Forwards pointer, button, scroll, keyboard, and modifier inputs to Gamescope virtual input via libei.
+pub fn forward_gamescope_inputs(
+    hook: &mut crate::gamescope::GamescopeHookState,
+    ctx: &egui::Context,
+    video_rect: egui::Rect,
+    target_res: (u32, u32),
+) {
+    if !hook.is_active || !hook.passthrough_enabled {
+        return;
+    }
+
+    let Some(client) = &mut hook.input_client else {
+        return;
+    };
+
+    // Ensure incoming EIS events (seat added, device resumed, etc.) are processed
+    client.dispatch();
+
+    // Forward pointer position
+    if let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) {
+        if video_rect.contains(pos) {
+            let rel_x = ((pos.x - video_rect.min.x) / video_rect.width()).clamp(0.0, 1.0);
+            let rel_y = ((pos.y - video_rect.min.y) / video_rect.height()).clamp(0.0, 1.0);
+            let gs_x = rel_x as f64 * target_res.0 as f64;
+            let gs_y = rel_y as f64 * target_res.1 as f64;
+            client.send_pointer_motion_absolute(gs_x, gs_y);
+        }
+    }
+
+    // Forward modifiers transition
+    let current_modifiers = ctx.input(|i| i.modifiers);
+    if current_modifiers.shift != hook.prev_modifiers.shift {
+        client.send_key(42, current_modifiers.shift);
+    }
+    if current_modifiers.ctrl != hook.prev_modifiers.ctrl {
+        client.send_key(29, current_modifiers.ctrl);
+    }
+    if current_modifiers.alt != hook.prev_modifiers.alt {
+        client.send_key(56, current_modifiers.alt);
+    }
+    if current_modifiers.mac_cmd != hook.prev_modifiers.mac_cmd {
+        client.send_key(125, current_modifiers.mac_cmd);
+    }
+    hook.prev_modifiers = current_modifiers;
+
+    // Forward discrete events
+    let events = ctx.input(|i| i.events.clone());
+    for event in events {
+        match event {
+            egui::Event::PointerButton { pos, button, pressed, .. } => {
+                let btn_code = match button {
+                    egui::PointerButton::Primary => crate::gamescope::input::BTN_LEFT,
+                    egui::PointerButton::Secondary => crate::gamescope::input::BTN_RIGHT,
+                    egui::PointerButton::Middle => crate::gamescope::input::BTN_MIDDLE,
+                    _ => crate::gamescope::input::BTN_LEFT,
+                };
+                if pressed {
+                    if video_rect.contains(pos) {
+                        client.send_button(btn_code, true);
+                    }
+                } else {
+                    client.send_button(btn_code, false);
+                }
+            }
+            egui::Event::MouseWheel { delta, .. } => {
+                client.send_scroll(delta.x as f64, delta.y as f64);
+            }
+            egui::Event::Scroll(delta) => {
+                client.send_scroll(delta.x as f64, delta.y as f64);
+            }
+            egui::Event::Key { key, pressed, modifiers, .. } => {
+                // Ignore Shift+Tab (handled as toggle)
+                if key == egui::Key::Tab && modifiers.shift {
+                    continue;
+                }
+                if let Some(code) = crate::gamescope::input::egui_key_to_evdev(key) {
+                    client.send_key(code, pressed);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Renders a permanent blocked sign overlay badge on Order::Debug when input passthrough is paused.
+/// This executes after the broadcast/replay capture layer (Order::Tooltip), ensuring that the
+/// blocked sign badge is visible to the user locally but NEVER captured into clips, replay buffers, or streams.
+fn draw_gamescope_input_paused_badge(ctx: &egui::Context, video_rect: egui::Rect) {
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Debug,
+        egui::Id::new("gamescope_input_paused_badge"),
+    ));
+
+    let margin = 16.0;
+    let badge_size = egui::vec2(40.0, 40.0);
+    let badge_rect = egui::Rect::from_min_size(
+        video_rect.min + egui::vec2(margin, margin),
+        badge_size,
+    );
+
+    // Dark translucent background with subtle warning red border
+    painter.rect_filled(
+        badge_rect,
+        egui::Rounding::same(6.0),
+        egui::Color32::from_rgba_premultiplied(16, 18, 24, 225),
+    );
+    painter.rect_stroke(
+        badge_rect,
+        egui::Rounding::same(6.0),
+        egui::Stroke::new(1.5, egui::Color32::from_rgb(230, 50, 50)),
+    );
+
+    // 🚫 Blocked sign symbol
+    painter.text(
+        badge_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "🚫",
+        egui::FontId::proportional(22.0),
+        egui::Color32::WHITE,
     );
 }
 

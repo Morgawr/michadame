@@ -2,6 +2,31 @@ use prost::Message;
 use std::sync::{atomic::AtomicBool, Arc};
 use std::time::Instant;
 
+/// The text reading and writing direction detected by OCR.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[repr(i32)]
+pub enum WritingDirection {
+    #[default]
+    LeftToRight = 0,
+    RightToLeft = 1,
+    TopToBottom = 2,
+}
+
+impl WritingDirection {
+    #[inline]
+    pub fn is_vertical(&self) -> bool {
+        matches!(self, WritingDirection::TopToBottom)
+    }
+
+    pub fn from_i32(val: i32) -> Self {
+        match val {
+            1 => WritingDirection::RightToLeft,
+            2 => WritingDirection::TopToBottom,
+            _ => WritingDirection::LeftToRight,
+        }
+    }
+}
+
 /// Represents an OCR-detected text region with normalized coordinates.
 /// All coordinate fields (center_x, center_y, width, height) are in the range [0.0, 1.0],
 /// relative to the full game/video rendered area.
@@ -13,6 +38,7 @@ pub struct OcrBox {
     pub width: f32,
     pub height: f32,
     pub lines: Vec<ParsedLine>,
+    pub writing_direction: WritingDirection,
 }
 
 /// Represents an individual OCR-detected line prior to multi-line block grouping.
@@ -24,6 +50,7 @@ pub struct ParsedLine {
     pub width: f32,
     pub height: f32,
     pub paragraph_idx: usize,
+    pub writing_direction: WritingDirection,
 }
 
 /// Encapsulates raw captured screen pixels from OpenGL to be processed by the background OCR worker.
@@ -449,6 +476,7 @@ mod tests {
             width: 0.2,
             height: 0.1,
             lines: Vec::new(),
+            writing_direction: WritingDirection::LeftToRight,
         });
         state.raw_lines.push(ParsedLine {
             text: "Hello".to_string(),
@@ -457,6 +485,7 @@ mod tests {
             width: 0.2,
             height: 0.1,
             paragraph_idx: 0,
+            writing_direction: WritingDirection::LeftToRight,
         });
         state.last_copied_index = Some(0);
         state.last_scan_time = Some(Instant::now());
@@ -485,6 +514,7 @@ mod tests {
             width: 0.1,
             height: 0.1,
             lines: Vec::new(),
+            writing_direction: WritingDirection::LeftToRight,
         });
 
         // If last_scan_time is None, not expired
@@ -519,6 +549,7 @@ mod tests {
             width: 0.1,
             height: 0.1,
             lines: Vec::new(),
+            writing_direction: WritingDirection::LeftToRight,
         });
         state.last_scan_time = Some(Instant::now() - std::time::Duration::from_secs(9999));
 

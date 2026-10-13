@@ -132,6 +132,7 @@ impl From<LegacyConfig> for MichadameConfig {
             mic: legacy.mic,
             webcam: legacy.webcam,
             video_profile: legacy.video_profile,
+            gamescope_profile: legacy.gamescope_profile,
             profiles,
         }
     }
@@ -242,6 +243,7 @@ mod tests {
             bank_compact_mode: None,
             popup_under_crt: Some(false),
             video_profile: None,
+            gamescope_profile: None,
             twitch: Default::default(),
             mic: Default::default(),
             webcam: Default::default(),
@@ -378,6 +380,7 @@ mod tests {
             bank_compact_mode: None,
             popup_under_crt: None,
             video_profile: None,
+            gamescope_profile: None,
             twitch: Default::default(),
             mic: Default::default(),
             webcam: Default::default(),

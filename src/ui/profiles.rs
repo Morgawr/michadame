@@ -3,6 +3,29 @@ use eframe::egui;
 
 pub fn draw_profile_management(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     let mut changed = false;
+    if state.gamescope_hook.as_ref().map_or(false, |g| g.is_active) {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Profile:")
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(150, 150, 150)),
+            );
+            ui.label(
+                egui::RichText::new("Gamescope Profile (Dedicated)")
+                    .monospace()
+                    .size(11.0)
+                    .strong()
+                    .color(egui::Color32::from_rgb(255, 215, 0)),
+            );
+            if ui.button("Save Config").clicked() {
+                config::save_config(state);
+                state.info("Saved configuration to dedicated Gamescope profile");
+                changed = true;
+            }
+        });
+        return changed;
+    }
     if state.video_player.is_some() {
         ui.horizontal(|ui| {
             ui.label(

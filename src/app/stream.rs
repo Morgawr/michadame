@@ -254,6 +254,7 @@ impl AppState {
         }
 
         self.stop_video_file();
+        self.stop_gamescope_hook();
 
         if audio_was_active {
             self.info("Stream stopped and audio stream dropped.");
@@ -302,6 +303,118 @@ impl AppState {
         self.video_player_event_receiver = None;
         self.frame_receiver = None;
         self.latest_frame = None;
+    }
+
+    pub fn stop_gamescope_hook(&mut self) {
+        if self.gamescope_hook.as_ref().map_or(false, |g| g.is_active) {
+            // Save gamescope profile changes while gamescope_hook is still active
+            self.gamescope_profile = crate::config::build_profile_from_state(self);
+            crate::config::save_config(self);
+        }
+
+        if let Some(mut hook) = self.gamescope_hook.take() {
+            hook.is_active = false;
+            if let Some(mut video_handle) = hook.video_handle.take() {
+                video_handle.stop();
+            }
+            drop(hook.audio_handle.take());
+            drop(hook.input_client.take());
+
+            // Restore normal profile
+            if let Some(prev_name) = self.previous_gamescope_normal_profile.take() {
+                self.active_profile = prev_name;
+            }
+            let profile_to_apply = self.profiles.get(&self.active_profile).cloned();
+            if let Some(profile) = profile_to_apply {
+                crate::config::apply_profile_to_state(self, &profile);
+            }
+        }
+        self.frame_receiver = None;
+        self.latest_frame = None;
+        self.ui.video_window_open = false;
+    }
+
+    pub fn start_gamescope_hook(&mut self, ctx: &egui::Context) {
+        self.stop_stream_resources();
+
+        // Stash current normal profile and capture card parameters
+        let current_normal = crate::config::build_profile_from_state(self);
+        self.profiles.insert(self.active_profile.clone(), current_normal);
+        self.previous_gamescope_normal_profile = Some(self.active_profile.clone());
+        // Apply dedicated gamescope profile
+        crate::config::apply_profile_to_state(self, &self.gamescope_profile.clone());
+
+        let (frame_tx, frame_rx) = crossbeam_channel::bounded(2);
+        self.frame_receiver = Some(frame_rx);
+        self.latest_frame = None;
+        self.gui_fps = 0.0;
+        self.video_fps = 0.0;
+        self.ui.video_window_open = true;
+        self.ui.control_window_open = false;
+
+        let repaint_ctx = ctx.clone();
+        let request_repaint = Arc::new(move || {
+            repaint_ctx.request_repaint();
+        });
+
+        // 1. Start Gamescope video reader (GStreamer converts to standard limited-range I420 YUV,
+        // so ColorRange::Limited ensures correct full-range RGB reconstruction in shaders)
+        self.color_range.store(
+            crate::video::types::ColorRange::Limited as u8,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let video_handle = match crate::gamescope::video::start_gamescope_video(
+            frame_tx,
+            request_repaint.clone(),
+            self.color_range.clone(),
+        ) {
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                self.error(format!("Failed to connect to Gamescope video stream: {e}"));
+                None
+            }
+        };
+
+        // 2. Start Gamescope audio monitor capture
+        let audio_handle = match crate::gamescope::audio::start_gamescope_audio(
+            self.hardware.audio_peak_amplitude.clone(),
+            self.hardware.audio_latency_ms.clone(),
+            self.hardware.audio_buffer_size,
+            self.hardware.audio_sample_rate,
+            self.hardware.audio_sample_format.clone(),
+            request_repaint,
+            self.replay.audio.clone(),
+        ) {
+            Ok(handle) => {
+                self.info("Gamescope audio hooked successfully.");
+                Some(handle)
+            }
+            Err(e) => {
+                self.error(format!("Failed to hook Gamescope audio: {e}"));
+                None
+            }
+        };
+
+        // 3. Connect EIS input client
+        let input_client = match crate::gamescope::input::GamescopeInputClient::connect() {
+            Ok(client) => Some(client),
+            Err(e) => {
+                tracing::warn!("Failed to initialize Gamescope EIS input client: {e}");
+                None
+            }
+        };
+
+        self.gamescope_hook = Some(crate::gamescope::GamescopeHookState {
+            is_active: true,
+            passthrough_enabled: true,
+            video_handle,
+            audio_handle,
+            input_client,
+            prev_modifiers: eframe::egui::Modifiers::default(),
+        });
+
+        self.info("Gamescope hook started (4K 60Hz). Mouse/keyboard passthrough active (Shift+Tab to release).");
+        ctx.request_repaint();
     }
 
     pub fn restart_audio_stream(&mut self, ctx: &egui::Context) {
@@ -943,5 +1056,25 @@ mod tests {
         assert_eq!(state.hardware.master_volume, 1.0);
         assert_eq!(state.replay.audio.game_volume(), 1.0);
         assert_eq!(state.twitch.alert_player.volume(), 1.0);
+    }
+
+    #[test]
+    fn stop_gamescope_hook_cleans_resources_and_closes_video_window() {
+        let mut state = AppState::default();
+        let (_frame_tx, frame_rx) = crossbeam_channel::bounded(1);
+
+        state.ui.video_window_open = true;
+        state.frame_receiver = Some(frame_rx);
+        state.gamescope_hook = Some(crate::gamescope::GamescopeHookState {
+            is_active: true,
+            ..Default::default()
+        });
+
+        state.stop_gamescope_hook();
+
+        assert!(state.gamescope_hook.is_none());
+        assert!(state.frame_receiver.is_none());
+        assert!(state.latest_frame.is_none());
+        assert!(!state.ui.video_window_open);
     }
 }

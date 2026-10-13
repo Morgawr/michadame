@@ -467,6 +467,8 @@ pub struct LegacyConfig {
     #[serde(default)]
     pub video_profile: Option<Profile>,
     #[serde(default)]
+    pub gamescope_profile: Option<Profile>,
+    #[serde(default)]
     pub twitch: TwitchConfig,
     #[serde(default)]
     pub mic: MicConfig,
@@ -574,6 +576,7 @@ impl Default for LegacyConfig {
             bank_compact_mode: None,
             popup_under_crt: None,
             video_profile: None,
+            gamescope_profile: None,
             twitch: TwitchConfig::default(),
             mic: MicConfig::default(),
             webcam: WebcamConfig::default(),
@@ -617,6 +620,8 @@ pub struct MichadameConfig {
     pub replay: crate::replay::config::ReplayConfig,
     #[serde(default)]
     pub video_profile: Option<Profile>,
+    #[serde(default)]
+    pub gamescope_profile: Option<Profile>,
     pub profiles: BTreeMap<String, Profile>,
 }
 
@@ -650,6 +655,7 @@ impl Default for MichadameConfig {
             bank_compact_mode: None,
             popup_under_crt: Some(false),
             video_profile: None,
+            gamescope_profile: None,
             profiles,
         }
     }

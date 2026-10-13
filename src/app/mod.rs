@@ -145,9 +145,12 @@ impl Default for AppState {
             active_profile: "Default".to_string(),
             new_profile_name: String::new(),
             video_profile: config::Profile::default(),
+            gamescope_profile: config::Profile::default(),
             previous_normal_profile: None,
+            previous_gamescope_normal_profile: None,
             previous_capture_resolution: (0, 0),
             previous_capture_framerate: 0,
+            gamescope_hook: None,
             fft_filter: None,
             fft_mask_data: Vec::new(),
             fft_mask_dirty: false,
@@ -391,7 +394,35 @@ impl eframe::App for AppState {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
         self.ui.is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-        self.replay.shortcuts(ctx);
+
+        // If Gamescope hook is active and passthrough is paused (michadame control mode),
+        // ensure any widget focus captured by Shift+Tab tab-navigation is cleared so hotkeys work,
+        // unless a dialog or controls window is open for explicit user text input.
+        if self
+            .gamescope_hook
+            .as_ref()
+            .map_or(false, |h| h.is_active && !h.passthrough_enabled)
+        {
+            if !self.ui.control_window_open
+                && !self.ui.show_stop_stream_dialog
+                && !self.ui.show_quit_dialog
+            {
+                ctx.memory_mut(|m| {
+                    if let Some(id) = m.focused() {
+                        m.surrender_focus(id);
+                    }
+                });
+            }
+        }
+
+        let gamescope_passthrough = self
+            .gamescope_hook
+            .as_ref()
+            .map_or(false, |h| h.is_active && h.passthrough_enabled);
+
+        if !gamescope_passthrough {
+            self.replay.shortcuts(ctx);
+        }
         let mut repaint_requested = false;
 
         if self.ui.control_window_open {
@@ -457,72 +488,97 @@ impl eframe::App for AppState {
             repaint_requested = true;
         }
 
-        // Video-window hotkeys must not fire while typing (e.g. in the Twitch chat input).
-        let typing = ctx.wants_keyboard_input();
-        if !typing && ctx.input(|i| i.key_pressed(egui::Key::F)) {
-            let is_fullscreen = !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(is_fullscreen));
-        }
-        if !ctx.wants_keyboard_input()
-            && ctx.input(|i| i.focused && i.modifiers.is_none() && i.key_pressed(egui::Key::C))
+        // Re-evaluate passthrough state as draw_video_player may have toggled it via Shift+Tab
+        let gamescope_passthrough = self
+            .gamescope_hook
+            .as_ref()
+            .map_or(false, |h| h.is_active && h.passthrough_enabled);
+
+        if self
+            .gamescope_hook
+            .as_ref()
+            .map_or(false, |h| h.is_active && !h.passthrough_enabled)
         {
-            let current_filter = CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed));
-            let next_filter = if current_filter != CrtFilter::Off {
-                CrtFilter::Off
-            } else if self.selected_crt_filter != CrtFilter::Off {
-                self.selected_crt_filter
-            } else {
-                CrtFilter::Lottes
-            };
-            self.crt_filter.store(next_filter as u8, Ordering::Relaxed);
-            config::save_config(self);
-            self.info(format!("CRT filter set to: {}", next_filter));
-            ctx.request_repaint();
-        }
-        if !ctx.wants_keyboard_input()
-            && ctx.input(|i| i.focused && i.modifiers.is_none() && i.key_pressed(egui::Key::K))
-        {
-            let current_filter = CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed));
-            if current_filter != CrtFilter::Off {
-                self.video.lights_off_night_mode = !self.video.lights_off_night_mode;
-                config::save_config(self);
-                ctx.request_repaint();
+            if !self.ui.control_window_open
+                && !self.ui.show_stop_stream_dialog
+                && !self.ui.show_quit_dialog
+            {
+                ctx.memory_mut(|m| {
+                    if let Some(id) = m.focused() {
+                        m.surrender_focus(id);
+                    }
+                });
             }
         }
-        if !typing && ctx.input(|i| i.key_pressed(egui::Key::G)) {
-            self.video.pixelate_filter_enabled = !self.video.pixelate_filter_enabled;
-            let status = if self.video.pixelate_filter_enabled {
-                "enabled"
-            } else {
-                "disabled"
-            };
-            self.info(format!("480p Pixelate filter {}.", status));
-            config::save_config(self);
-        }
-        // While typing, Escape only unfocuses the text field.
-        if !typing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-        }
-        if !typing
-            && ctx.input(|i| i.key_pressed(egui::Key::Q))
-            && self.ui.video_window_open
-            && !self.ui.show_stop_stream_dialog
-        {
-            self.ui.show_stop_stream_dialog = true;
-        }
-        if !typing && ctx.input(|i| i.key_pressed(egui::Key::M)) {
-            self.ui.control_window_open = !self.ui.control_window_open;
-        }
-        if crate::ui::check_toggle_key(ctx, egui::Key::L) {
-            self.ui.studio_window_open = !self.ui.studio_window_open;
-            repaint_requested = true;
-        }
-        if !ctx.wants_keyboard_input()
-            && ctx.input(|i| i.modifiers.is_none() && i.key_pressed(egui::Key::B))
-        {
-            self.bank.window_open = !self.bank.window_open;
-            if !self.bank.window_open {
-                self.bank.enlarged = None;
+
+        // Video-window hotkeys must not fire while typing or while Gamescope passthrough is active.
+        let typing = ctx.wants_keyboard_input();
+        if !gamescope_passthrough {
+            if !typing && ctx.input(|i| i.key_pressed(egui::Key::F)) {
+                let is_fullscreen = !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(is_fullscreen));
+            }
+            if !ctx.wants_keyboard_input()
+                && ctx.input(|i| i.modifiers.is_none() && i.key_pressed(egui::Key::C))
+            {
+                let current_filter = CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed));
+                let next_filter = if current_filter != CrtFilter::Off {
+                    CrtFilter::Off
+                } else if self.selected_crt_filter != CrtFilter::Off {
+                    self.selected_crt_filter
+                } else {
+                    CrtFilter::Lottes
+                };
+                self.crt_filter.store(next_filter as u8, Ordering::Relaxed);
+                config::save_config(self);
+                self.info(format!("CRT filter set to: {}", next_filter));
+                ctx.request_repaint();
+            }
+            if !ctx.wants_keyboard_input()
+                && ctx.input(|i| i.modifiers.is_none() && i.key_pressed(egui::Key::K))
+            {
+                let current_filter = CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed));
+                if current_filter != CrtFilter::Off {
+                    self.video.lights_off_night_mode = !self.video.lights_off_night_mode;
+                    config::save_config(self);
+                    ctx.request_repaint();
+                }
+            }
+            if !typing && ctx.input(|i| i.key_pressed(egui::Key::G)) {
+                self.video.pixelate_filter_enabled = !self.video.pixelate_filter_enabled;
+                let status = if self.video.pixelate_filter_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
+                self.info(format!("480p Pixelate filter {}.", status));
+                config::save_config(self);
+            }
+            // While typing, Escape only unfocuses the text field.
+            if !typing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+            }
+            if !typing
+                && ctx.input(|i| i.key_pressed(egui::Key::Q))
+                && self.ui.video_window_open
+                && !self.ui.show_stop_stream_dialog
+            {
+                self.ui.show_stop_stream_dialog = true;
+            }
+            if !typing && ctx.input(|i| i.key_pressed(egui::Key::M)) {
+                self.ui.control_window_open = !self.ui.control_window_open;
+            }
+            if crate::ui::check_toggle_key(ctx, egui::Key::L) {
+                self.ui.studio_window_open = !self.ui.studio_window_open;
+                repaint_requested = true;
+            }
+            if !ctx.wants_keyboard_input()
+                && ctx.input(|i| i.modifiers.is_none() && i.key_pressed(egui::Key::B))
+            {
+                self.bank.window_open = !self.bank.window_open;
+                if !self.bank.window_open {
+                    self.bank.enlarged = None;
+                }
             }
         }
 
@@ -894,6 +950,7 @@ mod tests {
             width: 0.1,
             height: 0.1,
             lines: Vec::new(),
+            writing_direction: crate::ocr::models::WritingDirection::LeftToRight,
         });
         // Expired scan (50 seconds ago)
         state.ocr.last_scan_time = Some(Instant::now() - std::time::Duration::from_secs(50));
@@ -940,6 +997,7 @@ mod tests {
             width: 0.1,
             height: 0.1,
             lines: Vec::new(),
+            writing_direction: crate::ocr::models::WritingDirection::LeftToRight,
         });
         // Scan was 10 seconds ago (35s remaining)
         state.ocr.last_scan_time = Some(Instant::now() - std::time::Duration::from_secs(10));

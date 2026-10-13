@@ -156,7 +156,7 @@ pub fn execute_lens_ocr_with_agent(
                             .geometry
                             .as_ref()
                             .and_then(|g| g.bounding_box.as_ref())
-                            .map(|b| (b.center_x, b.center_y, b.width, b.height));
+                            .map(|b| (b.center_x, b.center_y, b.width, b.height, b.rotation_z));
 
                         // If line has no bounding box, compute union from words
                         if resolved_box.is_none() {
@@ -165,6 +165,8 @@ pub fn execute_lens_ocr_with_agent(
                             let mut max_x = f32::MIN;
                             let mut max_y = f32::MIN;
                             let mut found_word_box = false;
+                            let mut avg_rotation = 0.0f32;
+                            let mut rot_count = 0;
 
                             for word in &line.words {
                                 if let Some(geom) = &word.geometry {
@@ -179,6 +181,8 @@ pub fn execute_lens_ocr_with_agent(
                                         min_y = min_y.min(w_min_y);
                                         max_x = max_x.max(w_max_x);
                                         max_y = max_y.max(w_max_y);
+                                        avg_rotation += bbox.rotation_z;
+                                        rot_count += 1;
                                     }
                                 }
                             }
@@ -186,7 +190,12 @@ pub fn execute_lens_ocr_with_agent(
                             if found_word_box && max_x > min_x && max_y > min_y {
                                 let w = max_x - min_x;
                                 let h = max_y - min_y;
-                                resolved_box = Some((min_x + w / 2.0, min_y + h / 2.0, w, h));
+                                let rot = if rot_count > 0 {
+                                    avg_rotation / rot_count as f32
+                                } else {
+                                    0.0
+                                };
+                                resolved_box = Some((min_x + w / 2.0, min_y + h / 2.0, w, h, rot));
                             }
                         }
 
@@ -196,10 +205,27 @@ pub fn execute_lens_ocr_with_agent(
                                 .geometry
                                 .as_ref()
                                 .and_then(|g| g.bounding_box.as_ref())
-                                .map(|b| (b.center_x, b.center_y, b.width, b.height));
+                                .map(|b| (b.center_x, b.center_y, b.width, b.height, b.rotation_z));
                         }
 
-                        if let Some((cx, cy, w, h)) = resolved_box {
+                        if let Some((cx, cy, raw_w, raw_h, rot)) = resolved_box {
+                            let p_dir = WritingDirection::from_i32(paragraph.writing_direction);
+                            let r = rot.abs();
+                            let is_rotated_vert = r > 0.785 && r < 2.356;
+                            let (w, h) = if is_rotated_vert && raw_w > raw_h {
+                                (raw_h, raw_w)
+                            } else {
+                                (raw_w, raw_h)
+                            };
+
+                            let writing_direction = if p_dir.is_vertical() {
+                                WritingDirection::TopToBottom
+                            } else if is_rotated_vert || (h > 1.8 * w && line_text.chars().count() >= 2) {
+                                WritingDirection::TopToBottom
+                            } else {
+                                p_dir
+                            };
+
                             parsed_lines.push(ParsedLine {
                                 text: line_text,
                                 center_x: cx.clamp(0.0, 1.0),
@@ -207,6 +233,7 @@ pub fn execute_lens_ocr_with_agent(
                                 width: w.clamp(0.001, 1.0),
                                 height: h.clamp(0.001, 1.0),
                                 paragraph_idx: p_idx,
+                                writing_direction,
                             });
                         }
                     }
@@ -269,33 +296,353 @@ pub fn join_lines_text(lines: &[&str]) -> String {
     result
 }
 
-/// Groups close horizontal lines into unified text blocks with union bounding boxes.
-///
-/// `sticky_distance` defines the maximum vertical distance between adjacent lines
-/// to merge them into a single block (as a multiple of line height).
-/// If `sticky_distance <= 0.0`, no lines are merged (every line becomes its own box).
-pub fn group_lines_into_blocks(lines: &[ParsedLine], sticky_distance: f32) -> Vec<OcrBox> {
+/// Merges horizontally adjacent `ParsedLine` fragments on the same row into unified lines,
+/// inserting appropriate whitespace to preserve character offsets and layout.
+pub fn merge_row_lines(lines: &[ParsedLine], sticky_distance: f32) -> Vec<ParsedLine> {
+    if lines.is_empty() || sticky_distance <= 0.0 {
+        return lines.to_vec();
+    }
+
+    // Sort lines primarily by center_y, secondarily by center_x
+    let mut sorted = lines.to_vec();
+    sorted.sort_by(|a, b| {
+        a.center_y
+            .partial_cmp(&b.center_y)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                a.center_x
+                    .partial_cmp(&b.center_x)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+
+    let mut merged: Vec<ParsedLine> = Vec::new();
+
+    for line in sorted {
+        let line_top = line.center_y - line.height / 2.0;
+        let line_bottom = line.center_y + line.height / 2.0;
+        let line_left = line.center_x - line.width / 2.0;
+
+        let mut matched_idx = None;
+        for (i, prev) in merged.iter().enumerate().rev() {
+            let prev_top = prev.center_y - prev.height / 2.0;
+            let prev_bottom = prev.center_y + prev.height / 2.0;
+            let prev_left = prev.center_x - prev.width / 2.0;
+
+            let min_h = prev.height.min(line.height);
+            let height_ratio = line.height / prev.height;
+            let is_similar_height = (0.65..=1.55).contains(&height_ratio);
+
+            // Vertical overlap: must be on the same horizontal row
+            let overlap_y = prev_bottom.min(line_bottom) - prev_top.max(line_top);
+            let is_same_row = overlap_y >= 0.5 * min_h
+                || (prev.center_y - line.center_y).abs() <= 0.35 * min_h;
+
+            if !is_similar_height || !is_same_row {
+                continue;
+            }
+
+            // Horizontal relationship: determine left vs right fragment
+            let (left_box, right_box, is_prev_left) = if prev_left <= line_left {
+                (prev, &line, true)
+            } else {
+                (&line, prev, false)
+            };
+
+            let left_r = left_box.center_x + left_box.width / 2.0;
+            let right_l = right_box.center_x - right_box.width / 2.0;
+
+            // Check that right_box doesn't start way before left_box ends (no massive overlap)
+            if right_l < left_r - 0.25 * min_h {
+                continue;
+            }
+
+            let char_cnt_l = left_box.text.chars().count().max(1);
+            let char_cnt_r = right_box.text.chars().count().max(1);
+            let avg_char_w = (left_box.width + right_box.width) / (char_cnt_l + char_cnt_r) as f32;
+
+            let gap = right_l - left_r;
+            // Max allowed gap on the same row: up to ~15 character widths or 0.6 of screen
+            let max_gap = ((sticky_distance * 15.0).max(8.0) * avg_char_w).min(0.6);
+
+            if gap <= max_gap {
+                matched_idx = Some((i, is_prev_left, gap, avg_char_w));
+                break;
+            }
+        }
+
+        if let Some((idx, is_prev_left, gap, avg_char_w)) = matched_idx {
+            let prev = &merged[idx];
+            let (left_box, right_box) = if is_prev_left {
+                (prev, &line)
+            } else {
+                (&line, prev)
+            };
+
+            let space_count = if gap >= 0.75 * avg_char_w {
+                (gap / avg_char_w).round().max(1.0) as usize
+            } else {
+                let left_last = left_box.text.chars().last();
+                let right_first = right_box.text.chars().next();
+                let need_space = match (left_last, right_first) {
+                    (Some(c1), Some(c2)) => !is_cjk(c1) && !is_cjk(c2) && c1 != '-',
+                    _ => false,
+                };
+                if need_space { 1 } else { 0 }
+            };
+
+            let l_trimmed = left_box.text.trim_end();
+            let r_trimmed = right_box.text.trim_start();
+            let new_text = format!("{}{}{}", l_trimmed, " ".repeat(space_count), r_trimmed);
+
+            let l_min_x = left_box.center_x - left_box.width / 2.0;
+            let r_max_x = right_box.center_x + right_box.width / 2.0;
+            let new_min_x = l_min_x;
+            let new_max_x = r_max_x;
+            let new_width = (new_max_x - new_min_x).clamp(0.001, 1.0);
+            let new_center_x = (new_min_x + new_max_x) / 2.0;
+
+            let top_a = left_box.center_y - left_box.height / 2.0;
+            let top_b = right_box.center_y - right_box.height / 2.0;
+            let bot_a = left_box.center_y + left_box.height / 2.0;
+            let bot_b = right_box.center_y + right_box.height / 2.0;
+            let new_min_y = top_a.min(top_b);
+            let new_max_y = bot_a.max(bot_b);
+            let new_height = (new_max_y - new_min_y).clamp(0.001, 1.0);
+            let new_center_y = (new_min_y + new_max_y) / 2.0;
+
+            let new_p_idx = left_box.paragraph_idx.min(right_box.paragraph_idx);
+
+            let new_dir = left_box.writing_direction;
+
+            merged[idx] = ParsedLine {
+                text: new_text,
+                center_x: new_center_x,
+                center_y: new_center_y,
+                width: new_width,
+                height: new_height,
+                paragraph_idx: new_p_idx,
+                writing_direction: new_dir,
+            };
+        } else {
+            merged.push(line);
+        }
+    }
+
+    merged
+}
+
+/// Merges vertically adjacent `ParsedLine` fragments on the same vertical column into unified lines,
+/// inserting appropriate whitespace to preserve character offsets and layout.
+pub fn merge_column_lines(lines: &[ParsedLine], sticky_distance: f32) -> Vec<ParsedLine> {
+    if lines.is_empty() || sticky_distance <= 0.0 {
+        return lines.to_vec();
+    }
+
+    // Sort lines primarily by center_x descending (Japanese Right-to-Left columns),
+    // secondarily by center_y (Top-to-Bottom)
+    let mut sorted = lines.to_vec();
+    sorted.sort_by(|a, b| {
+        b.center_x
+            .partial_cmp(&a.center_x)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                a.center_y
+                    .partial_cmp(&b.center_y)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+
+    let mut merged: Vec<ParsedLine> = Vec::new();
+
+    for line in sorted {
+        let line_top = line.center_y - line.height / 2.0;
+        let line_left = line.center_x - line.width / 2.0;
+        let line_right = line.center_x + line.width / 2.0;
+
+        let mut matched_idx = None;
+        for (i, prev) in merged.iter().enumerate().rev() {
+            let prev_top = prev.center_y - prev.height / 2.0;
+            let prev_left = prev.center_x - prev.width / 2.0;
+            let prev_right = prev.center_x + prev.width / 2.0;
+
+            let min_w = prev.width.min(line.width);
+            let width_ratio = line.width / prev.width;
+            let is_similar_width = (0.65..=1.55).contains(&width_ratio);
+
+            // Horizontal overlap: must be on the same vertical column
+            let overlap_x = prev_right.min(line_right) - prev_left.max(line_left);
+            let is_same_column = overlap_x >= 0.5 * min_w
+                || (prev.center_x - line.center_x).abs() <= 0.35 * min_w;
+
+            if !is_similar_width || !is_same_column {
+                continue;
+            }
+
+            // Vertical relationship: determine top vs bottom fragment
+            let (top_box, bot_box, is_prev_top) = if prev_top <= line_top {
+                (prev, &line, true)
+            } else {
+                (&line, prev, false)
+            };
+
+            let top_b = top_box.center_y + top_box.height / 2.0;
+            let bot_t = bot_box.center_y - bot_box.height / 2.0;
+
+            // Check that bot_box doesn't start way before top_box ends (no massive overlap)
+            if bot_t < top_b - 0.25 * min_w {
+                continue;
+            }
+
+            let char_cnt_t = top_box.text.chars().count().max(1);
+            let char_cnt_b = bot_box.text.chars().count().max(1);
+            let avg_char_h = (top_box.height + bot_box.height) / (char_cnt_t + char_cnt_b) as f32;
+
+            let gap = bot_t - top_b;
+            // Max allowed vertical gap on the same column: up to ~15 character heights or 0.6 of screen
+            let max_gap = ((sticky_distance * 15.0).max(8.0) * avg_char_h).min(0.6);
+
+            if gap <= max_gap {
+                matched_idx = Some((i, is_prev_top, gap, avg_char_h));
+                break;
+            }
+        }
+
+        if let Some((idx, is_prev_top, gap, avg_char_h)) = matched_idx {
+            let prev = &merged[idx];
+            let (top_box, bot_box) = if is_prev_top {
+                (prev, &line)
+            } else {
+                (&line, prev)
+            };
+
+            let space_count = if gap >= 0.75 * avg_char_h {
+                (gap / avg_char_h).round().max(1.0) as usize
+            } else {
+                let top_last = top_box.text.chars().last();
+                let bot_first = bot_box.text.chars().next();
+                let need_space = match (top_last, bot_first) {
+                    (Some(c1), Some(c2)) => !is_cjk(c1) && !is_cjk(c2) && c1 != '-',
+                    _ => false,
+                };
+                if need_space { 1 } else { 0 }
+            };
+
+            let t_trimmed = top_box.text.trim_end();
+            let b_trimmed = bot_box.text.trim_start();
+            let new_text = format!("{}{}{}", t_trimmed, " ".repeat(space_count), b_trimmed);
+
+            let t_min_y = top_box.center_y - top_box.height / 2.0;
+            let b_max_y = bot_box.center_y + bot_box.height / 2.0;
+            let new_min_y = t_min_y;
+            let new_max_y = b_max_y;
+            let new_height = (new_max_y - new_min_y).clamp(0.001, 1.0);
+            let new_center_y = (new_min_y + new_max_y) / 2.0;
+
+            let left_a = top_box.center_x - top_box.width / 2.0;
+            let left_b = bot_box.center_x - bot_box.width / 2.0;
+            let right_a = top_box.center_x + top_box.width / 2.0;
+            let right_b = bot_box.center_x + bot_box.width / 2.0;
+            let new_min_x = left_a.min(left_b);
+            let new_max_x = right_a.max(right_b);
+            let new_width = (new_max_x - new_min_x).clamp(0.001, 1.0);
+            let new_center_x = (new_min_x + new_max_x) / 2.0;
+
+            let new_p_idx = top_box.paragraph_idx.min(bot_box.paragraph_idx);
+
+            merged[idx] = ParsedLine {
+                text: new_text,
+                center_x: new_center_x,
+                center_y: new_center_y,
+                width: new_width,
+                height: new_height,
+                paragraph_idx: new_p_idx,
+                writing_direction: WritingDirection::TopToBottom,
+            };
+        } else {
+            merged.push(line);
+        }
+    }
+
+    merged
+}
+
+/// Helper to merge blocks that overlap in 2D space.
+fn merge_overlapping_blocks(
+    mut blocks: Vec<Vec<ParsedLine>>,
+    sticky_distance: f32,
+    is_vertical: bool,
+) -> Vec<Vec<ParsedLine>> {
+    let mut merged_any = true;
+    while merged_any {
+        merged_any = false;
+        let mut merge_pair = None;
+
+        'outer: for i in 0..blocks.len() {
+            let min_x_i = blocks[i].iter().map(|l| l.center_x - l.width / 2.0).fold(f32::MAX, f32::min);
+            let max_x_i = blocks[i].iter().map(|l| l.center_x + l.width / 2.0).fold(f32::MIN, f32::max);
+            let min_y_i = blocks[i].iter().map(|l| l.center_y - l.height / 2.0).fold(f32::MAX, f32::min);
+            let max_y_i = blocks[i].iter().map(|l| l.center_y + l.height / 2.0).fold(f32::MIN, f32::max);
+
+            for j in (i + 1)..blocks.len() {
+                let min_x_j = blocks[j].iter().map(|l| l.center_x - l.width / 2.0).fold(f32::MAX, f32::min);
+                let max_x_j = blocks[j].iter().map(|l| l.center_x + l.width / 2.0).fold(f32::MIN, f32::max);
+                let min_y_j = blocks[j].iter().map(|l| l.center_y - l.height / 2.0).fold(f32::MAX, f32::min);
+                let max_y_j = blocks[j].iter().map(|l| l.center_y + l.height / 2.0).fold(f32::MIN, f32::max);
+
+                let overlap_x = max_x_i.min(max_x_j) - min_x_i.max(min_x_j);
+                let overlap_y = max_y_i.min(max_y_j) - min_y_i.max(min_y_j);
+
+                let min_w = (max_x_i - min_x_i).min(max_x_j - min_x_j);
+                let min_h = (max_y_i - min_y_i).min(max_y_j - min_y_j);
+
+                // Check 2D bounding box intersection
+                if is_vertical {
+                    if overlap_y > 0.05 * min_h && overlap_x > 0.1 * min_w {
+                        merge_pair = Some((i, j));
+                        break 'outer;
+                    }
+                } else {
+                    if overlap_x > 0.05 * min_w && overlap_y > 0.1 * min_h {
+                        merge_pair = Some((i, j));
+                        break 'outer;
+                    }
+                }
+            }
+        }
+
+        if let Some((i, j)) = merge_pair {
+            let removed = blocks.remove(j);
+            let mut combined = blocks[i].clone();
+            combined.extend(removed);
+            if is_vertical {
+                blocks[i] = merge_column_lines(&combined, sticky_distance);
+                // Sort columns right to left
+                blocks[i].sort_by(|a, b| b.center_x.partial_cmp(&a.center_x).unwrap_or(std::cmp::Ordering::Equal));
+            } else {
+                blocks[i] = merge_row_lines(&combined, sticky_distance);
+                // Sort lines top to bottom
+                blocks[i].sort_by(|a, b| a.center_y.partial_cmp(&b.center_y).unwrap_or(std::cmp::Ordering::Equal));
+            }
+            merged_any = true;
+        }
+    }
+
+    blocks
+}
+
+/// Groups horizontal lines into unified text blocks with union bounding boxes.
+fn group_horizontal_lines_into_blocks(lines: &[ParsedLine], sticky_distance: f32) -> Vec<OcrBox> {
     if lines.is_empty() {
         return Vec::new();
     }
 
-    if sticky_distance <= 0.0 {
-        return lines
-            .iter()
-            .map(|l| OcrBox {
-                text: l.text.clone(),
-                center_x: l.center_x,
-                center_y: l.center_y,
-                width: l.width,
-                height: l.height,
-                lines: vec![l.clone()],
-            })
-            .collect();
-    }
+    // 1. First merge horizontal lines on the same row with whitespace preservation
+    let row_lines = merge_row_lines(lines, sticky_distance);
 
     let mut blocks: Vec<Vec<ParsedLine>> = Vec::new();
 
-    for line in lines {
+    for line in row_lines {
         let line_top = line.center_y - line.height / 2.0;
         let line_left = line.center_x - line.width / 2.0;
         let line_right = line.center_x + line.width / 2.0;
@@ -308,11 +655,25 @@ pub fn group_lines_into_blocks(lines: &[ParsedLine], sticky_distance: f32) -> Ve
             let last_left = last.center_x - last.width / 2.0;
             let last_right = last.center_x + last.width / 2.0;
 
+            let block_left = block
+                .iter()
+                .map(|l| l.center_x - l.width / 2.0)
+                .fold(f32::MAX, f32::min);
+            let block_right = block
+                .iter()
+                .map(|l| l.center_x + l.width / 2.0)
+                .fold(f32::MIN, f32::max);
+            let block_w = (block_right - block_left).max(0.001);
+
             let min_h = last.height.min(line.height);
-            let min_w = last.width.min(line.width);
+            let min_w = last.width.min(line.width).min(block_w);
 
             let vertical_gap = line_top - last_bottom;
-            let overlap_x = last_right.min(line_right) - last_left.max(line_left);
+
+            // Horizontal overlap against both the immediately previous line and the overall block
+            let overlap_x_last = last_right.min(line_right) - last_left.max(line_left);
+            let overlap_x_block = block_right.min(line_right) - block_left.max(line_left);
+            let overlap_x = overlap_x_last.max(overlap_x_block);
 
             // 1. Order check: Line must be positioned below the last line
             let is_below = line.center_y > last.center_y && line_top >= last.center_y;
@@ -323,11 +684,12 @@ pub fn group_lines_into_blocks(lines: &[ParsedLine], sticky_distance: f32) -> Ve
                 vertical_gap >= -0.2 * min_h && vertical_gap <= sticky_distance * min_h;
 
             // 3. Horizontal overlap & alignment check:
-            // Must have substantial horizontal overlap (>= 50% of the narrower line)
+            // Substantial overlap with last line or overall block (>= 35% of the narrower line)
             // Or if slightly indented, left margins must be aligned within sticky_distance fraction of font height
-            let is_tight_horizontal = overlap_x >= 0.5 * min_w
-                || (overlap_x >= 0.3 * min_w
-                    && (last_left - line_left).abs() <= sticky_distance * min_h);
+            let is_tight_horizontal = overlap_x >= 0.35 * min_w
+                || (overlap_x >= 0.2 * min_w
+                    && ((last_left - line_left).abs() <= sticky_distance * min_h
+                        || (block_left - line_left).abs() <= sticky_distance * min_h));
 
             // 4. Font size / height similarity check:
             // Lines in continuous text have similar font heights (within 35% of each other)
@@ -341,14 +703,136 @@ pub fn group_lines_into_blocks(lines: &[ParsedLine], sticky_distance: f32) -> Ve
         }
 
         if let Some(idx) = target_block_idx {
-            blocks[idx].push(line.clone());
+            blocks[idx].push(line);
         } else {
-            blocks.push(vec![line.clone()]);
+            blocks.push(vec![line]);
         }
     }
 
+    // 2. Merge any blocks that overlap horizontally and vertically on screen
+    let merged_blocks = merge_overlapping_blocks(blocks, sticky_distance, false);
+
     let mut boxes = Vec::new();
-    for block in blocks {
+    for block in merged_blocks {
+        let text_slices: Vec<&str> = block.iter().map(|l| l.text.as_str()).collect();
+        let full_text = join_lines_text(&text_slices);
+
+        let min_x = block
+            .iter()
+            .map(|l| l.center_x - l.width / 2.0)
+            .fold(f32::MAX, f32::min);
+        let max_x = block
+            .iter()
+            .map(|l| l.center_x + l.width / 2.0)
+            .fold(f32::MIN, f32::max);
+        let min_y = block
+            .iter()
+            .map(|l| l.center_y - l.height / 2.0)
+            .fold(f32::MAX, f32::min);
+        let max_y = block
+            .iter()
+            .map(|l| l.center_y + l.height / 2.0)
+            .fold(f32::MIN, f32::max);
+
+        let width = (max_x - min_x).clamp(0.001, 1.0);
+        let height = (max_y - min_y).clamp(0.001, 1.0);
+        let center_x = (min_x + width / 2.0).clamp(0.0, 1.0);
+        let center_y = (min_y + height / 2.0).clamp(0.0, 1.0);
+        let dir = block.first().map(|l| l.writing_direction).unwrap_or(WritingDirection::LeftToRight);
+
+        boxes.push(OcrBox {
+            text: full_text,
+            center_x,
+            center_y,
+            width,
+            height,
+            lines: block,
+            writing_direction: dir,
+        });
+    }
+
+    boxes
+}
+
+/// Groups vertical columns into unified text blocks progressing in Japanese Right-to-Left order.
+fn group_vertical_lines_into_blocks(lines: &[ParsedLine], sticky_distance: f32) -> Vec<OcrBox> {
+    if lines.is_empty() {
+        return Vec::new();
+    }
+
+    let col_lines = merge_column_lines(lines, sticky_distance);
+
+    let mut blocks: Vec<Vec<ParsedLine>> = Vec::new();
+
+    for line in col_lines {
+        let line_top = line.center_y - line.height / 2.0;
+        let line_bottom = line.center_y + line.height / 2.0;
+        let line_right = line.center_x + line.width / 2.0;
+
+        let mut target_block_idx = None;
+        for (idx, block) in blocks.iter().enumerate().rev() {
+            let last = block.last().unwrap();
+            let last_top = last.center_y - last.height / 2.0;
+            let last_bottom = last.center_y + last.height / 2.0;
+            let last_left = last.center_x - last.width / 2.0;
+
+            let block_top = block
+                .iter()
+                .map(|l| l.center_y - l.height / 2.0)
+                .fold(f32::MAX, f32::min);
+            let block_bottom = block
+                .iter()
+                .map(|l| l.center_y + l.height / 2.0)
+                .fold(f32::MIN, f32::max);
+            let block_h = (block_bottom - block_top).max(0.001);
+
+            let min_w = last.width.min(line.width);
+            let min_h = last.height.min(line.height).min(block_h);
+
+            // Japanese vertical reading order advances Right-to-Left:
+            // next column (`line`) is to the left of the previous column (`last`).
+            let horizontal_gap = last_left - line_right;
+
+            let overlap_y_last = last_bottom.min(line_bottom) - last_top.max(line_top);
+            let overlap_y_block = block_bottom.min(line_bottom) - block_top.max(line_top);
+            let overlap_y = overlap_y_last.max(overlap_y_block);
+
+            // 1. Order check: Line must be positioned to the left of the last column
+            let is_left = line.center_x < last.center_x;
+
+            // 2. Horizontal gap check: Tight distance threshold based on sticky_distance
+            let is_tight_horizontal =
+                horizontal_gap >= -0.2 * min_w && horizontal_gap <= sticky_distance * min_w;
+
+            // 3. Vertical overlap & alignment check:
+            // Substantial vertical overlap with last column or overall block (>= 35% of shorter column)
+            // Or if slightly indented, top margins must be aligned within sticky_distance fraction of font width
+            let is_tight_vertical = overlap_y >= 0.35 * min_h
+                || (overlap_y >= 0.2 * min_h
+                    && ((last_top - line_top).abs() <= sticky_distance * min_w
+                        || (block_top - line_top).abs() <= sticky_distance * min_w));
+
+            // 4. Font size / column width similarity check:
+            let width_ratio = line.width / last.width;
+            let is_similar_width = (0.65..=1.55).contains(&width_ratio);
+
+            if is_left && is_tight_horizontal && is_tight_vertical && is_similar_width {
+                target_block_idx = Some(idx);
+                break;
+            }
+        }
+
+        if let Some(idx) = target_block_idx {
+            blocks[idx].push(line);
+        } else {
+            blocks.push(vec![line]);
+        }
+    }
+
+    let merged_blocks = merge_overlapping_blocks(blocks, sticky_distance, true);
+
+    let mut boxes = Vec::new();
+    for block in merged_blocks {
         let text_slices: Vec<&str> = block.iter().map(|l| l.text.as_str()).collect();
         let full_text = join_lines_text(&text_slices);
 
@@ -381,8 +865,47 @@ pub fn group_lines_into_blocks(lines: &[ParsedLine], sticky_distance: f32) -> Ve
             width,
             height,
             lines: block,
+            writing_direction: WritingDirection::TopToBottom,
         });
     }
+
+    boxes
+}
+
+/// Groups close text lines into unified text blocks with union bounding boxes.
+///
+/// Separates horizontal text (read top-to-bottom) and vertical text (read top-to-bottom within
+/// columns, right-to-left across columns) to prevent improper cross-grouping.
+///
+/// `sticky_distance` defines the maximum distance between adjacent lines/columns
+/// to merge them into a single block (as a multiple of line height / column width).
+/// If `sticky_distance <= 0.0`, no lines are merged (every line becomes its own box).
+pub fn group_lines_into_blocks(lines: &[ParsedLine], sticky_distance: f32) -> Vec<OcrBox> {
+    if lines.is_empty() {
+        return Vec::new();
+    }
+
+    if sticky_distance <= 0.0 {
+        return lines
+            .iter()
+            .map(|l| OcrBox {
+                text: l.text.clone(),
+                center_x: l.center_x,
+                center_y: l.center_y,
+                width: l.width,
+                height: l.height,
+                lines: vec![l.clone()],
+                writing_direction: l.writing_direction,
+            })
+            .collect();
+    }
+
+    let (vert_lines, horiz_lines): (Vec<ParsedLine>, Vec<ParsedLine>) =
+        lines.iter().cloned().partition(|l| l.writing_direction.is_vertical());
+
+    let mut boxes = group_horizontal_lines_into_blocks(&horiz_lines, sticky_distance);
+    let vert_boxes = group_vertical_lines_into_blocks(&vert_lines, sticky_distance);
+    boxes.extend(vert_boxes);
 
     boxes
 }
@@ -702,6 +1225,7 @@ mod tests {
                 width: 0.89,
                 height: 0.20,
                 paragraph_idx: 0,
+                writing_direction: WritingDirection::LeftToRight,
             },
             ParsedLine {
                 text: "なにかが変わってしまったような気がしていた。".to_string(),
@@ -710,6 +1234,7 @@ mod tests {
                 width: 0.85,
                 height: 0.21,
                 paragraph_idx: 0,
+                writing_direction: WritingDirection::LeftToRight,
             },
         ];
 
@@ -739,6 +1264,7 @@ mod tests {
                 width: 0.8,
                 height: 0.1,
                 paragraph_idx: 0,
+                writing_direction: WritingDirection::LeftToRight,
             },
             // Distant line far below (gap = 0.35 - 0.05 = 0.30 >> 0.6 * 0.1 = 0.06)
             ParsedLine {
@@ -748,6 +1274,7 @@ mod tests {
                 width: 0.2,
                 height: 0.03, // also very different height
                 paragraph_idx: 0,
+                writing_direction: WritingDirection::LeftToRight,
             },
         ];
 
@@ -755,5 +1282,148 @@ mod tests {
         assert_eq!(boxes.len(), 2, "Distant UI text must not be merged with dialogue");
         assert_eq!(boxes[0].text, "セリフの一行目");
         assert_eq!(boxes[1].text, "離れたボタン");
+    }
+
+    #[test]
+    fn test_merge_horizontal_lines_and_overlapping_blocks() {
+        // Reproduces the exact OCR lines from the visual novel screenshot:
+        // Speaker name on top-left, dialogue quote on top-right separated by whitespace,
+        // and 2nd dialogue line below.
+        let lines = vec![
+            ParsedLine {
+                text: "北条".to_string(),
+                center_x: 0.056598295,
+                center_y: 0.21901257,
+                width: 0.08984375,
+                height: 0.31736526,
+                paragraph_idx: 0,
+                writing_direction: WritingDirection::LeftToRight,
+            },
+            ParsedLine {
+                text: "「その魔性に、我ら柳生一門の多く".to_string(),
+                center_x: 0.62397987,
+                center_y: 0.21924625,
+                width: 0.734375,
+                height: 0.3233533,
+                paragraph_idx: 1,
+                writing_direction: WritingDirection::LeftToRight,
+            },
+            ParsedLine {
+                text: "「が殺されたわけですね」".to_string(),
+                center_x: 0.2520905,
+                center_y: 0.5174159,
+                width: 0.4951172,
+                height: 0.2994012,
+                paragraph_idx: 2,
+                writing_direction: WritingDirection::LeftToRight,
+            },
+        ];
+
+        let boxes = group_lines_into_blocks(&lines, 0.6);
+        assert_eq!(boxes.len(), 1, "Expected all 3 lines to be merged into a single OCR box");
+        assert_eq!(
+            boxes[0].text,
+            "北条   「その魔性に、我ら柳生一門の多く「が殺されたわけですね」"
+        );
+        assert_eq!(boxes[0].lines.len(), 2, "Expected 2 visual rows in the box");
+        assert_eq!(boxes[0].lines[0].text, "北条   「その魔性に、我ら柳生一門の多く");
+        assert_eq!(boxes[0].lines[1].text, "「が殺されたわけですね」");
+        assert_eq!(boxes[0].writing_direction, WritingDirection::LeftToRight);
+    }
+
+    #[test]
+    fn test_merge_vertical_column_lines() {
+        // Vertical column split into top half and bottom half
+        let lines = vec![
+            ParsedLine {
+                text: "東京".to_string(),
+                center_x: 0.8,
+                center_y: 0.2,
+                width: 0.05,
+                height: 0.15,
+                paragraph_idx: 0,
+                writing_direction: WritingDirection::TopToBottom,
+            },
+            ParsedLine {
+                text: "特許許可局".to_string(),
+                center_x: 0.8,
+                center_y: 0.4,
+                width: 0.05,
+                height: 0.2,
+                paragraph_idx: 0,
+                writing_direction: WritingDirection::TopToBottom,
+            },
+        ];
+
+        let merged = merge_column_lines(&lines, 0.6);
+        assert_eq!(merged.len(), 1, "Expected top and bottom column fragments to merge");
+        assert_eq!(merged[0].text, "東京特許許可局");
+        assert!(merged[0].writing_direction.is_vertical());
+        assert!((merged[0].center_x - 0.8).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_group_vertical_lines_into_blocks_rtl() {
+        // Multi-column Japanese vertical text: read Right-to-Left (Col 1 on right, Col 2 on left)
+        let col1 = ParsedLine {
+            text: "あの朝、無人の駅で".to_string(),
+            center_x: 0.85, // Rightmost column
+            center_y: 0.4,
+            width: 0.06,
+            height: 0.6,
+            paragraph_idx: 0,
+            writing_direction: WritingDirection::TopToBottom,
+        };
+        let col2 = ParsedLine {
+            text: "彼女を見かけたときから".to_string(),
+            center_x: 0.77, // Next column to the left (gap = 0.85 - 0.03 - (0.77 + 0.03) = 0.02)
+            center_y: 0.4,
+            width: 0.06,
+            height: 0.6,
+            paragraph_idx: 0,
+            writing_direction: WritingDirection::TopToBottom,
+        };
+
+        // Pass in arbitrary order
+        let lines = vec![col2, col1];
+        let boxes = group_lines_into_blocks(&lines, 0.6);
+        assert_eq!(boxes.len(), 1, "Expected 2 vertical columns to merge into 1 block");
+        assert_eq!(boxes[0].writing_direction, WritingDirection::TopToBottom);
+        // RTL reading order: col1 text first, then col2 text
+        assert_eq!(boxes[0].text, "あの朝、無人の駅で彼女を見かけたときから");
+        assert_eq!(boxes[0].lines.len(), 2);
+        assert_eq!(boxes[0].lines[0].text, "あの朝、無人の駅で");
+        assert_eq!(boxes[0].lines[1].text, "彼女を見かけたときから");
+    }
+
+    #[test]
+    fn test_horizontal_and_vertical_lines_do_not_cross_merge() {
+        let horiz_dialogue = ParsedLine {
+            text: "これは横書きのセリフです。".to_string(),
+            center_x: 0.5,
+            center_y: 0.8,
+            width: 0.7,
+            height: 0.08,
+            paragraph_idx: 0,
+            writing_direction: WritingDirection::LeftToRight,
+        };
+        let vert_sign = ParsedLine {
+            text: "立入禁止".to_string(),
+            center_x: 0.85,
+            center_y: 0.4,
+            width: 0.06,
+            height: 0.3,
+            paragraph_idx: 1,
+            writing_direction: WritingDirection::TopToBottom,
+        };
+
+        let lines = vec![horiz_dialogue, vert_sign];
+        let boxes = group_lines_into_blocks(&lines, 0.6);
+        assert_eq!(boxes.len(), 2, "Horizontal dialogue and vertical sign must stay separate");
+
+        let h_box = boxes.iter().find(|b| !b.writing_direction.is_vertical()).unwrap();
+        let v_box = boxes.iter().find(|b| b.writing_direction.is_vertical()).unwrap();
+        assert_eq!(h_box.text, "これは横書きのセリフです。");
+        assert_eq!(v_box.text, "立入禁止");
     }
 }

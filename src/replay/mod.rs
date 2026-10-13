@@ -350,7 +350,7 @@ impl AudioTap {
         *self.mic_route.lock().unwrap() = None;
         self.refresh_enabled();
     }
-    pub fn register_broadcast_routes(&self, game: AudioRoute, mic: AudioRoute) {
+    pub(crate) fn register_broadcast_routes(&self, game: AudioRoute, mic: AudioRoute) {
         *self.broadcast_route.lock().unwrap() = Some(game);
         *self.broadcast_mic_route.lock().unwrap() = Some(mic);
         self.refresh_enabled();

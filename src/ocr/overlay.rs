@@ -96,6 +96,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
             // When hovered or actively displaying a dictionary popup, render the OCR text inside the darkened box!
             if is_active_box {
                 let text_color = egui::Color32::from_rgb(240, 243, 246);
+                let is_box_vertical = ocr_box.writing_direction.is_vertical();
                 if ocr_box.lines.is_empty() {
                     paint_ocr_text_line(
                         ui.painter(),
@@ -105,6 +106,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
                         min_y,
                         max_y,
                         text_color,
+                        is_box_vertical,
                     );
                 } else {
                     for line in &ocr_box.lines {
@@ -125,6 +127,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
                             line_min_y,
                             line_max_y,
                             text_color,
+                            line.writing_direction.is_vertical(),
                         );
                     }
                 }
@@ -408,6 +411,7 @@ fn paint_ocr_text_line(
     min_y: f32,
     max_y: f32,
     text_color: egui::Color32,
+    is_vertical: bool,
 ) {
     let chars: Vec<char> = text.chars().collect();
     if chars.is_empty() {
@@ -416,34 +420,58 @@ fn paint_ocr_text_line(
 
     let line_w = (max_x - min_x).max(1.0);
     let line_h = (max_y - min_y).max(1.0);
-    let char_w = line_w / chars.len() as f32;
-    // Scale font size to fit within line height and character width
-    let font_size = (line_h * 0.85).min(char_w * 1.25).clamp(10.0, 72.0);
-    let font_id = egui::FontId::new(
-        font_size,
-        egui::FontFamily::Name("GothicCJK".into()),
-    );
-    let center_y = (min_y + max_y) / 2.0;
 
-    for (i, &c) in chars.iter().enumerate() {
-        if c.is_whitespace() {
-            continue;
-        }
-        let center_x = min_x + (i as f32 + 0.5) * char_w;
-        painter.text(
-            egui::pos2(center_x, center_y),
-            egui::Align2::CENTER_CENTER,
-            c.to_string(),
-            font_id.clone(),
-            text_color,
+    if is_vertical {
+        let char_h = line_h / chars.len() as f32;
+        let font_size = (line_w * 0.85).min(char_h * 1.25).clamp(10.0, 72.0);
+        let font_id = egui::FontId::new(
+            font_size,
+            egui::FontFamily::Name("GothicCJK".into()),
         );
+        let center_x = (min_x + max_x) / 2.0;
+
+        for (i, &c) in chars.iter().enumerate() {
+            if c.is_whitespace() {
+                continue;
+            }
+            let center_y = min_y + (i as f32 + 0.5) * char_h;
+            painter.text(
+                egui::pos2(center_x, center_y),
+                egui::Align2::CENTER_CENTER,
+                c.to_string(),
+                font_id.clone(),
+                text_color,
+            );
+        }
+    } else {
+        let char_w = line_w / chars.len() as f32;
+        let font_size = (line_h * 0.85).min(char_w * 1.25).clamp(10.0, 72.0);
+        let font_id = egui::FontId::new(
+            font_size,
+            egui::FontFamily::Name("GothicCJK".into()),
+        );
+        let center_y = (min_y + max_y) / 2.0;
+
+        for (i, &c) in chars.iter().enumerate() {
+            if c.is_whitespace() {
+                continue;
+            }
+            let center_x = min_x + (i as f32 + 0.5) * char_w;
+            painter.text(
+                egui::pos2(center_x, center_y),
+                egui::Align2::CENTER_CENTER,
+                c.to_string(),
+                font_id.clone(),
+                text_color,
+            );
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ocr::OcrBox;
+    use crate::ocr::{OcrBox, ParsedLine, WritingDirection};
 
     #[test]
     fn test_box_coordinate_mapping() {
@@ -455,6 +483,7 @@ mod tests {
             width: 0.2,
             height: 0.1,
             lines: Vec::new(),
+            writing_direction: WritingDirection::LeftToRight,
         };
 
         let min_x = video_rect.min.x + (ocr_box.center_x - ocr_box.width / 2.0) * video_rect.width();
@@ -501,23 +530,49 @@ mod tests {
     }
 
     #[test]
+    fn test_vertical_char_alignment_exact_match() {
+        // Vertical column spanning x: 100..130 (w: 30), y: 200..500 (h: 300)
+        let text = "日本昔話";
+        let chars: Vec<char> = text.chars().collect();
+        let min_y = 200.0f32;
+        let max_y = 500.0f32;
+        let line_h = max_y - min_y;
+        let char_h = line_h / chars.len() as f32; // 300 / 4 = 75
+
+        // For word "昔話" (indices 2..4):
+        let word_start = 2;
+        let word_end = 4;
+        let word_min_y = min_y + (word_start as f32 / chars.len() as f32) * line_h;
+        let word_max_y = min_y + (word_end as f32 / chars.len() as f32) * line_h;
+
+        // Verify char centers of 2, 3 fall strictly inside [word_min_y, word_max_y]
+        for i in word_start..word_end {
+            let center_y = min_y + (i as f32 + 0.5) * char_h;
+            assert!(center_y > word_min_y);
+            assert!(center_y < word_max_y);
+        }
+    }
+
+    #[test]
     fn test_dismissal_cleans_boxes_and_raw_lines() {
         let mut ocr = crate::ocr::OcrState::default();
-        let line1 = crate::ocr::ParsedLine {
+        let line1 = ParsedLine {
             text: "Box 1".to_string(),
             center_x: 0.2,
             center_y: 0.2,
             width: 0.1,
             height: 0.05,
             paragraph_idx: 0,
+            writing_direction: WritingDirection::LeftToRight,
         };
-        let line2 = crate::ocr::ParsedLine {
+        let line2 = ParsedLine {
             text: "Box 2".to_string(),
             center_x: 0.5,
             center_y: 0.5,
             width: 0.1,
             height: 0.05,
             paragraph_idx: 1,
+            writing_direction: WritingDirection::LeftToRight,
         };
 
         ocr.raw_lines = vec![line1.clone(), line2.clone()];
@@ -529,6 +584,7 @@ mod tests {
                 width: 0.1,
                 height: 0.05,
                 lines: vec![line1],
+                writing_direction: WritingDirection::LeftToRight,
             },
             OcrBox {
                 text: "Box 2".to_string(),
@@ -537,6 +593,7 @@ mod tests {
                 width: 0.1,
                 height: 0.05,
                 lines: vec![line2],
+                writing_direction: WritingDirection::LeftToRight,
             },
         ];
 

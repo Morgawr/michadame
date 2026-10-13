@@ -27,6 +27,7 @@ pub fn lookup_word_at_pointer(
     for ocr_box in ocr_boxes {
         let min_x = video_rect.min.x + (ocr_box.center_x - ocr_box.width / 2.0) * video_rect.width();
         let max_x = video_rect.min.x + (ocr_box.center_x + ocr_box.width / 2.0) * video_rect.width();
+        let is_box_vertical = ocr_box.writing_direction.is_vertical();
         let min_y = video_rect.min.y + (ocr_box.center_y - ocr_box.height / 2.0) * video_rect.height();
         let max_y = video_rect.min.y + (ocr_box.center_y + ocr_box.height / 2.0) * video_rect.height();
 
@@ -48,6 +49,7 @@ pub fn lookup_word_at_pointer(
                 max_y,
                 char_start: 0,
                 char_len: 0,
+                is_vertical: is_box_vertical,
             }]
         } else {
             ocr_box
@@ -61,6 +63,7 @@ pub fn lookup_word_at_pointer(
                     max_y: video_rect.min.y + (line.center_y + line.height / 2.0) * video_rect.height(),
                     char_start: 0,
                     char_len: 0,
+                    is_vertical: line.writing_direction.is_vertical(),
                 })
                 .collect()
         };
@@ -76,25 +79,47 @@ pub fn lookup_word_at_pointer(
             continue;
         }
 
-        // Find the line closest to or containing pointer_pos.y
+        // Find the line/column closest to or containing pointer_pos
         let mut target_idx = None;
-        let mut min_dist_y = f32::MAX;
-        for (i, seg) in segments.iter().enumerate() {
-            if seg.char_len == 0 {
-                continue;
+        if is_box_vertical {
+            let mut min_dist_x = f32::MAX;
+            for (i, seg) in segments.iter().enumerate() {
+                if seg.char_len == 0 {
+                    continue;
+                }
+                if pointer_pos.x >= seg.min_x && pointer_pos.x <= seg.max_x {
+                    target_idx = Some(i);
+                    break;
+                }
+                let dist = if pointer_pos.x < seg.min_x {
+                    seg.min_x - pointer_pos.x
+                } else {
+                    pointer_pos.x - seg.max_x
+                };
+                if dist < min_dist_x {
+                    min_dist_x = dist;
+                    target_idx = Some(i);
+                }
             }
-            if pointer_pos.y >= seg.min_y && pointer_pos.y <= seg.max_y {
-                target_idx = Some(i);
-                break;
-            }
-            let dist = if pointer_pos.y < seg.min_y {
-                seg.min_y - pointer_pos.y
-            } else {
-                pointer_pos.y - seg.max_y
-            };
-            if dist < min_dist_y {
-                min_dist_y = dist;
-                target_idx = Some(i);
+        } else {
+            let mut min_dist_y = f32::MAX;
+            for (i, seg) in segments.iter().enumerate() {
+                if seg.char_len == 0 {
+                    continue;
+                }
+                if pointer_pos.y >= seg.min_y && pointer_pos.y <= seg.max_y {
+                    target_idx = Some(i);
+                    break;
+                }
+                let dist = if pointer_pos.y < seg.min_y {
+                    seg.min_y - pointer_pos.y
+                } else {
+                    pointer_pos.y - seg.max_y
+                };
+                if dist < min_dist_y {
+                    min_dist_y = dist;
+                    target_idx = Some(i);
+                }
             }
         }
 
@@ -103,11 +128,17 @@ pub fn lookup_word_at_pointer(
         };
         let target = &segments[target_idx];
 
-        // Relative horizontal position [0.0, 1.0] along THIS specific line,
+        // Relative position [0.0, 1.0] along THIS specific line/column,
         // converted to an index into the concatenated character stream.
-        let line_w = (target.max_x - target.min_x).max(1.0);
-        let t = ((pointer_pos.x - target.min_x) / line_w).clamp(0.0, 0.999);
-        let local_idx = ((t * target.char_len as f32).floor() as usize).min(target.char_len - 1);
+        let local_idx = if target.is_vertical {
+            let line_h = (target.max_y - target.min_y).max(1.0);
+            let t = ((pointer_pos.y - target.min_y) / line_h).clamp(0.0, 0.999);
+            ((t * target.char_len as f32).floor() as usize).min(target.char_len - 1)
+        } else {
+            let line_w = (target.max_x - target.min_x).max(1.0);
+            let t = ((pointer_pos.x - target.min_x) / line_w).clamp(0.0, 0.999);
+            ((t * target.char_len as f32).floor() as usize).min(target.char_len - 1)
+        };
         let char_idx = target.char_start + local_idx;
         let full_text: String = chars.iter().collect();
 
@@ -316,6 +347,7 @@ struct LineSegment<'a> {
     max_y: f32,
     char_start: usize,
     char_len: usize,
+    is_vertical: bool,
 }
 
 impl LineSegment<'_> {
@@ -327,11 +359,18 @@ impl LineSegment<'_> {
         if s >= e || self.char_len == 0 {
             return None;
         }
-        let w = self.max_x - self.min_x;
         let n = self.char_len as f32;
-        let x0 = self.min_x + ((s - self.char_start) as f32 / n) * w;
-        let x1 = self.min_x + ((e - self.char_start) as f32 / n) * w;
-        Some(Rect::from_min_max(egui::pos2(x0, self.min_y), egui::pos2(x1, self.max_y)))
+        if self.is_vertical {
+            let h = self.max_y - self.min_y;
+            let y0 = self.min_y + ((s - self.char_start) as f32 / n) * h;
+            let y1 = self.min_y + ((e - self.char_start) as f32 / n) * h;
+            Some(Rect::from_min_max(egui::pos2(self.min_x, y0), egui::pos2(self.max_x, y1)))
+        } else {
+            let w = self.max_x - self.min_x;
+            let x0 = self.min_x + ((s - self.char_start) as f32 / n) * w;
+            let x1 = self.min_x + ((e - self.char_start) as f32 / n) * w;
+            Some(Rect::from_min_max(egui::pos2(x0, self.min_y), egui::pos2(x1, self.max_y)))
+        }
     }
 }
 
@@ -612,7 +651,7 @@ mod tests {
     use super::*;
     use crate::dict::database::DictDatabase;
     use crate::dict::deinflect::global_deinflector;
-    use crate::ocr::ParsedLine;
+    use crate::ocr::{ParsedLine, WritingDirection};
     use tempfile::tempdir;
 
     #[test]
@@ -642,6 +681,7 @@ mod tests {
             width: 0.6,
             height: 0.05,
             paragraph_idx: 0,
+            writing_direction: WritingDirection::LeftToRight,
         };
 
         let line2 = ParsedLine {
@@ -651,6 +691,7 @@ mod tests {
             width: 0.6,
             height: 0.05,
             paragraph_idx: 0,
+            writing_direction: WritingDirection::LeftToRight,
         };
 
         let ocr_box = OcrBox {
@@ -660,6 +701,7 @@ mod tests {
             width: 0.6,
             height: 0.15,
             lines: vec![line1, line2],
+            writing_direction: WritingDirection::LeftToRight,
         };
 
         let video_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
@@ -751,6 +793,7 @@ mod tests {
             width: 0.3,
             height: 0.1,
             lines: Vec::new(),
+            writing_direction: WritingDirection::LeftToRight,
         };
 
         let video_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
@@ -830,6 +873,7 @@ mod tests {
             width: 0.7,
             height: 0.1,
             lines: Vec::new(),
+            writing_direction: WritingDirection::LeftToRight,
         };
 
         let video_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
@@ -928,6 +972,7 @@ mod tests {
             width: 0.1,
             height: 0.1,
             lines: Vec::new(),
+            writing_direction: WritingDirection::LeftToRight,
         };
 
         let video_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
@@ -991,6 +1036,7 @@ mod tests {
             width: 0.1,
             height: 0.1,
             lines: Vec::new(),
+            writing_direction: WritingDirection::LeftToRight,
         };
 
         let video_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
@@ -1026,6 +1072,7 @@ mod tests {
             width: 0.8,
             height: 0.1,
             lines: Vec::new(),
+            writing_direction: WritingDirection::LeftToRight,
         };
         let video_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
         // Box spans x: 100..900; first char center
@@ -1043,6 +1090,7 @@ mod tests {
             width: 0.8,
             height: 0.1,
             lines: Vec::new(),
+            writing_direction: WritingDirection::LeftToRight,
         };
         let video_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
         let x = 100.0 + (800.0 / n) * (idx as f32 + 0.5);
@@ -1293,6 +1341,7 @@ mod tests {
             width: 0.8,
             height: 0.05,
             paragraph_idx: 0,
+            writing_direction: WritingDirection::LeftToRight,
         };
         let line2 = ParsedLine {
             text: l2.to_string(),
@@ -1301,6 +1350,7 @@ mod tests {
             width: 0.4,
             height: 0.05,
             paragraph_idx: 0,
+            writing_direction: WritingDirection::LeftToRight,
         };
         let ocr_box = OcrBox {
             text: format!("{l1}{l2}"),
@@ -1309,6 +1359,7 @@ mod tests {
             width: 0.8,
             height: 0.15,
             lines: vec![line1, line2],
+            writing_direction: WritingDirection::LeftToRight,
         };
         let video_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
 
@@ -1373,6 +1424,7 @@ mod tests {
             width: 0.4,
             height: 0.1,
             lines: Vec::new(),
+            writing_direction: WritingDirection::LeftToRight,
         };
 
         let custom_names = vec![
@@ -1461,6 +1513,7 @@ mod tests {
             width: 0.2,
             height: 0.1,
             lines: Vec::new(),
+            writing_direction: WritingDirection::LeftToRight,
         };
 
         let custom_names = vec![
@@ -1513,6 +1566,7 @@ mod tests {
             width: 0.3,
             height: 0.1,
             lines: Vec::new(),
+            writing_direction: WritingDirection::LeftToRight,
         };
         let popup_kana = lookup_word_at_pointer(
             egui::pos2(500.0, 300.0),
@@ -1528,5 +1582,232 @@ mod tests {
         .expect("should find custom name matching reading");
         assert_eq!(popup_kana.entries[0].custom_name_id, Some(20));
         assert_eq!(popup_kana.entries[0].term, "田中");
+    }
+
+    #[test]
+    fn test_lookup_word_with_merged_whitespace_line() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test_ws.db");
+        let db = DictDatabase::open_or_create(&db_path).unwrap();
+
+        db.conn
+            .execute(
+                "INSERT INTO terms VALUES ('魔性', 'ましょう', 'n', '', 200.0, '[\"demonic nature\"]', 1, '')",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO terms VALUES ('北条', 'ほうじょう', 'n', '', 150.0, '[\"Houjou\"]', 2, '')",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO terms VALUES ('殺す', 'ころす', 'v5s', 'v5s', 180.0, '[\"to kill\"]', 3, '')",
+                [],
+            )
+            .unwrap();
+
+        // 2-row merged box produced from visual novel dialogue
+        let row1 = ParsedLine {
+            text: "北条   「その魔性に、我ら柳生一門の多く".to_string(),
+            center_x: 0.50,
+            center_y: 0.25,
+            width: 0.98,
+            height: 0.10,
+            paragraph_idx: 0,
+            writing_direction: WritingDirection::LeftToRight,
+        };
+        let row2 = ParsedLine {
+            text: "が殺されたわけですね」".to_string(),
+            center_x: 0.25,
+            center_y: 0.40,
+            width: 0.50,
+            height: 0.10,
+            paragraph_idx: 1,
+            writing_direction: WritingDirection::LeftToRight,
+        };
+
+        let ocr_box = OcrBox {
+            text: "北条   「その魔性に、我ら柳生一門の多くが殺されたわけですね」".to_string(),
+            center_x: 0.50,
+            center_y: 0.325,
+            width: 0.98,
+            height: 0.25,
+            lines: vec![row1, row2],
+            writing_direction: WritingDirection::LeftToRight,
+        };
+
+        let video_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
+
+        // 1. Hover over "北条" on row 1 (x ~ 30px, y = 150px)
+        let popup = lookup_word_at_pointer(
+            egui::pos2(30.0, 150.0),
+            &[ocr_box.clone()],
+            video_rect,
+            Some(&db),
+            None,
+            global_deinflector(),
+            &[],
+            None,
+            0,
+        );
+        assert!(popup.is_some(), "Hovering over 北条 should match");
+        let p = popup.unwrap();
+        assert_eq!(p.matched_term, "北条");
+        assert_eq!(p.char_range, (0, 2));
+        assert!((p.word_rect.height() - 60.0).abs() < 1.0); // 0.10 * 600 = 60px
+
+        // 2. Hover over whitespace gap between 北条 and 「 (x ~ 120px, y = 150px)
+        let popup_gap = lookup_word_at_pointer(
+            egui::pos2(120.0, 150.0),
+            &[ocr_box.clone()],
+            video_rect,
+            Some(&db),
+            None,
+            global_deinflector(),
+            &[],
+            None,
+            0,
+        );
+        assert!(popup_gap.is_none(), "Hovering over whitespace gap should not match any word");
+
+        // 3. Hover over "魔性" on row 1 (row1 spans 10px to 990px, width 980px, 21 chars -> ~46.6px/char)
+        // "魔性" is at char indices 8..10 -> approx x = 10 + 8.5 * 46.6 = 406px
+        let popup_mashou = lookup_word_at_pointer(
+            egui::pos2(406.0, 150.0),
+            &[ocr_box.clone()],
+            video_rect,
+            Some(&db),
+            None,
+            global_deinflector(),
+            &[],
+            None,
+            0,
+        );
+        assert!(popup_mashou.is_some(), "Hovering over 魔性 should match");
+        let p_m = popup_mashou.unwrap();
+        assert_eq!(p_m.matched_term, "魔性");
+        assert_eq!(p_m.char_range, (8, 10));
+        assert!((p_m.word_rect.center().x - 430.0).abs() < 50.0);
+        assert!((p_m.word_rect.height() - 60.0).abs() < 1.0);
+
+        // 4. Hover over "殺された" on row 2 (row2 cx=250, w=500 -> 0..500px, y = 240px)
+        // "殺" is 2nd character (after "が") -> x ~ 50..100px
+        let popup_korosu = lookup_word_at_pointer(
+            egui::pos2(68.0, 240.0),
+            &[ocr_box.clone()],
+            video_rect,
+            Some(&db),
+            None,
+            global_deinflector(),
+            &[],
+            None,
+            0,
+        );
+        assert!(popup_korosu.is_some(), "Hovering over 殺された should match 殺す");
+        let p_k = popup_korosu.unwrap();
+        assert_eq!(p_k.matched_term, "殺す");
+        assert!((p_k.word_rect.center().y - 240.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_lookup_word_vertical_text() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test_vert.db");
+        let db = DictDatabase::open_or_create(&db_path).unwrap();
+
+        db.conn
+            .execute(
+                "INSERT INTO terms VALUES ('特許', 'とっきょ', 'n', '', 200.0, '[\"patent\"]', 1, '')",
+                [],
+            )
+            .unwrap();
+
+        db.conn
+            .execute(
+                "INSERT INTO terms VALUES ('東京', 'とうきょう', 'n', '', 150.0, '[\"Tokyo\"]', 2, '')",
+                [],
+            )
+            .unwrap();
+
+        // Japanese vertical columns: Col 1 on right, Col 2 on left
+        // Col 1: "東京特許" (Tokyo patent)
+        let col1 = ParsedLine {
+            text: "東京特許".to_string(),
+            center_x: 0.85,
+            center_y: 0.50,
+            width: 0.05,
+            height: 0.60,
+            paragraph_idx: 0,
+            writing_direction: WritingDirection::TopToBottom,
+        };
+        let col2 = ParsedLine {
+            text: "許可局".to_string(),
+            center_x: 0.75,
+            center_y: 0.50,
+            width: 0.05,
+            height: 0.45,
+            paragraph_idx: 0,
+            writing_direction: WritingDirection::TopToBottom,
+        };
+
+        let ocr_box = OcrBox {
+            text: "東京特許許可局".to_string(),
+            center_x: 0.80,
+            center_y: 0.50,
+            width: 0.15,
+            height: 0.60,
+            lines: vec![col1, col2],
+            writing_direction: WritingDirection::TopToBottom,
+        };
+
+        let video_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
+
+        // Col 1 spans x: 825..875 (center 850px)
+        // Col 1 spans y: 120..480 (center 300px, height 360px -> 4 chars, 90px/char)
+        // '東' = 120..210, '京' = 210..300, '特' = 300..390, '許' = 390..480
+        // Hover over '特' on Col 1: x = 850, y = 345
+        let popup = lookup_word_at_pointer(
+            egui::pos2(850.0, 345.0),
+            &[ocr_box.clone()],
+            video_rect,
+            Some(&db),
+            None,
+            global_deinflector(),
+            &[],
+            None,
+            0,
+        );
+        assert!(popup.is_some(), "Hovering over vertical '特' should match");
+        let p = popup.unwrap();
+        assert_eq!(p.matched_term, "特許");
+        assert_eq!(p.char_range, (2, 4));
+        // Verify word_rect width matches column width (0.05 * 1000 = 50px)
+        assert!((p.word_rect.width() - 50.0).abs() < 1.0);
+        // Verify word_rect height matches 2 vertical glyphs (2 * 90px = 180px)
+        assert!((p.word_rect.height() - 180.0).abs() < 1.0);
+        // Verify vertical slice center y is ~390px
+        assert!((p.word_rect.center().y - 390.0).abs() < 1.0);
+
+        // Hover over '東' on Col 1: x = 850, y = 165
+        let popup_tokyo = lookup_word_at_pointer(
+            egui::pos2(850.0, 165.0),
+            &[ocr_box],
+            video_rect,
+            Some(&db),
+            None,
+            global_deinflector(),
+            &[],
+            None,
+            0,
+        );
+        assert!(popup_tokyo.is_some(), "Hovering over vertical '東' should match");
+        let p_t = popup_tokyo.unwrap();
+        assert_eq!(p_t.matched_term, "東京");
+        assert_eq!(p_t.char_range, (0, 2));
+        assert!((p_t.word_rect.width() - 50.0).abs() < 1.0);
+        assert!((p_t.word_rect.height() - 180.0).abs() < 1.0);
     }
 }

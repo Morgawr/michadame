@@ -331,9 +331,12 @@ pub struct AppState {
     pub active_profile: String,
     pub new_profile_name: String,
     pub video_profile: config::Profile,
+    pub gamescope_profile: config::Profile,
     pub previous_normal_profile: Option<String>,
+    pub previous_gamescope_normal_profile: Option<String>,
     pub previous_capture_resolution: (u32, u32),
     pub previous_capture_framerate: u32,
+    pub gamescope_hook: Option<crate::gamescope::GamescopeHookState>,
 
     pub fft_filter: Option<Arc<Mutex<crate::video::gpu::FftFilter>>>,
     pub fft_mask_data: Vec<u8>,

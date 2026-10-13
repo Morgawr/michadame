@@ -265,16 +265,18 @@ pub fn save_config_at(path: &Path, state: &mut AppState) -> Result<(), confy::Co
     cfg.replay = state.replay.config.clone();
     cfg.video_device = Some(state.hardware.selected_video_device.clone());
     cfg.usb_device = state.hardware.selected_usb_device.clone();
-    cfg.video_resolution = if state.hardware.selected_resolution.0 > 0 {
-        Some(state.hardware.selected_resolution)
-    } else {
-        None
-    };
-    cfg.video_framerate = if state.hardware.selected_framerate > 0 {
-        Some(state.hardware.selected_framerate)
-    } else {
-        None
-    };
+    if state.video_player.is_none() && state.gamescope_hook.is_none() {
+        cfg.video_resolution = if state.hardware.selected_resolution.0 > 0 {
+            Some(state.hardware.selected_resolution)
+        } else {
+            None
+        };
+        cfg.video_framerate = if state.hardware.selected_framerate > 0 {
+            Some(state.hardware.selected_framerate)
+        } else {
+            None
+        };
+    }
     cfg.reset_usb_on_startup = Some(state.ui.reset_usb_on_startup);
     cfg.has_shown_first_run_warning = Some(!state.ui.show_first_run_dialog);
     cfg.audio_source = state.hardware.selected_audio_source_name.clone();
@@ -297,6 +299,12 @@ pub fn save_config_at(path: &Path, state: &mut AppState) -> Result<(), confy::Co
         let current_profile_data = build_profile_from_state(state);
         state.video_profile = current_profile_data.clone();
         cfg.video_profile = Some(current_profile_data);
+        cfg.gamescope_profile = Some(state.gamescope_profile.clone());
+    } else if state.gamescope_hook.as_ref().map_or(false, |g| g.is_active) {
+        let current_profile_data = build_profile_from_state(state);
+        state.gamescope_profile = current_profile_data.clone();
+        cfg.gamescope_profile = Some(current_profile_data);
+        cfg.video_profile = Some(state.video_profile.clone());
     } else {
         let current_profile_data = build_profile_from_state(state);
         state
@@ -306,6 +314,7 @@ pub fn save_config_at(path: &Path, state: &mut AppState) -> Result<(), confy::Co
         cfg.active_profile = state.active_profile.clone();
         cfg.profiles = state.profiles.clone();
         cfg.video_profile = Some(state.video_profile.clone());
+        cfg.gamescope_profile = Some(state.gamescope_profile.clone());
     }
 
     store_config_atomic_at(path, &cfg)
@@ -340,7 +349,7 @@ pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(
     cfg.replay = state.replay.config.clone();
     cfg.video_device = Some(state.hardware.selected_video_device.clone());
     cfg.usb_device = state.hardware.selected_usb_device.clone();
-    if state.video_player.is_none() {
+    if state.video_player.is_none() && state.gamescope_hook.is_none() {
         cfg.video_resolution = if state.hardware.selected_resolution.0 > 0 {
             Some(state.hardware.selected_resolution)
         } else {
@@ -603,6 +612,7 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     state.profiles = cfg.profiles.clone();
     state.active_profile = cfg.active_profile.clone();
     state.video_profile = cfg.video_profile.clone().unwrap_or_default();
+    state.gamescope_profile = cfg.gamescope_profile.clone().unwrap_or_default();
 
     if let Some(saved_device) = &cfg.video_device {
         if state.hardware.video_devices.contains(saved_device) {
@@ -1770,6 +1780,65 @@ crt_brightboost = 1.6
         let vid_prof = reloaded.video_profile.expect("video_profile must be saved");
         assert_eq!(vid_prof.crt_hard_scan, Some(-3.0));
         assert_eq!(vid_prof.vibrance, Some(2.0));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("toml.bak"));
+    }
+
+    #[test]
+    fn test_gamescope_profile_isolation() {
+        let path = std::env::temp_dir().join(format!(
+            "michadame_gamescope_test_{}_{}.toml",
+            std::process::id(),
+            crate::replay::now_us()
+        ));
+
+        let mut config = MichadameConfig::default();
+        let mut retro_profile = Profile::default();
+        retro_profile.crt_hard_scan = Some(-15.0);
+        retro_profile.vibrance = Some(1.3);
+        config.profiles.insert("Retro".to_string(), retro_profile.clone());
+        config.active_profile = "Retro".to_string();
+        store_config_atomic_at(&path, &config).unwrap();
+
+        let mut state = AppState::default();
+        apply_config(&mut state, &config);
+        assert_eq!(state.active_profile, "Retro");
+        assert_eq!(state.crt.hard_scan, -15.0);
+        assert_eq!(state.video.vibrance, 1.3);
+
+        // Enter Gamescope mode
+        state.gamescope_hook = Some(crate::gamescope::GamescopeHookState {
+            is_active: true,
+            passthrough_enabled: true,
+            video_handle: None,
+            audio_handle: None,
+            input_client: None,
+            prev_modifiers: eframe::egui::Modifiers::default(),
+        });
+
+        // Tweak settings in Gamescope mode
+        state.crt.hard_scan = -5.0;
+        state.video.vibrance = 1.8;
+
+        // Save config in Gamescope mode
+        save_config_at(&path, &mut state).unwrap();
+
+        // Verify on disk that gamescope_profile received the changes and Retro was untouched
+        let reloaded: MichadameConfig = confy::load_path(&path).unwrap();
+        assert_eq!(reloaded.active_profile, "Retro");
+        assert_eq!(
+            reloaded.profiles.get("Retro").unwrap().crt_hard_scan,
+            Some(-15.0)
+        );
+        assert_eq!(
+            reloaded.profiles.get("Retro").unwrap().vibrance,
+            Some(1.3)
+        );
+
+        let gs_prof = reloaded.gamescope_profile.expect("gamescope_profile must be saved");
+        assert_eq!(gs_prof.crt_hard_scan, Some(-5.0));
+        assert_eq!(gs_prof.vibrance, Some(1.8));
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("toml.bak"));

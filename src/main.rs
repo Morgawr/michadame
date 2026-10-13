@@ -8,6 +8,7 @@ mod ocr;
 mod bank;
 mod twitch;
 pub mod dict;
+pub mod gamescope;
 
 use anyhow::Result;
 use eframe::egui;
