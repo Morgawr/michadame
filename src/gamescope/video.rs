@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-pub const GAMESCOPE_WIDTH: u32 = 2560;
-pub const GAMESCOPE_HEIGHT: u32 = 1440;
+pub const GAMESCOPE_WIDTH: u32 = 3840;
+pub const GAMESCOPE_HEIGHT: u32 = 2160;
 pub const GAMESCOPE_FPS: u32 = 60;
 pub const GAMESCOPE_FRAME_SIZE: usize = ((GAMESCOPE_WIDTH * GAMESCOPE_HEIGHT * 3) / 2) as usize;
 

@@ -49,7 +49,34 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                 state.hardware.video_queue_drops.load(Ordering::Relaxed)
             ));
             if state.ui.video_window_open {
-                if let Some(frame) = &state.latest_frame {
+                let gamescope_info = if let Some(hook) = &state.gamescope_hook {
+                    if hook.is_active {
+                        if let Some(frame) = &hook.current_dmabuf_frame {
+                            Some(format!(
+                                "Gamescope DMA-BUF: {} × {} · FourCC: {:#x} · modifier: {:#x}",
+                                frame.width, frame.height, frame.drm_fourcc, frame.modifier
+                            ))
+                        } else if let Some(frame) = &state.latest_frame {
+                            Some(format!(
+                                "Gamescope fallback: {} × {} · {:?} · {:.3} FPS nominal",
+                                frame.width,
+                                frame.height,
+                                frame.format,
+                                frame.rate.num as f64 / frame.rate.den as f64
+                            ))
+                        } else {
+                            Some("Gamescope: waiting for frames...".to_string())
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(info) = gamescope_info {
+                    ui.label(info);
+                } else if let Some(frame) = &state.latest_frame {
                     ui.label(format!(
                         "Decoded: {} × {} · {:?} · {:.3} FPS nominal",
                         frame.width,
@@ -95,18 +122,33 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
             ui.separator();
             ui.strong("Configured stream / filters");
             let hw = &state.hardware;
-            let format = hw
-                .supported_formats
-                .get(hw.selected_format_index)
-                .map_or("—", |f| f.fourcc.as_str());
-            ui.label(format!(
-                "{} · {} · {} × {} @ {} FPS",
-                hw.selected_video_device,
-                format,
-                hw.selected_resolution.0,
-                hw.selected_resolution.1,
-                hw.selected_framerate
-            ));
+            let is_gamescope = state.gamescope_hook.as_ref().map_or(false, |h| h.is_active);
+            if is_gamescope {
+                let hook = state.gamescope_hook.as_ref().unwrap();
+                let res = hook.resolution();
+                let mode = if hook.dma_handle.is_some() {
+                    "zero-copy DMA-BUF PipeWire"
+                } else {
+                    "GStreamer pipewiresrc fallback"
+                };
+                ui.label(format!(
+                    "Gamescope Hook · {} × {} @ 60 FPS ({})",
+                    res.0, res.1, mode
+                ));
+            } else {
+                let format = hw
+                    .supported_formats
+                    .get(hw.selected_format_index)
+                    .map_or("—", |f| f.fourcc.as_str());
+                ui.label(format!(
+                    "{} · {} · {} × {} @ {} FPS",
+                    hw.selected_video_device,
+                    format,
+                    hw.selected_resolution.0,
+                    hw.selected_resolution.1,
+                    hw.selected_framerate
+                ));
+            }
             ui.label(format!(
                 "Audio: {} · {} Hz · {} · buffer {} frames",
                 hw.selected_audio_source_name.as_deref().unwrap_or("—"),
@@ -206,5 +248,26 @@ mod tests {
                 assert!(state.ui.debug_open);
             }
         }
+    }
+
+    #[test]
+    fn debug_window_displays_gamescope_stream_info() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::default();
+        state.ui.debug_open = true;
+        state.ui.video_window_open = true;
+
+        let mut hook = crate::gamescope::GamescopeHookState::default();
+        hook.is_active = true;
+        hook.initial_resolution = (3840, 2160);
+        state.gamescope_hook = Some(hook);
+
+        let input = egui::RawInput {
+            viewport_id: egui::ViewportId::ROOT,
+            focused: true,
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| draw(&mut state, ctx));
+        assert!(state.ui.debug_open);
     }
 }

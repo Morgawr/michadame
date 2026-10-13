@@ -285,12 +285,25 @@ impl AppState {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Video File".to_string());
             format!(
-                "Michadame Viewer | {} | UI: {:.0} FPS | Video: {:.0} FPS | Audio Latency: {} ms",
+                "Michadame Viewer | {} | UI: {:.1} FPS | Video: {:.1} FPS | Audio Latency: {} ms",
                 filename, self.gui_fps, self.video_fps, audio_latency
             )
+        } else if let Some(hook) = &self.gamescope_hook {
+            if hook.is_active {
+                let res = hook.resolution();
+                format!(
+                    "Michadame Viewer | Gamescope ({}x{}) | UI: {:.1} FPS | Video: {:.1} FPS | Audio Latency: {} ms",
+                    res.0, res.1, self.gui_fps, self.video_fps, audio_latency
+                )
+            } else {
+                format!(
+                    "Michadame Viewer | UI: {:.1} FPS | Video: {:.1} FPS | Audio Latency: {} ms",
+                    self.gui_fps, self.video_fps, audio_latency
+                )
+            }
         } else {
             format!(
-                "Michadame Viewer | UI: {:.0} FPS | Video: {:.0} FPS | Audio Latency: {} ms",
+                "Michadame Viewer | UI: {:.1} FPS | Video: {:.1} FPS | Audio Latency: {} ms",
                 self.gui_fps, self.video_fps, audio_latency
             )
         };
@@ -660,7 +673,7 @@ impl eframe::App for AppState {
         }
 
         if let Some(rx) = &self.frame_receiver {
-            if let Ok(frame) = rx.try_recv() {
+            while let Ok(frame) = rx.try_recv() {
                 // Initialize or resize FFT mask when frame dimensions change
                 if self.video.fft_filter_enabled {
                     let (fft_w, fft_h) =
@@ -908,6 +921,26 @@ mod tests {
         state.last_video_fps_check = Instant::now() - std::time::Duration::from_secs(2);
         state.update_fps_counters(&ctx);
         assert_eq!(state.video_fps, 0.0);
+    }
+
+    #[test]
+    fn test_gamescope_fps_calculation_and_title() {
+        let mut state = AppState::default();
+        let ctx = egui::Context::default();
+        let mut hook = crate::gamescope::GamescopeHookState::default();
+        hook.is_active = true;
+        hook.initial_resolution = (3840, 2160);
+        state.gamescope_hook = Some(hook);
+
+        state.last_fps_check = Instant::now() - std::time::Duration::from_secs(1);
+        state.last_video_fps_check = state.last_fps_check;
+        state.frames_since_last_check = 60;
+        state.video_frames_since_last_check = 60;
+
+        state.update_fps_counters(&ctx);
+
+        assert!((state.gui_fps - 60.0).abs() < 1.0);
+        assert!((state.video_fps - 60.0).abs() < 1.0);
     }
 
     #[test]

@@ -12,7 +12,7 @@ pub fn draw_profile_management(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                     .color(egui::Color32::from_rgb(150, 150, 150)),
             );
             ui.label(
-                egui::RichText::new("Gamescope Profile (Dedicated)")
+                egui::RichText::new("Gamescope Profile")
                     .monospace()
                     .size(11.0)
                     .strong()

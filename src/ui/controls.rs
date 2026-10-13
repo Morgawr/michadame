@@ -196,9 +196,9 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             if is_gamescope {
                                 if let Some(hook) = &state.gamescope_hook {
                                     let (icon, input_label, color) = if hook.passthrough_enabled {
-                                        ("🎮", "Passthrough (Shift+Tab to pause)", egui::Color32::from_rgb(140, 240, 140))
+                                        ("🎮", "Passthrough", egui::Color32::from_rgb(140, 240, 140))
                                     } else {
-                                        ("🚫", "Input Paused (Shift+Tab to resume)", egui::Color32::from_rgb(255, 120, 120))
+                                        ("🚫", "Input Paused", egui::Color32::from_rgb(255, 120, 120))
                                     };
                                     ui.label(
                                         egui::RichText::new(format!("{} {}", icon, input_label))
@@ -787,6 +787,7 @@ fn draw_hotkeys_tab(ui: &mut egui::Ui) {
                     ("← / →", "Seek -5s / +5s (Video Player Mode)"),
                     ("Space", "Capture OCR (Google Lens)"),
                     ("Shift + Space", "Clear OCR Bounding Boxes"),
+                    ("Shift + Tab", "Toggle Gamescope Input Passthrough / Pause"),
                     ("Ctrl + C", "Export 15s Replay Clip to Clipboard"),
                     ("Ctrl + Shift + C", "Export 7s Audio-Only Clip to Clipboard"),
                     (

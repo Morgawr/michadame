@@ -264,6 +264,8 @@ impl AppState {
 
         self.frame_receiver = None;
         self.latest_frame = None;
+        self.video_fps = 0.0;
+        self.video_frames_since_last_check = 0;
         self.fullscreen_toggle_frame_count = None;
         self.ui.video_window_open = false;
     }
@@ -314,6 +316,8 @@ impl AppState {
 
         if let Some(mut hook) = self.gamescope_hook.take() {
             hook.is_active = false;
+            drop(hook.dma_handle.take());
+            drop(hook.egl_importer.take());
             if let Some(mut video_handle) = hook.video_handle.take() {
                 video_handle.stop();
             }
@@ -347,8 +351,13 @@ impl AppState {
         let (frame_tx, frame_rx) = crossbeam_channel::bounded(2);
         self.frame_receiver = Some(frame_rx);
         self.latest_frame = None;
+        self.hardware.video_queue_drops = Arc::new(std::sync::atomic::AtomicU64::new(0));
         self.gui_fps = 0.0;
         self.video_fps = 0.0;
+        self.frames_since_last_check = 0;
+        self.video_frames_since_last_check = 0;
+        self.last_fps_check = std::time::Instant::now();
+        self.last_video_fps_check = self.last_fps_check;
         self.ui.video_window_open = true;
         self.ui.control_window_open = false;
 
@@ -357,22 +366,40 @@ impl AppState {
             repaint_ctx.request_repaint();
         });
 
-        // 1. Start Gamescope video reader (GStreamer converts to standard limited-range I420 YUV,
-        // so ColorRange::Limited ensures correct full-range RGB reconstruction in shaders)
-        self.color_range.store(
-            crate::video::types::ColorRange::Limited as u8,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        let video_handle = match crate::gamescope::video::start_gamescope_video(
-            frame_tx,
+        // 1. Start Gamescope video reader:
+        // Try native zero-copy PipeWire DMA-BUF + EGL stream first.
+        let dma_handle = crate::gamescope::pipewire_dma::start_gamescope_dma_stream(
+            None,
             request_repaint.clone(),
-            self.color_range.clone(),
-        ) {
-            Ok(handle) => Some(handle),
-            Err(e) => {
-                self.error(format!("Failed to connect to Gamescope video stream: {e}"));
-                None
+            self.hardware.video_queue_drops.clone(),
+        );
+        let egl_importer = if dma_handle.is_some() {
+            crate::gamescope::egl::EglDmaBufImporter::new()
+                .map(|imp| std::sync::Arc::new(std::sync::Mutex::new(imp)))
+        } else {
+            None
+        };
+
+        let video_handle = if dma_handle.is_none() || egl_importer.is_none() {
+            tracing::info!("Using fallback GStreamer pipewiresrc pipeline for Gamescope video");
+            self.color_range.store(
+                crate::video::types::ColorRange::Limited as u8,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            match crate::gamescope::video::start_gamescope_video(
+                frame_tx,
+                request_repaint.clone(),
+                self.color_range.clone(),
+            ) {
+                Ok(handle) => Some(handle),
+                Err(e) => {
+                    self.error(format!("Failed to connect to Gamescope video stream: {e}"));
+                    None
+                }
             }
+        } else {
+            tracing::info!("Native PipeWire DMA-BUF zero-copy pipeline initialized for Gamescope video");
+            None
         };
 
         // 2. Start Gamescope audio monitor capture
@@ -404,13 +431,19 @@ impl AppState {
             }
         };
 
+        let initial_resolution = crate::gamescope::video::detect_gamescope_resolution();
+
         self.gamescope_hook = Some(crate::gamescope::GamescopeHookState {
             is_active: true,
             passthrough_enabled: true,
+            dma_handle,
+            egl_importer,
+            current_dmabuf_frame: None,
             video_handle,
             audio_handle,
             input_client,
             prev_modifiers: eframe::egui::Modifiers::default(),
+            initial_resolution,
         });
 
         self.info("Gamescope hook started (4K 60Hz). Mouse/keyboard passthrough active (Shift+Tab to release).");

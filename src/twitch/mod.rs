@@ -116,6 +116,8 @@ pub struct TwitchState {
     pub input: String,
     /// Hidden from the live view with the `T` hotkey (session only).
     pub overlay_hidden: bool,
+    /// Whether the text input box should request keyboard focus on the next frame.
+    pub focus_input_requested: bool,
     /// Last drawn overlay rect (video window points), if visible.
     pub overlay_rect: Option<egui::Rect>,
     pub emotes: EmoteCache,
@@ -171,6 +173,7 @@ impl Default for TwitchState {
             input: String::new(),
             // Start hidden each session; the user opens it with `T`.
             overlay_hidden: true,
+            focus_input_requested: false,
             overlay_rect: None,
             emotes: EmoteCache::default(),
             auth_flow: AuthFlow::Idle,

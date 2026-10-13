@@ -1811,10 +1811,7 @@ crt_brightboost = 1.6
         state.gamescope_hook = Some(crate::gamescope::GamescopeHookState {
             is_active: true,
             passthrough_enabled: true,
-            video_handle: None,
-            audio_handle: None,
-            input_client: None,
-            prev_modifiers: eframe::egui::Modifiers::default(),
+            ..Default::default()
         });
 
         // Tweak settings in Gamescope mode

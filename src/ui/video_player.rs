@@ -4,6 +4,7 @@ use crate::devices::filter_type::CrtFilter;
 use crate::video;
 use eframe::egui;
 use eframe::egui_glow;
+use std::os::unix::io::AsRawFd;
 use std::sync::atomic::Ordering;
 
 fn capture_frame_pixels_raw(
@@ -94,6 +95,20 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         passthrough_active = state.gamescope_hook.as_ref().map_or(false, |h| h.passthrough_enabled);
     }
 
+    let (latest_dmabuf_frame, egl_importer_cb) = if let Some(hook) = &mut state.gamescope_hook {
+        if hook.is_active {
+            if let Some(dma) = &hook.dma_handle {
+                while let Ok(frame) = dma.rx.try_recv() {
+                    hook.current_dmabuf_frame = Some(std::sync::Arc::new(frame));
+                    state.video_frames_since_last_check += 1;
+                }
+            }
+        }
+        (hook.current_dmabuf_frame.clone(), hook.egl_importer.clone())
+    } else {
+        (None, None)
+    };
+
     // Space to capture OCR; Shift+Space to clear OCR boxes (suppressed when passthrough is active)
     if !passthrough_active && !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
         if ctx.input(|i| i.modifiers.shift) {
@@ -155,7 +170,10 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
         let ppp = ctx.pixels_per_point();
         let output_size = (response.rect.width() * ppp, response.rect.height() * ppp);
-        let latest_frame_dim = active_frame.as_ref().map(|f| (f.width, f.height));
+        let latest_frame_dim = active_frame
+            .as_ref()
+            .map(|f| (f.width, f.height))
+            .or_else(|| latest_dmabuf_frame.as_ref().map(|f| (f.width, f.height)));
         let res = latest_frame_dim
             .or_else(|| {
                 if let Some(hook) = &state.gamescope_hook {
@@ -332,6 +350,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 let ocr_req_sender_cb = ocr_req_sender.clone();
                 let bank_capture_cb = bank_capture.clone();
 
+                let latest_dmabuf_frame_cb = latest_dmabuf_frame.clone();
+                let egl_importer_cb = egl_importer_cb.clone();
+
                 let capture_overlays = state.replay.config.capture_overlays;
                 let webcam_enabled = state.webcam.config.enabled;
                 let stream_res = if let Some(hook) = &state.gamescope_hook {
@@ -350,11 +371,30 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         move |_info, painter| {
                             let mut renderer = renderer_clone.lock().unwrap();
                             let output_size = (rect.width() * ppp, rect.height() * ppp);
-                            let fallback_tex = video_texture_id.and_then(|id| painter.texture(id));
+                            let mut fallback_tex = video_texture_id.and_then(|id| painter.texture(id));
+                            if let (Some(importer_arc), Some(dma_frame)) = (&egl_importer_cb, &latest_dmabuf_frame_cb) {
+                                if let Ok(mut importer) = importer_arc.lock() {
+                                    unsafe {
+                                        if let Some(imported_tex) = importer.import_dmabuf(
+                                            painter.gl(),
+                                            dma_frame.fd.as_raw_fd(),
+                                            dma_frame.width,
+                                            dma_frame.height,
+                                            dma_frame.stride,
+                                            dma_frame.drm_fourcc,
+                                            dma_frame.modifier,
+                                            dma_frame.captured_at,
+                                        ) {
+                                            fallback_tex = Some(imported_tex);
+                                        }
+                                    }
+                                }
+                            }
 
                             let res = latest_frame
                                 .as_ref()
                                 .map(|f| (f.width, f.height))
+                                .or_else(|| latest_dmabuf_frame_cb.as_ref().map(|f| (f.width, f.height)))
                                 .or_else(|| {
                                     if stream_res.0 > 0 {
                                         Some(stream_res)
@@ -402,6 +442,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                             let at = latest_frame
                                 .as_ref()
                                 .map(|f| f.captured_at)
+                                .or_else(|| latest_dmabuf_frame_cb.as_ref().map(|f| f.captured_at))
                                 .unwrap_or(0);
                             if ocr_capture_cb.swap(false, Ordering::AcqRel) {
                                 if let Some((pixels, w, h)) =
@@ -574,6 +615,10 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             let ocr_capture_cb = ocr_capture.clone();
             let ocr_req_sender_cb = ocr_req_sender.clone();
             let bank_capture_cb = bank_capture.clone();
+
+            let latest_dmabuf_frame_cb = latest_dmabuf_frame.clone();
+            let egl_importer_cb = egl_importer_cb.clone();
+
             let capture_overlays = state.replay.config.capture_overlays;
             let webcam_enabled = state.webcam.config.enabled;
             let stream_res = if let Some(hook) = &state.gamescope_hook {
@@ -589,10 +634,30 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             let callback = egui::PaintCallback {
                 rect,
                 callback: std::sync::Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
-                    let fallback_tex = video_texture_id.and_then(|id| painter.texture(id));
+                    let mut fallback_tex = video_texture_id.and_then(|id| painter.texture(id));
+                    if let (Some(importer_arc), Some(dma_frame)) = (&egl_importer_cb, &latest_dmabuf_frame_cb) {
+                        if let Ok(mut importer) = importer_arc.lock() {
+                            unsafe {
+                                if let Some(imported_tex) = importer.import_dmabuf(
+                                    painter.gl(),
+                                    dma_frame.fd.as_raw_fd(),
+                                    dma_frame.width,
+                                    dma_frame.height,
+                                    dma_frame.stride,
+                                    dma_frame.drm_fourcc,
+                                    dma_frame.modifier,
+                                    dma_frame.captured_at,
+                                ) {
+                                    fallback_tex = Some(imported_tex);
+                                }
+                            }
+                        }
+                    }
+
                     let res = latest_frame
                         .as_ref()
                         .map(|f| (f.width, f.height))
+                        .or_else(|| latest_dmabuf_frame_cb.as_ref().map(|f| (f.width, f.height)))
                         .or_else(|| {
                             if stream_res.0 > 0 {
                                 Some(stream_res)
@@ -636,6 +701,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     let at = latest_frame
                         .as_ref()
                         .map(|f| f.captured_at)
+                        .or_else(|| latest_dmabuf_frame_cb.as_ref().map(|f| f.captured_at))
                         .unwrap_or(0);
                     if ocr_capture_cb.swap(false, Ordering::AcqRel) {
                         if let Some((pixels, w, h)) =
@@ -800,13 +866,6 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             if let Some(rem_secs) = preroll_remaining_secs {
                 draw_preroll_counter_preview(ctx, response.rect, rem_secs);
             }
-        }
-
-        // Draw gamescope input paused badge on Order::Debug when hook is active and passthrough is paused.
-        // This is rendered on egui::Order::Debug so it is visible in the local preview window,
-        // but NEVER captured into clips, replay buffer, or Twitch livestream.
-        if is_gamescope && !passthrough_active {
-            draw_gamescope_input_paused_badge(ctx, video_rect);
         }
 
         if !passthrough_active && response.double_clicked() {
@@ -1267,44 +1326,6 @@ pub fn forward_gamescope_inputs(
             _ => {}
         }
     }
-}
-
-/// Renders a permanent blocked sign overlay badge on Order::Debug when input passthrough is paused.
-/// This executes after the broadcast/replay capture layer (Order::Tooltip), ensuring that the
-/// blocked sign badge is visible to the user locally but NEVER captured into clips, replay buffers, or streams.
-fn draw_gamescope_input_paused_badge(ctx: &egui::Context, video_rect: egui::Rect) {
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Debug,
-        egui::Id::new("gamescope_input_paused_badge"),
-    ));
-
-    let margin = 16.0;
-    let badge_size = egui::vec2(40.0, 40.0);
-    let badge_rect = egui::Rect::from_min_size(
-        video_rect.min + egui::vec2(margin, margin),
-        badge_size,
-    );
-
-    // Dark translucent background with subtle warning red border
-    painter.rect_filled(
-        badge_rect,
-        egui::Rounding::same(6.0),
-        egui::Color32::from_rgba_premultiplied(16, 18, 24, 225),
-    );
-    painter.rect_stroke(
-        badge_rect,
-        egui::Rounding::same(6.0),
-        egui::Stroke::new(1.5, egui::Color32::from_rgb(230, 50, 50)),
-    );
-
-    // 🚫 Blocked sign symbol
-    painter.text(
-        badge_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        "🚫",
-        egui::FontId::proportional(22.0),
-        egui::Color32::WHITE,
-    );
 }
 
 #[cfg(test)]

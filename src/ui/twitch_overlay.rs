@@ -28,6 +28,9 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
     }
     if tw.config.chat_overlay_enabled && toggle_pressed(ctx) {
         tw.overlay_hidden = !tw.overlay_hidden;
+        if !tw.overlay_hidden {
+            tw.focus_input_requested = true;
+        }
     }
     if !tw.config.chat_overlay_enabled || tw.overlay_hidden {
         tw.overlay_rect = None;
@@ -374,6 +377,14 @@ fn draw_footer(ui: &mut egui::Ui, tw: &mut TwitchState, footer: egui::Rect) {
                 .char_limit(500)
                 .desired_width(input_rect.width()),
         );
+        if can_send && tw.focus_input_requested {
+            response.request_focus();
+        }
+        tw.focus_input_requested = false;
+        if response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            response.surrender_focus();
+            tw.overlay_hidden = true;
+        }
         if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             tw.send_input();
             response.request_focus();

@@ -6,9 +6,9 @@
 
 set -euo pipefail
 
-# 1. Target resolution and refresh rate (Defaults to 1440p 60Hz for optimal streaming throughput)
-GAMESCOPE_WIDTH="${MICHADAME_WIDTH:-2560}"
-GAMESCOPE_HEIGHT="${MICHADAME_HEIGHT:-1440}"
+# 1. Target resolution and refresh rate (Defaults to 4K 60Hz)
+GAMESCOPE_WIDTH="${MICHADAME_WIDTH:-3840}"
+GAMESCOPE_HEIGHT="${MICHADAME_HEIGHT:-2160}"
 GAMESCOPE_REFRESH="${MICHADAME_REFRESH:-60}"
 
 # 2. Audio isolation setup

@@ -1,14 +1,20 @@
 pub mod audio;
+pub mod egl;
 pub mod input;
+pub mod pipewire_dma;
 pub mod video;
 
 pub struct GamescopeHookState {
     pub is_active: bool,
     pub passthrough_enabled: bool,
+    pub dma_handle: Option<pipewire_dma::GamescopeDmaBufHandle>,
+    pub egl_importer: Option<std::sync::Arc<std::sync::Mutex<egl::EglDmaBufImporter>>>,
+    pub current_dmabuf_frame: Option<std::sync::Arc<pipewire_dma::DmaBufFrame>>,
     pub video_handle: Option<video::GamescopeVideoHandle>,
     pub audio_handle: Option<audio::GamescopeAudioHandle>,
     pub input_client: Option<input::GamescopeInputClient>,
     pub prev_modifiers: eframe::egui::Modifiers,
+    pub initial_resolution: (u32, u32),
 }
 
 impl Default for GamescopeHookState {
@@ -16,23 +22,26 @@ impl Default for GamescopeHookState {
         Self {
             is_active: false,
             passthrough_enabled: true,
+            dma_handle: None,
+            egl_importer: None,
+            current_dmabuf_frame: None,
             video_handle: None,
             audio_handle: None,
             input_client: None,
             prev_modifiers: eframe::egui::Modifiers::default(),
+            initial_resolution: (video::GAMESCOPE_WIDTH, video::GAMESCOPE_HEIGHT),
         }
     }
 }
 
 impl GamescopeHookState {
     pub fn resolution(&self) -> (u32, u32) {
-        if let Some(video) = &self.video_handle {
+        if let Some(frame) = &self.current_dmabuf_frame {
+            (frame.width, frame.height)
+        } else if let Some(video) = &self.video_handle {
             (video.width, video.height)
         } else {
-            (
-                video::GAMESCOPE_WIDTH,
-                video::GAMESCOPE_HEIGHT,
-            )
+            self.initial_resolution
         }
     }
 

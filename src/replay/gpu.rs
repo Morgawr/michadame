@@ -52,6 +52,42 @@ impl SurfaceState {
         Some(true)
     }
 }
+
+pub const MAX_REPLAY_WIDTH: u32 = 1920;
+pub const MAX_REPLAY_HEIGHT: u32 = 1080;
+
+pub fn target_capture_dimensions(width: u32, height: u32) -> (u32, u32) {
+    if width == 0 || height == 0 {
+        return (0, 0);
+    }
+    if width <= MAX_REPLAY_WIDTH && height <= MAX_REPLAY_HEIGHT {
+        return (width, height);
+    }
+    let scale_w = MAX_REPLAY_WIDTH as f32 / width as f32;
+    let scale_h = MAX_REPLAY_HEIGHT as f32 / height as f32;
+    let scale = scale_w.min(scale_h);
+    // Keep even dimensions for NV12 video encoding compatibility
+    let w = ((width as f32 * scale).round() as u32).max(2) & !1;
+    let h = ((height as f32 * scale).round() as u32).max(2) & !1;
+    (w, h)
+}
+
+fn fbo_from_param(param: i32) -> Option<glow::Framebuffer> {
+    if param > 0 {
+        std::num::NonZeroU32::new(param as u32).map(glow::NativeFramebuffer)
+    } else {
+        None
+    }
+}
+
+fn tex_from_param(param: i32) -> Option<glow::Texture> {
+    if param > 0 {
+        std::num::NonZeroU32::new(param as u32).map(glow::NativeTexture)
+    } else {
+        None
+    }
+}
+
 #[derive(Default)]
 pub struct Readback {
     pending: VecDeque<Slot>,
@@ -60,6 +96,9 @@ pub struct Readback {
     last_at: i64,
     active: Option<std::sync::Weak<super::Shared>>,
     requested: Option<u64>,
+    downscale_fbo: Option<glow::Framebuffer>,
+    downscale_tex: Option<glow::Texture>,
+    downscale_size: (u32, u32),
 }
 impl Readback {
     fn observe_surface(&mut self, size: (u32, u32), at: i64, now: i64) -> Option<bool> {
@@ -80,6 +119,13 @@ impl Readback {
             for buffer in self.free.drain(..) {
                 gl.delete_buffer(buffer);
             }
+            if let Some(fbo) = self.downscale_fbo.take() {
+                gl.delete_framebuffer(fbo);
+            }
+            if let Some(tex) = self.downscale_tex.take() {
+                gl.delete_texture(tex);
+            }
+            self.downscale_size = (0, 0);
         }
         self.last_at = 0;
         self.requested = None;
@@ -122,10 +168,12 @@ impl Readback {
             self.active = None;
         }
 
+        let (capture_w, capture_h) = target_capture_dimensions(width, height);
+
         // Missing/stale capture timestamps cannot establish a new recording
         // epoch. Real stream restarts already disable replay. In particular,
         // never confuse an out-of-order frame with a backwards system clock.
-        let Some(resized) = self.observe_surface((width, height), at, super::now_us()) else {
+        let Some(resized) = self.observe_surface((capture_w, capture_h), at, super::now_us()) else {
             return;
         };
         if resized {
@@ -136,7 +184,7 @@ impl Readback {
         }
 
         let (slots, bytes, generation) = if let Some(runtime) = running_replay {
-            let Some(plan) = runtime.config.queue_plan(width, height) else {
+            let Some(plan) = runtime.config.queue_plan(capture_w, capture_h) else {
                 runtime.shared.message(
                     "Replay stopped: work queue or RAM budget is too small for this image size",
                 );
@@ -176,7 +224,7 @@ impl Readback {
             }
             (plan.slots, plan.frame_bytes, gen)
         } else {
-            (4, width as usize * height as usize * 4, 0)
+            (4, capture_w as usize * capture_h as usize * 4, 0)
         };
 
         unsafe {
@@ -226,8 +274,8 @@ impl Readback {
                                 b_buf.copy_from_slice(&rgba);
                                 if bc.tx.try_send(VideoFrame {
                                     rgba: b_buf,
-                                    width,
-                                    height,
+                                    width: capture_w,
+                                    height: capture_h,
                                     at: slot.at,
                                     generation: 0,
                                 }).is_err() {
@@ -240,8 +288,8 @@ impl Readback {
 
                         if let Err(error) = runtime.queue.submit(VideoFrame {
                             rgba,
-                            width,
-                            height,
+                            width: capture_w,
+                            height: capture_h,
                             at: slot.at,
                             generation,
                         }) {
@@ -258,8 +306,8 @@ impl Readback {
                                 gl.get_buffer_sub_data(glow::PIXEL_PACK_BUFFER, 0, &mut b_buf);
                                 if bc.tx.try_send(VideoFrame {
                                     rgba: b_buf,
-                                    width,
-                                    height,
+                                    width: capture_w,
+                                    height: capture_h,
                                     at: slot.at,
                                     generation: 0,
                                 }).is_err() {
@@ -280,8 +328,8 @@ impl Readback {
                         gl.get_buffer_sub_data(glow::PIXEL_PACK_BUFFER, 0, &mut b_buf);
                         if bc.tx.try_send(VideoFrame {
                             rgba: b_buf,
-                            width,
-                            height,
+                            width: capture_w,
+                            height: capture_h,
                             at: slot.at,
                             generation: 0,
                         }).is_err() {
@@ -294,7 +342,7 @@ impl Readback {
 
                 gl.delete_sync(slot.fence);
                 self.free.push(slot.buffer);
-                if copying_started.elapsed() >= std::time::Duration::from_millis(2) {
+                if copying_started.elapsed() >= std::time::Duration::from_millis(4) {
                     break;
                 }
             }
@@ -335,15 +383,126 @@ impl Readback {
                 });
                 if let Some(buffer) = buffer {
                     gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(buffer));
-                    gl.read_pixels(
-                        x as i32,
-                        y as i32,
-                        width as i32,
-                        height as i32,
-                        glow::RGBA,
-                        glow::UNSIGNED_BYTE,
-                        glow::PixelPackData::BufferOffset(0),
-                    );
+                    let is_downscaling = capture_w != width || capture_h != height;
+                    if is_downscaling {
+                        if self.downscale_size != (capture_w, capture_h) || self.downscale_fbo.is_none() {
+                            if let Some(fbo) = self.downscale_fbo.take() {
+                                gl.delete_framebuffer(fbo);
+                            }
+                            if let Some(tex) = self.downscale_tex.take() {
+                                gl.delete_texture(tex);
+                            }
+                            self.downscale_size = (0, 0);
+
+                            let old_tex = tex_from_param(gl.get_parameter_i32(glow::TEXTURE_BINDING_2D));
+                            if let Ok(tex) = gl.create_texture() {
+                                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                                gl.tex_image_2d(
+                                    glow::TEXTURE_2D,
+                                    0,
+                                    glow::RGBA8 as i32,
+                                    capture_w as i32,
+                                    capture_h as i32,
+                                    0,
+                                    glow::RGBA,
+                                    glow::UNSIGNED_BYTE,
+                                    None,
+                                );
+                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+
+                                if let Ok(fbo) = gl.create_framebuffer() {
+                                    let old_draw = fbo_from_param(gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING));
+                                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+                                    gl.framebuffer_texture_2d(
+                                        glow::FRAMEBUFFER,
+                                        glow::COLOR_ATTACHMENT0,
+                                        glow::TEXTURE_2D,
+                                        Some(tex),
+                                        0,
+                                    );
+                                    let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+                                    gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, old_draw);
+
+                                    if status == glow::FRAMEBUFFER_COMPLETE {
+                                        self.downscale_fbo = Some(fbo);
+                                        self.downscale_tex = Some(tex);
+                                        self.downscale_size = (capture_w, capture_h);
+                                    } else {
+                                        gl.delete_framebuffer(fbo);
+                                        gl.delete_texture(tex);
+                                    }
+                                } else {
+                                    gl.delete_texture(tex);
+                                }
+                            }
+                            gl.bind_texture(glow::TEXTURE_2D, old_tex);
+                        }
+
+                        if let Some(target_fbo) = self.downscale_fbo {
+                            let old_read_fbo = fbo_from_param(gl.get_parameter_i32(glow::READ_FRAMEBUFFER_BINDING));
+                            let old_draw_fbo = fbo_from_param(gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING));
+                            let scissor_enabled = gl.is_enabled(glow::SCISSOR_TEST);
+                            if scissor_enabled {
+                                gl.disable(glow::SCISSOR_TEST);
+                            }
+
+                            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, old_draw_fbo);
+                            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(target_fbo));
+                            gl.blit_framebuffer(
+                                x as i32,
+                                y as i32,
+                                (x + width) as i32,
+                                (y + height) as i32,
+                                0,
+                                0,
+                                capture_w as i32,
+                                capture_h as i32,
+                                glow::COLOR_BUFFER_BIT,
+                                glow::LINEAR,
+                            );
+
+                            if scissor_enabled {
+                                gl.enable(glow::SCISSOR_TEST);
+                            }
+
+                            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(target_fbo));
+                            gl.read_pixels(
+                                0,
+                                0,
+                                capture_w as i32,
+                                capture_h as i32,
+                                glow::RGBA,
+                                glow::UNSIGNED_BYTE,
+                                glow::PixelPackData::BufferOffset(0),
+                            );
+
+                            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, old_read_fbo);
+                            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, old_draw_fbo);
+                        } else {
+                            gl.read_pixels(
+                                x as i32,
+                                y as i32,
+                                width as i32,
+                                height as i32,
+                                glow::RGBA,
+                                glow::UNSIGNED_BYTE,
+                                glow::PixelPackData::BufferOffset(0),
+                            );
+                        }
+                    } else {
+                        gl.read_pixels(
+                            x as i32,
+                            y as i32,
+                            width as i32,
+                            height as i32,
+                            glow::RGBA,
+                            glow::UNSIGNED_BYTE,
+                            glow::PixelPackData::BufferOffset(0),
+                        );
+                    }
                     match gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
                         Ok(fence) => {
                             self.pending.push_back(Slot {
@@ -578,5 +737,18 @@ mod tests {
         let clip = history.clip(300, epoch + 600_000_000).unwrap();
         assert!(clip[0].key);
         assert!(clip.last().unwrap().end - clip[0].start > 297_000_000);
+    }
+
+    #[test]
+    fn target_capture_dimensions_scales_down_4k_and_preserves_1080p() {
+        assert_eq!(target_capture_dimensions(0, 0), (0, 0));
+        assert_eq!(target_capture_dimensions(1920, 1080), (1920, 1080));
+        assert_eq!(target_capture_dimensions(1280, 720), (1280, 720));
+        assert_eq!(target_capture_dimensions(3840, 2160), (1920, 1080));
+        assert_eq!(target_capture_dimensions(2560, 1440), (1920, 1080));
+        let (uw_w, uw_h) = target_capture_dimensions(3440, 1440);
+        assert_eq!(uw_w, 1920);
+        assert_eq!(uw_h % 2, 0);
+        assert!(uw_h <= 1080);
     }
 }
