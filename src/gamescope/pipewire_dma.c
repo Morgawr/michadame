@@ -26,6 +26,7 @@ struct gamescope_dma_stream {
     uint32_t drm_fourcc;
     uint64_t modifier;
     bool has_format;
+    uint32_t next_buffer_id;
 };
 
 static uint32_t spa_format_to_drm_fourcc(enum spa_video_format format) {
@@ -107,12 +108,32 @@ static void on_stream_param_changed(void *data, uint32_t id, const struct spa_po
     pw_stream_update_params(s->stream, b_params, 1);
 }
 
+static void on_stream_add_buffer(void *data, struct pw_buffer *b) {
+    struct gamescope_dma_stream *s = (struct gamescope_dma_stream *)data;
+    if (!s || !b) return;
+    s->next_buffer_id++;
+    b->user_data = (void *)(uintptr_t)s->next_buffer_id;
+}
+
+static void on_stream_remove_buffer(void *data, struct pw_buffer *b) {
+    (void)data;
+    if (b) {
+        b->user_data = NULL;
+    }
+}
+
 static void on_stream_process(void *data) {
     struct gamescope_dma_stream *s = (struct gamescope_dma_stream *)data;
     if (!s) return;
 
     struct pw_buffer *b = pw_stream_dequeue_buffer(s->stream);
     if (!b) return;
+
+    if (!b->user_data) {
+        s->next_buffer_id++;
+        b->user_data = (void *)(uintptr_t)s->next_buffer_id;
+    }
+    uint32_t buffer_id = (uint32_t)(uintptr_t)b->user_data;
 
     struct spa_buffer *buf = b->buffer;
     if (buf && buf->n_datas > 0 && s->has_format) {
@@ -123,6 +144,7 @@ static void on_stream_process(void *data) {
             if (s->on_frame) {
                 s->on_frame(
                     s->user_data,
+                    buffer_id,
                     d->fd,
                     s->width,
                     s->height,
@@ -141,6 +163,8 @@ static const struct pw_stream_events stream_events = {
     PW_VERSION_STREAM_EVENTS,
     .state_changed = on_stream_state_changed,
     .param_changed = on_stream_param_changed,
+    .add_buffer = on_stream_add_buffer,
+    .remove_buffer = on_stream_remove_buffer,
     .process = on_stream_process,
 };
 

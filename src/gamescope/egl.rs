@@ -23,12 +23,24 @@ type GlEGLImageTargetTexture2DOES = unsafe extern "C" fn(
 type EglGetCurrentDisplay = unsafe extern "C" fn() -> *mut c_void;
 type EglGetProcAddress = unsafe extern "C" fn(procname: *const c_char) -> *mut c_void;
 
+#[derive(Clone, Copy, Debug)]
+pub struct CachedDmaBuffer {
+    pub buffer_id: u32,
+    pub texture: glow::Texture,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub drm_fourcc: u32,
+    pub modifier: u64,
+}
+
 pub struct EglDmaBufImporter {
     egl_display: *mut c_void,
     egl_create_image_khr: EglCreateImageKHR,
     egl_destroy_image_khr: EglDestroyImageKHR,
     gl_egl_image_target_texture2d_oes: GlEGLImageTargetTexture2DOES,
     pub current_texture: Option<glow::Texture>,
+    pub cached_buffers: Vec<CachedDmaBuffer>,
     last_size: (u32, u32),
     last_captured_at: i64,
 }
@@ -106,6 +118,7 @@ impl EglDmaBufImporter {
                 egl_destroy_image_khr,
                 gl_egl_image_target_texture2d_oes,
                 current_texture: None,
+                cached_buffers: Vec::new(),
                 last_size: (0, 0),
                 last_captured_at: -1,
             })
@@ -114,10 +127,15 @@ impl EglDmaBufImporter {
 
     /// Imports a Linux DMA-BUF file descriptor directly into an OpenGL texture.
     ///
+    /// When `buffer_id` is non-zero and already present in the cache with identical format
+    /// parameters, the cached `glow::Texture` is returned immediately without issuing any
+    /// kernel DRM ioctls or EGLImage allocations.
+    ///
     /// The import is 100% zero-copy in GPU VRAM.
     pub unsafe fn import_dmabuf(
         &mut self,
         gl: &glow::Context,
+        buffer_id: u32,
         fd: i32,
         width: u32,
         height: u32,
@@ -126,9 +144,31 @@ impl EglDmaBufImporter {
         modifier: u64,
         captured_at: i64,
     ) -> Option<glow::Texture> {
-        if self.last_captured_at == captured_at && self.current_texture.is_some() {
-            return self.current_texture;
+        // If stream resolution changed, invalidate and delete all cached textures
+        if self.last_size != (0, 0) && self.last_size != (width, height) {
+            for entry in self.cached_buffers.drain(..) {
+                gl.delete_texture(entry.texture);
+            }
+            self.current_texture = None;
         }
+        self.last_size = (width, height);
+        self.last_captured_at = captured_at;
+
+        // Check cache for existing imported buffer
+        if buffer_id > 0 {
+            if let Some(entry) = self.cached_buffers.iter().find(|e| {
+                e.buffer_id == buffer_id
+                    && e.width == width
+                    && e.height == height
+                    && e.stride == stride
+                    && e.drm_fourcc == drm_fourcc
+                    && e.modifier == modifier
+            }) {
+                self.current_texture = Some(entry.texture);
+                return Some(entry.texture);
+            }
+        }
+
         let mut attribs: Vec<i32> = vec![
             0x3057, width as i32,      // EGL_WIDTH
             0x3056, height as i32,     // EGL_HEIGHT
@@ -159,18 +199,11 @@ impl EglDmaBufImporter {
         );
 
         if image.is_null() {
-            tracing::warn!("eglCreateImageKHR failed for DMA-BUF fd {}", fd);
+            tracing::warn!("eglCreateImageKHR failed for DMA-BUF buffer_id {} fd {}", buffer_id, fd);
             return None;
         }
 
-        let tex = match self.current_texture {
-            Some(t) => t,
-            None => {
-                let t = gl.create_texture().ok()?;
-                self.current_texture = Some(t);
-                t
-            }
-        };
+        let tex = gl.create_texture().ok()?;
 
         gl.bind_texture(glow::TEXTURE_2D, Some(tex));
         (self.gl_egl_image_target_texture2d_oes)(glow::TEXTURE_2D, image);
@@ -184,8 +217,71 @@ impl EglDmaBufImporter {
         // Once bound to the GL texture target, the EGLImage wrapper can be destroyed
         (self.egl_destroy_image_khr)(self.egl_display, image);
 
-        self.last_size = (width, height);
-        self.last_captured_at = captured_at;
+        tracing::info!(
+            "Imported new DMA-BUF texture to pool (buffer_id: {}, fd: {}, {}x{}, fourcc: 0x{:08x})",
+            buffer_id, fd, width, height, drm_fourcc
+        );
+
+        self.current_texture = Some(tex);
+        if buffer_id > 0 {
+            self.cached_buffers.push(CachedDmaBuffer {
+                buffer_id,
+                texture: tex,
+                width,
+                height,
+                stride,
+                drm_fourcc,
+                modifier,
+            });
+        }
+
         Some(tex)
+    }
+
+    /// Deletes all cached OpenGL textures.
+    pub unsafe fn destroy(&mut self, gl: &glow::Context) {
+        for entry in self.cached_buffers.drain(..) {
+            gl.delete_texture(entry.texture);
+        }
+        self.current_texture = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cached_dma_buffer_lookup() {
+        let dummy_tex = glow::NativeTexture(std::num::NonZeroU32::new(42).unwrap());
+        let cached = CachedDmaBuffer {
+            buffer_id: 1,
+            texture: dummy_tex,
+            width: 3840,
+            height: 2160,
+            stride: 15360,
+            drm_fourcc: 0x34325241,
+            modifier: 0,
+        };
+
+        let list = vec![cached];
+        let found = list.iter().find(|e| {
+            e.buffer_id == 1
+                && e.width == 3840
+                && e.height == 2160
+                && e.stride == 15360
+                && e.drm_fourcc == 0x34325241
+                && e.modifier == 0
+        });
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().texture, dummy_tex);
+
+        // Mismatched buffer_id should not find
+        let not_found = list.iter().find(|e| e.buffer_id == 2);
+        assert!(not_found.is_none());
+
+        // Mismatched resolution should not find
+        let mismatch_res = list.iter().find(|e| e.buffer_id == 1 && e.width == 1920);
+        assert!(mismatch_res.is_none());
     }
 }

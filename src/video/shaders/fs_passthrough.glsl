@@ -8,6 +8,7 @@
     uniform float vibrance;
     uniform int scaler_filter;
     uniform vec4 border_crop; // left, right, top, bottom
+    uniform int input_is_srgb;
 
     // Convert from linear to sRGB color space
     float ToSrgb1(float c) {
@@ -118,10 +119,19 @@
             centered_tc.y < border_crop.z || centered_tc.y > (1.0 - border_crop.w)) {
             out_color = vec4(ToSrgb(background_color), 1.0);
         } else {
-            vec3 linear_color = SampleVideo(video_texture, centered_tc, video_res, scaler_filter);
-            // Apply vibrance (saturation boost in linear space)
-            float luminance = dot(linear_color, vec3(0.2126, 0.7152, 0.0722));
-            linear_color = mix(vec3(luminance), linear_color, vibrance);
-            out_color = vec4(ToSrgb(linear_color), 1.0);
+            vec3 sampled_color = SampleVideo(video_texture, centered_tc, video_res, scaler_filter);
+            if (input_is_srgb != 0) {
+                // Input is already sRGB (e.g. direct Gamescope DMA-BUF).
+                if (abs(vibrance - 1.0) > 0.001) {
+                    float luminance = dot(sampled_color, vec3(0.2126, 0.7152, 0.0722));
+                    sampled_color = clamp(mix(vec3(luminance), sampled_color, vibrance), 0.0, 1.0);
+                }
+                out_color = vec4(sampled_color, 1.0);
+            } else {
+                // Apply vibrance (saturation boost in linear space)
+                float luminance = dot(sampled_color, vec3(0.2126, 0.7152, 0.0722));
+                vec3 linear_color = mix(vec3(luminance), sampled_color, vibrance);
+                out_color = vec4(ToSrgb(linear_color), 1.0);
+            }
         }
     }

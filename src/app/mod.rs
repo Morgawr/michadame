@@ -362,11 +362,10 @@ impl AppState {
         }
     }
 
-    /// Caps the framerate of the egui surface rendering for the main game to 60 FPS.
+    /// Updates the target time for the next 60 FPS presentation interval without blocking.
     ///
-    /// When the main game/video is active, this paces the main event loop to ~16.666 ms
-    /// intervals, preventing the UI surface rendering from overrunning the 60 FPS game
-    /// stream on high-refresh monitors (e.g. 144Hz/240Hz).
+    /// Presentation timing is driven directly by frame arrivals (e.g. PipeWire DMA-BUF delivery)
+    /// rather than artificial thread sleep loops, eliminating scheduler jitter and microstutters.
     pub fn pace_gui_frame(&mut self) {
         if self.ui.video_window_open {
             const TARGET_FRAME_DURATION: std::time::Duration =
@@ -374,13 +373,9 @@ impl AppState {
 
             let now = Instant::now();
             if let Some(ref mut next_time) = self.next_gui_frame_time {
-                if now < *next_time {
-                    let sleep_duration = *next_time - now;
-                    std::thread::sleep(sleep_duration);
-                }
-                let post_sleep_now = Instant::now();
-                if post_sleep_now > *next_time + TARGET_FRAME_DURATION * 2 {
-                    *next_time = post_sleep_now + TARGET_FRAME_DURATION;
+                let post_now = Instant::now();
+                if post_now > *next_time + TARGET_FRAME_DURATION * 2 {
+                    *next_time = post_now + TARGET_FRAME_DURATION;
                 } else {
                     *next_time += TARGET_FRAME_DURATION;
                 }
@@ -1165,15 +1160,14 @@ mod tests {
         state.pace_gui_frame();
         state.pace_gui_frame();
         let elapsed = start.elapsed();
-        // Two consecutive frames paced to 60 FPS should take at least ~15ms
-        assert!(elapsed >= std::time::Duration::from_millis(15));
+        // Pacing must be non-blocking with zero artificial thread::sleep overhead
+        assert!(elapsed < std::time::Duration::from_millis(5));
+        assert!(state.next_gui_frame_time.is_some());
 
-        // When video window is closed, pacing is disabled (no sleep)
+        // When video window is closed, pacing is disabled
         state.ui.video_window_open = false;
-        let start_closed = Instant::now();
         state.pace_gui_frame();
-        state.pace_gui_frame();
-        assert!(start_closed.elapsed() < std::time::Duration::from_millis(5));
+        assert!(state.next_gui_frame_time.is_none());
     }
 
     #[test]

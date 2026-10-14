@@ -11,6 +11,7 @@ struct GamescopeDmaStreamOpaque {
 
 type DmaFrameCb = unsafe extern "C" fn(
     user_data: *mut c_void,
+    buffer_id: u32,
     fd: i32,
     width: u32,
     height: u32,
@@ -38,6 +39,7 @@ extern "C" {
 
 #[derive(Debug)]
 pub struct DmaBufFrame {
+    pub buffer_id: u32,
     pub fd: OwnedFd,
     pub width: u32,
     pub height: u32,
@@ -55,6 +57,7 @@ struct StreamContext {
 
 unsafe extern "C" fn on_frame_trampoline(
     user_data: *mut c_void,
+    buffer_id: u32,
     fd: i32,
     width: u32,
     height: u32,
@@ -71,6 +74,7 @@ unsafe extern "C" fn on_frame_trampoline(
     }
 
     let frame = DmaBufFrame {
+        buffer_id,
         fd: OwnedFd::from_raw_fd(dup_fd),
         width,
         height,

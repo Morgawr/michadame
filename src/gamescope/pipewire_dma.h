@@ -10,6 +10,7 @@ extern "C" {
 
 typedef void (*gamescope_dma_frame_cb)(
     void *user_data,
+    uint32_t buffer_id,
     int fd,
     uint32_t width,
     uint32_t height,

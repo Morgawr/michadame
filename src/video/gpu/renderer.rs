@@ -143,6 +143,7 @@ pub struct CrtFilterRenderer {
     passthrough_scaler_filter_loc: glow::UniformLocation,
     final_border_crop_loc: glow::UniformLocation,
     passthrough_border_crop_loc: glow::UniformLocation,
+    passthrough_input_is_srgb_loc: Option<glow::UniformLocation>,
 
     cathode_prog: glow::Program,
     cathode_output_res_loc: glow::UniformLocation,
@@ -526,6 +527,8 @@ impl CrtFilterRenderer {
             let passthrough_border_crop_loc = gl
                 .get_uniform_location(passthrough_prog, "border_crop")
                 .unwrap();
+            let passthrough_input_is_srgb_loc =
+                gl.get_uniform_location(passthrough_prog, "input_is_srgb");
 
             let cathode_output_res_loc = gl
                 .get_uniform_location(cathode_prog, "outputResolution")
@@ -863,6 +866,7 @@ impl CrtFilterRenderer {
                 passthrough_scaler_filter_loc,
                 final_border_crop_loc,
                 passthrough_border_crop_loc,
+                passthrough_input_is_srgb_loc,
                 median_prog,
                 median_mix_loc,
                 deinterlace_prog,
@@ -1777,6 +1781,7 @@ impl CrtFilterRenderer {
                     params.scaler_filter,
                     params.border_crop,
                     upstream_target_fbo,
+                    false,
                 );
             }
 
@@ -2047,6 +2052,7 @@ impl CrtFilterRenderer {
             gl.disable(glow::BLEND);
             gl.bind_vertex_array(Some(self.vertex_array));
 
+            let mut input_is_srgb = false;
             if let Some(tex) = self.update_frame_history_and_prepare_input(
                 gl,
                 raw_frame,
@@ -2062,7 +2068,12 @@ impl CrtFilterRenderer {
             ) {
                 video_texture = Some(tex);
             } else if let Some(tex) = fallback_texture {
-                video_texture = Some(self.linearize_fallback_texture(gl, tex, resolution.0, resolution.1));
+                if !deinterlace_filter_enabled && !median_filter_enabled && !is_anime4k {
+                    video_texture = Some(tex);
+                    input_is_srgb = true;
+                } else {
+                    video_texture = Some(self.linearize_fallback_texture(gl, tex, resolution.0, resolution.1));
+                }
             }
 
             let input_texture = video_texture.expect("No video texture available");
@@ -2222,6 +2233,7 @@ impl CrtFilterRenderer {
                 scaler_filter,
                 border_crop,
                 upstream_target_fbo,
+                input_is_srgb,
             );
 
             if has_comments {
@@ -2363,6 +2375,7 @@ impl CrtFilterRenderer {
         scaler_filter: u8,
         border_crop: [f32; 4],
         target_fbo: Option<glow::Framebuffer>,
+        input_is_srgb: bool,
     ) -> RenderedArea {
         let final_input_texture = video_texture;
 
@@ -2371,6 +2384,10 @@ impl CrtFilterRenderer {
         gl.use_program(Some(self.passthrough_prog));
         gl.active_texture(glow::TEXTURE0);
         gl.bind_texture(glow::TEXTURE_2D, Some(final_input_texture));
+
+        if let Some(loc) = &self.passthrough_input_is_srgb_loc {
+            gl.uniform_1_i32(Some(loc), if input_is_srgb { 1 } else { 0 });
+        }
 
         gl.uniform_2_f32(
             Some(&self.p_passthrough_output_res_loc),

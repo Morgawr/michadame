@@ -102,19 +102,18 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         passthrough_active = state.gamescope_hook.as_ref().map_or(false, |h| h.passthrough_enabled);
     }
 
-    let (latest_dmabuf_frame, egl_importer_cb) = if let Some(hook) = &mut state.gamescope_hook {
+    let mut new_dma_frame_received = false;
+    if let Some(hook) = &mut state.gamescope_hook {
         if hook.is_active {
             if let Some(dma) = &hook.dma_handle {
                 while let Ok(frame) = dma.rx.try_recv() {
                     hook.current_dmabuf_frame = Some(std::sync::Arc::new(frame));
                     state.video_frames_since_last_check += 1;
+                    new_dma_frame_received = true;
                 }
             }
         }
-        (hook.current_dmabuf_frame.clone(), hook.egl_importer.clone())
-    } else {
-        (None, None)
-    };
+    }
 
     // Space to capture OCR; Shift+Space to clear OCR boxes (suppressed when passthrough is active)
     if !passthrough_active && !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
@@ -180,7 +179,12 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         let latest_frame_dim = active_frame
             .as_ref()
             .map(|f| (f.width, f.height))
-            .or_else(|| latest_dmabuf_frame.as_ref().map(|f| (f.width, f.height)));
+            .or_else(|| {
+                state
+                    .gamescope_hook
+                    .as_ref()
+                    .and_then(|h| h.current_dmabuf_frame.as_ref().map(|f| (f.width, f.height)))
+            });
         let res = latest_frame_dim
             .or_else(|| {
                 if let Some(hook) = &state.gamescope_hook {
@@ -236,14 +240,40 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     forward_gamescope_inputs(hook, ctx, video_rect, target_res);
                 }
             }
-            // Consume key and text events so game inputs don't leak into egui widgets while passthrough is on
-            ctx.input_mut(|i| {
-                i.events.retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
-            });
+            // If no new DMA frame arrived yet in this update cycle (e.g. this frame was triggered
+            // by a 144Hz mouse event), wait on PipeWire's frame delivery for up to ~16.6ms.
+            // This synchronizes presentations 1:1 with Gamescope's 60 FPS clock, preventing
+            // 144Hz surface presentation judder and allowing KWin VRR to drop directly to 60Hz.
+            if !new_dma_frame_received {
+                if let Some(ref mut hook) = state.gamescope_hook {
+                    if hook.is_active {
+                        if let Some(dma) = &hook.dma_handle {
+                            // Use a 25ms safety timeout (1.5 frame periods):
+                            // Under active 60 FPS streaming, this unblocks immediately when Gamescope delivers
+                            // the frame (~16.67ms cadence). A 16.0ms timeout was slightly shorter than a true
+                            // 16.667ms frame period, which caused premature timeouts on slight render jitter.
+                            if let Ok(frame) = dma.rx.recv_timeout(std::time::Duration::from_millis(25)) {
+                                hook.current_dmabuf_frame = Some(std::sync::Arc::new(frame));
+                                state.video_frames_since_last_check += 1;
+                                while let Ok(extra) = dma.rx.try_recv() {
+                                    hook.current_dmabuf_frame = Some(std::sync::Arc::new(extra));
+                                    state.video_frames_since_last_check += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         } else if is_gamescope {
             ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
             ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
         }
+
+        let (latest_dmabuf_frame, egl_importer_cb) = if let Some(hook) = &state.gamescope_hook {
+            (hook.current_dmabuf_frame.clone(), hook.egl_importer.clone())
+        } else {
+            (None, None)
+        };
 
         let cathode_params = video::gpu::CathodeInterferenceShaderParams::from_state(state);
         let time = ui.input(|i| i.time) as f32;
@@ -397,6 +427,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                     unsafe {
                                         if let Some(imported_tex) = importer.import_dmabuf(
                                             painter.gl(),
+                                            dma_frame.buffer_id,
                                             dma_frame.fd.as_raw_fd(),
                                             dma_frame.width,
                                             dma_frame.height,
@@ -660,6 +691,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                             unsafe {
                                 if let Some(imported_tex) = importer.import_dmabuf(
                                     painter.gl(),
+                                    dma_frame.buffer_id,
                                     dma_frame.fd.as_raw_fd(),
                                     dma_frame.width,
                                     dma_frame.height,
