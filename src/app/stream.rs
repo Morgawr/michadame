@@ -444,6 +444,7 @@ impl AppState {
             input_client,
             prev_modifiers: eframe::egui::Modifiers::default(),
             initial_resolution,
+            fps_mode: false,
         });
 
         self.info("Gamescope hook started (4K 60Hz). Mouse/keyboard passthrough active (Shift+Tab to release).");

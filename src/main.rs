@@ -33,6 +33,7 @@ fn main() -> Result<(), eframe::Error> {
                 height: icon_height,
             }),
         persist_window: true,
+        vsync: false,
         ..Default::default()
     };
 

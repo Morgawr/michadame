@@ -31,6 +31,7 @@ pub const FS_POPUP: &str = include_str!("../shaders/fs_popup.glsl");
 pub const FS_BLIT: &str = include_str!("../shaders/fs_blit.glsl");
 pub const VS_RETRO_MOUSE: &str = include_str!("../shaders/vs_retro_mouse.glsl");
 pub const FS_RETRO_MOUSE: &str = include_str!("../shaders/fs_retro_mouse.glsl");
+pub const FS_LINEARIZE: &str = include_str!("../shaders/fs_linearize.glsl");
 
 pub unsafe fn compile_program(gl: &glow::Context, vs_src: &str, fs_src: &str) -> glow::Program {
     let program = gl.create_program().expect("Cannot create program");

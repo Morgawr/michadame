@@ -92,6 +92,13 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 ctx.request_repaint();
             }
         }
+        if is_gamescope && ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::G)) {
+            if let Some(hook) = &mut state.gamescope_hook {
+                hook.fps_mode = !hook.fps_mode;
+                tracing::info!("Gamescope FPS relative mouse mode: {}", hook.fps_mode);
+                ctx.request_repaint();
+            }
+        }
         passthrough_active = state.gamescope_hook.as_ref().map_or(false, |h| h.passthrough_enabled);
     }
 
@@ -209,20 +216,33 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         );
         let video_rect = egui::Rect::from_min_size(video_rect_min, video_rect_size);
 
+        let is_window_focused = ctx.input(|i| i.focused);
         if is_gamescope && passthrough_active {
-            if let Some(ref mut hook) = state.gamescope_hook {
-                let target_res = hook.resolution();
-                forward_gamescope_inputs(hook, ctx, video_rect, target_res);
+            let is_fps_mode = state.gamescope_hook.as_ref().map_or(false, |h| h.fps_mode);
+            if is_window_focused && is_fps_mode {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::Locked));
+                ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
             }
-            if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
-                if video_rect.contains(pos) {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+
+            if let Some(ref mut hook) = state.gamescope_hook {
+                if !is_window_focused {
+                    // When window loses focus (e.g. Alt+Tab), release inputs to avoid stuck keys
+                    hook.release_all_inputs();
+                } else {
+                    let target_res = hook.resolution();
+                    forward_gamescope_inputs(hook, ctx, video_rect, target_res);
                 }
             }
             // Consume key and text events so game inputs don't leak into egui widgets while passthrough is on
             ctx.input_mut(|i| {
                 i.events.retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
             });
+        } else if is_gamescope {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
         }
 
         let cathode_params = video::gpu::CathodeInterferenceShaderParams::from_state(state);
@@ -295,7 +315,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             || (night_mode_glow_intensity > 0.001)
             || is_preroll_active
         {
-            ui.ctx().request_repaint();
+            ui.ctx().request_repaint_after(std::time::Duration::from_nanos(1_000_000_000 / 60));
         }
 
         if !is_showing_preroll
@@ -883,7 +903,7 @@ pub fn is_software_mouse_active(state: &AppState, is_on_crt_surface: bool) -> bo
     if state.twitch.preroll.is_some() {
         return false;
     }
-    if state.gamescope_hook.as_ref().map_or(false, |h| h.is_active && h.passthrough_enabled) {
+    if state.gamescope_hook.as_ref().map_or(false, |h| h.is_active && h.fps_mode) {
         return false;
     }
     let filter = CrtFilter::from_u8(state.crt_filter.load(Ordering::Relaxed));
@@ -1262,14 +1282,27 @@ pub fn forward_gamescope_inputs(
     // Ensure incoming EIS events (seat added, device resumed, etc.) are processed
     client.dispatch();
 
-    // Forward pointer position
-    if let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) {
-        if video_rect.contains(pos) {
-            let rel_x = ((pos.x - video_rect.min.x) / video_rect.width()).clamp(0.0, 1.0);
-            let rel_y = ((pos.y - video_rect.min.y) / video_rect.height()).clamp(0.0, 1.0);
-            let gs_x = rel_x as f64 * target_res.0 as f64;
-            let gs_y = rel_y as f64 * target_res.1 as f64;
-            client.send_pointer_motion_absolute(gs_x, gs_y);
+    // Forward pointer motion:
+    if hook.fps_mode {
+        // In FPS mode: send relative motion deltas for camera rotation
+        let delta = ctx.input(|i| i.pointer.delta());
+        if delta.x != 0.0 || delta.y != 0.0 {
+            let scale_x = target_res.0 as f64 / video_rect.width().max(1.0) as f64;
+            let scale_y = target_res.1 as f64 / video_rect.height().max(1.0) as f64;
+            client.send_pointer_motion(delta.x as f64 * scale_x, delta.y as f64 * scale_y);
+        }
+    } else {
+        // In standard mode (Slay the Spire 2, RPGs, strategy):
+        // Stream absolute coordinates on hover and drag
+        let is_any_button_down = ctx.input(|i| i.pointer.any_down());
+        if let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) {
+            if video_rect.contains(pos) || is_any_button_down {
+                let rel_x = ((pos.x - video_rect.min.x) / video_rect.width()).clamp(0.0, 1.0);
+                let rel_y = ((pos.y - video_rect.min.y) / video_rect.height()).clamp(0.0, 1.0);
+                let gs_x = rel_x as f64 * target_res.0 as f64;
+                let gs_y = rel_y as f64 * target_res.1 as f64;
+                client.send_pointer_motion_absolute(gs_x, gs_y);
+            }
         }
     }
 
@@ -1302,17 +1335,37 @@ pub fn forward_gamescope_inputs(
                 };
                 if pressed {
                     if video_rect.contains(pos) {
+                        let rel_x = ((pos.x - video_rect.min.x) / video_rect.width()).clamp(0.0, 1.0);
+                        let rel_y = ((pos.y - video_rect.min.y) / video_rect.height()).clamp(0.0, 1.0);
+                        let gs_x = rel_x as f64 * target_res.0 as f64;
+                        let gs_y = rel_y as f64 * target_res.1 as f64;
+                        client.send_pointer_motion_absolute(gs_x, gs_y);
                         client.send_button(btn_code, true);
                     }
                 } else {
                     client.send_button(btn_code, false);
                 }
             }
-            egui::Event::MouseWheel { delta, .. } => {
-                client.send_scroll(delta.x as f64, delta.y as f64);
-            }
-            egui::Event::Scroll(delta) => {
-                client.send_scroll(delta.x as f64, delta.y as f64);
+            egui::Event::MouseWheel { unit, delta, .. } => {
+                let is_hovered = ctx
+                    .input(|i| i.pointer.latest_pos())
+                    .map_or(false, |pos| video_rect.contains(pos));
+                if hook.fps_mode || is_hovered {
+                    // Gamescope passes (dy * 120.0) as discrete units to wlr_seat_pointer_notify_axis.
+                    // In Wayland/libei, positive dy is scroll DOWN, negative dy is scroll UP.
+                    // In egui, delta.y > 0 is scroll UP, so we invert delta.y.
+                    let (scroll_x, scroll_y) = match unit {
+                        egui::MouseWheelUnit::Line => (delta.x as f64, -delta.y as f64),
+                        egui::MouseWheelUnit::Point => {
+                            // Touchpad / smooth scroll: 50 points per notch
+                            (delta.x as f64 / 50.0, -delta.y as f64 / 50.0)
+                        }
+                        egui::MouseWheelUnit::Page => {
+                            (delta.x as f64 * 5.0, -delta.y as f64 * 5.0)
+                        }
+                    };
+                    client.send_scroll(scroll_x, scroll_y);
+                }
             }
             egui::Event::Key { key, pressed, modifiers, .. } => {
                 // Ignore Shift+Tab (handled as toggle)
@@ -1326,6 +1379,8 @@ pub fn forward_gamescope_inputs(
             _ => {}
         }
     }
+
+    client.dispatch();
 }
 
 #[cfg(test)]
@@ -1404,6 +1459,28 @@ mod tests {
         // Popup active UNDER CRT -> software mouse remains active
         state.dict.popup_under_crt = true;
         assert!(is_software_mouse_active(&state, true));
+
+        // Gamescope hook interactions:
+        state.gamescope_hook = Some(crate::gamescope::GamescopeHookState {
+            is_active: true,
+            passthrough_enabled: true,
+            fps_mode: false,
+            ..Default::default()
+        });
+        // Active in standard passthrough mode
+        assert!(is_software_mouse_active(&state, true));
+
+        // Active in input-paused mode (passthrough disabled)
+        if let Some(h) = &mut state.gamescope_hook {
+            h.passthrough_enabled = false;
+        }
+        assert!(is_software_mouse_active(&state, true));
+
+        // Disabled in FPS mode
+        if let Some(h) = &mut state.gamescope_hook {
+            h.fps_mode = true;
+        }
+        assert!(!is_software_mouse_active(&state, true));
     }
 
     #[test]

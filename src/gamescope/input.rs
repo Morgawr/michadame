@@ -218,8 +218,10 @@ impl GamescopeInputClient {
                         }
                     }
                     EI_EVENT_DEVICE_RESUMED => {
-                        if !self.device.is_null() {
-                            ei_device_start_emulating(self.device, 0);
+                        let dev = ei_event_get_device(event);
+                        let target = if !dev.is_null() { dev } else { self.device };
+                        if !target.is_null() {
+                            ei_device_start_emulating(target, 0);
                             self.is_emulating = true;
                             tracing::debug!("EI device resumed and started emulating");
                         }
@@ -252,6 +254,7 @@ impl GamescopeInputClient {
                 ei_device_frame(self.device, now);
             }
         }
+        self.dispatch();
     }
 
     pub fn send_pointer_motion(&mut self, dx: f64, dy: f64) {
@@ -263,6 +266,7 @@ impl GamescopeInputClient {
                 ei_device_frame(self.device, now);
             }
         }
+        self.dispatch();
     }
 
     pub fn send_button(&mut self, button: u32, is_press: bool) {
@@ -274,6 +278,7 @@ impl GamescopeInputClient {
                 ei_device_frame(self.device, now);
             }
         }
+        self.dispatch();
     }
 
     pub fn send_scroll(&mut self, dx: f64, dy: f64) {
@@ -285,6 +290,7 @@ impl GamescopeInputClient {
                 ei_device_frame(self.device, now);
             }
         }
+        self.dispatch();
     }
 
     pub fn send_key(&mut self, keycode: u32, is_press: bool) {
@@ -296,6 +302,7 @@ impl GamescopeInputClient {
                 ei_device_frame(self.device, now);
             }
         }
+        self.dispatch();
     }
 }
 

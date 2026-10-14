@@ -15,6 +15,7 @@ pub struct GamescopeHookState {
     pub input_client: Option<input::GamescopeInputClient>,
     pub prev_modifiers: eframe::egui::Modifiers,
     pub initial_resolution: (u32, u32),
+    pub fps_mode: bool,
 }
 
 impl Default for GamescopeHookState {
@@ -30,6 +31,7 @@ impl Default for GamescopeHookState {
             input_client: None,
             prev_modifiers: eframe::egui::Modifiers::default(),
             initial_resolution: (video::GAMESCOPE_WIDTH, video::GAMESCOPE_HEIGHT),
+            fps_mode: false,
         }
     }
 }

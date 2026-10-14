@@ -320,6 +320,7 @@ pub struct AppState {
     pub frames_since_last_check: u32,
     pub last_video_fps_check: Instant,
     pub video_frames_since_last_check: u32,
+    pub next_gui_frame_time: Option<Instant>,
 
     pub crt_filter: Arc<AtomicU8>,
     pub scaler_filter: Arc<AtomicU8>,

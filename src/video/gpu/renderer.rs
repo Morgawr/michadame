@@ -229,6 +229,8 @@ pub struct CrtFilterRenderer {
     retro_mouse_scanline_strength_loc: Option<glow::UniformLocation>,
     retro_mouse_scanline_freq_loc: Option<glow::UniformLocation>,
     retro_mouse_brightboost_loc: Option<glow::UniformLocation>,
+    linearize_prog: glow::Program,
+    linearize_sampler_loc: Option<glow::UniformLocation>,
 
     post_fbos: [glow::Framebuffer; 2],
     post_textures: [glow::Texture; 2],
@@ -403,6 +405,14 @@ impl CrtFilterRenderer {
 
             gl.use_program(Some(retro_mouse_prog));
             if let Some(ref loc) = retro_mouse_sampler_loc {
+                gl.uniform_1_i32(Some(loc), 0);
+            }
+            gl.use_program(None);
+
+            let linearize_prog = compile_program(gl, VS_SRC, FS_LINEARIZE);
+            let linearize_sampler_loc = gl.get_uniform_location(linearize_prog, "srgb_tex");
+            gl.use_program(Some(linearize_prog));
+            if let Some(ref loc) = linearize_sampler_loc {
                 gl.uniform_1_i32(Some(loc), 0);
             }
             gl.use_program(None);
@@ -929,6 +939,8 @@ impl CrtFilterRenderer {
                 retro_mouse_scanline_strength_loc,
                 retro_mouse_scanline_freq_loc,
                 retro_mouse_brightboost_loc,
+                linearize_prog,
+                linearize_sampler_loc,
                 post_fbos,
                 post_textures,
                 last_post_size: (0, 0),
@@ -1230,6 +1242,31 @@ impl CrtFilterRenderer {
         tex
     }
 
+    /// Linearizes an incoming sRGB framebuffer texture (e.g. from Gamescope DMA-BUF)
+    /// into self.pass_textures[6] (half-float RGBA16F) so that all CRT filters,
+    /// deinterlace, and passthrough presentation shaders receive linear RGB.
+    pub unsafe fn linearize_fallback_texture(
+        &mut self,
+        gl: &glow::Context,
+        fallback_texture: glow::Texture,
+        target_width: u32,
+        target_height: u32,
+    ) -> glow::Texture {
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[6]));
+        gl.viewport(0, 0, target_width as i32, target_height as i32);
+        gl.bind_vertex_array(Some(self.vertex_array));
+        gl.use_program(Some(self.linearize_prog));
+        if let Some(loc) = &self.linearize_sampler_loc {
+            gl.uniform_1_i32(Some(loc), 0);
+        }
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(glow::TEXTURE_2D, Some(fallback_texture));
+        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        self.pass_textures[6]
+    }
+
     #[allow(clippy::too_many_arguments)]
     unsafe fn update_frame_history_and_prepare_input(
         &mut self,
@@ -1467,6 +1504,8 @@ impl CrtFilterRenderer {
                 fft_black_threshold,
             ) {
                 video_texture = Some(tex);
+            } else if let Some(tex) = fallback_texture {
+                video_texture = Some(self.linearize_fallback_texture(gl, tex, resolution.0, resolution.1));
             }
 
             let input_texture = video_texture.expect("No video texture available");
@@ -2022,6 +2061,8 @@ impl CrtFilterRenderer {
                 fft_black_threshold,
             ) {
                 video_texture = Some(tex);
+            } else if let Some(tex) = fallback_texture {
+                video_texture = Some(self.linearize_fallback_texture(gl, tex, resolution.0, resolution.1));
             }
 
             let input_texture = video_texture.expect("No video texture available");
@@ -3056,6 +3097,7 @@ impl CrtFilterRenderer {
             gl.delete_program(self.popup_prog);
             gl.delete_program(self.blit_prog);
             gl.delete_program(self.retro_mouse_prog);
+            gl.delete_program(self.linearize_prog);
             gl.delete_texture(self.retro_mouse_texture);
             gl.delete_vertex_array(self.popup_vao);
             gl.delete_buffer(self.popup_vbo);
@@ -3351,5 +3393,43 @@ mod tests {
                 assert_eq!(history_count, 3);
             }
         }
+    }
+
+    #[test]
+    fn test_srgb_linearization_roundtrip() {
+        fn to_linear(c: f32) -> f32 {
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        }
+
+        fn to_srgb(c: f32) -> f32 {
+            if c < 0.0031308 {
+                c * 12.92
+            } else {
+                1.055 * c.powf(0.41666) - 0.055
+            }
+        }
+
+        // Test near-black values (e.g. 0.05, which was washed out to ~0.24 without linearization)
+        for i in 0..=255 {
+            let srgb = i as f32 / 255.0;
+            let linear = to_linear(srgb);
+            let roundtrip = to_srgb(linear);
+            assert!(
+                (srgb - roundtrip).abs() < 0.005,
+                "Linearization roundtrip failed for {srgb}: got {roundtrip}"
+            );
+        }
+
+        // Verify that without linearization (double gamma), near-black is severely elevated
+        let near_black = 0.05;
+        let double_gamma = to_srgb(near_black);
+        assert!(
+            double_gamma > 0.20,
+            "Double gamma must elevate near-black: got {double_gamma}"
+        );
     }
 }

@@ -131,6 +131,7 @@ impl Default for AppState {
             frames_since_last_check: 0,
             last_video_fps_check: Instant::now(),
             video_frames_since_last_check: 0,
+            next_gui_frame_time: None,
             crt_filter: Arc::new(AtomicU8::new(CrtFilter::Off as u8)),
             scaler_filter: Arc::new(AtomicU8::new(video::types::ScalerFilter::Bicubic as u8)),
             color_range: Arc::new(AtomicU8::new(video::types::ColorRange::Full as u8)),
@@ -360,6 +361,36 @@ impl AppState {
             self.error(format!("Failed to start clipboard copy: {e}"));
         }
     }
+
+    /// Caps the framerate of the egui surface rendering for the main game to 60 FPS.
+    ///
+    /// When the main game/video is active, this paces the main event loop to ~16.666 ms
+    /// intervals, preventing the UI surface rendering from overrunning the 60 FPS game
+    /// stream on high-refresh monitors (e.g. 144Hz/240Hz).
+    pub fn pace_gui_frame(&mut self) {
+        if self.ui.video_window_open {
+            const TARGET_FRAME_DURATION: std::time::Duration =
+                std::time::Duration::from_nanos(1_000_000_000 / 60);
+
+            let now = Instant::now();
+            if let Some(ref mut next_time) = self.next_gui_frame_time {
+                if now < *next_time {
+                    let sleep_duration = *next_time - now;
+                    std::thread::sleep(sleep_duration);
+                }
+                let post_sleep_now = Instant::now();
+                if post_sleep_now > *next_time + TARGET_FRAME_DURATION * 2 {
+                    *next_time = post_sleep_now + TARGET_FRAME_DURATION;
+                } else {
+                    *next_time += TARGET_FRAME_DURATION;
+                }
+            } else {
+                self.next_gui_frame_time = Some(now + TARGET_FRAME_DURATION);
+            }
+        } else {
+            self.next_gui_frame_time = None;
+        }
+    }
 }
 
 impl eframe::App for AppState {
@@ -384,6 +415,8 @@ impl eframe::App for AppState {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.pace_gui_frame();
+
         let raw_audio_peak = self
             .hardware
             .audio_peak_amplitude
@@ -1121,5 +1154,80 @@ mod tests {
         assert!(!state.twitch.can_send());
         state.maybe_share_mined_word_to_twitch(&entry);
         assert_eq!(state.twitch.messages.len(), 0);
+    }
+
+    #[test]
+    fn test_gui_frame_rate_limiter() {
+        let mut state = AppState::default();
+        state.ui.video_window_open = true;
+
+        let start = Instant::now();
+        state.pace_gui_frame();
+        state.pace_gui_frame();
+        let elapsed = start.elapsed();
+        // Two consecutive frames paced to 60 FPS should take at least ~15ms
+        assert!(elapsed >= std::time::Duration::from_millis(15));
+
+        // When video window is closed, pacing is disabled (no sleep)
+        state.ui.video_window_open = false;
+        let start_closed = Instant::now();
+        state.pace_gui_frame();
+        state.pace_gui_frame();
+        assert!(start_closed.elapsed() < std::time::Duration::from_millis(5));
+    }
+
+    #[test]
+    fn test_shift_tab_focus_and_hotkeys() {
+        let ctx = egui::Context::default();
+
+        // Frame 1: Shift+Tab is pressed
+        let mut raw_input = egui::RawInput::default();
+        raw_input.focused = true;
+        raw_input.modifiers.shift = true;
+        raw_input.events.push(egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: Some(egui::Key::Tab),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::SHIFT,
+        });
+
+        let _ = ctx.run(raw_input, |ctx| {
+            let consumed = ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
+            assert!(consumed, "Shift+Tab must be consumed");
+            ctx.memory_mut(|m| {
+                if let Some(id) = m.focused() {
+                    m.surrender_focus(id);
+                }
+            });
+            // Simulate CentralPanel with a response
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.allocate_response(egui::vec2(100.0, 100.0), egui::Sense::click());
+            });
+        });
+
+        assert!(!ctx.wants_keyboard_input());
+        assert_eq!(ctx.memory(|m| m.focused()), None);
+
+        // Frame 2: User presses 'C' with no modifiers
+        let mut raw_input2 = egui::RawInput::default();
+        raw_input2.focused = true;
+        raw_input2.events.push(egui::Event::Key {
+            key: egui::Key::C,
+            physical_key: Some(egui::Key::C),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+
+        let mut c_pressed = false;
+        let mut wants_kbd = false;
+        let _ = ctx.run(raw_input2, |ctx| {
+            wants_kbd = ctx.wants_keyboard_input();
+            c_pressed = ctx.input(|i| i.modifiers.is_none() && i.key_pressed(egui::Key::C));
+        });
+
+        assert!(!wants_kbd);
+        assert!(c_pressed);
     }
 }
