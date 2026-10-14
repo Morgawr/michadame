@@ -240,33 +240,36 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     forward_gamescope_inputs(hook, ctx, video_rect, target_res);
                 }
             }
-            // If no new DMA frame arrived yet in this update cycle (e.g. this frame was triggered
-            // by a 144Hz mouse event), wait on PipeWire's frame delivery for up to ~16.6ms.
-            // This synchronizes presentations 1:1 with Gamescope's 60 FPS clock, preventing
-            // 144Hz surface presentation judder and allowing KWin VRR to drop directly to 60Hz.
-            if !new_dma_frame_received {
-                if let Some(ref mut hook) = state.gamescope_hook {
-                    if hook.is_active {
-                        if let Some(dma) = &hook.dma_handle {
-                            // Use a 25ms safety timeout (1.5 frame periods):
-                            // Under active 60 FPS streaming, this unblocks immediately when Gamescope delivers
-                            // the frame (~16.67ms cadence). A 16.0ms timeout was slightly shorter than a true
-                            // 16.667ms frame period, which caused premature timeouts on slight render jitter.
-                            if let Ok(frame) = dma.rx.recv_timeout(std::time::Duration::from_millis(25)) {
-                                hook.current_dmabuf_frame = Some(std::sync::Arc::new(frame));
+            // Consume key and text events so game inputs don't leak into egui widgets while passthrough is on
+            ctx.input_mut(|i| {
+                i.events.retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
+            });
+        } else if is_gamescope {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+        }
+
+        // Keep UI surface rendering strictly tied to Gamescope's frame delivery in both active
+        // and input-paused modes. This prevents 144Hz presentation spikes when hovering/interacting
+        // with UI controls or moving the mouse while input is paused.
+        if is_gamescope && !new_dma_frame_received {
+            if let Some(ref mut hook) = state.gamescope_hook {
+                if hook.is_active {
+                    if let Some(dma) = &hook.dma_handle {
+                        // Use a 25ms safety timeout (1.5 frame periods):
+                        // Under active 60 FPS streaming, this unblocks immediately when Gamescope delivers
+                        // the frame (~16.67ms cadence).
+                        if let Ok(frame) = dma.rx.recv_timeout(std::time::Duration::from_millis(25)) {
+                            hook.current_dmabuf_frame = Some(std::sync::Arc::new(frame));
+                            state.video_frames_since_last_check += 1;
+                            while let Ok(extra) = dma.rx.try_recv() {
+                                hook.current_dmabuf_frame = Some(std::sync::Arc::new(extra));
                                 state.video_frames_since_last_check += 1;
-                                while let Ok(extra) = dma.rx.try_recv() {
-                                    hook.current_dmabuf_frame = Some(std::sync::Arc::new(extra));
-                                    state.video_frames_since_last_check += 1;
-                                }
                             }
                         }
                     }
                 }
             }
-        } else if is_gamescope {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
         }
 
         let (latest_dmabuf_frame, egl_importer_cb) = if let Some(hook) = &state.gamescope_hook {
