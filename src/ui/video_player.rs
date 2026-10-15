@@ -93,9 +93,20 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             }
         }
         if is_gamescope && ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::G)) {
-            if let Some(hook) = &mut state.gamescope_hook {
+            let new_fps_mode = if let Some(hook) = &mut state.gamescope_hook {
                 hook.fps_mode = !hook.fps_mode;
                 tracing::info!("Gamescope FPS relative mouse mode: {}", hook.fps_mode);
+                Some(hook.fps_mode)
+            } else {
+                None
+            };
+            if let Some(active) = new_fps_mode {
+                let msg = if active {
+                    "Gamescope: FPS camera mode ON (mouse locked, Shift+G to toggle)"
+                } else {
+                    "Gamescope: Standard mouse mode ON (cursor unlocked, Shift+G to toggle)"
+                };
+                state.info(msg);
                 ctx.request_repaint();
             }
         }
@@ -1319,12 +1330,21 @@ pub fn forward_gamescope_inputs(
 
     // Forward pointer motion:
     if hook.fps_mode {
-        // In FPS mode: send relative motion deltas for camera rotation
-        let delta = ctx.input(|i| i.pointer.delta());
-        if delta.x != 0.0 || delta.y != 0.0 {
+        // In FPS mode: send relative motion deltas for camera rotation.
+        // Under CursorGrab::Locked, egui's pointer position is frozen so pointer.delta() is (0,0).
+        // The raw movement is reported via pointer.motion() (fed by DeviceEvent::MouseMotion).
+        let raw_motion = ctx.input(|i| {
+            if let Some(m) = i.pointer.motion() {
+                if m.x != 0.0 || m.y != 0.0 {
+                    return m;
+                }
+            }
+            i.pointer.delta()
+        });
+        if raw_motion.x != 0.0 || raw_motion.y != 0.0 {
             let scale_x = target_res.0 as f64 / video_rect.width().max(1.0) as f64;
             let scale_y = target_res.1 as f64 / video_rect.height().max(1.0) as f64;
-            client.send_pointer_motion(delta.x as f64 * scale_x, delta.y as f64 * scale_y);
+            client.send_pointer_motion(raw_motion.x as f64 * scale_x, raw_motion.y as f64 * scale_y);
         }
     } else {
         // In standard mode (Slay the Spire 2, RPGs, strategy):
@@ -1368,7 +1388,11 @@ pub fn forward_gamescope_inputs(
                     egui::PointerButton::Middle => crate::gamescope::input::BTN_MIDDLE,
                     _ => crate::gamescope::input::BTN_LEFT,
                 };
-                if pressed {
+                if hook.fps_mode {
+                    // In FPS mode, cursor is locked and hidden. Forward buttons directly without
+                    // warping to stale screen coordinates or dropping clicks outside video_rect.
+                    client.send_button(btn_code, pressed);
+                } else if pressed {
                     if video_rect.contains(pos) {
                         let rel_x = ((pos.x - video_rect.min.x) / video_rect.width()).clamp(0.0, 1.0);
                         let rel_y = ((pos.y - video_rect.min.y) / video_rect.height()).clamp(0.0, 1.0);
@@ -1403,8 +1427,8 @@ pub fn forward_gamescope_inputs(
                 }
             }
             egui::Event::Key { key, pressed, modifiers, .. } => {
-                // Ignore Shift+Tab (handled as toggle)
-                if key == egui::Key::Tab && modifiers.shift {
+                // Ignore Shift+Tab (handled as passthrough toggle) and Shift+G (FPS mode toggle)
+                if modifiers.shift && (key == egui::Key::Tab || key == egui::Key::G) {
                     continue;
                 }
                 if let Some(code) = crate::gamescope::input::egui_key_to_evdev(key) {
