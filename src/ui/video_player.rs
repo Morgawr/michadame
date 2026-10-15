@@ -725,6 +725,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                             }
                         })
                         .unwrap_or((texture_size.x as u32, texture_size.y as u32));
+                    let is_mining_capture = bank_capture_cb.has_pending();
                     let rendered_area = renderer_clone.lock().unwrap().draw_passthrough(
                         painter.gl(),
                         painter,
@@ -756,6 +757,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         None,
                         glass_params.as_ref(),
                         0.0,
+                        is_mining_capture,
                     );
                     let at = latest_frame
                         .as_ref()

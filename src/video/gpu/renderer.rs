@@ -1992,6 +1992,7 @@ impl CrtFilterRenderer {
         cathode_params: Option<&CathodeInterferenceShaderParams>,
         glass_params: Option<&GlassShaderParams>,
         time: f32,
+        skip_popup: bool,
     ) -> RenderedArea {
         let mut video_texture = fallback_texture;
 
@@ -2189,7 +2190,7 @@ impl CrtFilterRenderer {
             let run_glass = glass_params
                 .map(|g| g.enabled && g.intensity > 0.001)
                 .unwrap_or(false);
-            let has_popup = !self.popup_primitives.is_empty();
+            let has_popup = !skip_popup && !self.popup_primitives.is_empty();
             let has_comments = !self.comment_primitives.is_empty();
             let has_alerts = !self.alert_primitives.is_empty();
             let has_overlay = has_popup || has_comments || has_alerts;
