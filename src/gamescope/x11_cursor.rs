@@ -1,14 +1,38 @@
-use std::ffi::{c_char, c_int, c_void, CString};
+use std::ffi::{c_char, c_int, c_ulong, c_void, CString};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[repr(C)]
 struct CGamescopeX11CursorMonitor {
     _unused: [u8; 0],
 }
 
-type CGamescopeX11CursorCb = unsafe extern "C" fn(is_hidden: c_int, user_data: *mut c_void);
+#[repr(C)]
+pub struct CGamescopeX11CursorImage {
+    pub width: u16,
+    pub height: u16,
+    pub xhot: u16,
+    pub yhot: u16,
+    pub cursor_serial: c_ulong,
+    pub rgba_pixels: *const u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GameCursorImage {
+    pub width: u32,
+    pub height: u32,
+    pub xhot: u32,
+    pub yhot: u32,
+    pub cursor_serial: u64,
+    pub rgba_pixels: Vec<u8>,
+}
+
+type CGamescopeX11CursorCb = unsafe extern "C" fn(
+    is_hidden: c_int,
+    image: *const CGamescopeX11CursorImage,
+    user_data: *mut c_void,
+);
 
 extern "C" {
     fn gamescope_x11_cursor_monitor_start(
@@ -20,21 +44,60 @@ extern "C" {
     fn gamescope_x11_cursor_monitor_stop(monitor: *mut CGamescopeX11CursorMonitor);
 }
 
+struct CursorMonitorShared {
+    is_cursor_hidden: AtomicBool,
+    cursor_image: Mutex<Option<Arc<GameCursorImage>>>,
+}
+
 pub struct GamescopeX11CursorMonitor {
     monitor: *mut CGamescopeX11CursorMonitor,
-    is_cursor_hidden: Arc<AtomicBool>,
-    _callback_data: Box<Arc<AtomicBool>>,
+    shared: Arc<CursorMonitorShared>,
+    _callback_data: Box<Arc<CursorMonitorShared>>,
 }
 
 unsafe impl Send for GamescopeX11CursorMonitor {}
 unsafe impl Sync for GamescopeX11CursorMonitor {}
 
-unsafe extern "C" fn on_cursor_changed(is_hidden: c_int, user_data: *mut c_void) {
-    if !user_data.is_null() {
-        let flag = &*(user_data as *const Arc<AtomicBool>);
-        let hidden = is_hidden != 0;
-        flag.store(hidden, Ordering::Release);
-        tracing::info!("Gamescope X11 cursor visibility: hidden={hidden}");
+unsafe extern "C" fn on_cursor_changed(
+    is_hidden: c_int,
+    image: *const CGamescopeX11CursorImage,
+    user_data: *mut c_void,
+) {
+    if user_data.is_null() {
+        return;
+    }
+    let shared = &*(user_data as *const Arc<CursorMonitorShared>);
+    let hidden = is_hidden != 0;
+    shared.is_cursor_hidden.store(hidden, Ordering::Release);
+
+    if hidden {
+        let mut guard = shared.cursor_image.lock().unwrap();
+        *guard = None;
+        tracing::info!("Gamescope X11 cursor visibility: hidden=true");
+    } else if !image.is_null() {
+        let img = &*image;
+        if img.width > 0 && img.height > 0 && !img.rgba_pixels.is_null() {
+            let count = (img.width as usize) * (img.height as usize) * 4;
+            let slice = std::slice::from_raw_parts(img.rgba_pixels, count);
+            let game_img = Arc::new(GameCursorImage {
+                width: img.width as u32,
+                height: img.height as u32,
+                xhot: img.xhot as u32,
+                yhot: img.yhot as u32,
+                cursor_serial: img.cursor_serial as u64,
+                rgba_pixels: slice.to_vec(),
+            });
+            let mut guard = shared.cursor_image.lock().unwrap();
+            *guard = Some(game_img);
+            tracing::info!(
+                "Gamescope X11 cursor visibility: hidden=false, serial={}, size={}x{}, hotspot=({},{})",
+                img.cursor_serial,
+                img.width,
+                img.height,
+                img.xhot,
+                img.yhot
+            );
+        }
     }
 }
 
@@ -51,15 +114,18 @@ impl Drop for GamescopeX11CursorMonitor {
 
 impl GamescopeX11CursorMonitor {
     pub fn start(display_name: &str) -> Option<Self> {
-        let is_cursor_hidden = Arc::new(AtomicBool::new(false));
-        let callback_data = Box::new(is_cursor_hidden.clone());
+        let shared = Arc::new(CursorMonitorShared {
+            is_cursor_hidden: AtomicBool::new(false),
+            cursor_image: Mutex::new(None),
+        });
+        let callback_data = Box::new(shared.clone());
 
         let c_display = CString::new(display_name).ok()?;
         let monitor = unsafe {
             gamescope_x11_cursor_monitor_start(
                 c_display.as_ptr(),
                 on_cursor_changed,
-                &*callback_data as *const Arc<AtomicBool> as *mut c_void,
+                &*callback_data as *const Arc<CursorMonitorShared> as *mut c_void,
             )
         };
 
@@ -68,18 +134,41 @@ impl GamescopeX11CursorMonitor {
         } else {
             Some(Self {
                 monitor,
-                is_cursor_hidden,
+                shared,
                 _callback_data: callback_data,
             })
         }
     }
 
     pub fn is_cursor_hidden(&self) -> bool {
-        self.is_cursor_hidden.load(Ordering::Acquire)
+        self.shared.is_cursor_hidden.load(Ordering::Acquire)
     }
 
-    pub fn cursor_hidden_flag(&self) -> Arc<AtomicBool> {
-        self.is_cursor_hidden.clone()
+    pub fn cursor_image(&self) -> Option<Arc<GameCursorImage>> {
+        self.shared.cursor_image.lock().unwrap().clone()
+    }
+
+    #[cfg(test)]
+    pub fn dummy_for_test(hidden: bool, image: Option<GameCursorImage>) -> Self {
+        let shared = Arc::new(CursorMonitorShared {
+            is_cursor_hidden: AtomicBool::new(hidden),
+            cursor_image: Mutex::new(image.map(Arc::new)),
+        });
+        Self {
+            monitor: std::ptr::null_mut(),
+            shared: shared.clone(),
+            _callback_data: Box::new(shared),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn set_hidden_for_test(&self, hidden: bool) {
+        self.shared.is_cursor_hidden.store(hidden, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub fn set_image_for_test(&self, image: Option<GameCursorImage>) {
+        *self.shared.cursor_image.lock().unwrap() = image.map(Arc::new);
     }
 }
 
@@ -200,5 +289,51 @@ mod tests {
         std::env::set_var("MICHADAME_GAMESCOPE_DISPLAY", ":99");
         assert_eq!(find_gamescope_x_display(), Some(":99".to_string()));
         std::env::remove_var("MICHADAME_GAMESCOPE_DISPLAY");
+    }
+
+    #[test]
+    fn test_c_cursor_image_layout() {
+        assert_eq!(std::mem::size_of::<CGamescopeX11CursorImage>(), 24);
+        assert_eq!(std::mem::align_of::<CGamescopeX11CursorImage>(), 8);
+    }
+
+    #[test]
+    fn test_on_cursor_changed_callback() {
+        let shared = Arc::new(CursorMonitorShared {
+            is_cursor_hidden: AtomicBool::new(true),
+            cursor_image: Mutex::new(None),
+        });
+        let user_data = &shared as *const Arc<CursorMonitorShared> as *mut c_void;
+
+        let dummy_pixels = [255u8, 0, 0, 255, 0, 255, 0, 255]; // 2x1 pixels
+        let c_img = CGamescopeX11CursorImage {
+            width: 2,
+            height: 1,
+            xhot: 1,
+            yhot: 0,
+            cursor_serial: 42,
+            rgba_pixels: dummy_pixels.as_ptr(),
+        };
+
+        // Notify visible
+        unsafe {
+            on_cursor_changed(0, &c_img, user_data);
+        }
+
+        assert!(!shared.is_cursor_hidden.load(Ordering::Acquire));
+        let img = shared.cursor_image.lock().unwrap().clone().expect("cursor image");
+        assert_eq!(img.width, 2);
+        assert_eq!(img.height, 1);
+        assert_eq!(img.xhot, 1);
+        assert_eq!(img.yhot, 0);
+        assert_eq!(img.cursor_serial, 42);
+        assert_eq!(img.rgba_pixels, dummy_pixels.to_vec());
+
+        // Notify hidden
+        unsafe {
+            on_cursor_changed(1, std::ptr::null(), user_data);
+        }
+        assert!(shared.is_cursor_hidden.load(Ordering::Acquire));
+        assert!(shared.cursor_image.lock().unwrap().is_none());
     }
 }

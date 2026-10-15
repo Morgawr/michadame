@@ -15,6 +15,7 @@ pub struct GamescopeHookState {
     pub audio_handle: Option<audio::GamescopeAudioHandle>,
     pub input_client: Option<input::GamescopeInputClient>,
     pub x11_cursor_monitor: Option<x11_cursor::GamescopeX11CursorMonitor>,
+    pub cursor_texture: Option<(u64, eframe::egui::TextureHandle)>,
     pub prev_modifiers: eframe::egui::Modifiers,
     pub initial_resolution: (u32, u32),
 }
@@ -31,6 +32,7 @@ impl Default for GamescopeHookState {
             audio_handle: None,
             input_client: None,
             x11_cursor_monitor: None,
+            cursor_texture: None,
             prev_modifiers: eframe::egui::Modifiers::default(),
             initial_resolution: (video::GAMESCOPE_WIDTH, video::GAMESCOPE_HEIGHT),
         }
@@ -41,6 +43,11 @@ impl GamescopeHookState {
     pub fn is_cursor_hidden(&self) -> bool {
         self.x11_cursor_monitor.as_ref().map_or(false, |m| m.is_cursor_hidden())
     }
+
+    pub fn cursor_image(&self) -> Option<std::sync::Arc<x11_cursor::GameCursorImage>> {
+        self.x11_cursor_monitor.as_ref().and_then(|m| m.cursor_image())
+    }
+
     pub fn resolution(&self) -> (u32, u32) {
         if let Some(frame) = &self.current_dmabuf_frame {
             (frame.width, frame.height)

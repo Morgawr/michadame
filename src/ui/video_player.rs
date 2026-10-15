@@ -306,13 +306,24 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             overscan,
         );
 
-        let pointer_pos = ui.input(|i| i.pointer.hover_pos());
+        let pointer_pos = ui.input(|i| {
+            i.pointer.hover_pos().or_else(|| {
+                if i.pointer.any_down() {
+                    i.pointer.latest_pos()
+                } else {
+                    None
+                }
+            })
+        });
         let is_on_crt_surface = pointer_pos.map_or(false, |pos| {
             crt_surface.contains(pos) && !state.twitch.overlay_contains(pos)
         });
         let is_hovering_controls = is_hovering_video_controls(state, pointer_pos, response.rect);
         let software_mouse_active =
             is_software_mouse_active(state, is_on_crt_surface) && !is_hovering_controls;
+        let real_mouse_active = !software_mouse_active
+            && is_window_focused
+            && is_real_game_cursor_active(state, pointer_pos, video_rect, is_hovering_controls);
 
         let (software_mouse_pos, software_mouse_clip) = if software_mouse_active {
             let pos = pointer_pos.map(|pos| {
@@ -332,7 +343,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             (None, None)
         };
 
-        if software_mouse_active {
+        if software_mouse_active || real_mouse_active {
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
         }
 
@@ -830,13 +841,69 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             draw_video_file_controls(state, ui, ctx, response.rect);
         }
 
-        if software_mouse_active && !is_preroll_active {
+        if (software_mouse_active || real_mouse_active) && !is_preroll_active {
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
         }
 
         // Draw webcam overlay on top of everything (suppressed during pre-roll)
         if !is_preroll_active {
             crate::ui::webcam_overlay::draw_webcam_overlay(state, ui, ctx, response.rect);
+        }
+
+        // Draw real Gamescope cursor if active
+        if real_mouse_active && !is_preroll_active {
+            if let Some(hook) = &mut state.gamescope_hook {
+                if let Some(img) = hook.cursor_image() {
+                    let needs_new_texture = match &hook.cursor_texture {
+                        Some((serial, _)) => *serial != img.cursor_serial,
+                        None => true,
+                    };
+                    if needs_new_texture {
+                        let color_image = egui::ColorImage::from_rgba_premultiplied(
+                            [img.width as usize, img.height as usize],
+                            &img.rgba_pixels,
+                        );
+                        let texture = ctx.load_texture(
+                            "gamescope_game_cursor",
+                            color_image,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        hook.cursor_texture = Some((img.cursor_serial, texture));
+                    }
+
+                    if let Some(pos) = pointer_pos {
+                        if let Some((_, texture)) = &hook.cursor_texture {
+                            let target_res = hook.resolution();
+                            let scale_x = if target_res.0 > 0 {
+                                video_rect.width() / target_res.0 as f32
+                            } else {
+                                1.0
+                            };
+                            let scale_y = if target_res.1 > 0 {
+                                video_rect.height() / target_res.1 as f32
+                            } else {
+                                1.0
+                            };
+                            let cursor_w = img.width as f32 * scale_x;
+                            let cursor_h = img.height as f32 * scale_y;
+                            let hot_x = img.xhot as f32 * scale_x;
+                            let hot_y = img.yhot as f32 * scale_y;
+                            let top_left = egui::pos2(pos.x - hot_x, pos.y - hot_y);
+                            let cursor_rect = egui::Rect::from_min_size(top_left, egui::vec2(cursor_w, cursor_h));
+
+                            ui.painter()
+                                .with_clip_rect(response.rect)
+                                .image(
+                                    texture.id(),
+                                    cursor_rect,
+                                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                    egui::Color32::WHITE,
+                                );
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+                        }
+                    }
+                }
+            }
         }
 
         // During pre-roll fade out / fade in transition, render a black overlay across the video
@@ -974,6 +1041,61 @@ pub fn is_hovering_video_controls(
     );
     pointer_pos.is_some_and(|pos| hover_zone.contains(pos))
         || state.video_player.as_ref().is_some_and(|p| p.is_seeking)
+}
+
+/// Determines if the real game mouse cursor extracted from Gamescope/X11 should be active.
+/// Returns false if Gamescope is inactive, passthrough is off, game cursor is hidden,
+/// no cursor image is available, mouse is outside video rect, hovering controls,
+/// or if system dialogs are open.
+pub fn is_real_game_cursor_active(
+    state: &AppState,
+    pointer_pos: Option<egui::Pos2>,
+    video_rect: egui::Rect,
+    is_hovering_controls: bool,
+) -> bool {
+    if state.twitch.preroll.is_some() {
+        return false;
+    }
+    let Some(hook) = &state.gamescope_hook else {
+        return false;
+    };
+    if !hook.is_active || !hook.passthrough_enabled || hook.is_cursor_hidden() || is_hovering_controls {
+        return false;
+    }
+    if hook.cursor_image().is_none() {
+        return false;
+    }
+    let Some(pos) = pointer_pos else {
+        return false;
+    };
+    if !video_rect.contains(pos) {
+        return false;
+    }
+
+    let has_system_dialog = state.ui.show_quit_dialog
+        || state.ui.show_stop_stream_dialog
+        || state.ui.show_first_run_dialog
+        || (state.config_load_error.is_some() && !state.ui.dismissed_config_error)
+        || state.video.fft_mask_window_open
+        || state.ui.debug_open;
+
+    if has_system_dialog {
+        return false;
+    }
+
+    let popup_active = state.dict.popup.is_some();
+    let popup_under_crt = state.dict.popup_under_crt;
+    if popup_active && !popup_under_crt {
+        return false;
+    }
+
+    if state.webcam.config.enabled
+        && (state.webcam.is_dragging || state.webcam.resizing_corner.is_some())
+    {
+        return false;
+    }
+
+    true
 }
 
 /// Draws the auto-hiding playback control widget with scrub bar, play, pause, and stop buttons.
@@ -1561,5 +1683,142 @@ mod tests {
         }
         assert!(is_hovering_video_controls(&state, Some(egui::pos2(320.0, 100.0)), window_rect));
         assert!(is_hovering_video_controls(&state, None, window_rect));
+    }
+
+    #[test]
+    fn test_real_game_cursor_and_precedence() {
+        let mut state = AppState::default();
+        let video_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
+        let cursor_pos = Some(egui::pos2(960.0, 540.0));
+
+        let dummy_cursor = crate::gamescope::x11_cursor::GameCursorImage {
+            width: 32,
+            height: 32,
+            xhot: 0,
+            yhot: 0,
+            cursor_serial: 1,
+            rgba_pixels: vec![255; 32 * 32 * 4],
+        };
+
+        // 1. Without Gamescope hook -> real cursor inactive
+        assert!(!is_real_game_cursor_active(&state, cursor_pos, video_rect, false));
+
+        // 2. Set up Gamescope hook with visible cursor image
+        let monitor = crate::gamescope::x11_cursor::GamescopeX11CursorMonitor::dummy_for_test(
+            false,
+            Some(dummy_cursor.clone()),
+        );
+        state.gamescope_hook = Some(crate::gamescope::GamescopeHookState {
+            is_active: true,
+            passthrough_enabled: true,
+            x11_cursor_monitor: Some(monitor),
+            ..Default::default()
+        });
+
+        // Real cursor should be active in normal playback
+        assert!(is_real_game_cursor_active(&state, cursor_pos, video_rect, false));
+
+        // When mouse is hovering controls -> inactive
+        assert!(!is_real_game_cursor_active(&state, cursor_pos, video_rect, true));
+
+        // When mouse is outside video rect -> inactive
+        assert!(!is_real_game_cursor_active(&state, Some(egui::pos2(2000.0, 500.0)), video_rect, false));
+        assert!(!is_real_game_cursor_active(&state, None, video_rect, false));
+
+        // When passthrough is disabled -> inactive
+        if let Some(h) = &mut state.gamescope_hook {
+            h.passthrough_enabled = false;
+        }
+        assert!(!is_real_game_cursor_active(&state, cursor_pos, video_rect, false));
+        if let Some(h) = &mut state.gamescope_hook {
+            h.passthrough_enabled = true;
+        }
+
+        // When cursor is hidden by game (camera rotation / mouselook) -> inactive
+        if let Some(h) = &state.gamescope_hook {
+            if let Some(m) = &h.x11_cursor_monitor {
+                m.set_hidden_for_test(true);
+            }
+        }
+        assert!(!is_real_game_cursor_active(&state, cursor_pos, video_rect, false));
+        if let Some(h) = &state.gamescope_hook {
+            if let Some(m) = &h.x11_cursor_monitor {
+                m.set_hidden_for_test(false);
+            }
+        }
+        assert!(is_real_game_cursor_active(&state, cursor_pos, video_rect, false));
+
+        // When system dialog is open -> inactive
+        state.ui.show_quit_dialog = true;
+        assert!(!is_real_game_cursor_active(&state, cursor_pos, video_rect, false));
+        state.ui.show_quit_dialog = false;
+
+        // PRECEDENCE TESTS:
+        // Rule: If retro mouse is enabled AND CRT filters are enabled, retro mouse takes precedence.
+        // Otherwise, render the real mouse.
+
+        let is_on_crt_surface = true;
+        let is_hovering_controls = false;
+        let is_window_focused = true;
+
+        // Case A: Retro mouse enabled + CRT enabled (Lottes)
+        state.video.retro_software_mouse = true;
+        state.crt_filter.store(1, Ordering::Relaxed);
+        let software_mouse_active =
+            is_software_mouse_active(&state, is_on_crt_surface) && !is_hovering_controls;
+        let real_mouse_active = !software_mouse_active
+            && is_window_focused
+            && is_real_game_cursor_active(&state, cursor_pos, video_rect, is_hovering_controls);
+        assert!(software_mouse_active, "Retro mouse must be active");
+        assert!(!real_mouse_active, "Retro mouse must take precedence over real mouse");
+
+        // Case B: Retro mouse disabled + CRT enabled (Lottes)
+        state.video.retro_software_mouse = false;
+        state.crt_filter.store(1, Ordering::Relaxed);
+        let software_mouse_active =
+            is_software_mouse_active(&state, is_on_crt_surface) && !is_hovering_controls;
+        let real_mouse_active = !software_mouse_active
+            && is_window_focused
+            && is_real_game_cursor_active(&state, cursor_pos, video_rect, is_hovering_controls);
+        assert!(!software_mouse_active, "Retro mouse must be inactive");
+        assert!(real_mouse_active, "Real mouse must be active when retro mouse is disabled");
+
+        // Case C: Retro mouse enabled + CRT filter OFF
+        state.video.retro_software_mouse = true;
+        state.crt_filter.store(0, Ordering::Relaxed);
+        let software_mouse_active =
+            is_software_mouse_active(&state, is_on_crt_surface) && !is_hovering_controls;
+        let real_mouse_active = !software_mouse_active
+            && is_window_focused
+            && is_real_game_cursor_active(&state, cursor_pos, video_rect, is_hovering_controls);
+        assert!(!software_mouse_active, "Retro mouse must be inactive when CRT is off");
+        assert!(real_mouse_active, "Real mouse must be active when CRT is off");
+
+        // Case D: Retro mouse disabled + CRT filter OFF
+        state.video.retro_software_mouse = false;
+        state.crt_filter.store(0, Ordering::Relaxed);
+        let software_mouse_active =
+            is_software_mouse_active(&state, is_on_crt_surface) && !is_hovering_controls;
+        let real_mouse_active = !software_mouse_active
+            && is_window_focused
+            && is_real_game_cursor_active(&state, cursor_pos, video_rect, is_hovering_controls);
+        assert!(!software_mouse_active, "Retro mouse must be inactive");
+        assert!(real_mouse_active, "Real mouse must be active");
+
+        // Case E: Camera rotation mode (cursor hidden)
+        if let Some(h) = &state.gamescope_hook {
+            if let Some(m) = &h.x11_cursor_monitor {
+                m.set_hidden_for_test(true);
+            }
+        }
+        state.video.retro_software_mouse = true;
+        state.crt_filter.store(1, Ordering::Relaxed);
+        let software_mouse_active =
+            is_software_mouse_active(&state, is_on_crt_surface) && !is_hovering_controls;
+        let real_mouse_active = !software_mouse_active
+            && is_window_focused
+            && is_real_game_cursor_active(&state, cursor_pos, video_rect, is_hovering_controls);
+        assert!(!software_mouse_active, "Retro mouse must NOT render during camera rotation");
+        assert!(!real_mouse_active, "Real mouse must NOT render during camera rotation");
     }
 }

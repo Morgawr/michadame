@@ -7,7 +7,20 @@ extern "C" {
 
 typedef struct gamescope_x11_cursor_monitor gamescope_x11_cursor_monitor;
 
-typedef void (*gamescope_x11_cursor_cb)(int is_hidden, void *user_data);
+typedef struct gamescope_x11_cursor_image {
+    unsigned short width;
+    unsigned short height;
+    unsigned short xhot;
+    unsigned short yhot;
+    unsigned long cursor_serial;
+    const unsigned char *rgba_pixels;
+} gamescope_x11_cursor_image;
+
+typedef void (*gamescope_x11_cursor_cb)(
+    int is_hidden,
+    const gamescope_x11_cursor_image *image,
+    void *user_data
+);
 
 gamescope_x11_cursor_monitor *gamescope_x11_cursor_monitor_start(
     const char *display_name,

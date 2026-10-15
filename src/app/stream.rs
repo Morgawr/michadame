@@ -453,6 +453,7 @@ impl AppState {
             audio_handle,
             input_client,
             x11_cursor_monitor,
+            cursor_texture: None,
             prev_modifiers: eframe::egui::Modifiers::default(),
             initial_resolution,
         });

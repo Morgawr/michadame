@@ -20,24 +20,74 @@ struct gamescope_x11_cursor_monitor {
     volatile int stop_requested;
 };
 
-static int is_cursor_empty(Display *dpy) {
+static void query_and_notify_cursor(
+    Display *dpy,
+    gamescope_x11_cursor_cb cb,
+    void *user_data,
+    int *last_hidden,
+    unsigned long *last_serial
+) {
+    if (!cb) return;
+
     XFixesCursorImage *cur = XFixesGetCursorImage(dpy);
     if (!cur) {
-        return 1;
+        if (*last_hidden != 1) {
+            *last_hidden = 1;
+            cb(1, NULL, user_data);
+        }
+        return;
     }
+
     int empty = 1;
     if (cur->width > 0 && cur->height > 0 && cur->pixels != NULL) {
         size_t count = (size_t)cur->width * (size_t)cur->height;
         for (size_t i = 0; i < count; i++) {
-            unsigned long p = cur->pixels[i];
-            if ((p >> 24) & 0xFF) {
+            if ((cur->pixels[i] >> 24) & 0xFF) {
                 empty = 0;
                 break;
             }
         }
     }
+
+    if (empty) {
+        if (*last_hidden != 1) {
+            *last_hidden = 1;
+            cb(1, NULL, user_data);
+        }
+    } else {
+        int visibility_changed = (*last_hidden != 0);
+        int serial_changed = (cur->cursor_serial != *last_serial);
+
+        if (visibility_changed || serial_changed) {
+            *last_hidden = 0;
+            *last_serial = cur->cursor_serial;
+
+            size_t count = (size_t)cur->width * (size_t)cur->height;
+            unsigned char *rgba = (unsigned char *)malloc(count * 4);
+            if (rgba) {
+                for (size_t i = 0; i < count; i++) {
+                    unsigned long p = cur->pixels[i];
+                    rgba[i * 4 + 0] = (unsigned char)((p >> 16) & 0xFF); // R
+                    rgba[i * 4 + 1] = (unsigned char)((p >> 8) & 0xFF);  // G
+                    rgba[i * 4 + 2] = (unsigned char)(p & 0xFF);         // B
+                    rgba[i * 4 + 3] = (unsigned char)((p >> 24) & 0xFF); // A
+                }
+
+                gamescope_x11_cursor_image img;
+                img.width = cur->width;
+                img.height = cur->height;
+                img.xhot = cur->xhot;
+                img.yhot = cur->yhot;
+                img.cursor_serial = cur->cursor_serial;
+                img.rgba_pixels = rgba;
+
+                cb(0, &img, user_data);
+                free(rgba);
+            }
+        }
+    }
+
     XFree(cur);
-    return empty;
 }
 
 static void *monitor_thread_func(void *arg) {
@@ -66,26 +116,23 @@ static void *monitor_thread_func(void *arg) {
     Window root = DefaultRootWindow(dpy);
     XFixesSelectCursorInput(dpy, root, XFixesDisplayCursorNotifyMask);
 
-    int last_hidden = is_cursor_empty(dpy);
-    if (m->cb) {
-        m->cb(last_hidden, m->user_data);
-    }
+    int last_hidden = -1;
+    unsigned long last_serial = 0;
+    query_and_notify_cursor(dpy, m->cb, m->user_data, &last_hidden, &last_serial);
 
     int x11_fd = ConnectionNumber(dpy);
 
     while (!m->stop_requested) {
+        int cursor_event_received = 0;
         while (XPending(dpy)) {
             XEvent ev;
             XNextEvent(dpy, &ev);
             if (ev.type == event_base + XFixesCursorNotify) {
-                int hidden = is_cursor_empty(dpy);
-                if (hidden != last_hidden) {
-                    last_hidden = hidden;
-                    if (m->cb) {
-                        m->cb(hidden, m->user_data);
-                    }
-                }
+                cursor_event_received = 1;
             }
+        }
+        if (cursor_event_received) {
+            query_and_notify_cursor(dpy, m->cb, m->user_data, &last_hidden, &last_serial);
         }
 
         struct pollfd fds[2];
