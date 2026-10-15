@@ -92,24 +92,6 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 ctx.request_repaint();
             }
         }
-        if is_gamescope && ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::G)) {
-            let new_fps_mode = if let Some(hook) = &mut state.gamescope_hook {
-                hook.fps_mode = !hook.fps_mode;
-                tracing::info!("Gamescope FPS relative mouse mode: {}", hook.fps_mode);
-                Some(hook.fps_mode)
-            } else {
-                None
-            };
-            if let Some(active) = new_fps_mode {
-                let msg = if active {
-                    "Gamescope: FPS camera mode ON (mouse locked, Shift+G to toggle)"
-                } else {
-                    "Gamescope: Standard mouse mode ON (cursor unlocked, Shift+G to toggle)"
-                };
-                state.info(msg);
-                ctx.request_repaint();
-            }
-        }
         passthrough_active = state.gamescope_hook.as_ref().map_or(false, |h| h.passthrough_enabled);
     }
 
@@ -233,8 +215,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
         let is_window_focused = ctx.input(|i| i.focused);
         if is_gamescope && passthrough_active {
-            let is_fps_mode = state.gamescope_hook.as_ref().map_or(false, |h| h.fps_mode);
-            if is_window_focused && is_fps_mode {
+            let is_cursor_hidden = state.gamescope_hook.as_ref().map_or(false, |h| h.is_cursor_hidden());
+            if is_window_focused && is_cursor_hidden {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::Locked));
                 ui.ctx().set_cursor_icon(egui::CursorIcon::None);
             } else {
@@ -949,7 +931,7 @@ pub fn is_software_mouse_active(state: &AppState, is_on_crt_surface: bool) -> bo
     if state.twitch.preroll.is_some() {
         return false;
     }
-    if state.gamescope_hook.as_ref().map_or(false, |h| h.is_active && h.fps_mode) {
+    if state.gamescope_hook.as_ref().map_or(false, |h| h.is_active && h.is_cursor_hidden()) {
         return false;
     }
     let filter = CrtFilter::from_u8(state.crt_filter.load(Ordering::Relaxed));
@@ -1321,6 +1303,8 @@ pub fn forward_gamescope_inputs(
         return;
     }
 
+    let is_cursor_hidden = hook.is_cursor_hidden();
+
     let Some(client) = &mut hook.input_client else {
         return;
     };
@@ -1329,8 +1313,8 @@ pub fn forward_gamescope_inputs(
     client.dispatch();
 
     // Forward pointer motion:
-    if hook.fps_mode {
-        // In FPS mode: send relative motion deltas for camera rotation.
+    if is_cursor_hidden {
+        // When game hides cursor (camera control / mouselook): send relative motion deltas.
         // Under CursorGrab::Locked, egui's pointer position is frozen so pointer.delta() is (0,0).
         // The raw movement is reported via pointer.motion() (fed by DeviceEvent::MouseMotion).
         let raw_motion = ctx.input(|i| {
@@ -1388,9 +1372,9 @@ pub fn forward_gamescope_inputs(
                     egui::PointerButton::Middle => crate::gamescope::input::BTN_MIDDLE,
                     _ => crate::gamescope::input::BTN_LEFT,
                 };
-                if hook.fps_mode {
-                    // In FPS mode, cursor is locked and hidden. Forward buttons directly without
-                    // warping to stale screen coordinates or dropping clicks outside video_rect.
+                if is_cursor_hidden {
+                    // When game hides cursor for camera control, cursor is locked and hidden.
+                    // Forward buttons directly without warping to stale screen coordinates or dropping clicks.
                     client.send_button(btn_code, pressed);
                 } else if pressed {
                     if video_rect.contains(pos) {
@@ -1409,7 +1393,7 @@ pub fn forward_gamescope_inputs(
                 let is_hovered = ctx
                     .input(|i| i.pointer.latest_pos())
                     .map_or(false, |pos| video_rect.contains(pos));
-                if hook.fps_mode || is_hovered {
+                if is_cursor_hidden || is_hovered {
                     // Gamescope passes (dy * 120.0) as discrete units to wlr_seat_pointer_notify_axis.
                     // In Wayland/libei, positive dy is scroll DOWN, negative dy is scroll UP.
                     // In egui, delta.y > 0 is scroll UP, so we invert delta.y.
@@ -1427,8 +1411,8 @@ pub fn forward_gamescope_inputs(
                 }
             }
             egui::Event::Key { key, pressed, modifiers, .. } => {
-                // Ignore Shift+Tab (handled as passthrough toggle) and Shift+G (FPS mode toggle)
-                if modifiers.shift && (key == egui::Key::Tab || key == egui::Key::G) {
+                // Ignore Shift+Tab (handled as passthrough toggle)
+                if key == egui::Key::Tab && modifiers.shift {
                     continue;
                 }
                 if let Some(code) = crate::gamescope::input::egui_key_to_evdev(key) {
@@ -1523,7 +1507,6 @@ mod tests {
         state.gamescope_hook = Some(crate::gamescope::GamescopeHookState {
             is_active: true,
             passthrough_enabled: true,
-            fps_mode: false,
             ..Default::default()
         });
         // Active in standard passthrough mode
@@ -1534,12 +1517,6 @@ mod tests {
             h.passthrough_enabled = false;
         }
         assert!(is_software_mouse_active(&state, true));
-
-        // Disabled in FPS mode
-        if let Some(h) = &mut state.gamescope_hook {
-            h.fps_mode = true;
-        }
-        assert!(!is_software_mouse_active(&state, true));
     }
 
     #[test]

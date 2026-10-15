@@ -3,6 +3,7 @@ pub mod egl;
 pub mod input;
 pub mod pipewire_dma;
 pub mod video;
+pub mod x11_cursor;
 
 pub struct GamescopeHookState {
     pub is_active: bool,
@@ -13,9 +14,9 @@ pub struct GamescopeHookState {
     pub video_handle: Option<video::GamescopeVideoHandle>,
     pub audio_handle: Option<audio::GamescopeAudioHandle>,
     pub input_client: Option<input::GamescopeInputClient>,
+    pub x11_cursor_monitor: Option<x11_cursor::GamescopeX11CursorMonitor>,
     pub prev_modifiers: eframe::egui::Modifiers,
     pub initial_resolution: (u32, u32),
-    pub fps_mode: bool,
 }
 
 impl Default for GamescopeHookState {
@@ -29,14 +30,17 @@ impl Default for GamescopeHookState {
             video_handle: None,
             audio_handle: None,
             input_client: None,
+            x11_cursor_monitor: None,
             prev_modifiers: eframe::egui::Modifiers::default(),
             initial_resolution: (video::GAMESCOPE_WIDTH, video::GAMESCOPE_HEIGHT),
-            fps_mode: false,
         }
     }
 }
 
 impl GamescopeHookState {
+    pub fn is_cursor_hidden(&self) -> bool {
+        self.x11_cursor_monitor.as_ref().map_or(false, |m| m.is_cursor_hidden())
+    }
     pub fn resolution(&self) -> (u32, u32) {
         if let Some(frame) = &self.current_dmabuf_frame {
             (frame.width, frame.height)

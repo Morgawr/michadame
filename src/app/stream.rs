@@ -323,6 +323,7 @@ impl AppState {
             }
             drop(hook.audio_handle.take());
             drop(hook.input_client.take());
+            drop(hook.x11_cursor_monitor.take());
 
             // Restore normal profile
             if let Some(prev_name) = self.previous_gamescope_normal_profile.take() {
@@ -431,6 +432,15 @@ impl AppState {
             }
         };
 
+        // 4. Initialize X11 cursor monitor for automatic camera capture
+        let x11_cursor_monitor = if let Some(disp) = crate::gamescope::x11_cursor::find_gamescope_x_display() {
+            tracing::info!("Found Gamescope X11 display: {disp}, starting cursor monitor");
+            crate::gamescope::x11_cursor::GamescopeX11CursorMonitor::start(&disp)
+        } else {
+            tracing::warn!("Gamescope X11 display not detected; automatic cursor capture disabled");
+            None
+        };
+
         let initial_resolution = crate::gamescope::video::detect_gamescope_resolution();
 
         self.gamescope_hook = Some(crate::gamescope::GamescopeHookState {
@@ -442,9 +452,9 @@ impl AppState {
             video_handle,
             audio_handle,
             input_client,
+            x11_cursor_monitor,
             prev_modifiers: eframe::egui::Modifiers::default(),
             initial_resolution,
-            fps_mode: false,
         });
 
         self.info("Gamescope hook started (4K 60Hz). Mouse/keyboard passthrough active (Shift+Tab to release).");
