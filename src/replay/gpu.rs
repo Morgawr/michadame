@@ -135,6 +135,15 @@ impl Readback {
         self.surface = SurfaceState::default();
         self.active = None;
     }
+
+    /// Rate-limit capture requests to <= 60 FPS (approx 16.6ms intervals)
+    /// to allow Gamescope to render at high refresh (120 FPS) while recording/streaming
+    /// at a clean 60 FPS without wasting GPU downscaling or PBO readback transfers.
+    pub fn should_capture(&self, at: i64) -> bool {
+        const MIN_CAPTURE_INTERVAL_US: i64 = 15_000;
+        at > self.last_at && (self.last_at <= 0 || (at - self.last_at) >= MIN_CAPTURE_INTERVAL_US)
+    }
+
     pub fn capture(
         &mut self,
         gl: &glow::Context,
@@ -348,7 +357,7 @@ impl Readback {
             }
 
             let stop_flag = running_replay.map_or(false, |r| r.shared.stop.load(Ordering::Relaxed));
-            if at > self.last_at && !stop_flag {
+            if self.should_capture(at) && !stop_flag {
                 self.last_at = at;
                 if let Some(runtime) = running_replay {
                     runtime.shared.captured_at.store(at, Ordering::Relaxed);
@@ -750,5 +759,39 @@ mod tests {
         assert_eq!(uw_w, 1920);
         assert_eq!(uw_h % 2, 0);
         assert!(uw_h <= 1080);
+    }
+
+    #[test]
+    fn should_capture_throttles_120fps_input_to_clean_60fps() {
+        let mut readback = Readback::default();
+        // Frame interval at 120 FPS is ~8,333.3 us
+        let frame_interval_120 = 8_333i64;
+        let mut t = 10_000_000i64;
+
+        // First frame (initial state, last_at is 0) should be captured
+        assert!(readback.should_capture(t));
+        readback.last_at = t;
+
+        // Frame 1 (+8.33ms) must be dropped
+        t += frame_interval_120;
+        assert!(!readback.should_capture(t));
+
+        // Frame 2 (+16.67ms total) must be captured
+        t += frame_interval_120;
+        assert!(readback.should_capture(t));
+        readback.last_at = t;
+
+        // Frame 3 (+8.33ms) must be dropped
+        t += frame_interval_120;
+        assert!(!readback.should_capture(t));
+
+        // Frame 4 (+16.67ms total) must be captured
+        t += frame_interval_120;
+        assert!(readback.should_capture(t));
+        readback.last_at = t;
+
+        // Out-of-order or duplicate timestamp must be rejected
+        assert!(!readback.should_capture(t));
+        assert!(!readback.should_capture(t - 1_000));
     }
 }

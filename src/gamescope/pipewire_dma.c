@@ -250,7 +250,7 @@ struct gamescope_dma_stream *gamescope_dma_stream_start(
             &SPA_RECTANGLE(320, 240),
             &SPA_RECTANGLE(4096, 4096)),
         SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(
-            &SPA_FRACTION(60, 1),
+            &SPA_FRACTION(120, 1),
             &SPA_FRACTION(0, 1),
             &SPA_FRACTION(1000, 1)),
         SPA_FORMAT_VIDEO_modifier, SPA_POD_CHOICE_ENUM_Long(2,
