@@ -80,54 +80,17 @@ impl VideoSchedule {
             return None;
         }
         let rate = config::Rate::new(config::OUTPUT_FPS, 1);
-        let mut repeats = Vec::new();
-        let key;
-        if let Some(last) = self.last_tick {
-            let gap = tick - (last + 1);
-            if gap > 0 && gap <= 60 {
-                for repeat_tick in (last + 1)..tick {
-                    let repeat_pts = self.epoch + rate.us(repeat_tick);
-                    let repeat_key = self.last_key_tick.is_none_or(|k| repeat_tick - k >= 60);
-                    if repeat_key {
-                        self.last_key_tick = Some(repeat_tick);
-                    }
-                    repeats.push((repeat_pts, repeat_key));
-                }
-                let pts = self.epoch + rate.us(tick);
-                key = self.last_key_tick.is_none_or(|k| tick - k >= 60);
-                if key {
-                    self.last_key_tick = Some(tick);
-                }
-                self.last_tick = Some(tick);
-                Some(ScheduleOutput { repeats, pts, key })
-            } else if gap > 60 {
-                let pts = self.epoch + rate.us(tick);
-                self.last_tick = Some(tick);
-                self.last_key_tick = Some(tick);
-                Some(ScheduleOutput {
-                    repeats: Vec::new(),
-                    pts,
-                    key: true,
-                })
-            } else {
-                let pts = self.epoch + rate.us(tick);
-                key = self.last_key_tick.is_none_or(|k| tick - k >= 60);
-                if key {
-                    self.last_key_tick = Some(tick);
-                }
-                self.last_tick = Some(tick);
-                Some(ScheduleOutput { repeats, pts, key })
-            }
-        } else {
-            let pts = self.epoch + rate.us(tick);
-            self.last_tick = Some(tick);
+        let pts = self.epoch + rate.us(tick);
+        let key = self.last_key_tick.is_none_or(|k| tick - k >= 60);
+        if key {
             self.last_key_tick = Some(tick);
-            Some(ScheduleOutput {
-                repeats,
-                pts,
-                key: true,
-            })
         }
+        self.last_tick = Some(tick);
+        Some(ScheduleOutput {
+            repeats: Vec::new(),
+            pts,
+            key,
+        })
     }
 }
 
@@ -1141,9 +1104,7 @@ mod tests {
         for (output, &tick) in accepted.iter().zip(&ticks) {
             assert_eq!(output.pts, epoch + rate.us(tick));
         }
-        assert_eq!(accepted[2].repeats.len(), 1);
-        assert_eq!(accepted[3].repeats.len(), 3);
-        assert_eq!(accepted[5].repeats.len(), 0);
+        assert!(accepted.iter().all(|o| o.repeats.is_empty()));
         assert!(accepted[5].key, "Recovered frame needs a time-based keyframe");
         assert!(!accepted[6].key);
         assert!(
