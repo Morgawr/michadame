@@ -409,7 +409,7 @@ fn export_output(
 
 pub const MP3_BITRATE: usize = 192_000;
 
-/// Decode replay Opus packets and write `[start, end)` (microseconds, capture
+/// Decode replay AAC packets and write `[start, end)` (microseconds, capture
 /// clock) as a 48 kHz stereo CBR MP3. Gaps become silence and overlaps are
 /// dropped, so the file keeps the original timeline. If less history exists
 /// than requested, the file starts at the first decoded sample instead of

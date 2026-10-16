@@ -512,7 +512,7 @@ pub(super) fn run(
         if let Some(s) = session.as_mut() {
             while let Some((at, samples)) = s.mixer.take() {
                 for mut packet in s.audio.encode(&samples, at)? {
-                    // Preserve the encoder's Opus lookahead offset.
+                    // Preserve the encoder's AAC priming offset.
                     packet
                         .packet
                         .set_pts(packet.packet.pts().map(|t| t + s.epoch));
@@ -521,7 +521,7 @@ pub(super) fn run(
                         .set_dts(packet.packet.dts().map(|t| t + s.epoch));
                     packet.start += s.epoch;
                     packet.end += s.epoch;
-                    if packet.start >= s.epoch {
+                    if packet.end >= s.epoch {
                         history.push(packet, limit);
                     }
                 }
