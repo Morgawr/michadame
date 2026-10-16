@@ -18,9 +18,15 @@ const SUBSCRIPTION_URL: &str = "https://api.twitch.tv/helix/eventsub/subscriptio
 
 type TlsStream = rustls::StreamOwned<rustls::ClientConnection, TcpStream>;
 
+pub enum EventSubMsg {
+    Alert(AlertEvent),
+    TokenRefreshed(StoredToken),
+    TokenInvalid(String),
+}
+
 pub struct EventSubHandle {
     pub access_token: String,
-    pub events: Receiver<AlertEvent>,
+    pub events: Receiver<EventSubMsg>,
     stop: Arc<AtomicBool>,
 }
 
@@ -57,7 +63,7 @@ pub fn spawn(token: StoredToken, ctx: Option<egui::Context>) -> EventSubHandle {
 struct Worker {
     token: StoredToken,
     stop: Arc<AtomicBool>,
-    event_tx: Sender<AlertEvent>,
+    event_tx: Sender<EventSubMsg>,
     ctx: Option<egui::Context>,
 }
 
@@ -66,27 +72,56 @@ impl Worker {
         self.stop.load(Ordering::Acquire)
     }
 
-    fn emit(&self, event: AlertEvent) {
+    fn emit(&self, event: EventSubMsg) {
         let _ = self.event_tx.send(event);
         if let Some(ctx) = &self.ctx {
             ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
     }
 
-    fn run(self) {
+    /// Validate (and refresh if needed) the token before connecting/subscribing.
+    /// Returns `false` if the token is permanently invalid and the worker should stop.
+    fn check_token(&mut self) -> bool {
+        match super::auth::ensure_valid(&self.token) {
+            Ok(Some(refreshed)) => {
+                self.token = refreshed.clone();
+                self.emit(EventSubMsg::TokenRefreshed(refreshed));
+                true
+            }
+            Ok(None) => true,
+            Err(super::auth::AuthError::Invalid(reason)) => {
+                self.emit(EventSubMsg::TokenInvalid(reason));
+                false
+            }
+            Err(super::auth::AuthError::Network(_)) => true,
+        }
+    }
+
+    fn run(mut self) {
         let mut backoff = 2u64;
         let mut current_url = EVENTSUB_WS_URL.to_string();
+        let mut is_reconnect = false;
 
         while !self.stopped() {
-            let res = self.session(&current_url);
+            if !is_reconnect && !self.check_token() {
+                break;
+            }
+            let res = self.session(&current_url, is_reconnect);
             match res {
-                Ok(new_url) => {
+                Ok(Some(new_url)) => {
                     backoff = 2;
-                    current_url = new_url.unwrap_or_else(|| EVENTSUB_WS_URL.to_string());
+                    current_url = new_url;
+                    is_reconnect = true;
+                }
+                Ok(None) => {
+                    backoff = 2;
+                    current_url = EVENTSUB_WS_URL.to_string();
+                    is_reconnect = false;
                 }
                 Err(err) => {
                     tracing::warn!("Twitch EventSub disconnected ({err}), reconnecting in {backoff}s");
                     current_url = EVENTSUB_WS_URL.to_string();
+                    is_reconnect = false;
                     let until = Instant::now() + Duration::from_secs(backoff);
                     while Instant::now() < until && !self.stopped() {
                         std::thread::sleep(Duration::from_millis(100));
@@ -97,7 +132,7 @@ impl Worker {
         }
     }
 
-    fn session(&self, url_str: &str) -> Result<Option<String>, String> {
+    fn session(&mut self, url_str: &str, is_reconnect: bool) -> Result<Option<String>, String> {
         let mut socket = connect_ws_tls(url_str)?;
 
         while !self.stopped() {
@@ -122,8 +157,12 @@ impl Worker {
 
                         match msg_type {
                             "session_welcome" => {
-                                if let Some(id) = json.pointer("/payload/session/id").and_then(|v| v.as_str()) {
-                                    self.subscribe_followers(id);
+                                if !is_reconnect {
+                                    if let Some(id) =
+                                        json.pointer("/payload/session/id").and_then(|v| v.as_str())
+                                    {
+                                        self.subscribe_followers(id)?;
+                                    }
                                 }
                             }
                             "session_keepalive" => {
@@ -153,12 +192,12 @@ impl Worker {
                                         .or_else(|| json.pointer("/payload/event/user_login"))
                                         .and_then(|v| v.as_str())
                                     {
-                                        self.emit(AlertEvent {
+                                        self.emit(EventSubMsg::Alert(AlertEvent {
                                             id: msg_id,
                                             kind: AlertKind::Follow {
                                                 user: user_name.to_string(),
                                             },
-                                        });
+                                        }));
                                     }
                                 }
                             }
@@ -183,10 +222,10 @@ impl Worker {
         Ok(None)
     }
 
-    fn subscribe_followers(&self, session_id: &str) {
+    fn subscribe_followers(&self, session_id: &str) -> Result<(), String> {
         if self.token.user_id.is_empty() {
             tracing::warn!("Twitch EventSub: cannot subscribe without user_id");
-            return;
+            return Err("Missing user_id on token".to_string());
         }
 
         let body = serde_json::json!({
@@ -218,6 +257,11 @@ impl Worker {
         match resp {
             Ok(_) => {
                 tracing::info!("Twitch EventSub: subscribed to channel.follow successfully");
+                Ok(())
+            }
+            Err(ureq::Error::Status(409, _)) => {
+                tracing::info!("Twitch EventSub: channel.follow subscription already exists");
+                Ok(())
             }
             Err(ureq::Error::Status(code, resp)) => {
                 let err_text = resp.into_string().unwrap_or_default();
@@ -228,9 +272,11 @@ impl Worker {
                 } else {
                     tracing::warn!("Twitch EventSub subscription failed (HTTP {code}): {err_text}");
                 }
+                Err(format!("EventSub subscribe HTTP {code}: {err_text}"))
             }
             Err(e) => {
                 tracing::warn!("Twitch EventSub subscription request error: {e}");
+                Err(format!("EventSub subscribe request error: {e}"))
             }
         }
     }

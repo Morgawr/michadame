@@ -669,14 +669,35 @@ impl TwitchState {
             }
         }
         self.sync_eventsub(ctx);
-        if let Some(es) = &self.eventsub {
-            let new_events: Vec<AlertEvent> = es.events.try_iter().collect();
-            if !new_events.is_empty() {
-                for ev in new_events {
-                    self.enqueue_alert(ev);
+        let es_events: Vec<eventsub::EventSubMsg> = self
+            .eventsub
+            .as_ref()
+            .map(|es| es.events.try_iter().collect())
+            .unwrap_or_default();
+        if !es_events.is_empty() {
+            for msg in es_events {
+                match msg {
+                    eventsub::EventSubMsg::Alert(ev) => self.enqueue_alert(ev),
+                    eventsub::EventSubMsg::TokenRefreshed(token) => {
+                        if let Err(e) = auth::save_token(&token) {
+                            tracing::error!("Failed to save refreshed Twitch token: {e}");
+                        }
+                        if let Some(es) = &mut self.eventsub {
+                            es.access_token = token.access_token.clone();
+                        }
+                        self.token = Some(token);
+                    }
+                    eventsub::EventSubMsg::TokenInvalid(reason) => {
+                        self.token = None;
+                        self.eventsub = None;
+                        auth::delete_token();
+                        self.notify_error(format!(
+                            "Twitch login expired ({reason}). Log in again."
+                        ));
+                    }
                 }
-                changed = true;
             }
+            changed = true;
         }
         let default_alert_duration =
             Duration::from_secs_f32(self.config.alerts_duration_secs.clamp(1.0, 30.0));
