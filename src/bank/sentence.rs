@@ -40,6 +40,36 @@ fn opener_for(close: char) -> Option<char> {
     BRACKET_PAIRS.iter().find(|&&(_, c)| c == close).map(|&(o, _)| o)
 }
 
+fn is_open_bracket_matched(slice: &[char], open: char, close: char) -> bool {
+    let mut depth = 0i32;
+    for &c in slice {
+        if c == open {
+            depth += 1;
+        } else if c == close {
+            depth -= 1;
+            if depth == 0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_close_bracket_matched(slice: &[char], open: char, close: char) -> bool {
+    let mut depth = 0i32;
+    for &c in slice.iter().rev() {
+        if c == close {
+            depth += 1;
+        } else if c == open {
+            depth -= 1;
+            if depth == 0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Splits `chars` into sentence spans `[start, end)` covering the whole input.
 fn sentence_spans(chars: &[char]) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
@@ -104,17 +134,20 @@ pub fn extract_sentence(text: &str, char_range: (usize, usize)) -> (String, (usi
     loop {
         let mut changed = false;
         if start < word_start {
-            if let Some(close) = closer_for(chars[start]) {
-                if !chars[start + 1..end].contains(&close) {
-                    start += 1;
-                    changed = true;
-                }
+            let first = chars[start];
+            let unmatched = match closer_for(first) {
+                Some(close) => !is_open_bracket_matched(&chars[start..end], first, close),
+                None => first == '"' && chars[start + 1..end].iter().filter(|&&c| c == '"').count() % 2 == 0,
+            };
+            if unmatched {
+                start += 1;
+                changed = true;
             }
         }
         if end > word_end {
             let last = chars[end - 1];
             let unmatched = match opener_for(last) {
-                Some(open) => !chars[start..end - 1].contains(&open),
+                Some(open) => !is_close_bracket_matched(&chars[start..end], open, last),
                 None => last == '"' && chars[start..end - 1].iter().filter(|&&c| c == '"').count() % 2 == 0,
             };
             if unmatched {
@@ -175,6 +208,17 @@ mod tests {
 
         let single = "「本当に行くの？」";
         assert_eq!(sentence_for(single, "行く"), "「本当に行くの？」");
+    }
+
+    #[test]
+    fn nested_quotes_and_ascii_quotes_trim_unmatched_outer_brackets() {
+        let nested = "「彼は「はい」と言った。それから帰った。」";
+        assert_eq!(sentence_for(nested, "言った"), "彼は「はい」と言った。");
+        assert_eq!(sentence_for(nested, "帰った"), "それから帰った。");
+
+        let ascii = "\"Hello! General Kenobi?\"";
+        assert_eq!(sentence_for(ascii, "Hello"), "Hello!");
+        assert_eq!(sentence_for(ascii, "Kenobi"), "General Kenobi?");
     }
 
     #[test]
