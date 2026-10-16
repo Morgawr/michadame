@@ -156,6 +156,7 @@ pub fn lookup_word_at_pointer(
         let cache_key = ScanCacheKey {
             db_generation: db.map_or(0, |d| d.generation),
             particle_index_ready: particle_index.is_some(),
+            has_freq_db: freq_db.is_some(),
             custom_names_gen,
             current_tag: current_tag.map(str::to_string),
             line_text: full_text.clone(),
@@ -249,56 +250,58 @@ pub fn lookup_word_at_pointer(
                 }
             }
 
-            let matched_entry =
-                primary_span.map(|(start, end)| (start, end, acc.entries, acc.groups));
+            let matched_entry = primary_span.map(|(start, end)| {
+                let mut entries = acc.entries;
+                let groups = acc.groups;
+                // Enrich entries with frequency if available and sort. Priority group always
+                // comes first (primary match, then longer before shorter spans, exact before
+                // normalized); frequency only orders entries within the same group.
+                if let Some(fdb) = freq_db {
+                    for entry in &mut entries {
+                        entry.frequency = fdb.get_frequency(&entry.term, &entry.reading);
+                    }
+                    // Sort in order of frequency: lowest rank first, unranked last.
+                    // A kana-only reading frequency (marked with ㋕) on a kanji term represents the reading in kana,
+                    // not the kanji word itself. Penalize it compared to a genuine kanji frequency.
+                    let by_freq = |a: &super::models::TermEntry, b: &super::models::TermEntry| {
+                        let a_kanji = crate::dict::database::contains_kanji(&a.term);
+                        let b_kanji = crate::dict::database::contains_kanji(&b.term);
+
+                        let a_is_kana_on_kanji =
+                            a_kanji && a.frequency.as_ref().map_or(false, |f| f.is_kana_freq());
+                        let b_is_kana_on_kanji =
+                            b_kanji && b.frequency.as_ref().map_or(false, |f| f.is_kana_freq());
+
+                        match (a_is_kana_on_kanji, b_is_kana_on_kanji) {
+                            (false, true) if a.frequency.is_some() => std::cmp::Ordering::Less,
+                            (true, false) if b.frequency.is_some() => std::cmp::Ordering::Greater,
+                            _ => match (&a.frequency, &b.frequency) {
+                                (Some(fa), Some(fb)) => fa.rank.cmp(&fb.rank),
+                                (Some(_), None) => std::cmp::Ordering::Less,
+                                (None, Some(_)) => std::cmp::Ordering::Greater,
+                                (None, None) => std::cmp::Ordering::Equal,
+                            },
+                        }
+                    };
+                    let mut tagged: Vec<_> = groups.into_iter().zip(entries).collect();
+                    tagged.sort_by(|(ga, a), (gb, b)| {
+                        ga.cmp(gb)
+                            .then_with(|| by_freq(a, b))
+                            .then_with(|| {
+                                b.score
+                                    .partial_cmp(&a.score)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            })
+                    });
+                    entries = tagged.into_iter().map(|(_, e)| e).collect();
+                }
+                (start, end, entries)
+            });
             SCAN_CACHE.with(|c| *c.borrow_mut() = Some((cache_key, matched_entry.clone())));
             matched_entry
         };
 
-        if let Some((start_offset, end_offset, entries, groups)) = matched_entry {
-            // Enrich entries with frequency if available and sort. Priority group always
-            // comes first (primary match, then longer before shorter spans, exact before
-            // normalized); frequency only orders entries within the same group.
-            let mut entries = entries;
-            if let Some(fdb) = freq_db {
-                for entry in &mut entries {
-                    entry.frequency = fdb.get_frequency(&entry.term, &entry.reading);
-                }
-                // Sort in order of frequency: lowest rank first, unranked last.
-                // A kana-only reading frequency (marked with ㋕) on a kanji term represents the reading in kana,
-                // not the kanji word itself. Penalize it compared to a genuine kanji frequency.
-                let by_freq = |a: &super::models::TermEntry, b: &super::models::TermEntry| {
-                    let a_kanji = crate::dict::database::contains_kanji(&a.term);
-                    let b_kanji = crate::dict::database::contains_kanji(&b.term);
-
-                    let a_is_kana_on_kanji =
-                        a_kanji && a.frequency.as_ref().map_or(false, |f| f.is_kana_freq());
-                    let b_is_kana_on_kanji =
-                        b_kanji && b.frequency.as_ref().map_or(false, |f| f.is_kana_freq());
-
-                    match (a_is_kana_on_kanji, b_is_kana_on_kanji) {
-                        (false, true) if a.frequency.is_some() => std::cmp::Ordering::Less,
-                        (true, false) if b.frequency.is_some() => std::cmp::Ordering::Greater,
-                        _ => match (&a.frequency, &b.frequency) {
-                            (Some(fa), Some(fb)) => fa.rank.cmp(&fb.rank),
-                            (Some(_), None) => std::cmp::Ordering::Less,
-                            (None, Some(_)) => std::cmp::Ordering::Greater,
-                            (None, None) => std::cmp::Ordering::Equal,
-                        },
-                    }
-                };
-                let mut tagged: Vec<_> = groups.into_iter().zip(entries).collect();
-                tagged.sort_by(|(ga, a), (gb, b)| {
-                    ga.cmp(gb)
-                        .then_with(|| by_freq(a, b))
-                        .then_with(|| {
-                            b.score
-                                .partial_cmp(&a.score)
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        })
-                });
-                entries = tagged.into_iter().map(|(_, e)| e).collect();
-            }
+        if let Some((start_offset, end_offset, entries)) = matched_entry {
 
             // Calculate precise per-line sub-bounding boxes for the recognized word.
             // The segment on the hovered line becomes `word_rect` (popup anchor); segments on
@@ -380,15 +383,16 @@ impl LineSegment<'_> {
 struct ScanCacheKey {
     db_generation: u64,
     particle_index_ready: bool,
+    has_freq_db: bool,
     custom_names_gen: u64,
     current_tag: Option<String>,
     line_text: String,
     char_idx: usize,
 }
 
-/// `(start, end, entries, groups)`: the primary span and all collected entries, with each
-/// entry's priority group (see [`ScanAccumulator`]; group 0 is the primary match).
-type ScanResult = Option<(usize, usize, Vec<super::models::TermEntry>, Vec<usize>)>;
+/// `(start, end, entries)`: the primary span and all collected entries, already enriched
+/// with frequency data and sorted by priority group and frequency.
+type ScanResult = Option<(usize, usize, Vec<super::models::TermEntry>)>;
 
 thread_local! {
     static SCAN_CACHE: std::cell::RefCell<Option<(ScanCacheKey, ScanResult)>> =
