@@ -1460,33 +1460,34 @@ impl CrtFilterRenderer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn paint(
+    unsafe fn preprocess_video_chain(
         &mut self,
         gl: &glow::Context,
-        painter: &egui_glow::Painter,
-        widget_rect: egui::Rect,
         raw_frame: Option<&RawFrame>,
         fallback_texture: Option<glow::Texture>,
         resolution: (u32, u32),
         output_size: (f32, f32),
-        params: &ShaderParams,
-        halo_params: &HaloShaderParams,
-        cathode_params: &CathodeInterferenceShaderParams,
-        glass_params: Option<&GlassShaderParams>,
-        time: f32,
-        run_pixelate: bool,
-        run_lottes: bool,
-        run_halo: bool,
+        scaler_filter: u8,
+        overscan_x: f32,
+        overscan_y: f32,
+        underscan_x: f32,
+        underscan_y: f32,
+        deinterlace_filter_enabled: bool,
+        deinterlace_mode: u8,
+        deinterlace_blend: f32,
+        deinterlace_motion_threshold: f32,
+        deinterlace_line_spacing: f32,
+        deinterlace_spatial_mix: f32,
+        median_filter_enabled: bool,
+        median_mix: f32,
         fft_filter: Option<&Arc<Mutex<FftFilter>>>,
         fft_mask_threshold: f32,
         fft_black_threshold: f32,
-        software_mouse_pos: Option<(f32, f32)>,
-        software_mouse_clip: Option<[i32; 4]>,
-        skip_popup: bool,
-    ) -> RenderedArea {
+        allow_srgb_passthrough_fastpath: bool,
+    ) -> (glow::Texture, (u32, u32), bool) {
         let mut video_texture = fallback_texture;
 
-        let scaler = ScalerFilter::from_u8(params.scaler_filter);
+        let scaler = ScalerFilter::from_u8(scaler_filter);
         let is_anime4k = matches!(
             scaler,
             ScalerFilter::Anime4kSmall | ScalerFilter::Anime4kMedium | ScalerFilter::Anime4kLarge
@@ -1519,7 +1520,7 @@ impl CrtFilterRenderer {
         };
 
         if self.last_size != resolution
-            || self.last_scaler_filter != Some(params.scaler_filter)
+            || self.last_scaler_filter != Some(scaler_filter)
             || self.last_pass_res != effective_res
         {
             self.setup_framebuffers(
@@ -1528,145 +1529,429 @@ impl CrtFilterRenderer {
                 resolution.1,
                 output_size.0 as u32,
                 output_size.1 as u32,
-                params.scaler_filter,
+                scaler_filter,
             );
             self.last_size = resolution;
-            self.last_scaler_filter = Some(params.scaler_filter);
+            self.last_scaler_filter = Some(scaler_filter);
             self.last_pass_res = effective_res;
         }
 
+        gl.bind_vertex_array(Some(self.vertex_array));
+        gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
+
+        let mut input_is_srgb = false;
+        if let Some(tex) = self.update_frame_history_and_prepare_input(
+            gl,
+            raw_frame,
+            resolution.0,
+            resolution.1,
+            overscan_x,
+            overscan_y,
+            underscan_x,
+            underscan_y,
+            fft_filter,
+            fft_mask_threshold,
+            fft_black_threshold,
+        ) {
+            video_texture = Some(tex);
+        } else if let Some(tex) = fallback_texture {
+            if allow_srgb_passthrough_fastpath
+                && !deinterlace_filter_enabled
+                && !median_filter_enabled
+                && !is_anime4k
+            {
+                video_texture = Some(tex);
+                input_is_srgb = true;
+            } else {
+                video_texture = Some(self.linearize_fallback_texture(
+                    gl,
+                    tex,
+                    resolution.0,
+                    resolution.1,
+                ));
+            }
+        }
+
+        let input_texture = video_texture.expect("No video texture available");
+        let mut current_video_texture = input_texture;
+        let mut current_res = resolution;
+
+        // Apply Deinterlace filter before median / upscaling
+        if deinterlace_filter_enabled {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[1]));
+            gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
+            gl.use_program(Some(self.deinterlace_prog));
+            if let Some(loc) = &self.deinterlace_current_frame_loc {
+                gl.uniform_1_i32(Some(loc), 0);
+            }
+            if let Some(loc) = &self.deinterlace_prev_frame_loc {
+                gl.uniform_1_i32(Some(loc), 1);
+            }
+            if let Some(loc) = &self.deinterlace_prev_frame_2_loc {
+                gl.uniform_1_i32(Some(loc), 2);
+            }
+            if let Some(loc) = &self.deinterlace_has_prev2_loc {
+                gl.uniform_1_i32(Some(loc), if self.history_count >= 2 { 1 } else { 0 });
+            }
+            gl.uniform_1_i32(Some(&self.deinterlace_mode_loc), deinterlace_mode as i32);
+            gl.uniform_1_f32(Some(&self.deinterlace_blend_loc), deinterlace_blend);
+            gl.uniform_1_f32(
+                Some(&self.deinterlace_motion_thresh_loc),
+                deinterlace_motion_threshold,
+            );
+            gl.uniform_1_f32(
+                Some(&self.deinterlace_line_spacing_loc),
+                deinterlace_line_spacing,
+            );
+            gl.uniform_1_f32(
+                Some(&self.deinterlace_spatial_mix_loc),
+                deinterlace_spatial_mix,
+            );
+
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(current_video_texture));
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[0]));
+            gl.active_texture(glow::TEXTURE2);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[2]));
+
+            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+            gl.active_texture(glow::TEXTURE2);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.active_texture(glow::TEXTURE0);
+
+            current_video_texture = self.pass_textures[1];
+        }
+
+        // Apply Median filter before upscaling
+        if median_filter_enabled {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[5]));
+            gl.viewport(0, 0, current_res.0 as i32, current_res.1 as i32);
+            gl.use_program(Some(self.median_prog));
+            gl.uniform_1_f32(Some(&self.median_mix_loc), median_mix);
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(current_video_texture));
+            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            current_video_texture = self.pass_textures[5];
+        }
+
+        if is_anime4k {
+            let upscaled = match scaler {
+                ScalerFilter::Anime4kSmall => self.anime4k_small.upscale(
+                    gl,
+                    current_video_texture,
+                    current_res.0,
+                    current_res.1,
+                    output_size.0 as u32,
+                    output_size.1 as u32,
+                ),
+                ScalerFilter::Anime4kMedium => self.anime4k_medium.upscale(
+                    gl,
+                    current_video_texture,
+                    current_res.0,
+                    current_res.1,
+                    output_size.0 as u32,
+                    output_size.1 as u32,
+                ),
+                ScalerFilter::Anime4kLarge => self.anime4k_large.upscale(
+                    gl,
+                    current_video_texture,
+                    current_res.0,
+                    current_res.1,
+                    output_size.0 as u32,
+                    output_size.1 as u32,
+                ),
+                _ => unreachable!(),
+            };
+            current_video_texture = upscaled.0;
+            current_res = (upscaled.1, upscaled.2);
+        }
+
+        (current_video_texture, current_res, input_is_srgb)
+    }
+
+    unsafe fn prepare_postprocess_targets(
+        &mut self,
+        gl: &glow::Context,
+        output_size: (f32, f32),
+        cathode_params: Option<&CathodeInterferenceShaderParams>,
+        glass_params: Option<&GlassShaderParams>,
+        skip_popup: bool,
+        software_mouse_pos: Option<(f32, f32)>,
+    ) -> (
+        Option<glow::Framebuffer>,
+        Option<glow::Framebuffer>,
+        Option<glow::Framebuffer>,
+        bool,
+    ) {
+        let run_cathode = cathode_params
+            .map(|c| c.enabled && c.intensity > 0.001)
+            .unwrap_or(false);
+        let run_glass = glass_params
+            .map(|g| g.enabled && g.intensity > 0.001)
+            .unwrap_or(false);
+        let has_popup = !skip_popup && !self.popup_primitives.is_empty();
+        let has_comments = !self.comment_primitives.is_empty();
+        let has_alerts = !self.alert_primitives.is_empty();
+        let has_overlay = has_popup || has_comments || has_alerts;
+        let has_mouse = software_mouse_pos.is_some();
+        let has_post = run_cathode || run_glass || has_overlay || has_mouse;
+
+        let (upstream_target_fbo, cathode_target_fbo, glass_target_fbo) =
+            match (run_cathode, run_glass) {
+                (true, true) => {
+                    self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
+                    (Some(self.post_fbos[0]), Some(self.post_fbos[1]), None)
+                }
+                (true, false) | (false, true) => {
+                    self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
+                    (Some(self.post_fbos[0]), None, None)
+                }
+                (false, false) => {
+                    if has_overlay || has_mouse {
+                        self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
+                        (Some(self.post_fbos[0]), None, None)
+                    } else {
+                        (None, None, None)
+                    }
+                }
+            };
+
+        (
+            upstream_target_fbo,
+            cathode_target_fbo,
+            glass_target_fbo,
+            has_post,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn postprocess_and_present(
+        &mut self,
+        gl: &glow::Context,
+        painter: &egui_glow::Painter,
+        widget_rect: egui::Rect,
+        output_size: (f32, f32),
+        final_input_texture: glow::Texture,
+        final_input_res: (u32, u32),
+        horizontal_stretch: f32,
+        s_mask: f32,
+        scan_str: f32,
+        b_boost: f32,
+        cathode_params: Option<&CathodeInterferenceShaderParams>,
+        glass_params: Option<&GlassShaderParams>,
+        cathode_target_fbo: Option<glow::Framebuffer>,
+        glass_target_fbo: Option<glow::Framebuffer>,
+        time: f32,
+        skip_popup: bool,
+        software_mouse_pos: Option<(f32, f32)>,
+        software_mouse_clip: Option<[i32; 4]>,
+        scissor_enabled: bool,
+        blend_enabled: bool,
+        old_vbo: i32,
+    ) {
+        let run_cathode = cathode_params
+            .map(|c| c.enabled && c.intensity > 0.001)
+            .unwrap_or(false);
+        let run_glass = glass_params
+            .map(|g| g.enabled && g.intensity > 0.001)
+            .unwrap_or(false);
+        let has_popup = !skip_popup && !self.popup_primitives.is_empty();
+        let has_comments = !self.comment_primitives.is_empty();
+        let has_alerts = !self.alert_primitives.is_empty();
+        let has_overlay = has_popup || has_comments || has_alerts;
+        let has_mouse = software_mouse_pos.is_some();
+
+        // Niconico comments sit on the CRT image (below the dictionary
+        // popup) and are kept in mining captures, unlike the popup.
+        if has_comments {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
+            gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+            self.draw_overlay_primitives(
+                gl,
+                painter,
+                &self.comment_primitives,
+                output_size,
+                widget_rect,
+                s_mask,
+                scan_str,
+                b_boost,
+            );
+            self.comment_primitives.clear();
+        }
+
+        if has_alerts {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
+            gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+            self.draw_overlay_primitives(
+                gl,
+                painter,
+                &self.alert_primitives,
+                output_size,
+                widget_rect,
+                s_mask,
+                scan_str,
+                b_boost,
+            );
+            self.alert_primitives.clear();
+        }
+
+        if has_popup {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
+            gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+            self.draw_popup_primitives(
+                gl,
+                painter,
+                output_size,
+                widget_rect,
+                s_mask,
+                scan_str,
+                b_boost,
+            );
+            self.popup_primitives.clear();
+        }
+
+        if let Some(mouse_pos) = software_mouse_pos {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
+            gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+            self.draw_software_mouse(
+                gl,
+                mouse_pos,
+                output_size,
+                s_mask,
+                scan_str,
+                b_boost,
+                output_size.0 / widget_rect.width(),
+                software_mouse_clip,
+            );
+        }
+
+        if run_cathode {
+            let cp = cathode_params.unwrap();
+            let cathode_input = self.post_textures[0];
+            let scissor_cathode = scissor_enabled && !run_glass;
+            self.draw_cathode_pass(
+                gl,
+                cathode_input,
+                output_size,
+                final_input_res,
+                horizontal_stretch,
+                time,
+                cp,
+                cathode_target_fbo,
+                scissor_cathode,
+            );
+        }
+
+        if run_glass {
+            let gp = glass_params.unwrap();
+            let glass_input = if run_cathode {
+                self.post_textures[1]
+            } else {
+                self.post_textures[0]
+            };
+            let scissor_glass = scissor_enabled;
+            self.draw_glass_pass(
+                gl,
+                glass_input,
+                output_size,
+                final_input_res,
+                gp,
+                time,
+                glass_target_fbo,
+                scissor_glass,
+            );
+        }
+
+        self.last_video_texture = Some(final_input_texture);
+        self.mipmap_generated_this_frame
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+
+        if !run_cathode && !run_glass && (has_overlay || has_mouse) {
+            self.blit_texture(gl, self.post_textures[0], output_size, None, scissor_enabled);
+        }
+
+        if scissor_enabled {
+            gl.enable(glow::SCISSOR_TEST);
+        } else {
+            gl.disable(glow::SCISSOR_TEST);
+        }
+
+        if blend_enabled {
+            gl.enable(glow::BLEND);
+        } else {
+            gl.disable(glow::BLEND);
+        }
+
+        if old_vbo != 0 {
+            gl.bind_vertex_array(Some(glow::VertexArray::from(glow::NativeVertexArray(
+                NonZero::new(old_vbo as u32).unwrap(),
+            ))));
+        } else {
+            gl.bind_vertex_array(None);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint(
+        &mut self,
+        gl: &glow::Context,
+        painter: &egui_glow::Painter,
+        widget_rect: egui::Rect,
+        raw_frame: Option<&RawFrame>,
+        fallback_texture: Option<glow::Texture>,
+        resolution: (u32, u32),
+        output_size: (f32, f32),
+        params: &ShaderParams,
+        halo_params: &HaloShaderParams,
+        cathode_params: &CathodeInterferenceShaderParams,
+        glass_params: Option<&GlassShaderParams>,
+        time: f32,
+        run_pixelate: bool,
+        run_lottes: bool,
+        run_halo: bool,
+        fft_filter: Option<&Arc<Mutex<FftFilter>>>,
+        fft_mask_threshold: f32,
+        fft_black_threshold: f32,
+        software_mouse_pos: Option<(f32, f32)>,
+        software_mouse_clip: Option<[i32; 4]>,
+        skip_popup: bool,
+    ) -> RenderedArea {
         unsafe {
             let old_vbo = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
             let scissor_enabled = gl.is_enabled(glow::SCISSOR_TEST);
             gl.disable(glow::SCISSOR_TEST);
             let blend_enabled = gl.is_enabled(glow::BLEND);
             gl.disable(glow::BLEND);
-            gl.bind_vertex_array(Some(self.vertex_array));
-            gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
 
-            if let Some(tex) = self.update_frame_history_and_prepare_input(
+            let allow_srgb_fastpath = !run_lottes && !run_halo && !run_pixelate;
+            let (current_video_texture, current_res, input_is_srgb) = self.preprocess_video_chain(
                 gl,
                 raw_frame,
-                resolution.0,
-                resolution.1,
+                fallback_texture,
+                resolution,
+                output_size,
+                params.scaler_filter,
                 params.overscan_x,
                 params.overscan_y,
                 params.underscan_x,
                 params.underscan_y,
+                params.deinterlace_filter_enabled,
+                params.deinterlace_mode,
+                params.deinterlace_blend,
+                params.deinterlace_motion_threshold,
+                params.deinterlace_line_spacing,
+                params.deinterlace_spatial_mix,
+                params.median_filter_enabled,
+                params.median_mix,
                 fft_filter,
                 fft_mask_threshold,
                 fft_black_threshold,
-            ) {
-                video_texture = Some(tex);
-            } else if let Some(tex) = fallback_texture {
-                video_texture = Some(self.linearize_fallback_texture(gl, tex, resolution.0, resolution.1));
-            }
-
-            let input_texture = video_texture.expect("No video texture available");
-            let mut current_video_texture = input_texture;
-            let mut current_res = resolution;
-
-            // Apply Deinterlace filter before median / upscaling
-            if params.deinterlace_filter_enabled {
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[1]));
-                gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
-                gl.use_program(Some(self.deinterlace_prog));
-                if let Some(loc) = &self.deinterlace_current_frame_loc {
-                    gl.uniform_1_i32(Some(loc), 0);
-                }
-                if let Some(loc) = &self.deinterlace_prev_frame_loc {
-                    gl.uniform_1_i32(Some(loc), 1);
-                }
-                if let Some(loc) = &self.deinterlace_prev_frame_2_loc {
-                    gl.uniform_1_i32(Some(loc), 2);
-                }
-                if let Some(loc) = &self.deinterlace_has_prev2_loc {
-                    gl.uniform_1_i32(Some(loc), if self.history_count >= 2 { 1 } else { 0 });
-                }
-                gl.uniform_1_i32(Some(&self.deinterlace_mode_loc), params.deinterlace_mode as i32);
-                gl.uniform_1_f32(Some(&self.deinterlace_blend_loc), params.deinterlace_blend);
-                gl.uniform_1_f32(
-                    Some(&self.deinterlace_motion_thresh_loc),
-                    params.deinterlace_motion_threshold,
-                );
-                gl.uniform_1_f32(
-                    Some(&self.deinterlace_line_spacing_loc),
-                    params.deinterlace_line_spacing,
-                );
-                gl.uniform_1_f32(
-                    Some(&self.deinterlace_spatial_mix_loc),
-                    params.deinterlace_spatial_mix,
-                );
-
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(current_video_texture));
-                gl.active_texture(glow::TEXTURE1);
-                gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[0]));
-                gl.active_texture(glow::TEXTURE2);
-                gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[2]));
-
-                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-
-                gl.active_texture(glow::TEXTURE2);
-                gl.bind_texture(glow::TEXTURE_2D, None);
-                gl.active_texture(glow::TEXTURE1);
-                gl.bind_texture(glow::TEXTURE_2D, None);
-                gl.active_texture(glow::TEXTURE0);
-
-                current_video_texture = self.pass_textures[1];
-            }
-
-            // Apply Median filter before upscaling
-            if params.median_filter_enabled {
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[5]));
-                gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
-                gl.use_program(Some(self.median_prog));
-                gl.uniform_1_f32(Some(&self.median_mix_loc), params.median_mix);
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(current_video_texture));
-                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                current_video_texture = self.pass_textures[5];
-            }
-
-            let scaler = ScalerFilter::from_u8(params.scaler_filter);
-            let is_anime4k = matches!(
-                scaler,
-                ScalerFilter::Anime4kSmall
-                    | ScalerFilter::Anime4kMedium
-                    | ScalerFilter::Anime4kLarge
+                allow_srgb_fastpath,
             );
-
-            if is_anime4k {
-                let upscaled = match scaler {
-                    ScalerFilter::Anime4kSmall => self.anime4k_small.upscale(
-                        gl,
-                        current_video_texture,
-                        current_res.0,
-                        current_res.1,
-                        output_size.0 as u32,
-                        output_size.1 as u32,
-                    ),
-                    ScalerFilter::Anime4kMedium => self.anime4k_medium.upscale(
-                        gl,
-                        current_video_texture,
-                        current_res.0,
-                        current_res.1,
-                        output_size.0 as u32,
-                        output_size.1 as u32,
-                    ),
-                    ScalerFilter::Anime4kLarge => self.anime4k_large.upscale(
-                        gl,
-                        current_video_texture,
-                        current_res.0,
-                        current_res.1,
-                        output_size.0 as u32,
-                        output_size.1 as u32,
-                    ),
-                    _ => unreachable!(),
-                };
-                current_video_texture = upscaled.0;
-                current_res = (upscaled.1, upscaled.2);
-            }
 
             let mut final_input_texture = current_video_texture;
             let mut final_input_res = current_res;
@@ -1689,40 +1974,15 @@ impl CrtFilterRenderer {
             }
             self.last_video_texture = Some(final_input_texture);
 
-            let run_cathode = cathode_params.enabled && cathode_params.intensity > 0.001;
-            let run_glass = glass_params
-                .map(|g| g.enabled && g.intensity > 0.001)
-                .unwrap_or(false);
-            let has_popup = !skip_popup && !self.popup_primitives.is_empty();
-            let has_comments = !self.comment_primitives.is_empty();
-            let has_alerts = !self.alert_primitives.is_empty();
-            let has_overlay = has_popup || has_comments || has_alerts;
-            let has_mouse = software_mouse_pos.is_some();
-            let has_post = run_cathode || run_glass || has_overlay || has_mouse;
-
-            let (upstream_target_fbo, cathode_target_fbo, glass_target_fbo) =
-                match (run_cathode, run_glass) {
-                    (true, true) => {
-                        self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
-                        (Some(self.post_fbos[0]), Some(self.post_fbos[1]), None)
-                    }
-                    (true, false) => {
-                        self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
-                        (Some(self.post_fbos[0]), None, None)
-                    }
-                    (false, true) => {
-                        self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
-                        (Some(self.post_fbos[0]), None, None)
-                    }
-                    (false, false) => {
-                        if has_overlay || has_mouse {
-                            self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
-                            (Some(self.post_fbos[0]), None, None)
-                        } else {
-                            (None, None, None)
-                        }
-                    }
-                };
+            let (upstream_target_fbo, cathode_target_fbo, glass_target_fbo, has_post) = self
+                .prepare_postprocess_targets(
+                    gl,
+                    output_size,
+                    Some(cathode_params),
+                    glass_params,
+                    skip_popup,
+                    software_mouse_pos,
+                );
 
             if run_lottes {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, upstream_target_fbo);
@@ -1831,7 +2091,7 @@ impl CrtFilterRenderer {
                     params.scaler_filter,
                     params.border_crop,
                     upstream_target_fbo,
-                    false,
+                    input_is_srgb,
                 );
             }
 
@@ -1851,149 +2111,30 @@ impl CrtFilterRenderer {
                 (0.0, 0.0, 1.0)
             };
 
-            // Niconico comments sit on the CRT image (below the dictionary
-            // popup) and are kept in mining captures, unlike the popup.
-            if has_comments {
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
-                gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
-                self.draw_overlay_primitives(
-                    gl,
-                    painter,
-                    &self.comment_primitives,
-                    output_size,
-                    widget_rect,
-                    s_mask,
-                    scan_str,
-                    b_boost,
-                );
-                self.comment_primitives.clear();
-            }
+            self.postprocess_and_present(
+                gl,
+                painter,
+                widget_rect,
+                output_size,
+                final_input_texture,
+                final_input_res,
+                params.horizontal_stretch,
+                s_mask,
+                scan_str,
+                b_boost,
+                Some(cathode_params),
+                glass_params,
+                cathode_target_fbo,
+                glass_target_fbo,
+                time,
+                skip_popup,
+                software_mouse_pos,
+                software_mouse_clip,
+                scissor_enabled,
+                blend_enabled,
+                old_vbo,
+            );
 
-            if has_alerts {
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
-                gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
-                self.draw_overlay_primitives(
-                    gl,
-                    painter,
-                    &self.alert_primitives,
-                    output_size,
-                    widget_rect,
-                    s_mask,
-                    scan_str,
-                    b_boost,
-                );
-                self.alert_primitives.clear();
-            }
-
-            if has_popup {
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
-                gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
-                self.draw_popup_primitives(
-                    gl,
-                    painter,
-                    output_size,
-                    widget_rect,
-                    s_mask,
-                    scan_str,
-                    b_boost,
-                );
-                self.popup_primitives.clear();
-            }
-
-            if let Some(mouse_pos) = software_mouse_pos {
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
-                gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
-                let (s_mask, scan_str, b_boost) = if run_lottes {
-                    (
-                        params.shadow_mask,
-                        (params.hard_scan / 30.0).clamp(0.0, 1.0),
-                        params.brightboost.max(1.0),
-                    )
-                } else if run_halo {
-                    (
-                        halo_params.shadow_mask,
-                        0.5,
-                        halo_params.brightboost.max(1.0),
-                    )
-                } else {
-                    (0.0, 0.0, 1.0)
-                };
-                self.draw_software_mouse(
-                    gl,
-                    mouse_pos,
-                    output_size,
-                    s_mask,
-                    scan_str,
-                    b_boost,
-                    output_size.0 / widget_rect.width(),
-                    software_mouse_clip,
-                );
-            }
-
-            if run_cathode {
-                let cathode_input = self.post_textures[0];
-                let scissor_cathode = scissor_enabled && !run_glass;
-                self.draw_cathode_pass(
-                    gl,
-                    cathode_input,
-                    output_size,
-                    final_input_res,
-                    params.horizontal_stretch,
-                    time,
-                    cathode_params,
-                    cathode_target_fbo,
-                    scissor_cathode,
-                );
-            }
-
-            if run_glass {
-                let gp = glass_params.unwrap();
-                let glass_input = if run_cathode {
-                    self.post_textures[1]
-                } else {
-                    self.post_textures[0]
-                };
-                let scissor_glass = scissor_enabled;
-                self.draw_glass_pass(
-                    gl,
-                    glass_input,
-                    output_size,
-                    final_input_res,
-                    gp,
-                    time,
-                    glass_target_fbo,
-                    scissor_glass,
-                );
-            }
-
-            self.last_video_texture = Some(final_input_texture);
-            self.mipmap_generated_this_frame
-                .store(false, std::sync::atomic::Ordering::Relaxed);
-
-            if !run_cathode && !run_glass && (has_overlay || has_mouse) {
-                self.blit_texture(gl, self.post_textures[0], output_size, None, scissor_enabled);
-            }
-
-            if scissor_enabled {
-                gl.enable(glow::SCISSOR_TEST);
-            } else {
-                gl.disable(glow::SCISSOR_TEST);
-            }
-
-            if blend_enabled {
-                gl.enable(glow::BLEND);
-            } else {
-                gl.disable(glow::BLEND);
-            }
-
-            gl.bind_vertex_array(None);
-            if old_vbo != 0 {
-                gl.bind_vertex_array(Some(glow::VertexArray::from(glow::NativeVertexArray(
-                    NonZero::new(old_vbo as u32).unwrap(),
-                ))));
-            } else {
-                gl.bind_vertex_array(None);
-            }
             RenderedArea::fit(final_input_res, output_size, params.horizontal_stretch)
         }
     }
@@ -2031,233 +2172,52 @@ impl CrtFilterRenderer {
         cathode_params: Option<&CathodeInterferenceShaderParams>,
         glass_params: Option<&GlassShaderParams>,
         time: f32,
+        software_mouse_pos: Option<(f32, f32)>,
+        software_mouse_clip: Option<[i32; 4]>,
         skip_popup: bool,
     ) -> RenderedArea {
-        let mut video_texture = fallback_texture;
-
-        let scaler = ScalerFilter::from_u8(scaler_filter);
-        let is_anime4k = matches!(
-            scaler,
-            ScalerFilter::Anime4kSmall | ScalerFilter::Anime4kMedium | ScalerFilter::Anime4kLarge
-        );
-
-        let effective_res = if is_anime4k {
-            match scaler {
-                ScalerFilter::Anime4kSmall => self.anime4k_small.get_upscaled_size(
-                    resolution.0,
-                    resolution.1,
-                    output_size.0 as u32,
-                    output_size.1 as u32,
-                ),
-                ScalerFilter::Anime4kMedium => self.anime4k_medium.get_upscaled_size(
-                    resolution.0,
-                    resolution.1,
-                    output_size.0 as u32,
-                    output_size.1 as u32,
-                ),
-                ScalerFilter::Anime4kLarge => self.anime4k_large.get_upscaled_size(
-                    resolution.0,
-                    resolution.1,
-                    output_size.0 as u32,
-                    output_size.1 as u32,
-                ),
-                _ => unreachable!(),
-            }
-        } else {
-            resolution
-        };
-
-        if self.last_size != resolution
-            || self.last_scaler_filter != Some(scaler_filter)
-            || self.last_pass_res != effective_res
-        {
-            self.setup_framebuffers(
-                gl,
-                resolution.0,
-                resolution.1,
-                output_size.0 as u32,
-                output_size.1 as u32,
-                scaler_filter,
-            );
-            self.last_size = resolution;
-            self.last_scaler_filter = Some(scaler_filter);
-            self.last_pass_res = effective_res;
-        }
-
         unsafe {
             let old_vbo = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
             let scissor_enabled = gl.is_enabled(glow::SCISSOR_TEST);
             gl.disable(glow::SCISSOR_TEST);
             let blend_enabled = gl.is_enabled(glow::BLEND);
             gl.disable(glow::BLEND);
-            gl.bind_vertex_array(Some(self.vertex_array));
 
-            let mut input_is_srgb = false;
-            if let Some(tex) = self.update_frame_history_and_prepare_input(
+            let (current_video_texture, current_res, input_is_srgb) = self.preprocess_video_chain(
                 gl,
                 raw_frame,
-                resolution.0,
-                resolution.1,
+                fallback_texture,
+                resolution,
+                output_size,
+                scaler_filter,
                 overscan_x,
                 overscan_y,
                 underscan_x,
                 underscan_y,
+                deinterlace_filter_enabled,
+                deinterlace_mode,
+                deinterlace_blend,
+                deinterlace_motion_threshold,
+                deinterlace_line_spacing,
+                deinterlace_spatial_mix,
+                median_filter_enabled,
+                median_mix,
                 fft_filter,
                 fft_mask_threshold,
                 fft_black_threshold,
-            ) {
-                video_texture = Some(tex);
-            } else if let Some(tex) = fallback_texture {
-                if !deinterlace_filter_enabled && !median_filter_enabled && !is_anime4k {
-                    video_texture = Some(tex);
-                    input_is_srgb = true;
-                } else {
-                    video_texture = Some(self.linearize_fallback_texture(gl, tex, resolution.0, resolution.1));
-                }
-            }
-
-            let input_texture = video_texture.expect("No video texture available");
-            let mut current_video_texture = input_texture;
-            let mut current_res = resolution;
-
-            // Apply Deinterlace filter before median / upscaling
-            if deinterlace_filter_enabled {
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[1]));
-                gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
-                gl.use_program(Some(self.deinterlace_prog));
-                if let Some(loc) = &self.deinterlace_current_frame_loc {
-                    gl.uniform_1_i32(Some(loc), 0);
-                }
-                if let Some(loc) = &self.deinterlace_prev_frame_loc {
-                    gl.uniform_1_i32(Some(loc), 1);
-                }
-                if let Some(loc) = &self.deinterlace_prev_frame_2_loc {
-                    gl.uniform_1_i32(Some(loc), 2);
-                }
-                if let Some(loc) = &self.deinterlace_has_prev2_loc {
-                    gl.uniform_1_i32(Some(loc), if self.history_count >= 2 { 1 } else { 0 });
-                }
-                gl.uniform_1_i32(Some(&self.deinterlace_mode_loc), deinterlace_mode as i32);
-                gl.uniform_1_f32(Some(&self.deinterlace_blend_loc), deinterlace_blend);
-                gl.uniform_1_f32(
-                    Some(&self.deinterlace_motion_thresh_loc),
-                    deinterlace_motion_threshold,
-                );
-                gl.uniform_1_f32(
-                    Some(&self.deinterlace_line_spacing_loc),
-                    deinterlace_line_spacing,
-                );
-                gl.uniform_1_f32(
-                    Some(&self.deinterlace_spatial_mix_loc),
-                    deinterlace_spatial_mix,
-                );
-
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(current_video_texture));
-                gl.active_texture(glow::TEXTURE1);
-                gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[0]));
-                gl.active_texture(glow::TEXTURE2);
-                gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[2]));
-
-                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-
-                gl.active_texture(glow::TEXTURE2);
-                gl.bind_texture(glow::TEXTURE_2D, None);
-                gl.active_texture(glow::TEXTURE1);
-                gl.bind_texture(glow::TEXTURE_2D, None);
-                gl.active_texture(glow::TEXTURE0);
-
-                current_video_texture = self.pass_textures[1];
-            }
-
-            // Apply Median filter before upscaling
-            if median_filter_enabled {
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[5]));
-                gl.viewport(0, 0, current_res.0 as i32, current_res.1 as i32);
-                gl.use_program(Some(self.median_prog));
-                gl.uniform_1_f32(Some(&self.median_mix_loc), median_mix);
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(current_video_texture));
-                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                current_video_texture = self.pass_textures[5];
-            }
-
-            let scaler = ScalerFilter::from_u8(scaler_filter);
-            let is_anime4k = matches!(
-                scaler,
-                ScalerFilter::Anime4kSmall
-                    | ScalerFilter::Anime4kMedium
-                    | ScalerFilter::Anime4kLarge
+                true,
             );
-
-            if is_anime4k {
-                let upscaled = match scaler {
-                    ScalerFilter::Anime4kSmall => self.anime4k_small.upscale(
-                        gl,
-                        current_video_texture,
-                        current_res.0,
-                        current_res.1,
-                        output_size.0 as u32,
-                        output_size.1 as u32,
-                    ),
-                    ScalerFilter::Anime4kMedium => self.anime4k_medium.upscale(
-                        gl,
-                        current_video_texture,
-                        current_res.0,
-                        current_res.1,
-                        output_size.0 as u32,
-                        output_size.1 as u32,
-                    ),
-                    ScalerFilter::Anime4kLarge => self.anime4k_large.upscale(
-                        gl,
-                        current_video_texture,
-                        current_res.0,
-                        current_res.1,
-                        output_size.0 as u32,
-                        output_size.1 as u32,
-                    ),
-                    _ => unreachable!(),
-                };
-                current_video_texture = upscaled.0;
-                current_res = (upscaled.1, upscaled.2);
-            }
             self.last_video_texture = Some(current_video_texture);
 
-            let run_cathode = cathode_params
-                .map(|c| c.enabled && c.intensity > 0.001)
-                .unwrap_or(false);
-            let run_glass = glass_params
-                .map(|g| g.enabled && g.intensity > 0.001)
-                .unwrap_or(false);
-            let has_popup = !skip_popup && !self.popup_primitives.is_empty();
-            let has_comments = !self.comment_primitives.is_empty();
-            let has_alerts = !self.alert_primitives.is_empty();
-            let has_overlay = has_popup || has_comments || has_alerts;
-            let has_post = run_cathode || run_glass || has_overlay;
-
-            let (upstream_target_fbo, cathode_target_fbo, glass_target_fbo) =
-                match (run_cathode, run_glass) {
-                    (true, true) => {
-                        self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
-                        (Some(self.post_fbos[0]), Some(self.post_fbos[1]), None)
-                    }
-                    (true, false) => {
-                        self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
-                        (Some(self.post_fbos[0]), None, None)
-                    }
-                    (false, true) => {
-                        self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
-                        (Some(self.post_fbos[0]), None, None)
-                    }
-                    (false, false) => {
-                        if has_overlay {
-                            self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
-                            (Some(self.post_fbos[0]), None, None)
-                        } else {
-                            (None, None, None)
-                        }
-                    }
-                };
+            let (upstream_target_fbo, cathode_target_fbo, glass_target_fbo, has_post) = self
+                .prepare_postprocess_targets(
+                    gl,
+                    output_size,
+                    cathode_params,
+                    glass_params,
+                    skip_popup,
+                    software_mouse_pos,
+                );
 
             if scissor_enabled && !has_post {
                 gl.enable(glow::SCISSOR_TEST);
@@ -2276,117 +2236,30 @@ impl CrtFilterRenderer {
                 input_is_srgb,
             );
 
-            if has_comments {
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
-                gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
-                self.draw_overlay_primitives(
-                    gl,
-                    painter,
-                    &self.comment_primitives,
-                    output_size,
-                    widget_rect,
-                    0.0,
-                    0.0,
-                    1.0,
-                );
-                self.comment_primitives.clear();
-            }
+            self.postprocess_and_present(
+                gl,
+                painter,
+                widget_rect,
+                output_size,
+                current_video_texture,
+                current_res,
+                horizontal_stretch,
+                0.0,
+                0.0,
+                1.0,
+                cathode_params,
+                glass_params,
+                cathode_target_fbo,
+                glass_target_fbo,
+                time,
+                skip_popup,
+                software_mouse_pos,
+                software_mouse_clip,
+                scissor_enabled,
+                blend_enabled,
+                old_vbo,
+            );
 
-            if has_alerts {
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
-                gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
-                self.draw_overlay_primitives(
-                    gl,
-                    painter,
-                    &self.alert_primitives,
-                    output_size,
-                    widget_rect,
-                    0.0,
-                    0.0,
-                    1.0,
-                );
-                self.alert_primitives.clear();
-            }
-
-            if has_popup {
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
-                gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
-                self.draw_popup_primitives(
-                    gl,
-                    painter,
-                    output_size,
-                    widget_rect,
-                    0.0,
-                    0.0,
-                    1.0,
-                );
-                self.popup_primitives.clear();
-            }
-
-            if run_cathode {
-                let cp = cathode_params.unwrap();
-                let cathode_input = self.post_textures[0];
-                let scissor_cathode = scissor_enabled && !run_glass;
-                self.draw_cathode_pass(
-                    gl,
-                    cathode_input,
-                    output_size,
-                    current_res,
-                    horizontal_stretch,
-                    time,
-                    cp,
-                    cathode_target_fbo,
-                    scissor_cathode,
-                );
-            }
-
-            if run_glass {
-                let gp = glass_params.unwrap();
-                let glass_input = if run_cathode {
-                    self.post_textures[1]
-                } else {
-                    self.post_textures[0]
-                };
-                let scissor_glass = scissor_enabled;
-                self.draw_glass_pass(
-                    gl,
-                    glass_input,
-                    output_size,
-                    current_res,
-                    gp,
-                    time,
-                    glass_target_fbo,
-                    scissor_glass,
-                );
-            }
-
-            self.last_video_texture = Some(current_video_texture);
-            self.mipmap_generated_this_frame
-                .store(false, std::sync::atomic::Ordering::Relaxed);
-
-            if !run_cathode && !run_glass && has_overlay {
-                self.blit_texture(gl, self.post_textures[0], output_size, None, scissor_enabled);
-            }
-
-            if scissor_enabled {
-                gl.enable(glow::SCISSOR_TEST);
-            } else {
-                gl.disable(glow::SCISSOR_TEST);
-            }
-
-            if blend_enabled {
-                gl.enable(glow::BLEND);
-            } else {
-                gl.disable(glow::BLEND);
-            }
-
-            if old_vbo != 0 {
-                gl.bind_vertex_array(Some(glow::VertexArray::from(glow::NativeVertexArray(
-                    NonZero::new(old_vbo as u32).unwrap(),
-                ))));
-            } else {
-                gl.bind_vertex_array(None);
-            }
             rendered_area
         }
     }
