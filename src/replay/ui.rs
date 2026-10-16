@@ -204,15 +204,16 @@ pub fn draw_replay_buffer_group(
 
         let durations = replay.config.durations();
         let items: Vec<(usize, u32)> = durations.into_iter().enumerate().collect();
-        if items.len() >= 4 {
+        if items.len() >= 6 {
             let row1 = (items[0], items[1]);
             let row2 = (items[2], items[3]);
-            for ((idx_a, sec_a), (idx_b, sec_b)) in [row1, row2] {
+            let row3 = (items[4], items[5]);
+            for ((idx_a, sec_a), (idx_b, sec_b)) in [row1, row2, row3] {
                 crate::ui::controls::two_columns(ui, |c1, c2| {
                     let mut draw_shortcut = |col: &mut egui::Ui, index: usize, seconds: u32| {
                         col.horizontal(|ui| {
-                            let label_str = if index == 3 {
-                                "Save Custom:".to_string()
+                            let label_str = if index == 5 {
+                                format!("Save Custom ({}s):", seconds)
                             } else {
                                 format!("Save {}s:", seconds)
                             };
