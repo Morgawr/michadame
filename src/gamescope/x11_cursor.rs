@@ -206,36 +206,54 @@ pub fn find_gamescope_x_display() -> Option<String> {
                 continue;
             }
 
-            // Check parent PID in /proc/<pid>/stat
-            let stat_path = proc_path.join("stat");
-            let Ok(stat) = std::fs::read_to_string(&stat_path) else {
+            // Check up to 4 ancestor levels in /proc/<pid>/stat for gamescope
+            let Ok(mut curr_pid) = pid_str.parse::<u32>() else {
                 continue;
             };
-            let Some(rparen) = stat.rfind(')') else {
-                continue;
-            };
-            let rest = &stat[rparen + 1..];
-            let fields: Vec<&str> = rest.split_whitespace().collect();
-            if fields.len() < 2 {
-                continue;
-            }
-            let Ok(ppid) = fields[1].parse::<u32>() else {
-                continue;
-            };
-
-            let parent_comm_path = PathBuf::from(format!("/proc/{ppid}/comm"));
-            let is_parent_gamescope = std::fs::read_to_string(&parent_comm_path)
-                .map(|pcomm| pcomm.trim().contains("gamescope"))
-                .unwrap_or(false);
-
-            if !is_parent_gamescope {
-                let parent_cmdline_path = PathBuf::from(format!("/proc/{ppid}/cmdline"));
-                let is_cmd_gamescope = std::fs::read(&parent_cmdline_path)
-                    .map(|bytes| String::from_utf8_lossy(&bytes).contains("gamescope"))
-                    .unwrap_or(false);
-                if !is_cmd_gamescope {
-                    continue;
+            let mut has_gamescope_ancestor = false;
+            for _ in 0..4 {
+                let stat_path = PathBuf::from(format!("/proc/{curr_pid}/stat"));
+                let Ok(stat) = std::fs::read_to_string(&stat_path) else {
+                    break;
+                };
+                let Some(rparen) = stat.rfind(')') else {
+                    break;
+                };
+                let rest = &stat[rparen + 1..];
+                let fields: Vec<&str> = rest.split_whitespace().collect();
+                if fields.len() < 2 {
+                    break;
                 }
+                let Ok(ppid) = fields[1].parse::<u32>() else {
+                    break;
+                };
+                if ppid <= 1 {
+                    break;
+                }
+
+                let parent_comm_path = PathBuf::from(format!("/proc/{ppid}/comm"));
+                let is_parent_gamescope = std::fs::read_to_string(&parent_comm_path)
+                    .map(|pcomm| pcomm.trim().contains("gamescope"))
+                    .unwrap_or(false);
+
+                let is_cmd_gamescope = if !is_parent_gamescope {
+                    let parent_cmdline_path = PathBuf::from(format!("/proc/{ppid}/cmdline"));
+                    std::fs::read(&parent_cmdline_path)
+                        .map(|bytes| String::from_utf8_lossy(&bytes).contains("gamescope"))
+                        .unwrap_or(false)
+                } else {
+                    true
+                };
+
+                if is_cmd_gamescope {
+                    has_gamescope_ancestor = true;
+                    break;
+                }
+                curr_pid = ppid;
+            }
+
+            if !has_gamescope_ancestor {
+                continue;
             }
 
             // Extract display argument from Xwayland's cmdline
@@ -244,36 +262,11 @@ pub fn find_gamescope_x_display() -> Option<String> {
                 let parts: Vec<&[u8]> = bytes.split(|&b| b == 0).collect();
                 for part in parts {
                     let s = String::from_utf8_lossy(part);
-                    if s.starts_with(':') && s[1..].chars().all(|c| c.is_ascii_digit()) {
+                    if s.starts_with(':') && !s[1..].is_empty() && s[1..].chars().all(|c| c.is_ascii_digit()) {
                         return Some(s.to_string());
                     }
                 }
             }
-        }
-    }
-
-    // 3. Fallback: Search /tmp/.X11-unix/X* for socket numbers different from host DISPLAY
-    let host_disp_num = std::env::var("DISPLAY")
-        .ok()
-        .and_then(|d| d.trim_start_matches(':').split('.').next().map(|s| s.to_string()));
-
-    if let Ok(entries) = std::fs::read_dir("/tmp/.X11-unix") {
-        let mut candidates = Vec::new();
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(num_str) = name.strip_prefix('X') {
-                if num_str.chars().all(|c| c.is_ascii_digit()) {
-                    if host_disp_num.as_deref() != Some(num_str) {
-                        if let Ok(num) = num_str.parse::<u32>() {
-                            candidates.push(num);
-                        }
-                    }
-                }
-            }
-        }
-        candidates.sort_by(|a, b| b.cmp(a));
-        if let Some(num) = candidates.first() {
-            return Some(format!(":{num}"));
         }
     }
 

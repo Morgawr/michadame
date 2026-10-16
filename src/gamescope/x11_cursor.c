@@ -100,7 +100,14 @@ static void *monitor_thread_func(void *arg) {
         if (dpy) {
             break;
         }
-        usleep(100000);
+        struct pollfd stop_pfd;
+        stop_pfd.fd = m->stop_fd;
+        stop_pfd.events = POLLIN;
+        stop_pfd.revents = 0;
+        int ret = poll(&stop_pfd, 1, 100);
+        if (ret > 0 && (stop_pfd.revents & POLLIN)) {
+            break;
+        }
     }
 
     if (!dpy) {
