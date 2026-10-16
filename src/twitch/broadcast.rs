@@ -488,8 +488,13 @@ pub fn start_broadcast(
     // Video frame queue: small capacity of 3 frames to strictly ensure low latency.
     let (vtx, vrx) = bounded::<VideoFrame>(3);
     let (vfree_tx, vfree_rx) = bounded::<Vec<u8>>(4);
+    const MAX_BROADCAST_FRAME_BYTES: usize = 1920 * 1080 * 4;
     for _ in 0..4 {
-        let _ = vfree_tx.send(Vec::new());
+        let mut buf = vec![0u8; MAX_BROADCAST_FRAME_BYTES];
+        for page in buf.chunks_mut(4096) {
+            page[0] = 0;
+        }
+        let _ = vfree_tx.send(buf);
     }
 
     // Audio queues
