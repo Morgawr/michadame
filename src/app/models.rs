@@ -60,6 +60,9 @@ pub struct UiState {
     pub studio_window_open: bool,
     pub dismissed_config_error: bool,
     pub active_settings_tab: SettingsTab,
+    pub config_save_pending: bool,
+    pub in_egui_frame: bool,
+    pub any_pointer_down: bool,
 }
 
 pub struct CrtSettings {

@@ -275,6 +275,7 @@ impl AppState {
             // Save video profile changes while video_player is still active
             self.video_profile = crate::config::build_profile_from_state(self);
             crate::config::save_config(self);
+            crate::config::flush_pending_config(self);
         }
 
         if let Some(mut player) = self.video_player.take() {
@@ -312,6 +313,7 @@ impl AppState {
             // Save gamescope profile changes while gamescope_hook is still active
             self.gamescope_profile = crate::config::build_profile_from_state(self);
             crate::config::save_config(self);
+            crate::config::flush_pending_config(self);
         }
 
         if let Some(mut hook) = self.gamescope_hook.take() {

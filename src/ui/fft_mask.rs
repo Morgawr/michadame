@@ -49,6 +49,8 @@ pub fn draw_fft_mask_editor(state: &mut AppState, ctx: &egui::Context) -> bool {
                 let mut pct = state.fft_mask_threshold * 100.0;
                 if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).suffix("%")).changed() {
                     state.fft_mask_threshold = pct / 100.0;
+                    mask_changed = true;
+                    crate::config::save_config(state);
                 }
             }).response.on_hover_text("Only block frequencies brighter than this threshold.\n0% = block all masked, 100% = block only the brightest peaks.");
 
@@ -57,6 +59,8 @@ pub fn draw_fft_mask_editor(state: &mut AppState, ctx: &egui::Context) -> bool {
                 let mut pct = state.fft_black_threshold * 100.0;
                 if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).suffix("%")).changed() {
                     state.fft_black_threshold = pct / 100.0;
+                    mask_changed = true;
+                    crate::config::save_config(state);
                 }
             }).response.on_hover_text("Skip FFT filtering for dark areas.\nPixels whose 9×9 neighborhood average brightness\nis below this level use the original unfiltered image.\n0% = apply everywhere, higher = skip darker regions.");
 

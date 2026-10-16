@@ -35,7 +35,7 @@ pub fn create_rotating_backup(config_path: &Path) {
     let bak_path = config_path.with_extension("toml.bak");
     let _ = std::fs::copy(config_path, &bak_path);
 
-    // 2. Timestamped rotating backup in backups/
+    // 2. Timestamped rotating backup in backups/ (rate-limited to at most once every 60 seconds)
     if let Some(parent) = config_path.parent() {
         let backups_dir = parent.join("backups");
         if std::fs::create_dir_all(&backups_dir).is_ok() {
@@ -43,10 +43,26 @@ pub fn create_rotating_backup(config_path: &Path) {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let backup_file = backups_dir.join(format!("config-{}.toml", now_secs));
-            let _ = std::fs::copy(config_path, &backup_file);
+            let recent_backup_exists = std::fs::read_dir(&backups_dir)
+                .ok()
+                .map(|entries| {
+                    entries.filter_map(|e| e.ok()).any(|e| {
+                        let name = e.file_name();
+                        let s = name.to_string_lossy();
+                        s.strip_prefix("config-")
+                            .and_then(|s| s.strip_suffix(".toml"))
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .is_some_and(|ts| now_secs.saturating_sub(ts) < 60)
+                    })
+                })
+                .unwrap_or(false);
 
-            prune_old_backups(&backups_dir, 20);
+            if !recent_backup_exists {
+                let backup_file = backups_dir.join(format!("config-{}.toml", now_secs));
+                let _ = std::fs::copy(config_path, &backup_file);
+
+                prune_old_backups(&backups_dir, 20);
+            }
         }
     }
 }
@@ -236,7 +252,30 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
     }
 }
 
+pub fn sync_active_profile_in_state(state: &mut AppState) {
+    let current_profile_data = build_profile_from_state(state);
+    if state.video_player.is_some() {
+        state.video_profile = current_profile_data;
+    } else if state.gamescope_hook.as_ref().map_or(false, |g| g.is_active) {
+        state.gamescope_profile = current_profile_data;
+    } else {
+        state
+            .profiles
+            .insert(state.active_profile.clone(), current_profile_data);
+    }
+}
+
 pub fn save_config(state: &mut AppState) {
+    sync_active_profile_in_state(state);
+    if state.ui.in_egui_frame {
+        state.ui.config_save_pending = true;
+        return;
+    }
+    flush_pending_config(state);
+}
+
+pub fn flush_pending_config(state: &mut AppState) {
+    state.ui.config_save_pending = false;
     if cfg!(test) {
         return;
     }
@@ -253,6 +292,25 @@ pub fn save_config_at(path: &Path, state: &mut AppState) -> Result<(), confy::Co
     if let Some(err) = &state.config_load_error {
         tracing::error!(
             "ABORTING save_config: Configuration loading failed at startup ({}). Overwriting is blocked to protect existing data.",
+            err
+        );
+        return Err(confy::ConfyError::GeneralLoadError(std::io::Error::other(
+            format!("Configuration loading failed at startup: {}", err),
+        )));
+    }
+
+    sync_active_profile_in_state(state);
+    save_global_hardware_config_at(path, state)
+}
+
+pub fn save_global_hardware_config(state: &mut AppState) {
+    save_config(state);
+}
+
+pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(), confy::ConfyError> {
+    if let Some(err) = &state.config_load_error {
+        tracing::error!(
+            "ABORTING save_global_hardware_config: Configuration loading failed at startup ({}). Overwriting is blocked to protect existing data.",
             err
         );
         return Err(confy::ConfyError::GeneralLoadError(std::io::Error::other(
@@ -294,91 +352,23 @@ pub fn save_config_at(path: &Path, state: &mut AppState) -> Result<(), confy::Co
     cfg.popup_under_crt = Some(state.dict.popup_under_crt);
     cfg.twitch = state.twitch.config.clone();
     cfg.mic = state.mic.config.clone();
+    cfg.webcam = state.webcam.config.clone();
 
+    let current_profile_data = build_profile_from_state(state);
     if state.video_player.is_some() {
-        let current_profile_data = build_profile_from_state(state);
-        state.video_profile = current_profile_data.clone();
         cfg.video_profile = Some(current_profile_data);
         cfg.gamescope_profile = Some(state.gamescope_profile.clone());
     } else if state.gamescope_hook.as_ref().map_or(false, |g| g.is_active) {
-        let current_profile_data = build_profile_from_state(state);
-        state.gamescope_profile = current_profile_data.clone();
         cfg.gamescope_profile = Some(current_profile_data);
         cfg.video_profile = Some(state.video_profile.clone());
     } else {
-        let current_profile_data = build_profile_from_state(state);
-        state
-            .profiles
-            .insert(state.active_profile.clone(), current_profile_data);
-
+        let mut profiles = state.profiles.clone();
+        profiles.insert(state.active_profile.clone(), current_profile_data);
         cfg.active_profile = state.active_profile.clone();
-        cfg.profiles = state.profiles.clone();
+        cfg.profiles = profiles;
         cfg.video_profile = Some(state.video_profile.clone());
         cfg.gamescope_profile = Some(state.gamescope_profile.clone());
     }
-
-    store_config_atomic_at(path, &cfg)
-}
-
-pub fn save_global_hardware_config(state: &AppState) {
-    if cfg!(test) {
-        return;
-    }
-    let Ok(path) = confy::get_configuration_file_path("michadame", None) else {
-        tracing::error!("Failed to get configuration file path for save_global_hardware_config");
-        return;
-    };
-    if let Err(e) = save_global_hardware_config_at(&path, state) {
-        tracing::error!("Failed to save global hardware configuration: {}", e);
-    }
-}
-
-pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(), confy::ConfyError> {
-    if let Some(err) = &state.config_load_error {
-        tracing::error!(
-            "ABORTING save_global_hardware_config: Configuration loading failed at startup ({}). Overwriting is blocked to protect existing data.",
-            err
-        );
-        return Err(confy::ConfyError::GeneralLoadError(std::io::Error::other(
-            format!("Configuration loading failed at startup: {}", err),
-        )));
-    }
-
-    let mut cfg = confy::load_path::<MichadameConfig>(path)?;
-
-    cfg.replay = state.replay.config.clone();
-    cfg.video_device = Some(state.hardware.selected_video_device.clone());
-    cfg.usb_device = state.hardware.selected_usb_device.clone();
-    if state.video_player.is_none() && state.gamescope_hook.is_none() {
-        cfg.video_resolution = if state.hardware.selected_resolution.0 > 0 {
-            Some(state.hardware.selected_resolution)
-        } else {
-            None
-        };
-        cfg.video_framerate = if state.hardware.selected_framerate > 0 {
-            Some(state.hardware.selected_framerate)
-        } else {
-            None
-        };
-        cfg.active_profile = state.active_profile.clone();
-        cfg.profiles = state.profiles.clone();
-    }
-    cfg.reset_usb_on_startup = Some(state.ui.reset_usb_on_startup);
-    cfg.has_shown_first_run_warning = Some(!state.ui.show_first_run_dialog);
-    cfg.audio_source = state.hardware.selected_audio_source_name.clone();
-    cfg.audio_buffer_size = Some(state.hardware.audio_buffer_size);
-    cfg.audio_sample_rate = Some(state.hardware.audio_sample_rate);
-    cfg.audio_sample_format = Some(state.hardware.audio_sample_format.clone());
-    cfg.master_volume = Some(state.hardware.master_volume);
-    cfg.ocr_sticky_distance = Some(state.ocr.sticky_distance);
-    cfg.ocr_hide_overlay = Some(state.ocr.hide_overlay);
-    cfg.ocr_timeout_seconds = Some(state.ocr.timeout_seconds);
-    cfg.bank_current_tag = crate::bank::tags::normalize_tag(&state.bank.current_tag);
-    cfg.bank_compact_mode = Some(state.bank.compact_mode);
-    cfg.default_halo = Some(state.halo_defaults.clone());
-    cfg.twitch = state.twitch.config.clone();
-    cfg.mic = state.mic.config.clone();
-    cfg.webcam = state.webcam.config.clone();
 
     store_config_atomic_at(path, &cfg)
 }
@@ -677,9 +667,11 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     state.mic.config = cfg.mic.clone();
     if let Some(defaults) = &cfg.default_halo {
         state.halo_defaults = defaults.clone();
+        state.halo = defaults.clone();
     }
     if let Some(defaults) = &cfg.default_cathode_interference {
         state.cathode_interference_defaults = defaults.clone();
+        state.cathode_interference = defaults.clone();
     }
 
     state.webcam.config = cfg.webcam.clone();

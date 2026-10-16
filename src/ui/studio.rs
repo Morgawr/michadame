@@ -710,6 +710,7 @@ pub fn draw_studio_window(state: &mut AppState, ctx: &egui::Context) -> bool {
                 class == egui::ViewportClass::Immediate,
                 "This egui backend doesn't support multiple viewports"
             );
+            state.ui.any_pointer_down |= ctx.input(|i| i.pointer.any_down());
 
             // Hotkeys inside Studio window:
             // Esc or L closes the Studio window.

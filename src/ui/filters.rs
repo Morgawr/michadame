@@ -721,6 +721,10 @@ pub fn draw_shaders_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         ui.add_space(4.0);
     }
 
+    if changed {
+        crate::config::save_config(state);
+    }
+
     changed
 }
 
@@ -1482,6 +1486,10 @@ pub fn draw_effects_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             });
         }
     });
+
+    if changed {
+        crate::config::save_config(state);
+    }
 
     changed
 }

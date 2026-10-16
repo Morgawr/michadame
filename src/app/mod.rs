@@ -55,6 +55,9 @@ impl Default for AppState {
                 studio_window_open: false,
                 dismissed_config_error: false,
                 active_settings_tab: crate::app::models::SettingsTab::default(),
+                config_save_pending: false,
+                in_egui_frame: false,
+                any_pointer_down: false,
             },
             crt: CrtSettings {
                 hard_scan: -8.0,
@@ -394,6 +397,9 @@ impl eframe::App for AppState {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if self.ui.config_save_pending {
+            config::flush_pending_config(self);
+        }
         self.replay.disable();
         if let Some(gl) = _gl {
             self.replay.gpu.lock().unwrap().destroy(gl);
@@ -410,6 +416,8 @@ impl eframe::App for AppState {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.ui.in_egui_frame = true;
+        self.ui.any_pointer_down = ctx.input(|i| i.pointer.any_down());
         self.pace_gui_frame();
 
         let raw_audio_peak = self
@@ -480,6 +488,7 @@ impl eframe::App for AppState {
                         class == egui::ViewportClass::Immediate,
                         "This egui backend doesn't support multiple viewports"
                     );
+                    self.ui.any_pointer_down |= ctx.input(|i| i.pointer.any_down());
 
                     repaint_requested |= ui::draw_main_ui(self, ctx);
 
@@ -921,6 +930,11 @@ impl eframe::App for AppState {
         self.update_fps_counters(ctx);
         ui::debug::draw(self, ctx);
         self.toasts.show(ctx);
+
+        self.ui.in_egui_frame = false;
+        if self.ui.config_save_pending && !self.ui.any_pointer_down {
+            config::flush_pending_config(self);
+        }
 
         if repaint_requested {
             ctx.request_repaint();

@@ -46,6 +46,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             .changed();
                     }
                     if combo_changed {
+                        crate::config::save_global_hardware_config(state);
                         changed = true;
                     }
                 });
