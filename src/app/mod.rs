@@ -191,7 +191,7 @@ impl AppState {
                 self.hardware.usb_devices = usb_devices;
 
                 if let Ok(cfg) = confy::load::<config::MichadameConfig>("michadame", None) {
-                    config::apply_config(self, &cfg);
+                    config::apply_hardware_devices_from_config(self, &cfg);
                 }
                 self.sync_mic_stream();
                 self.sync_webcam_stream(None);

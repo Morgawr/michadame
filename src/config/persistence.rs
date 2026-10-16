@@ -596,14 +596,7 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) -> bool {
     audio_hardware_changed
 }
 
-pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
-    state.replay.config = cfg.replay.clone();
-    state.replay.sync_audio_filter();
-    state.profiles = cfg.profiles.clone();
-    state.active_profile = cfg.active_profile.clone();
-    state.video_profile = cfg.video_profile.clone().unwrap_or_default();
-    state.gamescope_profile = cfg.gamescope_profile.clone().unwrap_or_default();
-
+pub fn apply_hardware_devices_from_config(state: &mut AppState, cfg: &MichadameConfig) {
     if let Some(saved_device) = &cfg.video_device {
         if state.hardware.video_devices.contains(saved_device) {
             state.hardware.selected_video_device = saved_device.clone();
@@ -629,15 +622,6 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
             state.hardware.selected_audio_source_name = Some(saved_source.clone());
         }
     }
-    state.hardware.audio_buffer_size = cfg.audio_buffer_size.unwrap_or(1024);
-    state.hardware.audio_sample_rate = cfg.audio_sample_rate.unwrap_or(48000);
-    state.hardware.audio_sample_format = cfg
-        .audio_sample_format
-        .clone()
-        .unwrap_or_else(|| "S16LE".to_string());
-    if let Some(vol) = cfg.master_volume {
-        state.set_master_volume(vol);
-    }
 
     if !state.hardware.selected_video_device.is_empty() {
         crate::video::types::apply_saved_format_config(state, cfg);
@@ -653,6 +637,55 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
             tracing::info!("USB device reset on startup as requested.");
         }
     }
+
+    if let Some(saved_mic) = &cfg.mic.device_name {
+        if state
+            .hardware
+            .audio_sources
+            .iter()
+            .any(|(_, name)| name == saved_mic)
+        {
+            state.mic.config.device_name = Some(saved_mic.clone());
+        }
+    }
+
+    if let Some(dev) = &state.webcam.config.device {
+        if state.hardware.video_devices.contains(dev) {
+            if let Ok(formats) = crate::devices::video::find_video_formats(dev) {
+                state.webcam.supported_formats = formats;
+                if let Some(saved_fourcc) = &state.webcam.config.format_fourcc {
+                    if let Some(idx) = state
+                        .webcam
+                        .supported_formats
+                        .iter()
+                        .position(|f| f.fourcc == *saved_fourcc)
+                    {
+                        state.webcam.selected_format_index = idx;
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
+    state.replay.config = cfg.replay.clone();
+    state.replay.sync_audio_filter();
+    state.profiles = cfg.profiles.clone();
+    state.active_profile = cfg.active_profile.clone();
+    state.video_profile = cfg.video_profile.clone().unwrap_or_default();
+    state.gamescope_profile = cfg.gamescope_profile.clone().unwrap_or_default();
+
+    state.hardware.audio_buffer_size = cfg.audio_buffer_size.unwrap_or(1024);
+    state.hardware.audio_sample_rate = cfg.audio_sample_rate.unwrap_or(48000);
+    state.hardware.audio_sample_format = cfg
+        .audio_sample_format
+        .clone()
+        .unwrap_or_else(|| "S16LE".to_string());
+    if let Some(vol) = cfg.master_volume {
+        state.set_master_volume(vol);
+    }
+
     if !cfg.has_shown_first_run_warning.unwrap_or(false) {
         state.ui.show_first_run_dialog = true;
     }
@@ -675,23 +708,7 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     }
 
     state.webcam.config = cfg.webcam.clone();
-    if let Some(dev) = &state.webcam.config.device {
-        if state.hardware.video_devices.contains(dev) {
-            if let Ok(formats) = crate::devices::video::find_video_formats(dev) {
-                state.webcam.supported_formats = formats;
-                if let Some(saved_fourcc) = &state.webcam.config.format_fourcc {
-                    if let Some(idx) = state
-                        .webcam
-                        .supported_formats
-                        .iter()
-                        .position(|f| f.fourcc == *saved_fourcc)
-                    {
-                        state.webcam.selected_format_index = idx;
-                    }
-                }
-            }
-        }
-    }
+    apply_hardware_devices_from_config(state, cfg);
 
     state.active_profile = cfg.active_profile.clone();
 
