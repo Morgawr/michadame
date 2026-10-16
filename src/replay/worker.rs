@@ -262,10 +262,15 @@ impl TimelineMixer {
         } else if start_sample < self.next_out && !self.emitted {
             // Nothing encoded yet: extend the timeline back so a source that
             // started slightly earlier is not truncated.
-            for _ in 0..(self.next_out - start_sample) {
-                self.pending.push_front([0.0; 2]);
+            let back_gap = self.next_out - start_sample;
+            if back_gap <= MIX_MAX_GAP {
+                for _ in 0..back_gap {
+                    self.pending.push_front([0.0; 2]);
+                }
+                self.next_out = start_sample;
+            } else {
+                return;
             }
-            self.next_out = start_sample;
         }
 
         // Samples for already-encoded time cannot be mixed in anymore.
@@ -499,7 +504,7 @@ pub(super) fn run(
             };
             if let Some(s) = session.as_mut() {
                 if block.at >= s.epoch - 200_000 && block.at <= now_us() {
-                    let _ = s.mic_clock.append_recovering(&block, s.epoch);
+                    let _ = s.mic_clock.append_recovering(&block, s.epoch)?;
                     while let Some((at, samples)) = s.mic_clock.take() {
                         s.mixer.push(MixSource::Mic, at, &samples, 1.0);
                     }
