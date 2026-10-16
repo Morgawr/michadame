@@ -142,7 +142,12 @@ impl PrerollPlayer {
         let t = self.elapsed_secs();
         let trans = self.transition_duration_secs;
         let t_mid = (d - trans).max(0.0) + trans / 2.0;
-        t >= t_mid
+        if t >= t_mid {
+            self.audio_tap.set_broadcast_preroll_active(false);
+            true
+        } else {
+            false
+        }
     }
 
     /// Polls new decoded frames from the worker thread.
@@ -218,27 +223,28 @@ fn run_preroll_worker(
         .best(ffmpeg_next::media::Type::Audio)
         .map(|s| (s.index(), s.time_base(), s.parameters()));
 
-    let (mut audio_decoder, audio_idx, mut resampler) = if let Some((idx, _tb, params)) = audio_info {
-        match ffmpeg_next::codec::context::Context::from_parameters(params)
-            .and_then(|c| c.decoder().audio())
-        {
-            Ok(dec) => {
-                let layout = if dec.channel_layout().is_empty() {
-                    ffmpeg_next::ChannelLayout::default(dec.channels().max(1) as i32)
-                } else {
-                    dec.channel_layout()
-                };
-                let rsm = create_audio_resampler(dec.format(), layout, dec.rate());
-                (Some(dec), Some(idx), rsm)
+    let (mut audio_decoder, audio_idx, audio_time_base, mut resampler) =
+        if let Some((idx, tb, params)) = audio_info {
+            match ffmpeg_next::codec::context::Context::from_parameters(params)
+                .and_then(|c| c.decoder().audio())
+            {
+                Ok(dec) => {
+                    let layout = if dec.channel_layout().is_empty() {
+                        ffmpeg_next::ChannelLayout::default(dec.channels().max(1) as i32)
+                    } else {
+                        dec.channel_layout()
+                    };
+                    let rsm = create_audio_resampler(dec.format(), layout, dec.rate());
+                    (Some(dec), Some(idx), Some(tb), rsm)
+                }
+                Err(e) => {
+                    tracing::warn!("Could not open pre-roll audio stream: {e}");
+                    (None, None, None, None)
+                }
             }
-            Err(e) => {
-                tracing::warn!("Could not open pre-roll audio stream: {e}");
-                (None, None, None)
-            }
-        }
-    } else {
-        (None, None, None)
-    };
+        } else {
+            (None, None, None, None)
+        };
 
     // Initialize local rodio output so streamer can hear the pre-roll audio
     let (_rodio_guard, local_sink) = match crate::devices::audio::initialize_rodio_playback() {
@@ -247,9 +253,18 @@ fn run_preroll_worker(
     };
 
     let start_time = Instant::now();
+    let start_epoch_us = crate::replay::now_us();
     let total_us = (duration_secs * 1_000_000.0) as i64;
     let t_start = (duration_secs - transition_secs).max(0.0);
     let t_mid = t_start + transition_secs / 2.0;
+    let t_mid_us = (t_mid * 1_000_000.0) as i64;
+
+    let mut preroll_audio_active = true;
+    let mut audio_frames_emitted: u64 = 0;
+    let mut silent_audio_emitted_us: i64 = 0;
+    const SILENT_CHUNK_US: i64 = 20_000;
+    const SILENT_CHUNK_SAMPLES: usize = 960 * 2; // 20ms at 48kHz stereo
+    let silent_chunk = [0.0f32; SILENT_CHUNK_SAMPLES];
 
     let mut decoded_video = ffmpeg_next::frame::Video::empty();
     let mut normalized_video = ffmpeg_next::frame::Video::empty();
@@ -268,22 +283,52 @@ fn run_preroll_worker(
                         break;
                     }
 
-                    let frame_pts_us = decoded_video.pts().map(|pts| unsafe {
-                        ffmpeg_next::sys::av_rescale_q(
-                            pts,
-                            video_time_base.into(),
-                            ffmpeg_next::Rational(1, 1_000_000).into(),
-                        )
-                    }).unwrap_or_else(|| start_time.elapsed().as_micros() as i64);
+                    let frame_pts_us = decoded_video
+                        .pts()
+                        .map(|pts| unsafe {
+                            ffmpeg_next::sys::av_rescale_q(
+                                pts,
+                                video_time_base.into(),
+                                ffmpeg_next::Rational(1, 1_000_000).into(),
+                            )
+                        })
+                        .unwrap_or_else(|| start_time.elapsed().as_micros() as i64);
 
                     // Sync presentation to wall clock
-                    let target_time = start_time + Duration::from_micros(frame_pts_us.max(0) as u64);
-                    let now = Instant::now();
-                    if target_time > now {
-                        let sleep_dur = target_time - now;
-                        if sleep_dur > Duration::from_millis(1) {
-                            thread::sleep(sleep_dur.min(Duration::from_millis(50)));
+                    let target_time =
+                        start_time + Duration::from_micros(frame_pts_us.max(0) as u64);
+                    while !stop_requested.load(Ordering::Relaxed) {
+                        let now = Instant::now();
+                        if target_time <= now {
+                            break;
                         }
+                        let sleep_dur = target_time - now;
+                        if sleep_dur <= Duration::from_millis(1) {
+                            break;
+                        }
+                        thread::sleep(sleep_dur.min(Duration::from_millis(50)));
+                    }
+
+                    if stop_requested.load(Ordering::Relaxed) {
+                        break;
+                    }
+
+                    if audio_idx.is_none() && preroll_audio_active {
+                        let target_silent_us = frame_pts_us.max(0).min(t_mid_us);
+                        while silent_audio_emitted_us + SILENT_CHUNK_US <= target_silent_us {
+                            audio_tap.submit_preroll_audio(
+                                &silent_chunk,
+                                48000,
+                                2,
+                                start_epoch_us + silent_audio_emitted_us,
+                            );
+                            silent_audio_emitted_us += SILENT_CHUNK_US;
+                        }
+                    }
+
+                    if preroll_audio_active && frame_pts_us >= t_mid_us {
+                        preroll_audio_active = false;
+                        audio_tap.set_broadcast_preroll_active(false);
                     }
 
                     if scaler.run(&decoded_video, &mut normalized_video).is_ok() {
@@ -313,17 +358,55 @@ fn run_preroll_worker(
                             break;
                         }
                         if let Some(resampled) = resample_audio_frame(rsm, &decoded_audio) {
-                            let samples_count = resampled.samples() * 2; // stereo
+                            let frames = resampled.samples();
+                            let samples_count = frames * 2; // stereo
                             if samples_count > 0 {
+                                let fallback_pts_us =
+                                    ((audio_frames_emitted * 1_000_000) / 48_000) as i64;
+                                let audio_pts_us = decoded_audio
+                                    .pts()
+                                    .and_then(|pts| {
+                                        audio_time_base.map(|tb| unsafe {
+                                            ffmpeg_next::sys::av_rescale_q(
+                                                pts,
+                                                tb.into(),
+                                                ffmpeg_next::Rational(1, 1_000_000).into(),
+                                            )
+                                        })
+                                    })
+                                    .unwrap_or(fallback_pts_us)
+                                    .max(0);
+                                audio_frames_emitted += frames as u64;
+
+                                let pts_sec = audio_pts_us as f64 / 1_000_000.0;
+                                while !stop_requested.load(Ordering::Relaxed) {
+                                    let elapsed_sec = start_time.elapsed().as_secs_f64();
+                                    if pts_sec <= elapsed_sec + 0.05 {
+                                        break;
+                                    }
+                                    let sleep_secs = (pts_sec - (elapsed_sec + 0.05)).min(0.05);
+                                    thread::sleep(Duration::from_secs_f64(sleep_secs));
+                                }
+
+                                if stop_requested.load(Ordering::Relaxed) {
+                                    break;
+                                }
+
+                                if pts_sec >= t_mid {
+                                    if preroll_audio_active {
+                                        preroll_audio_active = false;
+                                        audio_tap.set_broadcast_preroll_active(false);
+                                    }
+                                    continue;
+                                }
+
                                 let plane = resampled.plane::<f32>(0);
                                 let mut samples = plane[..samples_count.min(plane.len())].to_vec();
 
                                 // Fade pre-roll audio volume out during transition first half
-                                let cur_t = position_us.load(Ordering::Relaxed) as f64 / 1_000_000.0;
-                                let vol = if cur_t >= t_mid {
-                                    0.0
-                                } else if cur_t > t_start {
-                                    ((t_mid - cur_t) / (t_mid - t_start)).clamp(0.0, 1.0) as f32
+                                let vol = if pts_sec > t_start {
+                                    ((t_mid - pts_sec) / (t_mid - t_start).max(0.001))
+                                        .clamp(0.0, 1.0) as f32
                                 } else {
                                     1.0f32
                                 };
@@ -334,7 +417,14 @@ fn run_preroll_worker(
                                     }
                                 }
 
-                                audio_tap.submit_preroll_audio(&samples, 48000, 2, crate::replay::now_us());
+                                if preroll_audio_active {
+                                    audio_tap.submit_preroll_audio(
+                                        &samples,
+                                        48000,
+                                        2,
+                                        start_epoch_us + audio_pts_us,
+                                    );
+                                }
 
                                 // Play locally through streamer's audio device
                                 if let Some(ref sink) = local_sink {
@@ -353,6 +443,22 @@ fn run_preroll_worker(
     // After demux EOF, wait until full duration / transition has elapsed
     while !stop_requested.load(Ordering::Relaxed) {
         let elapsed = start_time.elapsed().as_micros() as i64;
+        if audio_idx.is_none() && preroll_audio_active {
+            let target_silent_us = elapsed.max(0).min(t_mid_us);
+            while silent_audio_emitted_us + SILENT_CHUNK_US <= target_silent_us {
+                audio_tap.submit_preroll_audio(
+                    &silent_chunk,
+                    48000,
+                    2,
+                    start_epoch_us + silent_audio_emitted_us,
+                );
+                silent_audio_emitted_us += SILENT_CHUNK_US;
+            }
+        }
+        if preroll_audio_active && elapsed >= t_mid_us {
+            preroll_audio_active = false;
+            audio_tap.set_broadcast_preroll_active(false);
+        }
         position_us.store(elapsed.min(total_us), Ordering::Relaxed);
         repaint();
         if elapsed >= total_us {
