@@ -58,6 +58,7 @@ extern "C" {
     fn ei_seat_bind_capabilities(seat: *mut EiSeat, ...) -> c_int;
     fn ei_device_ref(device: *mut EiDevice) -> *mut EiDevice;
     fn ei_device_unref(device: *mut EiDevice) -> *mut EiDevice;
+    fn ei_device_has_capability(device: *mut EiDevice, cap: c_uint) -> bool;
     fn ei_device_start_emulating(device: *mut EiDevice, sequence: u32);
     fn ei_device_stop_emulating(device: *mut EiDevice);
     fn ei_device_pointer_motion_absolute(device: *mut EiDevice, x: f64, y: f64);
@@ -71,7 +72,7 @@ extern "C" {
 
 pub struct GamescopeInputClient {
     ei: *mut Ei,
-    device: *mut EiDevice,
+    devices: Vec<*mut EiDevice>,
     is_emulating: bool,
 }
 
@@ -80,12 +81,13 @@ unsafe impl Send for GamescopeInputClient {}
 impl Drop for GamescopeInputClient {
     fn drop(&mut self) {
         unsafe {
-            if !self.device.is_null() {
-                if self.is_emulating {
-                    ei_device_stop_emulating(self.device);
+            for dev in self.devices.drain(..) {
+                if !dev.is_null() {
+                    if self.is_emulating {
+                        ei_device_stop_emulating(dev);
+                    }
+                    ei_device_unref(dev);
                 }
-                ei_device_unref(self.device);
-                self.device = std::ptr::null_mut();
             }
             if !self.ei.is_null() {
                 ei_unref(self.ei);
@@ -151,7 +153,7 @@ impl GamescopeInputClient {
 
             let mut client = Self {
                 ei,
-                device: std::ptr::null_mut(),
+                devices: Vec::new(),
                 is_emulating: false,
             };
 
@@ -170,6 +172,15 @@ impl GamescopeInputClient {
             );
             Ok(client)
         }
+    }
+
+    unsafe fn device_for_cap(&self, cap: c_uint) -> *mut EiDevice {
+        for &dev in &self.devices {
+            if !dev.is_null() && ei_device_has_capability(dev, cap) {
+                return dev;
+            }
+        }
+        self.devices.first().copied().unwrap_or(std::ptr::null_mut())
     }
 
     pub fn dispatch(&mut self) {
@@ -203,27 +214,32 @@ impl GamescopeInputClient {
                                 EI_DEVICE_CAP_KEYBOARD,
                                 EI_DEVICE_CAP_BUTTON,
                                 EI_DEVICE_CAP_SCROLL,
-                                std::ptr::null::<c_void>(),
+                                0 as c_uint,
                             );
                         }
                     }
                     EI_EVENT_DEVICE_ADDED => {
                         let dev = ei_event_get_device(event);
-                        if !dev.is_null() {
-                            if !self.device.is_null() {
-                                ei_device_unref(self.device);
-                            }
-                            self.device = ei_device_ref(dev);
-                            tracing::debug!("EI device acquired");
+                        if !dev.is_null() && !self.devices.contains(&dev) {
+                            self.devices.push(ei_device_ref(dev));
+                            tracing::debug!("EI device acquired (total: {})", self.devices.len());
                         }
                     }
                     EI_EVENT_DEVICE_RESUMED => {
                         let dev = ei_event_get_device(event);
-                        let target = if !dev.is_null() { dev } else { self.device };
-                        if !target.is_null() {
-                            ei_device_start_emulating(target, 0);
+                        if !dev.is_null() {
+                            ei_device_start_emulating(dev, 0);
                             self.is_emulating = true;
                             tracing::debug!("EI device resumed and started emulating");
+                        } else {
+                            for &d in &self.devices {
+                                if !d.is_null() {
+                                    ei_device_start_emulating(d, 0);
+                                }
+                            }
+                            if !self.devices.is_empty() {
+                                self.is_emulating = true;
+                            }
                         }
                     }
                     EI_EVENT_DEVICE_PAUSED => {
@@ -231,12 +247,23 @@ impl GamescopeInputClient {
                         tracing::debug!("EI device paused");
                     }
                     EI_EVENT_DEVICE_REMOVED => {
-                        if !self.device.is_null() {
-                            ei_device_unref(self.device);
-                            self.device = std::ptr::null_mut();
-                            self.is_emulating = false;
-                            tracing::debug!("EI device removed");
+                        let dev = ei_event_get_device(event);
+                        if !dev.is_null() {
+                            if let Some(pos) = self.devices.iter().position(|&d| d == dev) {
+                                let removed = self.devices.remove(pos);
+                                ei_device_unref(removed);
+                            }
+                        } else {
+                            for d in self.devices.drain(..) {
+                                if !d.is_null() {
+                                    ei_device_unref(d);
+                                }
+                            }
                         }
+                        if self.devices.is_empty() {
+                            self.is_emulating = false;
+                        }
+                        tracing::debug!("EI device removed (remaining: {})", self.devices.len());
                     }
                     _ => {}
                 }
@@ -248,10 +275,11 @@ impl GamescopeInputClient {
     pub fn send_pointer_motion_absolute(&mut self, x: f64, y: f64) {
         self.dispatch();
         unsafe {
-            if !self.device.is_null() && self.is_emulating {
+            let dev = self.device_for_cap(EI_DEVICE_CAP_POINTER_ABSOLUTE);
+            if !dev.is_null() && self.is_emulating {
                 let now = ei_now(self.ei);
-                ei_device_pointer_motion_absolute(self.device, x, y);
-                ei_device_frame(self.device, now);
+                ei_device_pointer_motion_absolute(dev, x, y);
+                ei_device_frame(dev, now);
             }
         }
         self.dispatch();
@@ -260,10 +288,11 @@ impl GamescopeInputClient {
     pub fn send_pointer_motion(&mut self, dx: f64, dy: f64) {
         self.dispatch();
         unsafe {
-            if !self.device.is_null() && self.is_emulating {
+            let dev = self.device_for_cap(EI_DEVICE_CAP_POINTER);
+            if !dev.is_null() && self.is_emulating {
                 let now = ei_now(self.ei);
-                ei_device_pointer_motion(self.device, dx, dy);
-                ei_device_frame(self.device, now);
+                ei_device_pointer_motion(dev, dx, dy);
+                ei_device_frame(dev, now);
             }
         }
         self.dispatch();
@@ -272,10 +301,11 @@ impl GamescopeInputClient {
     pub fn send_button(&mut self, button: u32, is_press: bool) {
         self.dispatch();
         unsafe {
-            if !self.device.is_null() && self.is_emulating {
+            let dev = self.device_for_cap(EI_DEVICE_CAP_BUTTON);
+            if !dev.is_null() && self.is_emulating {
                 let now = ei_now(self.ei);
-                ei_device_button_button(self.device, button, is_press);
-                ei_device_frame(self.device, now);
+                ei_device_button_button(dev, button, is_press);
+                ei_device_frame(dev, now);
             }
         }
         self.dispatch();
@@ -284,10 +314,11 @@ impl GamescopeInputClient {
     pub fn send_scroll(&mut self, dx: f64, dy: f64) {
         self.dispatch();
         unsafe {
-            if !self.device.is_null() && self.is_emulating {
+            let dev = self.device_for_cap(EI_DEVICE_CAP_SCROLL);
+            if !dev.is_null() && self.is_emulating {
                 let now = ei_now(self.ei);
-                ei_device_scroll_delta(self.device, dx, dy);
-                ei_device_frame(self.device, now);
+                ei_device_scroll_delta(dev, dx, dy);
+                ei_device_frame(dev, now);
             }
         }
         self.dispatch();
@@ -296,10 +327,11 @@ impl GamescopeInputClient {
     pub fn send_key(&mut self, keycode: u32, is_press: bool) {
         self.dispatch();
         unsafe {
-            if !self.device.is_null() && self.is_emulating {
+            let dev = self.device_for_cap(EI_DEVICE_CAP_KEYBOARD);
+            if !dev.is_null() && self.is_emulating {
                 let now = ei_now(self.ei);
-                ei_device_keyboard_key(self.device, keycode, is_press);
-                ei_device_frame(self.device, now);
+                ei_device_keyboard_key(dev, keycode, is_press);
+                ei_device_frame(dev, now);
             }
         }
         self.dispatch();

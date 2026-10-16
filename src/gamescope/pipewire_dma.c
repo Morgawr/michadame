@@ -94,7 +94,7 @@ static void on_stream_param_changed(void *data, uint32_t id, const struct spa_po
     pw_log_info("Gamescope format negotiated: %ux%u (DRM FourCC: 0x%08x, modifier: 0x%lx)",
                 s->width, s->height, s->drm_fourcc, (unsigned long)s->modifier);
 
-    // After format is negotiated, update stream parameters to request DMA-BUF / MemFd buffers
+    // After format is negotiated, update stream parameters to request DMA-BUF buffers
     uint8_t buffer_bufs[512];
     struct spa_pod_builder b_buf = SPA_POD_BUILDER_INIT(buffer_bufs, sizeof(buffer_bufs));
     const struct spa_pod *b_params[1];
@@ -102,8 +102,7 @@ static void on_stream_param_changed(void *data, uint32_t id, const struct spa_po
         SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
         SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(4, 2, 8),
         SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1),
-        SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int(
-            (1 << SPA_DATA_DmaBuf) | (1 << SPA_DATA_MemFd)));
+        SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int(1 << SPA_DATA_DmaBuf));
 
     pw_stream_update_params(s->stream, b_params, 1);
 }
@@ -244,7 +243,7 @@ struct gamescope_dma_stream *gamescope_dma_stream_start(
             SPA_VIDEO_FORMAT_BGRx,
             SPA_VIDEO_FORMAT_BGRA,
             SPA_VIDEO_FORMAT_RGBA,
-            SPA_VIDEO_FORMAT_NV12),
+            SPA_VIDEO_FORMAT_RGBx),
         SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(
             &SPA_RECTANGLE(3840, 2160),
             &SPA_RECTANGLE(320, 240),
@@ -253,9 +252,7 @@ struct gamescope_dma_stream *gamescope_dma_stream_start(
             &SPA_FRACTION(120, 1),
             &SPA_FRACTION(0, 1),
             &SPA_FRACTION(1000, 1)),
-        SPA_FORMAT_VIDEO_modifier, SPA_POD_CHOICE_ENUM_Long(2,
-            (long long)DRM_FORMAT_MOD_LINEAR,
-            (long long)DRM_FORMAT_MOD_LINEAR));
+        SPA_FORMAT_VIDEO_modifier, SPA_POD_Long((long long)DRM_FORMAT_MOD_LINEAR));
 
     int ret = pw_stream_connect(
         s->stream,

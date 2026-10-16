@@ -427,6 +427,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     callback: std::sync::Arc::new(egui_glow::CallbackFn::new(
                         move |_info, painter| {
                             let mut renderer = renderer_clone.lock().unwrap();
+                            unsafe {
+                                crate::gamescope::egl::drain_orphaned_dma_textures(painter.gl());
+                            }
                             let output_size = (rect.width() * ppp, rect.height() * ppp);
                             let mut fallback_tex = video_texture_id.and_then(|id| painter.texture(id));
                             if let (Some(importer_arc), Some(dma_frame)) = (&egl_importer_cb, &latest_dmabuf_frame_cb) {
@@ -692,6 +695,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             let callback = egui::PaintCallback {
                 rect,
                 callback: std::sync::Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
+                    unsafe {
+                        crate::gamescope::egl::drain_orphaned_dma_textures(painter.gl());
+                    }
                     let mut fallback_tex = video_texture_id.and_then(|id| painter.texture(id));
                     if let (Some(importer_arc), Some(dma_frame)) = (&egl_importer_cb, &latest_dmabuf_frame_cb) {
                         if let Ok(mut importer) = importer_arc.lock() {

@@ -34,7 +34,20 @@ pub struct CachedDmaBuffer {
     pub modifier: u64,
 }
 
+static ORPHANED_DMA_TEXTURES: std::sync::Mutex<Vec<glow::Texture>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Deletes any OpenGL textures left behind by dropped `EglDmaBufImporter` instances.
+pub unsafe fn drain_orphaned_dma_textures(gl: &glow::Context) {
+    if let Ok(mut list) = ORPHANED_DMA_TEXTURES.lock() {
+        for tex in list.drain(..) {
+            gl.delete_texture(tex);
+        }
+    }
+}
+
 pub struct EglDmaBufImporter {
+    lib_handle: *mut c_void,
     egl_display: *mut c_void,
     egl_create_image_khr: EglCreateImageKHR,
     egl_destroy_image_khr: EglDestroyImageKHR,
@@ -50,7 +63,20 @@ unsafe impl Sync for EglDmaBufImporter {}
 
 impl Drop for EglDmaBufImporter {
     fn drop(&mut self) {
-        // Texture cleanup will happen via OpenGL context if needed
+        if !self.cached_buffers.is_empty() {
+            if let Ok(mut orphaned) = ORPHANED_DMA_TEXTURES.lock() {
+                for entry in self.cached_buffers.drain(..) {
+                    orphaned.push(entry.texture);
+                }
+            }
+        }
+        self.current_texture = None;
+        if !self.lib_handle.is_null() {
+            unsafe {
+                libc::dlclose(self.lib_handle);
+            }
+            self.lib_handle = null_mut();
+        }
     }
 }
 
@@ -72,6 +98,7 @@ impl EglDmaBufImporter {
 
             if get_proc_addr_sym.is_null() || get_current_display_sym.is_null() {
                 tracing::warn!("Failed to resolve eglGetProcAddress / eglGetCurrentDisplay");
+                libc::dlclose(lib);
                 return None;
             }
 
@@ -94,6 +121,7 @@ impl EglDmaBufImporter {
 
             if egl_display.is_null() {
                 tracing::warn!("Failed to obtain EGL display (both eglGetCurrentDisplay and eglGetDisplay returned null)");
+                libc::dlclose(lib);
                 return None;
             }
 
@@ -103,6 +131,7 @@ impl EglDmaBufImporter {
 
             if create_image_ptr.is_null() || destroy_image_ptr.is_null() || target_tex_ptr.is_null() {
                 tracing::warn!("Failed to resolve EGL DMA-BUF extensions (eglCreateImageKHR/glEGLImageTargetTexture2DOES)");
+                libc::dlclose(lib);
                 return None;
             }
 
@@ -113,6 +142,7 @@ impl EglDmaBufImporter {
             tracing::info!("EGL DMA-BUF texture importer successfully initialized (display: {:?})", egl_display);
 
             Some(Self {
+                lib_handle: lib,
                 egl_display,
                 egl_create_image_khr,
                 egl_destroy_image_khr,
@@ -144,6 +174,7 @@ impl EglDmaBufImporter {
         modifier: u64,
         captured_at: i64,
     ) -> Option<glow::Texture> {
+        drain_orphaned_dma_textures(gl);
         // If stream resolution changed, invalidate and delete all cached textures
         if self.last_size != (0, 0) && self.last_size != (width, height) {
             for entry in self.cached_buffers.drain(..) {
@@ -264,7 +295,7 @@ mod tests {
             modifier: 0,
         };
 
-        let list = vec![cached];
+        let list = [cached];
         let found = list.iter().find(|e| {
             e.buffer_id == 1
                 && e.width == 3840
