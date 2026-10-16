@@ -18,6 +18,7 @@ pub struct GamescopeHookState {
     pub cursor_texture: Option<(u64, eframe::egui::TextureHandle)>,
     pub prev_modifiers: eframe::egui::Modifiers,
     pub initial_resolution: (u32, u32),
+    pub last_cursor_retry: Option<std::time::Instant>,
 }
 
 impl Default for GamescopeHookState {
@@ -35,11 +36,39 @@ impl Default for GamescopeHookState {
             cursor_texture: None,
             prev_modifiers: eframe::egui::Modifiers::default(),
             initial_resolution: (video::GAMESCOPE_WIDTH, video::GAMESCOPE_HEIGHT),
+            last_cursor_retry: None,
         }
     }
 }
 
 impl GamescopeHookState {
+    pub fn poll_late_connections(&mut self) {
+        if !self.is_active || (self.x11_cursor_monitor.is_some() && self.input_client.is_some()) {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_cursor_retry {
+            if now.duration_since(last) < std::time::Duration::from_secs(1) {
+                return;
+            }
+        }
+        self.last_cursor_retry = Some(now);
+
+        if self.x11_cursor_monitor.is_none() {
+            if let Some(disp) = x11_cursor::find_gamescope_x_display() {
+                if let Some(monitor) = x11_cursor::GamescopeX11CursorMonitor::start(&disp) {
+                    tracing::info!("Found Gamescope X11 display: {disp}, started cursor monitor");
+                    self.x11_cursor_monitor = Some(monitor);
+                }
+            }
+        }
+        if self.input_client.is_none() {
+            if let Ok(client) = input::GamescopeInputClient::connect() {
+                self.input_client = Some(client);
+            }
+        }
+    }
+
     pub fn is_cursor_hidden(&self) -> bool {
         self.x11_cursor_monitor.as_ref().map_or(false, |m| m.is_cursor_hidden())
     }

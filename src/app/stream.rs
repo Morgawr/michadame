@@ -458,6 +458,7 @@ impl AppState {
             cursor_texture: None,
             prev_modifiers: eframe::egui::Modifiers::default(),
             initial_resolution,
+            last_cursor_retry: Some(std::time::Instant::now()),
         });
 
         self.info("Gamescope hook started (4K 60Hz). Mouse/keyboard passthrough active (Shift+Tab to release).");

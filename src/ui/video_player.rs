@@ -98,6 +98,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
     let mut new_dma_frame_received = false;
     if let Some(hook) = &mut state.gamescope_hook {
         if hook.is_active {
+            hook.poll_late_connections();
             if let Some(dma) = &hook.dma_handle {
                 while let Ok(frame) = dma.rx.try_recv() {
                     hook.current_dmabuf_frame = Some(std::sync::Arc::new(frame));
@@ -324,6 +325,12 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         let real_mouse_active = !software_mouse_active
             && is_window_focused
             && is_real_game_cursor_active(state, pointer_pos, video_rect, is_hovering_controls);
+        let passthrough_hide_host_cursor = is_passthrough_host_cursor_hidden(
+            state,
+            pointer_pos,
+            video_rect,
+            is_hovering_controls,
+        );
 
         let (software_mouse_pos, software_mouse_clip) = if software_mouse_active {
             let pos = pointer_pos.map(|pos| {
@@ -343,7 +350,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             (None, None)
         };
 
-        if software_mouse_active || real_mouse_active {
+        if software_mouse_active || real_mouse_active || passthrough_hide_host_cursor {
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
         }
 
@@ -861,7 +868,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             draw_video_file_controls(state, ui, ctx, response.rect);
         }
 
-        if (software_mouse_active || real_mouse_active) && !is_preroll_active {
+        if (software_mouse_active || real_mouse_active || passthrough_hide_host_cursor) && !is_preroll_active {
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
         }
 
@@ -1063,11 +1070,9 @@ pub fn is_hovering_video_controls(
         || state.video_player.as_ref().is_some_and(|p| p.is_seeking)
 }
 
-/// Determines if the real game mouse cursor extracted from Gamescope/X11 should be active.
-/// Returns false if Gamescope is inactive, passthrough is off, game cursor is hidden,
-/// no cursor image is available, mouse is outside video rect, hovering controls,
-/// or if system dialogs are open.
-pub fn is_real_game_cursor_active(
+/// Determines if the host OS hardware cursor should be hidden over the video surface
+/// while Gamescope passthrough is active (e.g. when the game renders its own software cursor).
+pub fn is_passthrough_host_cursor_hidden(
     state: &AppState,
     pointer_pos: Option<egui::Pos2>,
     video_rect: egui::Rect,
@@ -1079,10 +1084,7 @@ pub fn is_real_game_cursor_active(
     let Some(hook) = &state.gamescope_hook else {
         return false;
     };
-    if !hook.is_active || !hook.passthrough_enabled || hook.is_cursor_hidden() || is_hovering_controls {
-        return false;
-    }
-    if hook.cursor_image().is_none() {
+    if !hook.is_active || !hook.passthrough_enabled || is_hovering_controls {
         return false;
     }
     let Some(pos) = pointer_pos else {
@@ -1116,6 +1118,25 @@ pub fn is_real_game_cursor_active(
     }
 
     true
+}
+
+/// Determines if the real game mouse cursor extracted from Gamescope/X11 should be active.
+/// Returns false if Gamescope is inactive, passthrough is off, game cursor is hidden,
+/// no cursor image is available, mouse is outside video rect, hovering controls,
+/// or if system dialogs are open.
+pub fn is_real_game_cursor_active(
+    state: &AppState,
+    pointer_pos: Option<egui::Pos2>,
+    video_rect: egui::Rect,
+    is_hovering_controls: bool,
+) -> bool {
+    let Some(hook) = &state.gamescope_hook else {
+        return false;
+    };
+    if hook.is_cursor_hidden() || hook.cursor_image().is_none() {
+        return false;
+    }
+    is_passthrough_host_cursor_hidden(state, pointer_pos, video_rect, is_hovering_controls)
 }
 
 /// Draws the auto-hiding playback control widget with scrub bar, play, pause, and stop buttons.
@@ -1840,5 +1861,26 @@ mod tests {
             && is_real_game_cursor_active(&state, cursor_pos, video_rect, is_hovering_controls);
         assert!(!software_mouse_active, "Retro mouse must NOT render during camera rotation");
         assert!(!real_mouse_active, "Real mouse must NOT render during camera rotation");
+        assert!(
+            is_passthrough_host_cursor_hidden(&state, cursor_pos, video_rect, is_hovering_controls),
+            "Host hardware cursor must be hidden over video_rect during active passthrough"
+        );
+
+        // Case F: Game renders its own software cursor without an X11 cursor monitor
+        if let Some(h) = &mut state.gamescope_hook {
+            h.x11_cursor_monitor = None;
+            h.passthrough_enabled = true;
+        }
+        assert!(
+            is_passthrough_host_cursor_hidden(&state, cursor_pos, video_rect, false),
+            "Host hardware cursor must be hidden in passthrough mode even without X11 cursor image"
+        );
+        if let Some(h) = &mut state.gamescope_hook {
+            h.passthrough_enabled = false;
+        }
+        assert!(
+            !is_passthrough_host_cursor_hidden(&state, cursor_pos, video_rect, false),
+            "Host hardware cursor must be restored when passthrough is paused"
+        );
     }
 }

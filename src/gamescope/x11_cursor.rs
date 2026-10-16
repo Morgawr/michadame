@@ -188,7 +188,10 @@ pub fn find_gamescope_x_display() -> Option<String> {
         }
     }
 
-    // 2. Scan /proc for Xwayland processes whose parent process is gamescope
+    let host_disp = std::env::var("DISPLAY").ok();
+    let mut candidates: Vec<(u32, String)> = Vec::new();
+
+    // 2. Scan /proc for Xwayland processes spawned by gamescope
     if let Ok(entries) = std::fs::read_dir("/proc") {
         for entry in entries.flatten() {
             let file_name = entry.file_name();
@@ -206,71 +209,97 @@ pub fn find_gamescope_x_display() -> Option<String> {
                 continue;
             }
 
+            let cmdline_bytes = std::fs::read(proc_path.join("cmdline")).unwrap_or_default();
+            let cmdline_lossy = String::from_utf8_lossy(&cmdline_bytes);
+
             // Check up to 4 ancestor levels in /proc/<pid>/stat for gamescope
-            let Ok(mut curr_pid) = pid_str.parse::<u32>() else {
-                continue;
-            };
-            let mut has_gamescope_ancestor = false;
-            for _ in 0..4 {
-                let stat_path = PathBuf::from(format!("/proc/{curr_pid}/stat"));
-                let Ok(stat) = std::fs::read_to_string(&stat_path) else {
-                    break;
-                };
-                let Some(rparen) = stat.rfind(')') else {
-                    break;
-                };
-                let rest = &stat[rparen + 1..];
-                let fields: Vec<&str> = rest.split_whitespace().collect();
-                if fields.len() < 2 {
-                    break;
-                }
-                let Ok(ppid) = fields[1].parse::<u32>() else {
-                    break;
-                };
-                if ppid <= 1 {
-                    break;
-                }
+            let mut is_gamescope_xwayland = false;
+            if let Ok(mut curr_pid) = pid_str.parse::<u32>() {
+                for _ in 0..4 {
+                    let stat_path = PathBuf::from(format!("/proc/{curr_pid}/stat"));
+                    let Ok(stat) = std::fs::read_to_string(&stat_path) else {
+                        break;
+                    };
+                    let Some(rparen) = stat.rfind(')') else {
+                        break;
+                    };
+                    let rest = &stat[rparen + 1..];
+                    let fields: Vec<&str> = rest.split_whitespace().collect();
+                    if fields.len() < 2 {
+                        break;
+                    }
+                    let Ok(ppid) = fields[1].parse::<u32>() else {
+                        break;
+                    };
+                    if ppid <= 1 {
+                        break;
+                    }
 
-                let parent_comm_path = PathBuf::from(format!("/proc/{ppid}/comm"));
-                let is_parent_gamescope = std::fs::read_to_string(&parent_comm_path)
-                    .map(|pcomm| pcomm.trim().contains("gamescope"))
-                    .unwrap_or(false);
+                    let parent_comm_path = PathBuf::from(format!("/proc/{ppid}/comm"));
+                    let is_parent_gamescope = std::fs::read_to_string(&parent_comm_path)
+                        .map(|pcomm| pcomm.trim().contains("gamescope"))
+                        .unwrap_or(false);
 
-                let is_cmd_gamescope = if !is_parent_gamescope {
-                    let parent_cmdline_path = PathBuf::from(format!("/proc/{ppid}/cmdline"));
-                    std::fs::read(&parent_cmdline_path)
-                        .map(|bytes| String::from_utf8_lossy(&bytes).contains("gamescope"))
-                        .unwrap_or(false)
-                } else {
-                    true
-                };
+                    let is_cmd_gamescope = if !is_parent_gamescope {
+                        let parent_cmdline_path = PathBuf::from(format!("/proc/{ppid}/cmdline"));
+                        std::fs::read(&parent_cmdline_path)
+                            .map(|bytes| String::from_utf8_lossy(&bytes).contains("gamescope"))
+                            .unwrap_or(false)
+                    } else {
+                        true
+                    };
 
-                if is_cmd_gamescope {
-                    has_gamescope_ancestor = true;
-                    break;
+                    if is_cmd_gamescope {
+                        is_gamescope_xwayland = true;
+                        break;
+                    }
+                    curr_pid = ppid;
                 }
-                curr_pid = ppid;
             }
 
-            if !has_gamescope_ancestor {
+            // Gamescope often double-forks Xwayland, reparenting it to systemd --user.
+            // Detect Gamescope's Xwayland via its signature flags or inherited environment.
+            if !is_gamescope_xwayland
+                && (cmdline_lossy.contains("-force-xrandr-emulation")
+                    || cmdline_lossy.contains("gamescope"))
+            {
+                is_gamescope_xwayland = true;
+            }
+
+            if !is_gamescope_xwayland {
+                if let Ok(environ_bytes) = std::fs::read(proc_path.join("environ")) {
+                    let environ_lossy = String::from_utf8_lossy(&environ_bytes);
+                    if environ_lossy.contains("GAMESCOPE_")
+                        || environ_lossy.contains("LIBEI_SOCKET=gamescope")
+                        || environ_lossy.contains("michadame_gamescope")
+                    {
+                        is_gamescope_xwayland = true;
+                    }
+                }
+            }
+
+            if !is_gamescope_xwayland {
                 continue;
             }
 
             // Extract display argument from Xwayland's cmdline
-            let cmdline_path = proc_path.join("cmdline");
-            if let Ok(bytes) = std::fs::read(&cmdline_path) {
-                let parts: Vec<&[u8]> = bytes.split(|&b| b == 0).collect();
-                for part in parts {
-                    let s = String::from_utf8_lossy(part);
-                    if s.starts_with(':') && !s[1..].is_empty() && s[1..].chars().all(|c| c.is_ascii_digit()) {
-                        return Some(s.to_string());
+            for part in cmdline_bytes.split(|&b| b == 0) {
+                let s = String::from_utf8_lossy(part);
+                if let Some(num_str) = s.strip_prefix(':') {
+                    if !num_str.is_empty() && num_str.chars().all(|c| c.is_ascii_digit()) {
+                        if host_disp.as_deref() != Some(s.as_ref()) {
+                            if let Ok(num) = num_str.parse::<u32>() {
+                                candidates.push((num, s.to_string()));
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
-    None
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates.into_iter().next().map(|(_, disp)| disp)
 }
 
 #[cfg(test)]
