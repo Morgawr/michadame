@@ -449,6 +449,7 @@ pub struct BroadcastHandle {
     pub stop: Arc<AtomicBool>,
     pub video_tx: Sender<VideoFrame>,
     pub video_free_rx: Receiver<Vec<u8>>,
+    audio_tap: Arc<crate::replay::AudioTap>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -463,8 +464,17 @@ impl BroadcastHandle {
 
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        self.audio_tap.unregister_broadcast_routes();
         if let Some(t) = self.thread.take() {
-            let _ = t.join();
+            if std::thread::Builder::new()
+                .name("twitch-broadcast-stop".into())
+                .spawn(move || {
+                    let _ = t.join();
+                })
+                .is_err()
+            {
+                // Fallback if OS thread creation fails
+            }
         }
     }
 }
@@ -567,7 +577,9 @@ pub fn start_broadcast(
                 &worker_stop,
                 &worker_audio_tap,
             );
-            worker_audio_tap.unregister_broadcast_routes();
+            if !worker_stop.load(Ordering::Acquire) {
+                worker_audio_tap.unregister_broadcast_routes();
+            }
             if let Err(e) = result {
                 tracing::error!("Twitch broadcast stopped with error: {e:#}");
                 *worker_status.lock().unwrap() = BroadcastStatus::Error(format!("{e:#}"));
@@ -582,6 +594,7 @@ pub fn start_broadcast(
         stop,
         video_tx: vtx,
         video_free_rx: vfree_rx,
+        audio_tap,
         thread: Some(thread),
     })
 }

@@ -145,6 +145,7 @@ pub struct TwitchState {
     // Pre-roll video player
     pub preroll: Option<PrerollPlayer>,
     pub preroll_file_dialog_receiver: Option<Receiver<std::path::PathBuf>>,
+    stream_key_receiver: Option<Receiver<Result<String, String>>>,
 
     self_display_name: Option<String>,
     self_color: Option<egui::Color32>,
@@ -192,6 +193,7 @@ impl Default for TwitchState {
             clips: clips::ClipManager::default(),
             preroll: None,
             preroll_file_dialog_receiver: None,
+            stream_key_receiver: None,
             self_display_name: None,
             self_color: None,
             worker: None,
@@ -487,21 +489,21 @@ impl TwitchState {
     }
 
     pub fn try_fetch_stream_key(&mut self) {
-        let Some(token) = &self.token else {
+        let Some(token) = self.token.clone() else {
             self.notify_error("Log in to Twitch first to fetch your stream key");
             return;
         };
-        match auth::fetch_stream_key(token) {
-            Ok(key) => {
-                self.config.stream_key = key.clone();
-                self.stream_key_input = key;
-                self.config_dirty = true;
-                self.notify_info("Twitch stream key fetched from account!");
-            }
-            Err(e) => {
-                self.notify_error(format!("Could not fetch stream key: {e}"));
-            }
+        if self.stream_key_receiver.is_some() {
+            return;
         }
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.stream_key_receiver = Some(rx);
+        let _ = std::thread::Builder::new()
+            .name("twitch-stream-key-fetch".to_string())
+            .spawn(move || {
+                let res = auth::fetch_stream_key(&token).map_err(|e| e.to_string());
+                let _ = tx.send(res);
+            });
     }
 
     pub fn client_id(&self) -> String {
@@ -590,6 +592,28 @@ impl TwitchState {
                 self.config.preroll_video_path = path.to_string_lossy().to_string();
                 self.config_dirty = true;
                 changed = true;
+            }
+        }
+
+        if let Some(rx) = &self.stream_key_receiver {
+            match rx.try_recv() {
+                Ok(Ok(key)) => {
+                    self.config.stream_key = key.clone();
+                    self.stream_key_input = key;
+                    self.config_dirty = true;
+                    self.notify_info("Twitch stream key fetched from account!");
+                    self.stream_key_receiver = None;
+                    changed = true;
+                }
+                Ok(Err(e)) => {
+                    self.notify_error(format!("Could not fetch stream key: {e}"));
+                    self.stream_key_receiver = None;
+                    changed = true;
+                }
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    self.stream_key_receiver = None;
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
             }
         }
 
