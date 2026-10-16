@@ -168,36 +168,50 @@ struct VideoFileAudioSource {
     audio_latency_ms: Arc<AtomicU64>,
     replay_audio: Arc<crate::replay::AudioTap>,
     local_batch: Vec<f32>,
+    read_buf: VecDeque<f32>,
+    local_gen: u64,
 }
 
 impl Iterator for VideoFileAudioSource {
     type Item = f32;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let mut sample_opt = None;
         let mut report_batch = false;
         let current_gen = self.seek_generation.load(Ordering::SeqCst);
+        if self.local_gen != current_gen {
+            self.read_buf.clear();
+            self.local_gen = current_gen;
+        }
 
-        if let Ok(mut q) = self.queue.try_lock() {
-            if q.generation < current_gen {
-                q.samples.clear();
-                q.generation = current_gen;
-            } else if let Some(s) = q.samples.pop_front() {
-                q.samples_consumed += 1;
-                // Update shared audio PTS once per stereo frame (every 2 samples)
-                if q.samples_consumed % 2 == 0 {
-                    let played_frames = q.samples_consumed / 2;
-                    let elapsed_us =
-                        (played_frames as f64 / AUDIO_OUTPUT_RATE as f64 * 1_000_000.0) as i64;
-                    let current_pts = q.head_pts_us + elapsed_us;
-                    self.current_pts_shared
-                        .store(current_pts, Ordering::Relaxed);
+        if self.read_buf.is_empty() {
+            let channels = AUDIO_OUTPUT_CHANNELS as usize;
+            if let Ok(mut q) = self.queue.try_lock() {
+                if q.generation < current_gen {
+                    q.samples.clear();
+                    q.generation = current_gen;
+                } else {
+                    let count = (q.samples.len() / channels).min(16) * channels;
+                    if count > 0 {
+                        self.read_buf.extend(q.samples.drain(..count));
+                        q.samples_consumed += count as u64;
+                        let played_frames = q.samples_consumed / channels as u64;
+                        let elapsed_us =
+                            (played_frames as f64 / AUDIO_OUTPUT_RATE as f64 * 1_000_000.0) as i64;
+                        let current_pts = q.head_pts_us + elapsed_us;
+                        self.current_pts_shared
+                            .store(current_pts, Ordering::Relaxed);
+                    }
                 }
-                sample_opt = Some(s);
+            }
+
+            if self.read_buf.is_empty() {
+                for _ in 0..channels {
+                    self.read_buf.push_back(0.0);
+                }
             }
         }
 
-        let sample = sample_opt.unwrap_or(0.0);
+        let sample = self.read_buf.pop_front().unwrap_or(0.0);
         self.local_batch.push(sample);
 
         // Batch report to audio meter and replay tap
@@ -470,6 +484,8 @@ pub fn video_file_thread_main(
                             audio_latency_ms: audio_latency_ms.clone(),
                             replay_audio: replay_audio.clone(),
                             local_batch: Vec::with_capacity(512),
+                            read_buf: VecDeque::with_capacity(512),
+                            local_gen: 0,
                         };
                         sink.append(audio_source);
                         sink.set_volume(master_volume);
@@ -1221,6 +1237,8 @@ mod tests {
             audio_latency_ms,
             replay_audio,
             local_batch: Vec::with_capacity(512),
+            read_buf: VecDeque::with_capacity(512),
+            local_gen: 0,
         };
 
         // Initialize queue to 10.0s at generation 0 (as on a seek)
@@ -1273,6 +1291,8 @@ mod tests {
             audio_latency_ms,
             replay_audio,
             local_batch: Vec::with_capacity(512),
+            read_buf: VecDeque::with_capacity(512),
+            local_gen: 0,
         };
 
         // Queue contains samples from generation 0
