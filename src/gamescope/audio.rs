@@ -12,8 +12,8 @@ pub struct GamescopeAudioHandle {
 
 impl Drop for GamescopeAudioHandle {
     fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("PULSE_SOURCE");
+        if let Some(ref id) = self.module_id {
+            let _ = Command::new("pactl").args(["unload-module", id]).output();
         }
     }
 }
@@ -62,12 +62,10 @@ pub fn start_gamescope_audio(
     let module_id = ensure_gamescope_sink().unwrap_or(None);
 
     let monitor_source = format!("{GAMESCOPE_SINK_NAME}.monitor");
-    unsafe {
-        std::env::set_var("PULSE_SOURCE", &monitor_source);
-    }
+    let alsa_device = format!("pulse:DEVICE={monitor_source}");
 
     let stream = crate::devices::audio::start_audio_stream(
-        "pulse",
+        &alsa_device,
         peak_amplitude_shared,
         audio_latency_ms,
         buffer_size,
