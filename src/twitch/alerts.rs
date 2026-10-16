@@ -123,16 +123,16 @@ impl AlertsState {
 
     /// Synthesizes and enqueues a test alert for local preview.
     pub fn trigger_test(&mut self, kind: AlertTestKind) {
-        let now = Instant::now();
+        let seq = next_alert_seq();
         let event = match kind {
             AlertTestKind::Follow => AlertEvent {
-                id: format!("test-follow-{}", now.elapsed().as_nanos()),
+                id: format!("test-follow-{seq}"),
                 kind: AlertKind::Follow {
                     user: "NeonRacer".to_string(),
                 },
             },
             AlertTestKind::Sub => AlertEvent {
-                id: format!("test-sub-{}", now.elapsed().as_nanos()),
+                id: format!("test-sub-{seq}"),
                 kind: AlertKind::Subscription {
                     user: "CyberSamurai".to_string(),
                     tier: "Tier 1".to_string(),
@@ -143,7 +143,7 @@ impl AlertsState {
                 },
             },
             AlertTestKind::GiftSub => AlertEvent {
-                id: format!("test-giftsub-{}", now.elapsed().as_nanos()),
+                id: format!("test-giftsub-{seq}"),
                 kind: AlertKind::Subscription {
                     user: "PixelKnight".to_string(),
                     tier: "Tier 1".to_string(),
@@ -154,7 +154,7 @@ impl AlertsState {
                 },
             },
             AlertTestKind::Bits => AlertEvent {
-                id: format!("test-bits-{}", now.elapsed().as_nanos()),
+                id: format!("test-bits-{seq}"),
                 kind: AlertKind::Bits {
                     user: "ArcadeHero".to_string(),
                     amount: 500,
@@ -162,7 +162,7 @@ impl AlertsState {
                 },
             },
             AlertTestKind::Raid => AlertEvent {
-                id: format!("test-raid-{}", now.elapsed().as_nanos()),
+                id: format!("test-raid-{seq}"),
                 kind: AlertKind::Raid {
                     user: "VaporStreamer".to_string(),
                     viewers: 42,
@@ -171,6 +171,11 @@ impl AlertsState {
         };
         self.enqueue(event);
     }
+}
+
+pub fn next_alert_seq() -> u64 {
+    static NEXT_ALERT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT_ALERT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(test)]

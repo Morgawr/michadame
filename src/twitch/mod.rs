@@ -910,7 +910,7 @@ impl TwitchState {
                                         .to_string();
                                     self.enqueue_alert(AlertEvent {
                                         id: msg.tag("id").map(str::to_string).unwrap_or_else(|| {
-                                            format!("bits-{}-{}", chat.login, now.elapsed().as_nanos())
+                                            format!("bits-{}-{}", chat.login, alerts::next_alert_seq())
                                         }),
                                         kind: AlertKind::Bits {
                                             user: chat.display_name.clone(),
@@ -949,7 +949,7 @@ impl TwitchState {
                                 let message = msg.trailing().filter(|m| !m.trim().is_empty()).map(str::to_string);
                                 self.enqueue_alert(AlertEvent {
                                     id: msg.tag("id").map(str::to_string).unwrap_or_else(|| {
-                                        format!("sub-{user}-{}", now.elapsed().as_nanos())
+                                        format!("sub-{user}-{}", alerts::next_alert_seq())
                                     }),
                                     kind: AlertKind::Subscription {
                                         user,
@@ -983,7 +983,7 @@ impl TwitchState {
                                 };
                                 self.enqueue_alert(AlertEvent {
                                     id: msg.tag("id").map(str::to_string).unwrap_or_else(|| {
-                                        format!("gift-{gifter}-{}", now.elapsed().as_nanos())
+                                        format!("gift-{gifter}-{}", alerts::next_alert_seq())
                                     }),
                                     kind: AlertKind::Subscription {
                                         user: recipient.unwrap_or_else(|| {
@@ -1011,7 +1011,7 @@ impl TwitchState {
                                     .unwrap_or(0);
                                 self.enqueue_alert(AlertEvent {
                                     id: msg.tag("id").map(str::to_string).unwrap_or_else(|| {
-                                        format!("raid-{raider}-{}", now.elapsed().as_nanos())
+                                        format!("raid-{raider}-{}", alerts::next_alert_seq())
                                     }),
                                     kind: AlertKind::Raid {
                                         user: raider,
