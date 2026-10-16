@@ -70,13 +70,29 @@ pub fn find_video_formats(device_path: &str) -> Result<Vec<VideoFormat>> {
                                     }
                                 }
                                 FrameIntervalEnum::Stepwise(frac) => {
-                                    if frac.max.numerator > 0 {
-                                        let fps = (frac.max.denominator as f64
-                                            / frac.max.numerator as f64)
+                                    if frac.min.numerator > 0 {
+                                        let max_fps = (frac.min.denominator as f64
+                                            / frac.min.numerator as f64)
                                             .round()
                                             as u32;
-                                        if !framerates.contains(&fps) {
-                                            framerates.push(fps);
+                                        let min_fps = if frac.max.numerator > 0 {
+                                            (frac.max.denominator as f64
+                                                / frac.max.numerator as f64)
+                                                .round()
+                                                as u32
+                                        } else {
+                                            max_fps
+                                        };
+                                        if max_fps > 0 && !framerates.contains(&max_fps) {
+                                            framerates.push(max_fps);
+                                        }
+                                        for &std_fps in &[60, 50, 30, 25, 24, 15] {
+                                            if std_fps >= min_fps
+                                                && std_fps <= max_fps
+                                                && !framerates.contains(&std_fps)
+                                            {
+                                                framerates.push(std_fps);
+                                            }
                                         }
                                     }
                                 }
