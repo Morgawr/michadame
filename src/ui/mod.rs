@@ -124,7 +124,19 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
             if ctx.input(|i| i.modifiers.shift) {
                 state.clear_ocr();
             } else {
-                println!("Spacebar pressed, sending command...");
+                tracing::debug!("Spacebar pressed, sending command...");
+                if !state
+                    .ocr
+                    .is_processing
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    state
+                        .ocr
+                        .capture_requested
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    state.info("Capturing screen for Google Lens OCR...");
+                    ctx.request_repaint();
+                }
                 send_ws_command(serde_json::json!({"command": "manual_ocr"}));
             }
         }

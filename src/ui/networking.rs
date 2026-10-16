@@ -1,25 +1,37 @@
+use std::net::{SocketAddr, TcpStream};
 use std::thread;
-use tungstenite::{connect, Message};
-use url::Url;
+use std::time::Duration;
+use tungstenite::{client, Message};
 
 pub fn send_ws_command(command: serde_json::Value) {
     thread::spawn(move || {
-        println!("Connecting to WebSocket at ws://127.0.0.1:9002 ...");
-        match connect(Url::parse("ws://127.0.0.1:9002").unwrap()) {
+        tracing::debug!("Connecting to WebSocket at ws://127.0.0.1:9002 ...");
+        let addr: SocketAddr = "127.0.0.1:9002".parse().unwrap();
+        let stream = match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!("Failed to connect to WebSocket TCP socket: {}", e);
+                return;
+            }
+        };
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+
+        match client("ws://127.0.0.1:9002", stream) {
             Ok((mut socket, _)) => {
-                println!("Connected to WebSocket.");
+                tracing::debug!("Connected to WebSocket.");
                 let msg = command.to_string();
                 if let Err(e) = socket.send(Message::Text(msg)) {
-                    println!("WebSocket write error: {}", e);
+                    tracing::debug!("WebSocket write error: {}", e);
                     return;
                 }
                 match socket.read() {
-                    Ok(msg) => println!("WebSocket received: {}", msg),
-                    Err(e) => println!("WebSocket read error: {}", e),
+                    Ok(msg) => tracing::debug!("WebSocket received: {}", msg),
+                    Err(e) => tracing::debug!("WebSocket read error: {}", e),
                 }
                 let _ = socket.close(None);
             }
-            Err(e) => println!("Failed to connect to WebSocket: {}", e),
+            Err(e) => tracing::debug!("Failed to handshake WebSocket: {}", e),
         }
     });
 }
