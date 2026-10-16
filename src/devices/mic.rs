@@ -400,17 +400,26 @@ struct MicMonitorSource {
     stop: Arc<AtomicBool>,
     channels: u16,
     sample_rate: u32,
+    pending_right: Option<f32>,
 }
 
 impl Iterator for MicMonitorSource {
     type Item = f32;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Ok(sample) = self.consumer.pop() {
-            Some(sample)
-        } else if self.stop.load(Ordering::Relaxed) {
+        if let Some(right) = self.pending_right.take() {
+            return Some(right);
+        }
+        if self.consumer.slots() >= 2 {
+            if let (Ok(left), Ok(right)) = (self.consumer.pop(), self.consumer.pop()) {
+                self.pending_right = Some(right);
+                return Some(left);
+            }
+        }
+        if self.stop.load(Ordering::Relaxed) {
             None
         } else {
+            self.pending_right = Some(0.0);
             Some(0.0)
         }
     }
@@ -418,7 +427,7 @@ impl Iterator for MicMonitorSource {
 
 impl Source for MicMonitorSource {
     fn current_frame_len(&self) -> Option<usize> {
-        Some(self.consumer.slots())
+        Some((self.consumer.slots() & !1) + usize::from(self.pending_right.is_some()))
     }
 
     fn channels(&self) -> u16 {
@@ -431,6 +440,61 @@ impl Source for MicMonitorSource {
 
     fn total_duration(&self) -> Option<Duration> {
         None
+    }
+}
+
+#[inline]
+fn push_stereo_pair(prod: &mut Producer<f32>, left: f32, right: f32) {
+    if prod.slots() >= 2 {
+        let _ = prod.push(left);
+        let _ = prod.push(right);
+    }
+}
+
+fn push_monitor_stereo(
+    prod: &mut Producer<f32>,
+    active_buf: &[f32],
+    channels: u16,
+    rate: u32,
+    resample_phase: &mut f64,
+    prev_frame: &mut [f32; 2],
+) {
+    let ch = channels.max(1) as usize;
+    if rate == 48000 || rate == 0 {
+        if ch == 1 {
+            for &s in active_buf {
+                push_stereo_pair(prod, s, s);
+            }
+            if let Some(&last) = active_buf.last() {
+                *prev_frame = [last, last];
+            }
+        } else {
+            for frame in active_buf.chunks_exact(ch) {
+                push_stereo_pair(prod, frame[0], frame[1]);
+            }
+            if let Some(last) = active_buf.chunks_exact(ch).last() {
+                *prev_frame = [last[0], last[1]];
+            }
+        }
+        return;
+    }
+
+    let step = rate as f64 / 48000.0;
+    for frame in active_buf.chunks_exact(ch) {
+        let curr = if ch == 1 {
+            [frame[0], frame[0]]
+        } else {
+            [frame[0], frame[1]]
+        };
+        while *resample_phase <= 1.0 {
+            let t = *resample_phase as f32;
+            let l = prev_frame[0] + (curr[0] - prev_frame[0]) * t;
+            let r = prev_frame[1] + (curr[1] - prev_frame[1]) * t;
+            push_stereo_pair(prod, l, r);
+            *resample_phase += step;
+        }
+        *resample_phase -= 1.0;
+        *prev_frame = curr;
     }
 }
 
@@ -547,6 +611,7 @@ fn initialize_monitor_playback(stop: &Arc<AtomicBool>) -> Result<(
         stop: Arc::clone(stop),
         channels: 2,
         sample_rate: 48000,
+        pending_right: None,
     };
     sink.append(source);
 
@@ -667,6 +732,8 @@ fn run_mic_capture_worker(
         let mut i32_buf = vec![0i32; if sample_format_str == "S32LE" { buffer_samples } else { 0 }];
         let mut i16_buf = vec![0i16; if sample_format_str == "S16LE" { buffer_samples } else { 0 }];
         let mut cfg = config.read().map(|c| c.clone()).unwrap_or_default();
+        let mut monitor_resample_phase = 0.0f64;
+        let mut monitor_prev_frame = [0.0f32; 2];
 
         // Capture loop
         while !stop.load(Ordering::Relaxed) {
@@ -752,16 +819,14 @@ fn run_mic_capture_worker(
                     // Submit to monitor if enabled
                     if cfg.monitor {
                         if let Some(prod) = monitor_producer {
-                            if channels == 1 {
-                                for &s in active_buf.iter() {
-                                    let _ = prod.push(s);
-                                    let _ = prod.push(s);
-                                }
-                            } else {
-                                for &s in active_buf.iter() {
-                                    let _ = prod.push(s);
-                                }
-                            }
+                            push_monitor_stereo(
+                                prod,
+                                active_buf,
+                                channels,
+                                rate,
+                                &mut monitor_resample_phase,
+                                &mut monitor_prev_frame,
+                            );
                         }
                     }
 
@@ -882,5 +947,41 @@ mod tests {
         let mut buf2 = vec![0.5; 64];
         pipeline.process_interleaved(&mut buf2, 1, &config);
         assert!((buf2[0] - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_mic_monitor_stereo_alignment_and_resampling() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (mut prod, cons) = RingBuffer::<f32>::new(3); // Odd capacity (3 slots)
+        let mut source = MicMonitorSource {
+            consumer: cons,
+            stop: Arc::clone(&stop),
+            channels: 2,
+            sample_rate: 48000,
+            pending_right: None,
+        };
+
+        // Underrun emits a full (0.0, 0.0) stereo pair without shifting L/R phase.
+        assert_eq!(source.next(), Some(0.0));
+        // Even if a stereo pair arrives mid-underrun, pending_right finishes the silent pair first.
+        let mut phase = 0.0;
+        let mut prev = [0.0; 2];
+        push_monitor_stereo(&mut prod, &[0.25, 0.75, 0.5, 0.9], 2, 48000, &mut phase, &mut prev);
+        // Only 1 stereo pair fit in the 3-slot buffer (the second pair was rejected intact).
+        assert_eq!(source.next(), Some(0.0));
+        assert_eq!(source.next(), Some(0.25));
+        assert_eq!(source.next(), Some(0.75));
+
+        // Verify 24 kHz -> 48 kHz upsampling produces 2x stereo frames.
+        let (mut prod2, mut cons2) = RingBuffer::<f32>::new(64);
+        let mut phase2 = 0.0;
+        let mut prev2 = [0.0; 2];
+        push_monitor_stereo(&mut prod2, &[1.0; 8], 1, 24000, &mut phase2, &mut prev2);
+        let mut popped = Vec::new();
+        while let Ok(s) = cons2.pop() {
+            popped.push(s);
+        }
+        assert_eq!(popped.len() % 2, 0);
+        assert!(popped.len() >= 16);
     }
 }
