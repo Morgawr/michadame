@@ -172,6 +172,7 @@ pub struct CrtFilterRenderer {
     retro_ambient_glow_loc: Option<glow::UniformLocation>,
     retro_dark_mode_loc: Option<glow::UniformLocation>,
     last_video_texture: Option<glow::Texture>,
+    mipmap_generated_this_frame: std::sync::atomic::AtomicBool,
 
     crt_glass_prog: glow::Program,
     glass_output_res_loc: Option<glow::UniformLocation>,
@@ -828,6 +829,7 @@ impl CrtFilterRenderer {
                 retro_ambient_glow_loc,
                 retro_dark_mode_loc,
                 last_video_texture: None,
+                mipmap_generated_this_frame: std::sync::atomic::AtomicBool::new(false),
                 pixelate_prog,
                 final_prog,
                 yuv_planar_prog,
@@ -1916,20 +1918,9 @@ impl CrtFilterRenderer {
                 );
             }
 
-            let final_output_tex = if run_glass {
-                if run_cathode {
-                    self.post_textures[1]
-                } else {
-                    self.post_textures[0]
-                }
-            } else if run_cathode {
-                self.post_textures[0]
-            } else if has_overlay || has_mouse {
-                self.post_textures[0]
-            } else {
-                final_input_texture
-            };
-            self.last_video_texture = Some(final_output_tex);
+            self.last_video_texture = Some(final_input_texture);
+            self.mipmap_generated_this_frame
+                .store(false, std::sync::atomic::Ordering::Relaxed);
 
             if !run_cathode && !run_glass && (has_overlay || has_mouse) {
                 self.blit_texture(gl, self.post_textures[0], output_size, None, scissor_enabled);
@@ -2321,20 +2312,9 @@ impl CrtFilterRenderer {
                 );
             }
 
-            let final_output_tex = if run_glass {
-                if run_cathode {
-                    self.post_textures[1]
-                } else {
-                    self.post_textures[0]
-                }
-            } else if run_cathode {
-                self.post_textures[0]
-            } else if has_overlay {
-                self.post_textures[0]
-            } else {
-                current_video_texture
-            };
-            self.last_video_texture = Some(final_output_tex);
+            self.last_video_texture = Some(current_video_texture);
+            self.mipmap_generated_this_frame
+                .store(false, std::sync::atomic::Ordering::Relaxed);
 
             if !run_cathode && !run_glass && has_overlay {
                 self.blit_texture(gl, self.post_textures[0], output_size, None, scissor_enabled);
@@ -2918,11 +2898,25 @@ impl CrtFilterRenderer {
             gl.active_texture(glow::TEXTURE1);
             let video_tex = self.last_video_texture.unwrap_or(self.pass_textures[6]);
             gl.bind_texture(glow::TEXTURE_2D, Some(video_tex));
-            gl.generate_mipmap(glow::TEXTURE_2D);
+            let prev_min_filter =
+                gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER);
+            let prev_mag_filter =
+                gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER);
+            if !self
+                .mipmap_generated_this_frame
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                gl.generate_mipmap(glow::TEXTURE_2D);
+            }
             gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
                 glow::TEXTURE_MIN_FILTER,
                 glow::LINEAR_MIPMAP_LINEAR as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR as i32,
             );
 
             gl.uniform_2_f32(
@@ -2977,7 +2971,12 @@ impl CrtFilterRenderer {
             gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
                 glow::TEXTURE_MIN_FILTER,
-                glow::LINEAR as i32,
+                prev_min_filter,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                prev_mag_filter,
             );
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.active_texture(glow::TEXTURE0);
@@ -3028,11 +3027,25 @@ impl CrtFilterRenderer {
             gl.active_texture(glow::TEXTURE0);
             let video_tex = self.last_video_texture.unwrap_or(self.pass_textures[6]);
             gl.bind_texture(glow::TEXTURE_2D, Some(video_tex));
-            gl.generate_mipmap(glow::TEXTURE_2D);
+            let prev_min_filter =
+                gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER);
+            let prev_mag_filter =
+                gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER);
+            if !self
+                .mipmap_generated_this_frame
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                gl.generate_mipmap(glow::TEXTURE_2D);
+            }
             gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
                 glow::TEXTURE_MIN_FILTER,
                 glow::LINEAR_MIPMAP_LINEAR as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR as i32,
             );
 
             gl.uniform_2_f32(
@@ -3079,7 +3092,12 @@ impl CrtFilterRenderer {
             gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
                 glow::TEXTURE_MIN_FILTER,
-                glow::LINEAR as i32,
+                prev_min_filter,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                prev_mag_filter,
             );
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.use_program(None);
