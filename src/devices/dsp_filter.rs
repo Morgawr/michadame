@@ -179,9 +179,9 @@ impl DownwardExpander {
 
         let env_safe = self.env[c].max(1e-6);
         let gain = if env_safe < self.threshold_linear {
-            let diff_db = 20.0 * (env_safe / self.threshold_linear).log10();
-            let gain_db = diff_db * (self.ratio - 1.0);
-            10.0f32.powf((gain_db / 20.0).clamp(-60.0, 0.0))
+            (env_safe / self.threshold_linear)
+                .powf(self.ratio - 1.0)
+                .clamp(1e-3, 1.0)
         } else {
             1.0
         };

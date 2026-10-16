@@ -23,18 +23,150 @@ pub struct NoiseGateFilter {
     gain: f32,
     hold_countdown: usize,
     sample_rate: f32,
+    close_threshold_db: f32,
+    open_threshold_db: f32,
+    attack_time_ms: f32,
+    hold_time_ms: f32,
+    release_time_ms: f32,
+    close_threshold_linear: f32,
+    open_threshold_linear: f32,
+    attack_step: f32,
+    release_step: f32,
+    hold_total_samples: usize,
 }
 
 impl NoiseGateFilter {
     pub fn new(sample_rate: f32) -> Self {
-        Self {
+        let mut filter = Self {
             state: GateState::Closed,
             gain: 0.0,
             hold_countdown: 0,
             sample_rate,
-        }
+            close_threshold_db: f32::NAN,
+            open_threshold_db: f32::NAN,
+            attack_time_ms: f32::NAN,
+            hold_time_ms: f32::NAN,
+            release_time_ms: f32::NAN,
+            close_threshold_linear: 0.0,
+            open_threshold_linear: 0.0,
+            attack_step: 1.0,
+            release_step: 1.0,
+            hold_total_samples: 0,
+        };
+        filter.update_params(-52.0, -42.0, 5.0, 200.0, 120.0);
+        filter
     }
 
+    #[inline]
+    pub fn update_params(
+        &mut self,
+        close_threshold_db: f32,
+        open_threshold_db: f32,
+        attack_time_ms: f32,
+        hold_time_ms: f32,
+        release_time_ms: f32,
+    ) {
+        if self.close_threshold_db == close_threshold_db
+            && self.open_threshold_db == open_threshold_db
+            && self.attack_time_ms == attack_time_ms
+            && self.hold_time_ms == hold_time_ms
+            && self.release_time_ms == release_time_ms
+        {
+            return;
+        }
+
+        self.close_threshold_db = close_threshold_db;
+        self.open_threshold_db = open_threshold_db;
+        self.attack_time_ms = attack_time_ms;
+        self.hold_time_ms = hold_time_ms;
+        self.release_time_ms = release_time_ms;
+
+        self.close_threshold_linear = if close_threshold_db <= -120.0 {
+            0.0
+        } else {
+            10.0f32.powf(close_threshold_db / 20.0)
+        };
+        self.open_threshold_linear = if open_threshold_db <= -120.0 {
+            0.0
+        } else {
+            10.0f32.powf(open_threshold_db / 20.0)
+        };
+
+        let attack_samples = (attack_time_ms * 0.001 * self.sample_rate).max(0.0);
+        self.attack_step = if attack_samples > 0.0 {
+            1.0 / attack_samples
+        } else {
+            1.0
+        };
+
+        let release_samples = (release_time_ms * 0.001 * self.sample_rate).max(0.0);
+        self.release_step = if release_samples > 0.0 {
+            1.0 / release_samples
+        } else {
+            1.0
+        };
+
+        self.hold_total_samples = (hold_time_ms * 0.001 * self.sample_rate).max(0.0) as usize;
+    }
+
+    #[inline]
+    pub fn compute_gain(&mut self, peak_level: f32) -> f32 {
+        let level = peak_level.abs();
+
+        // Gate state machine with hysteresis using precomputed linear thresholds
+        if level >= self.open_threshold_linear {
+            // Signal above open threshold -> open or opening
+            if self.gain >= 1.0 {
+                self.state = GateState::Open;
+                self.gain = 1.0;
+            } else {
+                self.state = GateState::Opening;
+                self.gain = (self.gain + self.attack_step).min(1.0);
+                if self.gain >= 1.0 {
+                    self.state = GateState::Open;
+                }
+            }
+            self.hold_countdown = self.hold_total_samples;
+        } else if self.state == GateState::Open || self.state == GateState::Holding {
+            if level >= self.close_threshold_linear {
+                // Signal is between close and open threshold while already open: keep open
+                self.state = GateState::Open;
+                self.gain = 1.0;
+                self.hold_countdown = self.hold_total_samples;
+            } else {
+                // Signal dropped below close threshold: enter hold state
+                self.state = GateState::Holding;
+                if self.hold_countdown > 0 {
+                    self.hold_countdown -= 1;
+                    self.gain = 1.0;
+                } else {
+                    // Hold expired -> start closing
+                    self.state = GateState::Closing;
+                    self.gain = (self.gain - self.release_step).max(0.0);
+                    if self.gain <= 0.0 {
+                        self.state = GateState::Closed;
+                    }
+                }
+            }
+        } else if self.state == GateState::Closing {
+            self.gain = (self.gain - self.release_step).max(0.0);
+            if self.gain <= 0.0 {
+                self.state = GateState::Closed;
+            }
+        } else if self.state == GateState::Opening {
+            self.gain = (self.gain + self.attack_step).min(1.0);
+            if self.gain >= 1.0 {
+                self.state = GateState::Open;
+            }
+        } else {
+            // Closed
+            self.gain = 0.0;
+        }
+
+        self.gain
+    }
+
+    #[cfg(test)]
     #[inline]
     pub fn process_sample(
         &mut self,
@@ -45,81 +177,14 @@ impl NoiseGateFilter {
         hold_time_ms: f32,
         release_time_ms: f32,
     ) -> f32 {
-        let level = sample.abs();
-        let level_db = if level > 1e-6 {
-            20.0 * level.log10()
-        } else {
-            -120.0
-        };
-
-        // Attack and release rates per sample
-        let attack_samples = (attack_time_ms * 0.001 * self.sample_rate).max(0.0);
-        let attack_step = if attack_samples > 0.0 {
-            1.0 / attack_samples
-        } else {
-            1.0
-        };
-
-        let release_samples = (release_time_ms * 0.001 * self.sample_rate).max(0.0);
-        let release_step = if release_samples > 0.0 {
-            1.0 / release_samples
-        } else {
-            1.0
-        };
-
-        let hold_total_samples = (hold_time_ms * 0.001 * self.sample_rate).max(0.0) as usize;
-
-        // Gate state machine with hysteresis
-        if level_db >= open_threshold_db {
-            // Signal above open threshold -> open or opening
-            if self.gain >= 1.0 {
-                self.state = GateState::Open;
-                self.gain = 1.0;
-            } else {
-                self.state = GateState::Opening;
-                self.gain = (self.gain + attack_step).min(1.0);
-                if self.gain >= 1.0 {
-                    self.state = GateState::Open;
-                }
-            }
-            self.hold_countdown = hold_total_samples;
-        } else if self.state == GateState::Open || self.state == GateState::Holding {
-            if level_db >= close_threshold_db {
-                // Signal is between close and open threshold while already open: keep open
-                self.state = GateState::Open;
-                self.gain = 1.0;
-                self.hold_countdown = hold_total_samples;
-            } else {
-                // Signal dropped below close threshold: enter hold state
-                self.state = GateState::Holding;
-                if self.hold_countdown > 0 {
-                    self.hold_countdown -= 1;
-                    self.gain = 1.0;
-                } else {
-                    // Hold expired -> start closing
-                    self.state = GateState::Closing;
-                    self.gain = (self.gain - release_step).max(0.0);
-                    if self.gain <= 0.0 {
-                        self.state = GateState::Closed;
-                    }
-                }
-            }
-        } else if self.state == GateState::Closing {
-            self.gain = (self.gain - release_step).max(0.0);
-            if self.gain <= 0.0 {
-                self.state = GateState::Closed;
-            }
-        } else if self.state == GateState::Opening {
-            self.gain = (self.gain + attack_step).min(1.0);
-            if self.gain >= 1.0 {
-                self.state = GateState::Open;
-            }
-        } else {
-            // Closed
-            self.gain = 0.0;
-        }
-
-        sample * self.gain
+        self.update_params(
+            close_threshold_db,
+            open_threshold_db,
+            attack_time_ms,
+            hold_time_ms,
+            release_time_ms,
+        );
+        sample * self.compute_gain(sample.abs())
     }
 }
 
@@ -140,16 +205,93 @@ impl GainFilter {
 pub struct CompressorFilter {
     env: f32,
     sample_rate: f32,
+    ratio: f32,
+    threshold_db: f32,
+    attack_time_ms: f32,
+    release_time_ms: f32,
+    output_gain_db: f32,
+    threshold_linear: f32,
+    slope_exp: f32,
+    attack_coeff: f32,
+    release_coeff: f32,
+    makeup_linear: f32,
 }
 
 impl CompressorFilter {
     pub fn new(sample_rate: f32) -> Self {
-        Self {
+        let mut filter = Self {
             env: 0.0,
             sample_rate,
-        }
+            ratio: f32::NAN,
+            threshold_db: f32::NAN,
+            attack_time_ms: f32::NAN,
+            release_time_ms: f32::NAN,
+            output_gain_db: f32::NAN,
+            threshold_linear: 1.0,
+            slope_exp: 0.0,
+            attack_coeff: 0.0,
+            release_coeff: 0.0,
+            makeup_linear: 1.0,
+        };
+        filter.update_params(4.0, -18.0, 5.0, 80.0, 0.0);
+        filter
     }
 
+    #[inline]
+    pub fn update_params(
+        &mut self,
+        ratio: f32,
+        threshold_db: f32,
+        attack_time_ms: f32,
+        release_time_ms: f32,
+        output_gain_db: f32,
+    ) {
+        if self.ratio == ratio
+            && self.threshold_db == threshold_db
+            && self.attack_time_ms == attack_time_ms
+            && self.release_time_ms == release_time_ms
+            && self.output_gain_db == output_gain_db
+        {
+            return;
+        }
+
+        self.ratio = ratio;
+        self.threshold_db = threshold_db;
+        self.attack_time_ms = attack_time_ms;
+        self.release_time_ms = release_time_ms;
+        self.output_gain_db = output_gain_db;
+
+        let attack_sec = (attack_time_ms.max(0.1) * 0.001).max(1.0 / self.sample_rate);
+        let release_sec = (release_time_ms.max(1.0) * 0.001).max(1.0 / self.sample_rate);
+
+        self.attack_coeff = (-1.0 / (attack_sec * self.sample_rate)).exp();
+        self.release_coeff = (-1.0 / (release_sec * self.sample_rate)).exp();
+        self.threshold_linear = 10.0f32.powf(threshold_db / 20.0);
+        let ratio_clamped = ratio.max(1.0);
+        self.slope_exp = (1.0 / ratio_clamped) - 1.0;
+        self.makeup_linear = 10.0f32.powf(output_gain_db / 20.0);
+    }
+
+    #[inline]
+    pub fn compute_gain(&mut self, peak_level: f32) -> f32 {
+        let level = peak_level.abs();
+        if level > self.env {
+            self.env = self.attack_coeff * self.env + (1.0 - self.attack_coeff) * level;
+        } else {
+            self.env = self.release_coeff * self.env + (1.0 - self.release_coeff) * level;
+        }
+
+        let env_safe = self.env.max(1e-6);
+        let gain_reduction_linear = if env_safe > self.threshold_linear {
+            (env_safe / self.threshold_linear).powf(self.slope_exp)
+        } else {
+            1.0
+        };
+
+        gain_reduction_linear * self.makeup_linear
+    }
+
+    #[cfg(test)]
     #[inline]
     pub fn process_sample(
         &mut self,
@@ -160,35 +302,14 @@ impl CompressorFilter {
         release_time_ms: f32,
         output_gain_db: f32,
     ) -> f32 {
-        let level = sample.abs();
-        let attack_sec = (attack_time_ms.max(0.1) * 0.001).max(1.0 / self.sample_rate);
-        let release_sec = (release_time_ms.max(1.0) * 0.001).max(1.0 / self.sample_rate);
-
-        let attack_coeff = (-1.0 / (attack_sec * self.sample_rate)).exp();
-        let release_coeff = (-1.0 / (release_sec * self.sample_rate)).exp();
-
-        if level > self.env {
-            self.env = attack_coeff * self.env + (1.0 - attack_coeff) * level;
-        } else {
-            self.env = release_coeff * self.env + (1.0 - release_coeff) * level;
-        }
-
-        let env_safe = self.env.max(1e-6);
-        let env_db = 20.0 * env_safe.log10();
-
-        let gain_reduction_db = if env_db > threshold_db {
-            let ratio_clamped = ratio.max(1.0);
-            let overshoot = env_db - threshold_db;
-            let compressed = threshold_db + (overshoot / ratio_clamped);
-            compressed - env_db // negative dB
-        } else {
-            0.0
-        };
-
-        let total_gain_db = gain_reduction_db + output_gain_db;
-        let gain_linear = 10.0f32.powf(total_gain_db / 20.0);
-
-        sample * gain_linear
+        self.update_params(
+            ratio,
+            threshold_db,
+            attack_time_ms,
+            release_time_ms,
+            output_gain_db,
+        );
+        sample * self.compute_gain(sample.abs())
     }
 }
 
@@ -216,6 +337,25 @@ impl MicDspPipeline {
         let vol = config.volume.clamp(0.0, 2.0);
         let gain_linear = 10.0f32.powf(config.gain.gain_db / 20.0);
 
+        if config.noise_gate.enabled {
+            self.gate.update_params(
+                config.noise_gate.close_threshold_db,
+                config.noise_gate.open_threshold_db,
+                config.noise_gate.attack_time_ms,
+                config.noise_gate.hold_time_ms,
+                config.noise_gate.release_time_ms,
+            );
+        }
+        if config.compressor.enabled {
+            self.compressor.update_params(
+                config.compressor.ratio,
+                config.compressor.threshold_db,
+                config.compressor.attack_time_ms,
+                config.compressor.release_time_ms,
+                config.compressor.output_gain_db,
+            );
+        }
+
         // Process frame by frame
         for frame in samples.chunks_exact_mut(num_ch) {
             // For multi-channel, compute max level to drive envelope consistently
@@ -223,15 +363,7 @@ impl MicDspPipeline {
 
             // 1. Noise Gate
             if config.noise_gate.enabled {
-                let _ = self.gate.process_sample(
-                    frame_max,
-                    config.noise_gate.close_threshold_db,
-                    config.noise_gate.open_threshold_db,
-                    config.noise_gate.attack_time_ms,
-                    config.noise_gate.hold_time_ms,
-                    config.noise_gate.release_time_ms,
-                );
-                let gate_gain = self.gate.gain;
+                let gate_gain = self.gate.compute_gain(frame_max);
                 for s in frame.iter_mut() {
                     *s *= gate_gain;
                 }
@@ -247,25 +379,7 @@ impl MicDspPipeline {
             // 3. Compressor
             if config.compressor.enabled {
                 let gated_gain_max = frame.iter().fold(0.0f32, |acc, &s| acc.max(s.abs()));
-                let _ = self.compressor.process_sample(
-                    gated_gain_max,
-                    config.compressor.ratio,
-                    config.compressor.threshold_db,
-                    config.compressor.attack_time_ms,
-                    config.compressor.release_time_ms,
-                    config.compressor.output_gain_db,
-                );
-                let env_safe = self.compressor.env.max(1e-6);
-                let env_db = 20.0 * env_safe.log10();
-                let gain_reduction_db = if env_db > config.compressor.threshold_db {
-                    let r = config.compressor.ratio.max(1.0);
-                    let overshoot = env_db - config.compressor.threshold_db;
-                    (config.compressor.threshold_db + overshoot / r) - env_db
-                } else {
-                    0.0
-                };
-                let total_gain_db = gain_reduction_db + config.compressor.output_gain_db;
-                let comp_gain = 10.0f32.powf(total_gain_db / 20.0);
+                let comp_gain = self.compressor.compute_gain(gated_gain_max);
                 for s in frame.iter_mut() {
                     *s *= comp_gain;
                 }
