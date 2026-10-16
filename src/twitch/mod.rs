@@ -275,6 +275,39 @@ impl TwitchState {
         self.is_broadcasting() || matches!(self.stream_status, StreamStatus::Live { .. })
     }
 
+    /// Returns true only when the live stream belongs to the authenticated user's own channel
+    /// (or Michadame itself is actively broadcasting).
+    pub fn is_own_live_stream(&self) -> bool {
+        if self.is_broadcasting() {
+            return true;
+        }
+        let Some(token) = &self.token else {
+            return false;
+        };
+        if token.user_id.is_empty() {
+            return false;
+        }
+        match &self.stream_status {
+            StreamStatus::Live {
+                broadcaster_id: Some(id),
+                ..
+            } => id == &token.user_id,
+            StreamStatus::Live {
+                broadcaster_id: None,
+                ..
+            } => {
+                !token.login.is_empty()
+                    && self
+                        .config
+                        .channel
+                        .trim()
+                        .trim_start_matches('#')
+                        .eq_ignore_ascii_case(&token.login)
+            }
+            _ => false,
+        }
+    }
+
     /// Resolves the broadcaster Twitch user ID for the current live stream.
     pub fn live_broadcaster_id(&self) -> Option<String> {
         if let StreamStatus::Live { broadcaster_id: Some(ref id), .. } = self.stream_status {
@@ -609,7 +642,7 @@ impl TwitchState {
             }
         }
 
-        let is_live_now = self.is_stream_live();
+        let is_live_now = self.is_own_live_stream();
         if is_live_now && !self.was_stream_live {
             self.was_stream_live = true;
             let deadline = now + Duration::from_secs(10);
@@ -626,8 +659,10 @@ impl TwitchState {
         if let Some(deadline) = self.warmup_clip_deadline {
             if now >= deadline {
                 self.warmup_clip_deadline = None;
-                if let (Some(token), Some(broadcaster_id)) = (&self.token, self.live_broadcaster_id()) {
-                    clips::trigger_warmup_clip(broadcaster_id, token.clone());
+                if let Some(token) = &self.token {
+                    if !token.user_id.is_empty() && self.is_own_live_stream() {
+                        clips::trigger_warmup_clip(token.user_id.clone(), token.clone());
+                    }
                 }
             } else {
                 ctx.request_repaint_after(deadline.saturating_duration_since(now));
@@ -1743,6 +1778,18 @@ mod tests {
         tx.send(StreamStatus::Offline).unwrap();
         state.poll(&ctx);
         assert!(!state.is_stream_live());
+        assert!(!state.was_stream_live);
+        assert!(state.warmup_clip_deadline.is_none());
+
+        // Another streamer's channel goes live -> warm-up clip must NOT be scheduled
+        tx.send(StreamStatus::Live {
+            viewer_count: Some(100),
+            broadcaster_id: Some("99999".into()),
+        })
+        .unwrap();
+        state.poll(&ctx);
+        assert!(state.is_stream_live());
+        assert!(!state.is_own_live_stream());
         assert!(!state.was_stream_live);
         assert!(state.warmup_clip_deadline.is_none());
     }
