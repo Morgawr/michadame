@@ -550,6 +550,8 @@ pub fn video_file_thread_main(
             let mut pending_audio_seek_target_us: Option<i64> = None;
             let mut resampler_needs_reset = false;
             let mut last_video_frame: Option<(i64, ffmpeg_next::frame::Video)> = None;
+            let mut decoded = ffmpeg_next::frame::Video::empty();
+            let mut normalized = ffmpeg_next::frame::Video::empty();
 
             loop {
                 if demux_stop_flag.load(Ordering::Relaxed) {
@@ -679,26 +681,39 @@ pub fn video_file_thread_main(
                         if let Some((pts, frame)) = last_video_frame.take() {
                             pending_video_seek_target_us = None;
                             pending_audio_seek_target_us = None;
-                            let mut normalized = ffmpeg_next::frame::Video::empty();
-                            if scaler.run(&frame, &mut normalized).is_ok() {
-                                let w = normalized.width();
-                                let h = normalized.height();
-                                let fmt = normalized.format();
-                                if let Ok(data) = copy_frame_tightly(&normalized) {
-                                    let range_val = color_range.load(Ordering::Relaxed);
-                                    let raw_frame = Arc::new(RawFrame {
-                                        captured_at: crate::replay::now_us(),
-                                        rate: replay_rate,
-                                        width: w,
-                                        height: h,
+                            let packed = if frame.format() == output_format
+                                && frame.width() == video_decoder.width()
+                                && frame.height() == video_decoder.height()
+                            {
+                                copy_frame_tightly(&frame)
+                                    .ok()
+                                    .map(|data| (frame.width(), frame.height(), frame.format(), data))
+                            } else if scaler.run(&frame, &mut normalized).is_ok() {
+                                copy_frame_tightly(&normalized).ok().map(|data| {
+                                    (
+                                        normalized.width(),
+                                        normalized.height(),
+                                        normalized.format(),
                                         data,
-                                        format: fmt,
-                                        color_range: crate::video::types::ColorRange::from_u8(range_val),
-                                    });
-                                    let gen = seek_generation.load(Ordering::SeqCst);
-                                    if let Ok(mut vq) = video_queue.lock() {
-                                        vq.push_back((pts, raw_frame, gen));
-                                    }
+                                    )
+                                })
+                            } else {
+                                None
+                            };
+                            if let Some((w, h, fmt, data)) = packed {
+                                let range_val = color_range.load(Ordering::Relaxed);
+                                let raw_frame = Arc::new(RawFrame {
+                                    captured_at: crate::replay::now_us(),
+                                    rate: replay_rate,
+                                    width: w,
+                                    height: h,
+                                    data,
+                                    format: fmt,
+                                    color_range: crate::video::types::ColorRange::from_u8(range_val),
+                                });
+                                let gen = seek_generation.load(Ordering::SeqCst);
+                                if let Ok(mut vq) = video_queue.lock() {
+                                    vq.push_back((pts, raw_frame, gen));
                                 }
                             }
                         }
@@ -717,7 +732,6 @@ pub fn video_file_thread_main(
 
                 if stream_idx == video_stream_index {
                     if video_decoder.send_packet(&packet).is_ok() {
-                        let mut decoded = ffmpeg_next::frame::Video::empty();
                         while video_decoder.receive_frame(&mut decoded).is_ok() {
                             let frame_pts = decoded.pts().map(|pts| unsafe {
                                 ffmpeg_next::sys::av_rescale_q(
@@ -743,26 +757,44 @@ pub fn video_file_thread_main(
                                 }
                             }
 
-                            let mut normalized = ffmpeg_next::frame::Video::empty();
-                            if scaler.run(&decoded, &mut normalized).is_ok() {
-                                let w = normalized.width();
-                                let h = normalized.height();
-                                let fmt = normalized.format();
-                                if let Ok(data) = copy_frame_tightly(&normalized) {
-                                    let range_val = color_range.load(Ordering::Relaxed);
-                                    let raw_frame = Arc::new(RawFrame {
-                                        captured_at: crate::replay::now_us(),
-                                        rate: replay_rate,
-                                        width: w,
-                                        height: h,
+                            let packed = if decoded.format() == output_format
+                                && decoded.width() == video_decoder.width()
+                                && decoded.height() == video_decoder.height()
+                            {
+                                copy_frame_tightly(&decoded).ok().map(|data| {
+                                    (
+                                        decoded.width(),
+                                        decoded.height(),
+                                        decoded.format(),
                                         data,
-                                        format: fmt,
-                                        color_range: crate::video::types::ColorRange::from_u8(range_val),
-                                    });
+                                    )
+                                })
+                            } else if scaler.run(&decoded, &mut normalized).is_ok() {
+                                copy_frame_tightly(&normalized).ok().map(|data| {
+                                    (
+                                        normalized.width(),
+                                        normalized.height(),
+                                        normalized.format(),
+                                        data,
+                                    )
+                                })
+                            } else {
+                                None
+                            };
+                            if let Some((w, h, fmt, data)) = packed {
+                                let range_val = color_range.load(Ordering::Relaxed);
+                                let raw_frame = Arc::new(RawFrame {
+                                    captured_at: crate::replay::now_us(),
+                                    rate: replay_rate,
+                                    width: w,
+                                    height: h,
+                                    data,
+                                    format: fmt,
+                                    color_range: crate::video::types::ColorRange::from_u8(range_val),
+                                });
 
-                                    if let Ok(mut vq) = video_queue.lock() {
-                                        vq.push_back((frame_pts, raw_frame, gen));
-                                    }
+                                if let Ok(mut vq) = video_queue.lock() {
+                                    vq.push_back((frame_pts, raw_frame, gen));
                                 }
                             }
                         }

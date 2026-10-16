@@ -110,8 +110,16 @@ fn plane_tight_row_bytes(frame: &ffmpeg_next::frame::Video, plane: usize) -> Res
 }
 
 pub(crate) fn copy_frame_tightly(frame: &ffmpeg_next::frame::Video) -> Result<Vec<u8>> {
-    let mut data = Vec::new();
-    for plane in 0..frame.planes() {
+    let planes = frame.planes();
+    let mut total_bytes = 0usize;
+    for plane in 0..planes {
+        let row_bytes = plane_tight_row_bytes(frame, plane)?;
+        let row_count = frame.plane_height(plane) as usize;
+        total_bytes += row_bytes * row_count;
+    }
+
+    let mut data = Vec::with_capacity(total_bytes);
+    for plane in 0..planes {
         let row_bytes = plane_tight_row_bytes(frame, plane)?;
         let row_count = frame.plane_height(plane) as usize;
         let stride = frame.stride(plane);
@@ -126,7 +134,6 @@ pub(crate) fn copy_frame_tightly(frame: &ffmpeg_next::frame::Video) -> Result<Ve
             ));
         }
 
-        data.reserve(row_bytes * row_count);
         for row in 0..row_count {
             let start = row * stride;
             let end = start + row_bytes;
@@ -367,6 +374,8 @@ fn run_video_capture_session(
         crate::video::types::ScalerFilter::from_u8(current_scaler_val).into_ffmpeg_flag(),
     )
     .context("Failed to create software scaler for normalization")?;
+    let mut decoded = ffmpeg_next::frame::Video::empty();
+    let mut normalized = ffmpeg_next::frame::Video::empty();
     loop {
         let new_scaler_val = scaler_filter.load(Ordering::Relaxed);
         if new_scaler_val != current_scaler_val {
@@ -415,21 +424,30 @@ fn run_video_capture_session(
         decoder
             .send_packet(&packet)
             .context("Failed to send packet to decoder")?;
-        let mut decoded = ffmpeg_next::frame::Video::empty();
         while decoder.receive_frame(&mut decoded).is_ok() {
-            // Use the scaler to normalize the frame (removes strides and ensures consistent plane layout)
-            let mut normalized = ffmpeg_next::frame::Video::empty();
-
             let range_val = color_range.load(Ordering::Relaxed);
 
-            scaler
-                .run(&decoded, &mut normalized)
-                .context("Failed to normalize video frame")?;
-
-            let width = normalized.width();
-            let height = normalized.height();
-            let format = normalized.format();
-            let data = copy_frame_tightly(&normalized)?;
+            let (width, height, format, data) = if decoded.format() == output_format
+                && decoded.width() == decoder.width()
+                && decoded.height() == decoder.height()
+            {
+                (
+                    decoded.width(),
+                    decoded.height(),
+                    decoded.format(),
+                    copy_frame_tightly(&decoded)?,
+                )
+            } else {
+                scaler
+                    .run(&decoded, &mut normalized)
+                    .context("Failed to normalize video frame")?;
+                (
+                    normalized.width(),
+                    normalized.height(),
+                    normalized.format(),
+                    copy_frame_tightly(&normalized)?,
+                )
+            };
 
             let now = crate::replay::now_us();
             let timestamp = decoded
