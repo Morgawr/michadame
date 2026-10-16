@@ -50,20 +50,46 @@ pub fn lookup_word_at_pointer(
                 char_start: 0,
                 char_len: 0,
                 is_vertical: is_box_vertical,
+                char_spans_px: Vec::new(),
             }]
         } else {
             ocr_box
                 .lines
                 .iter()
-                .map(|line| LineSegment {
-                    text: line.text.as_str(),
-                    min_x: video_rect.min.x + (line.center_x - line.width / 2.0) * video_rect.width(),
-                    max_x: video_rect.min.x + (line.center_x + line.width / 2.0) * video_rect.width(),
-                    min_y: video_rect.min.y + (line.center_y - line.height / 2.0) * video_rect.height(),
-                    max_y: video_rect.min.y + (line.center_y + line.height / 2.0) * video_rect.height(),
-                    char_start: 0,
-                    char_len: 0,
-                    is_vertical: line.writing_direction.is_vertical(),
+                .map(|line| {
+                    let is_vert = line.writing_direction.is_vertical();
+                    let char_count = line.text.chars().count();
+                    let char_spans_px = if line.char_spans.len() == char_count {
+                        line.char_spans
+                            .iter()
+                            .map(|&(s0, s1)| {
+                                if is_vert {
+                                    (
+                                        video_rect.min.y + s0 * video_rect.height(),
+                                        video_rect.min.y + s1 * video_rect.height(),
+                                    )
+                                } else {
+                                    (
+                                        video_rect.min.x + s0 * video_rect.width(),
+                                        video_rect.min.x + s1 * video_rect.width(),
+                                    )
+                                }
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    LineSegment {
+                        text: line.text.as_str(),
+                        min_x: video_rect.min.x + (line.center_x - line.width / 2.0) * video_rect.width(),
+                        max_x: video_rect.min.x + (line.center_x + line.width / 2.0) * video_rect.width(),
+                        min_y: video_rect.min.y + (line.center_y - line.height / 2.0) * video_rect.height(),
+                        max_y: video_rect.min.y + (line.center_y + line.height / 2.0) * video_rect.height(),
+                        char_start: 0,
+                        char_len: 0,
+                        is_vertical: is_vert,
+                        char_spans_px,
+                    }
                 })
                 .collect()
         };
@@ -128,17 +154,12 @@ pub fn lookup_word_at_pointer(
         };
         let target = &segments[target_idx];
 
-        // Relative position [0.0, 1.0] along THIS specific line/column,
-        // converted to an index into the concatenated character stream.
-        let local_idx = if target.is_vertical {
-            let line_h = (target.max_y - target.min_y).max(1.0);
-            let t = ((pointer_pos.y - target.min_y) / line_h).clamp(0.0, 0.999);
-            ((t * target.char_len as f32).floor() as usize).min(target.char_len - 1)
-        } else {
-            let line_w = (target.max_x - target.min_x).max(1.0);
-            let t = ((pointer_pos.x - target.min_x) / line_w).clamp(0.0, 0.999);
-            ((t * target.char_len as f32).floor() as usize).min(target.char_len - 1)
-        };
+        // Resolve pointer_pos along THIS specific line/column to an index into the
+        // concatenated character stream, using per-character spans when available.
+        let local_idx = target.char_index_at(
+            pointer_pos,
+            &chars[target.char_start..target.char_start + target.char_len],
+        );
         let char_idx = target.char_start + local_idx;
         let full_text: String = chars.iter().collect();
 
@@ -351,9 +372,77 @@ struct LineSegment<'a> {
     char_start: usize,
     char_len: usize,
     is_vertical: bool,
+    char_spans_px: Vec<(f32, f32)>,
 }
 
 impl LineSegment<'_> {
+    /// Resolves a screen pointer position to a local character index `[0, self.char_len)`.
+    fn char_index_at(&self, pointer_pos: egui::Pos2, seg_chars: &[char]) -> usize {
+        if self.char_len == 0 {
+            return 0;
+        }
+        let coord = if self.is_vertical {
+            pointer_pos.y
+        } else {
+            pointer_pos.x
+        };
+        if self.char_spans_px.len() == self.char_len {
+            let cross_size = if self.is_vertical {
+                (self.max_x - self.min_x).max(1.0)
+            } else {
+                (self.max_y - self.min_y).max(1.0)
+            };
+            if coord <= self.char_spans_px[0].0 {
+                return 0;
+            }
+            for i in 0..self.char_len {
+                let (s0, s1) = self.char_spans_px[i];
+                if coord >= s0 && coord <= s1 {
+                    return i;
+                }
+                if i + 1 < self.char_len {
+                    let next_s0 = self.char_spans_px[i + 1].0;
+                    if coord > s1 && coord < next_s0 {
+                        let left_c = seg_chars.get(i).copied().unwrap_or(' ');
+                        let right_c = seg_chars.get(i + 1).copied().unwrap_or(' ');
+                        let left_is_punct = is_punct_char(left_c);
+                        let right_is_punct = is_punct_char(right_c);
+                        if left_is_punct && !right_is_punct {
+                            // Trailing whitespace inside a 1-em punctuation cell (e.g. after 、 or 。):
+                            // only snap to the following word when the pointer is right against it.
+                            return if next_s0 - coord <= cross_size * 0.12 {
+                                i + 1
+                            } else {
+                                i
+                            };
+                        }
+                        if !left_is_punct && right_is_punct {
+                            // Leading whitespace inside a 1-em opening bracket cell (e.g. before 「):
+                            return if coord - s1 <= cross_size * 0.12 {
+                                i
+                            } else {
+                                i + 1
+                            };
+                        }
+                        let mid = (s1 + next_s0) * 0.5;
+                        return if coord < mid { i } else { i + 1 };
+                    }
+                }
+            }
+            return self.char_len - 1;
+        }
+
+        if self.is_vertical {
+            let line_h = (self.max_y - self.min_y).max(1.0);
+            let t = ((coord - self.min_y) / line_h).clamp(0.0, 0.999);
+            ((t * self.char_len as f32).floor() as usize).min(self.char_len - 1)
+        } else {
+            let line_w = (self.max_x - self.min_x).max(1.0);
+            let t = ((coord - self.min_x) / line_w).clamp(0.0, 0.999);
+            ((t * self.char_len as f32).floor() as usize).min(self.char_len - 1)
+        }
+    }
+
     /// Screen rect covering the part of global char range [start, end) on this line, if any.
     fn sub_rect(&self, start: usize, end: usize) -> Option<Rect> {
         let seg_end = self.char_start + self.char_len;
@@ -362,16 +451,33 @@ impl LineSegment<'_> {
         if s >= e || self.char_len == 0 {
             return None;
         }
+        let local_s = s - self.char_start;
+        let local_e = e - self.char_start;
+        if self.char_spans_px.len() == self.char_len {
+            let c0 = self.char_spans_px[local_s].0;
+            let c1 = self.char_spans_px[local_e - 1].1;
+            return if self.is_vertical {
+                Some(Rect::from_min_max(
+                    egui::pos2(self.min_x, c0),
+                    egui::pos2(self.max_x, c1),
+                ))
+            } else {
+                Some(Rect::from_min_max(
+                    egui::pos2(c0, self.min_y),
+                    egui::pos2(c1, self.max_y),
+                ))
+            };
+        }
         let n = self.char_len as f32;
         if self.is_vertical {
             let h = self.max_y - self.min_y;
-            let y0 = self.min_y + ((s - self.char_start) as f32 / n) * h;
-            let y1 = self.min_y + ((e - self.char_start) as f32 / n) * h;
+            let y0 = self.min_y + (local_s as f32 / n) * h;
+            let y1 = self.min_y + (local_e as f32 / n) * h;
             Some(Rect::from_min_max(egui::pos2(self.min_x, y0), egui::pos2(self.max_x, y1)))
         } else {
             let w = self.max_x - self.min_x;
-            let x0 = self.min_x + ((s - self.char_start) as f32 / n) * w;
-            let x1 = self.min_x + ((e - self.char_start) as f32 / n) * w;
+            let x0 = self.min_x + (local_s as f32 / n) * w;
+            let x1 = self.min_x + (local_e as f32 / n) * w;
             Some(Rect::from_min_max(egui::pos2(x0, self.min_y), egui::pos2(x1, self.max_y)))
         }
     }
@@ -697,6 +803,7 @@ mod tests {
             height: 0.05,
             paragraph_idx: 0,
             writing_direction: WritingDirection::LeftToRight,
+            ..Default::default()
         };
 
         let line2 = ParsedLine {
@@ -707,6 +814,7 @@ mod tests {
             height: 0.05,
             paragraph_idx: 0,
             writing_direction: WritingDirection::LeftToRight,
+            ..Default::default()
         };
 
         let ocr_box = OcrBox {
@@ -1357,6 +1465,7 @@ mod tests {
             height: 0.05,
             paragraph_idx: 0,
             writing_direction: WritingDirection::LeftToRight,
+            ..Default::default()
         };
         let line2 = ParsedLine {
             text: l2.to_string(),
@@ -1366,6 +1475,7 @@ mod tests {
             height: 0.05,
             paragraph_idx: 0,
             writing_direction: WritingDirection::LeftToRight,
+            ..Default::default()
         };
         let ocr_box = OcrBox {
             text: format!("{l1}{l2}"),
@@ -1633,6 +1743,7 @@ mod tests {
             height: 0.10,
             paragraph_idx: 0,
             writing_direction: WritingDirection::LeftToRight,
+            ..Default::default()
         };
         let row2 = ParsedLine {
             text: "が殺されたわけですね」".to_string(),
@@ -1642,6 +1753,7 @@ mod tests {
             height: 0.10,
             paragraph_idx: 1,
             writing_direction: WritingDirection::LeftToRight,
+            ..Default::default()
         };
 
         let ocr_box = OcrBox {
@@ -1757,6 +1869,7 @@ mod tests {
             height: 0.60,
             paragraph_idx: 0,
             writing_direction: WritingDirection::TopToBottom,
+            ..Default::default()
         };
         let col2 = ParsedLine {
             text: "許可局".to_string(),
@@ -1766,6 +1879,7 @@ mod tests {
             height: 0.45,
             paragraph_idx: 0,
             writing_direction: WritingDirection::TopToBottom,
+            ..Default::default()
         };
 
         let ocr_box = OcrBox {
@@ -1824,5 +1938,79 @@ mod tests {
         assert_eq!(p_t.char_range, (0, 2));
         assert!((p_t.word_rect.width() - 50.0).abs() < 1.0);
         assert!((p_t.word_rect.height() - 180.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_lookup_word_with_char_spans_and_punctuation() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test_spans.db");
+        let db = DictDatabase::open_or_create(&db_path).unwrap();
+
+        db.conn
+            .execute(
+                "INSERT INTO terms VALUES ('軍', 'ぐん', 'n', '', 200.0, '[\"army\"]', 1, '')",
+                [],
+            )
+            .unwrap();
+
+        // Simulate "……軍。" where '……' takes 2 em (100..200), '軍' takes 1 em (200..250),
+        // and '。' ink box is narrow (250..268) inside [100..268].
+        let line = ParsedLine {
+            text: "……軍。".to_string(),
+            center_x: 0.184,
+            center_y: 0.50,
+            width: 0.168,
+            height: 0.05,
+            paragraph_idx: 0,
+            writing_direction: WritingDirection::LeftToRight,
+            char_spans: vec![
+                (0.100, 0.150), // '…'
+                (0.150, 0.200), // '…'
+                (0.200, 0.250), // '軍'
+                (0.250, 0.268), // '。'
+            ],
+        };
+        let ocr_box = OcrBox {
+            text: line.text.clone(),
+            center_x: line.center_x,
+            center_y: line.center_y,
+            width: line.width,
+            height: line.height,
+            lines: vec![line],
+            writing_direction: WritingDirection::LeftToRight,
+        };
+        let video_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
+
+        // Hover over '軍' at x = 225px -> must resolve to char_idx 2 ('軍') and highlight [200..250]
+        let popup = lookup_word_at_pointer(
+            egui::pos2(225.0, 300.0),
+            &[ocr_box.clone()],
+            video_rect,
+            Some(&db),
+            None,
+            global_deinflector(),
+            &[],
+            None,
+            0,
+        )
+        .expect("should match 軍 using exact char_spans");
+        assert_eq!(popup.matched_term, "軍");
+        assert_eq!(popup.char_range, (2, 3));
+        assert!((popup.word_rect.min.x - 200.0).abs() < 0.5);
+        assert!((popup.word_rect.max.x - 250.0).abs() < 0.5);
+
+        // Hovering over '……' at x = 160px must not match '軍'
+        let popup_ellipsis = lookup_word_at_pointer(
+            egui::pos2(160.0, 300.0),
+            &[ocr_box],
+            video_rect,
+            Some(&db),
+            None,
+            global_deinflector(),
+            &[],
+            None,
+            0,
+        );
+        assert!(popup_ellipsis.is_none());
     }
 }

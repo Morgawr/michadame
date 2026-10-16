@@ -142,24 +142,6 @@ pub fn execute_lens_ocr_with_agent(
             if let Some(layout) = text_obj.text_layout {
                 for (p_idx, paragraph) in layout.paragraphs.iter().enumerate() {
                     for line in &paragraph.lines {
-                        let line_text: String = line
-                            .words
-                            .iter()
-                            .map(|w| {
-                                format!(
-                                    "{}{}",
-                                    w.plain_text,
-                                    w.text_separator.as_deref().unwrap_or("")
-                                )
-                            })
-                            .collect::<String>()
-                            .trim()
-                            .to_string();
-
-                        if line_text.is_empty() {
-                            continue;
-                        }
-
                         // Try to get bounding box from line geometry
                         let mut resolved_box = line
                             .geometry
@@ -227,22 +209,66 @@ pub fn execute_lens_ocr_with_agent(
                                 (raw_w, raw_h)
                             };
 
+                            let raw_char_count: usize =
+                                line.words.iter().map(|w| w.plain_text.chars().count()).sum();
                             let writing_direction = if p_dir.is_vertical() {
                                 WritingDirection::TopToBottom
-                            } else if is_rotated_vert || (h > 1.8 * w && line_text.chars().count() >= 2) {
+                            } else if is_rotated_vert || (h > 1.8 * w && raw_char_count >= 2) {
                                 WritingDirection::TopToBottom
                             } else {
                                 p_dir
                             };
 
+                            let is_vertical = writing_direction.is_vertical();
+                            let cx_clamped = cx.clamp(0.0, 1.0);
+                            let cy_clamped = cy.clamp(0.0, 1.0);
+                            let w_clamped = w.clamp(0.001, 1.0);
+                            let h_clamped = h.clamp(0.001, 1.0);
+
+                            let char_em = estimate_line_char_em(
+                                &line.words,
+                                w_clamped,
+                                h_clamped,
+                                width,
+                                height,
+                                is_vertical,
+                                is_rotated_vert,
+                            );
+
+                            let (line_min, line_max) = if is_vertical {
+                                (
+                                    (cy_clamped - h_clamped * 0.5).clamp(0.0, 1.0),
+                                    (cy_clamped + h_clamped * 0.5).clamp(0.0, 1.0),
+                                )
+                            } else {
+                                (
+                                    (cx_clamped - w_clamped * 0.5).clamp(0.0, 1.0),
+                                    (cx_clamped + w_clamped * 0.5).clamp(0.0, 1.0),
+                                )
+                            };
+
+                            let (line_text, char_spans) = build_line_text_and_spans(
+                                &line.words,
+                                line_min,
+                                line_max,
+                                char_em,
+                                is_vertical,
+                                is_rotated_vert,
+                            );
+
+                            if line_text.is_empty() {
+                                continue;
+                            }
+
                             parsed_lines.push(ParsedLine {
                                 text: line_text,
-                                center_x: cx.clamp(0.0, 1.0),
-                                center_y: cy.clamp(0.0, 1.0),
-                                width: w.clamp(0.001, 1.0),
-                                height: h.clamp(0.001, 1.0),
+                                center_x: cx_clamped,
+                                center_y: cy_clamped,
+                                width: w_clamped,
+                                height: h_clamped,
                                 paragraph_idx: p_idx,
                                 writing_direction,
+                                char_spans,
                             });
                         }
                     }
@@ -252,6 +278,284 @@ pub fn execute_lens_ocr_with_agent(
     }
 
     Ok(parsed_lines)
+}
+
+/// Checks if a character is a fullwidth CJK ideograph or kana (excluding punctuation/symbols).
+fn is_cjk_ideograph_or_kana(c: char) -> bool {
+    matches!(c,
+        '\u{3040}'..='\u{309F}' // Hiragana
+        | '\u{30A1}'..='\u{30FA}' | '\u{30FD}'..='\u{30FF}' // Katakana (excluding ・ and ー)
+        | '\u{31F0}'..='\u{31FF}' // Katakana Phonetic Extensions
+        | '\u{3400}'..='\u{4DBF}' // CJK Unified Ideographs Extension A
+        | '\u{4E00}'..='\u{9FFF}' // CJK Unified Ideographs
+    )
+}
+
+/// Returns the natural relative width/span weight of a character when subdividing a multi-character
+/// word bounding box into individual character spans.
+pub fn char_natural_weight(c: char) -> f32 {
+    match c {
+        '、' | '。' | '，' | '．' | '「' | '」' | '『' | '』' | '（' | '）'
+        | '【' | '】' | '〈' | '〉' | '《' | '》' | '〔' | '〕' | '［' | '］'
+        | '｛' | '｝' | '・' | '“' | '”' | '‘' | '’' => 0.4,
+        '.' | ',' | ':' | ';' | '\'' | '"' | '!' | '|' | '/' | '\\'
+        | '(' | ')' | '[' | ']' | '{' | '}' => 0.35,
+        '\u{FF61}'..='\u{FF9F}' => 0.5,
+        c if c.is_ascii() => 0.55,
+        _ => 1.0,
+    }
+}
+
+/// Subdivides `[min_pos, max_pos]` across `text.chars()` weighted by [`char_natural_weight`].
+pub fn subdivide_span_weighted(text: &str, min_pos: f32, max_pos: f32) -> Vec<(f32, f32)> {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+    let span = (max_pos - min_pos).max(0.0);
+    let weights: Vec<f32> = chars.iter().map(|&c| char_natural_weight(c)).collect();
+    let total_w: f32 = weights.iter().sum::<f32>().max(1e-6);
+    let mut out = Vec::with_capacity(chars.len());
+    let mut cur = min_pos;
+    for (i, w) in weights.iter().enumerate() {
+        let next = if i + 1 == chars.len() {
+            max_pos.max(cur)
+        } else {
+            cur + span * (w / total_w)
+        };
+        out.push((cur, next));
+        cur = next;
+    }
+    out
+}
+
+fn is_dot_leader_char(c: char) -> bool {
+    matches!(c, '…' | '‥' | '⋮' | '︙' | '･' | '・' | '.' | '．' | '·')
+}
+
+/// Normalizes OCR dot-leader / ellipsis transcriptions (e.g. `"…………"`, `"………………"`, `"･･････"`,
+/// `"・・・・・・"`) so that the number of `'…'` characters matches the underlying glyph grid width
+/// (`word_span / char_em`).
+///
+/// In Japanese game fonts, a 6-dot ellipsis (`……`) occupies 2 fullwidth character cells (3 dots per
+/// cell), but OCR models frequently transcribe those 6 dots as 4–6 `'…'` characters (12–18 dots)
+/// or 6–7 halfwidth/fullwidth middle dots (`'･'` / `'・'`).
+pub fn normalize_dot_leader_word(plain_text: &str, word_span: Option<f32>, char_em: f32) -> String {
+    if plain_text.is_empty() || !plain_text.chars().any(is_dot_leader_char) {
+        return plain_text.to_string();
+    }
+
+    let chars: Vec<char> = plain_text.chars().collect();
+    let mut out = String::with_capacity(plain_text.len());
+    let mut i = 0;
+
+    while i < chars.len() {
+        if !is_dot_leader_char(chars[i]) {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+
+        let start = i;
+        while i < chars.len() && is_dot_leader_char(chars[i]) {
+            i += 1;
+        }
+        let run = &chars[start..i];
+        let run_len = run.len();
+        let has_ellipsis = run.iter().any(|&c| matches!(c, '…' | '‥' | '⋮' | '︙'));
+        let has_hw_dot = run.iter().any(|&c| c == '･');
+
+        // Estimate the physical span occupied by this dot-leader run
+        let non_run_weight: f32 = chars[..start]
+            .iter()
+            .chain(chars[i..].iter())
+            .map(|&c| char_natural_weight(c))
+            .sum();
+        let run_span = word_span.and_then(|ws| {
+            if ws > 0.0 && char_em > 0.0 {
+                Some((ws - non_run_weight * char_em).max(char_em * 0.5))
+            } else {
+                None
+            }
+        });
+
+        if let Some(r_span) = run_span {
+            let is_packed_dots = run_len >= 3 && (r_span / run_len as f32) < 0.65 * char_em;
+            if has_ellipsis || (has_hw_dot && run_len >= 2) || is_packed_dots {
+                let cells = (r_span / char_em).round().clamp(1.0, 16.0) as usize;
+                for _ in 0..cells {
+                    out.push('…');
+                }
+                continue;
+            }
+        } else if has_hw_dot && run_len >= 2 {
+            let cells = (run_len as f32 / 3.0).round().clamp(1.0, 16.0) as usize;
+            for _ in 0..cells {
+                out.push('…');
+            }
+            continue;
+        } else if has_ellipsis && run_len >= 4 {
+            let cells = (run_len / 2).clamp(1, 16);
+            for _ in 0..cells {
+                out.push('…');
+            }
+            continue;
+        }
+
+        for &c in run {
+            out.push(c);
+        }
+    }
+
+    out
+}
+
+/// Estimates the normalized size of 1 fullwidth CJK character (`1 em`) along the line's reading axis.
+fn estimate_line_char_em(
+    words: &[TextLayoutWord],
+    line_w: f32,
+    line_h: f32,
+    img_w: u32,
+    img_h: u32,
+    is_vertical: bool,
+    is_rotated_vert: bool,
+) -> f32 {
+    let mut cjk_span_sum = 0.0f32;
+    let mut cjk_char_sum = 0usize;
+
+    for w in words {
+        if w.plain_text.is_empty() || !w.plain_text.chars().all(is_cjk_ideograph_or_kana) {
+            continue;
+        }
+        if let Some(bbox) = w.geometry.as_ref().and_then(|g| g.bounding_box.as_ref()) {
+            let (bw, bh) = if is_rotated_vert && bbox.width > bbox.height {
+                (bbox.height, bbox.width)
+            } else {
+                (bbox.width, bbox.height)
+            };
+            let span = if is_vertical { bh } else { bw };
+            if span > 0.0 {
+                cjk_span_sum += span;
+                cjk_char_sum += w.plain_text.chars().count();
+            }
+        }
+    }
+
+    if cjk_char_sum > 0 {
+        return cjk_span_sum / cjk_char_sum as f32;
+    }
+
+    let aspect = if is_vertical {
+        img_w.max(1) as f32 / img_h.max(1) as f32
+    } else {
+        img_h.max(1) as f32 / img_w.max(1) as f32
+    };
+    let cross = if is_vertical { line_w } else { line_h };
+    (cross * aspect * 0.95).max(0.001)
+}
+
+/// Builds the line text and per-character normalized `[start, end]` spans from Lens word boxes.
+fn build_line_text_and_spans(
+    words: &[TextLayoutWord],
+    line_min: f32,
+    line_max: f32,
+    char_em: f32,
+    is_vertical: bool,
+    is_rotated_vert: bool,
+) -> (String, Vec<(f32, f32)>) {
+    struct WordPiece<'a> {
+        text: String,
+        sep: &'a str,
+        span: Option<(f32, f32)>,
+    }
+
+    let mut pieces = Vec::with_capacity(words.len());
+    let mut all_have_boxes = true;
+
+    for w in words {
+        let span = w
+            .geometry
+            .as_ref()
+            .and_then(|g| g.bounding_box.as_ref())
+            .map(|b| {
+                let (bw, bh) = if is_rotated_vert && b.width > b.height {
+                    (b.height, b.width)
+                } else {
+                    (b.width, b.height)
+                };
+                if is_vertical {
+                    (
+                        (b.center_y - bh * 0.5).clamp(0.0, 1.0),
+                        (b.center_y + bh * 0.5).clamp(0.0, 1.0),
+                    )
+                } else {
+                    (
+                        (b.center_x - bw * 0.5).clamp(0.0, 1.0),
+                        (b.center_x + bw * 0.5).clamp(0.0, 1.0),
+                    )
+                }
+            });
+
+        let span_len = span.map(|(a, b)| (b - a).max(0.0));
+        let norm_text = normalize_dot_leader_word(&w.plain_text, span_len, char_em);
+        if !norm_text.is_empty() && span.is_none() {
+            all_have_boxes = false;
+        }
+        pieces.push(WordPiece {
+            text: norm_text,
+            sep: w.text_separator.as_deref().unwrap_or(""),
+            span,
+        });
+    }
+
+    if all_have_boxes && !pieces.is_empty() {
+        let mut char_items: Vec<(char, (f32, f32))> = Vec::new();
+        for (idx, piece) in pieces.iter().enumerate() {
+            if let Some((w_min, w_max)) = piece.span {
+                if !piece.text.is_empty() {
+                    let sub = subdivide_span_weighted(&piece.text, w_min, w_max);
+                    for (c, s) in piece.text.chars().zip(sub) {
+                        char_items.push((c, s));
+                    }
+                }
+                if !piece.sep.is_empty() {
+                    let next_min = pieces[idx + 1..]
+                        .iter()
+                        .find_map(|p| p.span.map(|s| s.0))
+                        .unwrap_or(w_max)
+                        .max(w_max);
+                    let sub = subdivide_span_weighted(piece.sep, w_max, next_min);
+                    for (c, s) in piece.sep.chars().zip(sub) {
+                        char_items.push((c, s));
+                    }
+                }
+            }
+        }
+
+        let start_trim = char_items
+            .iter()
+            .position(|(c, _)| !c.is_whitespace())
+            .unwrap_or(char_items.len());
+        let end_trim = char_items
+            .iter()
+            .rposition(|(c, _)| !c.is_whitespace())
+            .map(|p| p + 1)
+            .unwrap_or(start_trim);
+
+        let trimmed = &char_items[start_trim..end_trim];
+        let text: String = trimmed.iter().map(|(c, _)| *c).collect();
+        let spans: Vec<(f32, f32)> = trimmed.iter().map(|(_, s)| *s).collect();
+        return (text, spans);
+    }
+
+    let line_text: String = pieces
+        .iter()
+        .map(|p| format!("{}{}", p.text, p.sep))
+        .collect::<String>()
+        .trim()
+        .to_string();
+    let spans = subdivide_span_weighted(&line_text, line_min, line_max);
+    (line_text, spans)
 }
 
 #[cfg(test)]
@@ -275,6 +579,7 @@ pub fn is_cjk(c: char) -> bool {
         | '\u{3000}'..='\u{303F}' // CJK Symbols and Punctuation (、, 。, 「, 」, etc.)
         | '\u{FF00}'..='\u{FFEF}' // Halfwidth and Fullwidth Forms
         | '\u{31F0}'..='\u{31FF}' // Katakana Phonetic Extensions
+        | '…' | '‥' | '―' | '—' | '“' | '”' | '‘' | '’'
     )
 }
 
@@ -423,6 +728,14 @@ pub fn merge_row_lines(lines: &[ParsedLine], sticky_distance: f32) -> Vec<Parsed
             let new_p_idx = left_box.paragraph_idx.min(right_box.paragraph_idx);
 
             let new_dir = left_box.writing_direction;
+            let new_char_spans = merge_line_char_spans(
+                left_box,
+                right_box,
+                l_trimmed,
+                r_trimmed,
+                space_count,
+                false,
+            );
 
             merged[idx] = ParsedLine {
                 text: new_text,
@@ -432,6 +745,7 @@ pub fn merge_row_lines(lines: &[ParsedLine], sticky_distance: f32) -> Vec<Parsed
                 height: new_height,
                 paragraph_idx: new_p_idx,
                 writing_direction: new_dir,
+                char_spans: new_char_spans,
             };
         } else {
             merged.push(line);
@@ -439,6 +753,79 @@ pub fn merge_row_lines(lines: &[ParsedLine], sticky_distance: f32) -> Vec<Parsed
     }
 
     merged
+}
+
+fn line_effective_spans(line: &ParsedLine, is_vertical: bool) -> Vec<(f32, f32)> {
+    let char_count = line.text.chars().count();
+    if line.char_spans.len() == char_count {
+        return line.char_spans.clone();
+    }
+    let (min_pos, max_pos) = if is_vertical {
+        (
+            (line.center_y - line.height * 0.5).clamp(0.0, 1.0),
+            (line.center_y + line.height * 0.5).clamp(0.0, 1.0),
+        )
+    } else {
+        (
+            (line.center_x - line.width * 0.5).clamp(0.0, 1.0),
+            (line.center_x + line.width * 0.5).clamp(0.0, 1.0),
+        )
+    };
+    if char_count == 0 {
+        return Vec::new();
+    }
+    let step = (max_pos - min_pos).max(0.0) / char_count as f32;
+    (0..char_count)
+        .map(|i| (min_pos + i as f32 * step, min_pos + (i + 1) as f32 * step))
+        .collect()
+}
+
+fn merge_line_char_spans(
+    first_box: &ParsedLine,
+    second_box: &ParsedLine,
+    first_trimmed: &str,
+    second_trimmed: &str,
+    space_count: usize,
+    is_vertical: bool,
+) -> Vec<(f32, f32)> {
+    let first_spans = line_effective_spans(first_box, is_vertical);
+    let second_spans = line_effective_spans(second_box, is_vertical);
+
+    let first_keep = first_trimmed.chars().count().min(first_spans.len());
+    let second_total = second_box.text.chars().count();
+    let second_keep = second_trimmed.chars().count().min(second_spans.len());
+    let second_skip = second_total.saturating_sub(second_keep).min(second_spans.len());
+
+    let mut out = Vec::with_capacity(first_keep + space_count + second_keep);
+    out.extend_from_slice(&first_spans[..first_keep]);
+
+    if space_count > 0 {
+        let gap_start = out.last().map(|s| s.1).unwrap_or_else(|| {
+            if is_vertical {
+                first_box.center_y + first_box.height * 0.5
+            } else {
+                first_box.center_x + first_box.width * 0.5
+            }
+        });
+        let gap_end = second_spans
+            .get(second_skip)
+            .map(|s| s.0)
+            .unwrap_or_else(|| {
+                if is_vertical {
+                    second_box.center_y - second_box.height * 0.5
+                } else {
+                    second_box.center_x - second_box.width * 0.5
+                }
+            })
+            .max(gap_start);
+        let step = (gap_end - gap_start) / space_count as f32;
+        for i in 0..space_count {
+            out.push((gap_start + i as f32 * step, gap_start + (i + 1) as f32 * step));
+        }
+    }
+
+    out.extend_from_slice(&second_spans[second_skip..]);
+    out
 }
 
 /// Merges vertically adjacent `ParsedLine` fragments on the same vertical column into unified lines,
@@ -558,6 +945,14 @@ pub fn merge_column_lines(lines: &[ParsedLine], sticky_distance: f32) -> Vec<Par
             let new_center_x = (new_min_x + new_max_x) / 2.0;
 
             let new_p_idx = top_box.paragraph_idx.min(bot_box.paragraph_idx);
+            let new_char_spans = merge_line_char_spans(
+                top_box,
+                bot_box,
+                t_trimmed,
+                b_trimmed,
+                space_count,
+                true,
+            );
 
             merged[idx] = ParsedLine {
                 text: new_text,
@@ -567,6 +962,7 @@ pub fn merge_column_lines(lines: &[ParsedLine], sticky_distance: f32) -> Vec<Par
                 height: new_height,
                 paragraph_idx: new_p_idx,
                 writing_direction: WritingDirection::TopToBottom,
+                char_spans: new_char_spans,
             };
         } else {
             merged.push(line);
@@ -1249,6 +1645,7 @@ mod tests {
                 height: 0.20,
                 paragraph_idx: 0,
                 writing_direction: WritingDirection::LeftToRight,
+                ..Default::default()
             },
             ParsedLine {
                 text: "なにかが変わってしまったような気がしていた。".to_string(),
@@ -1258,6 +1655,7 @@ mod tests {
                 height: 0.21,
                 paragraph_idx: 0,
                 writing_direction: WritingDirection::LeftToRight,
+                ..Default::default()
             },
         ];
 
@@ -1288,6 +1686,7 @@ mod tests {
                 height: 0.1,
                 paragraph_idx: 0,
                 writing_direction: WritingDirection::LeftToRight,
+                ..Default::default()
             },
             // Distant line far below (gap = 0.35 - 0.05 = 0.30 >> 0.6 * 0.1 = 0.06)
             ParsedLine {
@@ -1298,6 +1697,7 @@ mod tests {
                 height: 0.03, // also very different height
                 paragraph_idx: 0,
                 writing_direction: WritingDirection::LeftToRight,
+                ..Default::default()
             },
         ];
 
@@ -1321,6 +1721,7 @@ mod tests {
                 height: 0.31736526,
                 paragraph_idx: 0,
                 writing_direction: WritingDirection::LeftToRight,
+                ..Default::default()
             },
             ParsedLine {
                 text: "「その魔性に、我ら柳生一門の多く".to_string(),
@@ -1330,6 +1731,7 @@ mod tests {
                 height: 0.3233533,
                 paragraph_idx: 1,
                 writing_direction: WritingDirection::LeftToRight,
+                ..Default::default()
             },
             ParsedLine {
                 text: "「が殺されたわけですね」".to_string(),
@@ -1339,6 +1741,7 @@ mod tests {
                 height: 0.2994012,
                 paragraph_idx: 2,
                 writing_direction: WritingDirection::LeftToRight,
+                ..Default::default()
             },
         ];
 
@@ -1350,6 +1753,10 @@ mod tests {
         );
         assert_eq!(boxes[0].lines.len(), 2, "Expected 2 visual rows in the box");
         assert_eq!(boxes[0].lines[0].text, "北条   「その魔性に、我ら柳生一門の多く");
+        assert_eq!(
+            boxes[0].lines[0].char_spans.len(),
+            boxes[0].lines[0].text.chars().count()
+        );
         assert_eq!(boxes[0].lines[1].text, "「が殺されたわけですね」");
         assert_eq!(boxes[0].writing_direction, WritingDirection::LeftToRight);
     }
@@ -1366,6 +1773,7 @@ mod tests {
                 height: 0.15,
                 paragraph_idx: 0,
                 writing_direction: WritingDirection::TopToBottom,
+                ..Default::default()
             },
             ParsedLine {
                 text: "特許許可局".to_string(),
@@ -1375,12 +1783,14 @@ mod tests {
                 height: 0.2,
                 paragraph_idx: 0,
                 writing_direction: WritingDirection::TopToBottom,
+                ..Default::default()
             },
         ];
 
         let merged = merge_column_lines(&lines, 0.6);
         assert_eq!(merged.len(), 1, "Expected top and bottom column fragments to merge");
         assert_eq!(merged[0].text, "東京特許許可局");
+        assert_eq!(merged[0].char_spans.len(), merged[0].text.chars().count());
         assert!(merged[0].writing_direction.is_vertical());
         assert!((merged[0].center_x - 0.8).abs() < 1e-4);
     }
@@ -1396,6 +1806,7 @@ mod tests {
             height: 0.6,
             paragraph_idx: 0,
             writing_direction: WritingDirection::TopToBottom,
+            ..Default::default()
         };
         let col2 = ParsedLine {
             text: "彼女を見かけたときから".to_string(),
@@ -1405,6 +1816,7 @@ mod tests {
             height: 0.6,
             paragraph_idx: 0,
             writing_direction: WritingDirection::TopToBottom,
+            ..Default::default()
         };
 
         // Pass in arbitrary order
@@ -1429,6 +1841,7 @@ mod tests {
             height: 0.08,
             paragraph_idx: 0,
             writing_direction: WritingDirection::LeftToRight,
+            ..Default::default()
         };
         let vert_sign = ParsedLine {
             text: "立入禁止".to_string(),
@@ -1438,6 +1851,7 @@ mod tests {
             height: 0.3,
             paragraph_idx: 1,
             writing_direction: WritingDirection::TopToBottom,
+            ..Default::default()
         };
 
         let lines = vec![horiz_dialogue, vert_sign];
@@ -1448,5 +1862,39 @@ mod tests {
         let v_box = boxes.iter().find(|b| b.writing_direction.is_vertical()).unwrap();
         assert_eq!(h_box.text, "これは横書きのセリフです。");
         assert_eq!(v_box.text, "立入禁止");
+    }
+
+    #[test]
+    fn test_normalize_dot_leader_word_matches_grid_width() {
+        // 4 ellipses "…………" spanning 2 kanji cells (char_em = 0.055, span = 0.118) -> "……" (2 cells)
+        assert_eq!(
+            normalize_dot_leader_word("…………", Some(0.118), 0.055),
+            "……"
+        );
+        // 6 ellipses "………………" spanning 2 kanji cells (char_em = 0.015, span = 0.032) -> "……"
+        assert_eq!(
+            normalize_dot_leader_word("………………", Some(0.032), 0.015),
+            "……"
+        );
+        // 7 halfwidth middle dots "･･･････" spanning 2 kanji cells -> "……"
+        assert_eq!(
+            normalize_dot_leader_word("･･･････", Some(0.031), 0.015),
+            "……"
+        );
+        // 6 fullwidth middle dots "・・・・・・" packed into 2 kanji cells -> "……"
+        assert_eq!(
+            normalize_dot_leader_word("・・・・・・", Some(0.110), 0.055),
+            "……"
+        );
+        // Single katakana middle dot separator "・" is untouched
+        assert_eq!(
+            normalize_dot_leader_word("・", Some(0.004), 0.015),
+            "・"
+        );
+        // Normal word is untouched
+        assert_eq!(
+            normalize_dot_leader_word("六盟傑", Some(0.165), 0.055),
+            "六盟傑"
+        );
     }
 }

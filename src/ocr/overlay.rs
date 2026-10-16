@@ -101,6 +101,8 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
                     paint_ocr_text_line(
                         ui.painter(),
                         &ocr_box.text,
+                        &[],
+                        video_rect,
                         min_x,
                         max_x,
                         min_y,
@@ -122,6 +124,8 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
                         paint_ocr_text_line(
                             ui.painter(),
                             &line.text,
+                            &line.char_spans,
+                            video_rect,
                             line_min_x,
                             line_max_x,
                             line_min_y,
@@ -418,6 +422,8 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
 fn paint_ocr_text_line(
     painter: &egui::Painter,
     text: &str,
+    char_spans: &[(f32, f32)],
+    video_rect: egui::Rect,
     min_x: f32,
     max_x: f32,
     min_y: f32,
@@ -432,9 +438,19 @@ fn paint_ocr_text_line(
 
     let line_w = (max_x - min_x).max(1.0);
     let line_h = (max_y - min_y).max(1.0);
+    let use_spans = char_spans.len() == chars.len();
+
+    // Estimate effective character count so narrow punctuation (、, 。, 「, 」) does not
+    // artificially shrink the font size when computing char_w / char_h.
+    let effective_char_count: f32 = chars
+        .iter()
+        .map(|&c| crate::ocr::lens::char_natural_weight(c))
+        .sum::<f32>()
+        .max(1.0);
 
     if is_vertical {
-        let char_h = line_h / chars.len() as f32;
+        let char_h = line_h / effective_char_count;
+        let uniform_char_h = line_h / chars.len() as f32;
         let font_size = (line_w * 0.85).min(char_h * 1.25).clamp(10.0, 72.0);
         let font_id = egui::FontId::new(
             font_size,
@@ -446,7 +462,14 @@ fn paint_ocr_text_line(
             if c.is_whitespace() {
                 continue;
             }
-            let center_y = min_y + (i as f32 + 0.5) * char_h;
+            let center_y = if use_spans {
+                let (s0, s1) = char_spans[i];
+                let y0 = video_rect.min.y + s0 * video_rect.height();
+                let y1 = video_rect.min.y + s1 * video_rect.height();
+                (y0 + y1) * 0.5
+            } else {
+                min_y + (i as f32 + 0.5) * uniform_char_h
+            };
             painter.text(
                 egui::pos2(center_x, center_y),
                 egui::Align2::CENTER_CENTER,
@@ -456,7 +479,8 @@ fn paint_ocr_text_line(
             );
         }
     } else {
-        let char_w = line_w / chars.len() as f32;
+        let char_w = line_w / effective_char_count;
+        let uniform_char_w = line_w / chars.len() as f32;
         let font_size = (line_h * 0.85).min(char_w * 1.25).clamp(10.0, 72.0);
         let font_id = egui::FontId::new(
             font_size,
@@ -468,7 +492,15 @@ fn paint_ocr_text_line(
             if c.is_whitespace() {
                 continue;
             }
-            let center_x = min_x + (i as f32 + 0.5) * char_w;
+            let center_x = if use_spans {
+                let (s0, s1) = char_spans[i];
+                let x0 = video_rect.min.x + s0 * video_rect.width();
+                let x1 = video_rect.min.x + s1 * video_rect.width();
+                let cw = (x1 - x0).max(0.0);
+                (x0 + x1) * 0.5 + punct_ink_offset_x(c, font_size, cw)
+            } else {
+                min_x + (i as f32 + 0.5) * uniform_char_w
+            };
             painter.text(
                 egui::pos2(center_x, center_y),
                 egui::Align2::CENTER_CENTER,
@@ -477,6 +509,34 @@ fn paint_ocr_text_line(
                 text_color,
             );
         }
+    }
+}
+
+/// Compensates for off-center CJK punctuation ink inside fullwidth 1-em font glyphs when
+/// Google Lens returns a tight bounding box around the punctuation mark's visible ink.
+///
+/// In `NotoSansJP-Regular.ttf` (`GothicCJK`):
+/// - Closing/comma/period punctuation (`。`, `、`, `」`, `』`, `）`, `】`) has its visible ink
+///   centered at `~0.20 em` (`-0.30 * font_size` from the `1.0 em` advance center).
+/// - Opening brackets (`「`, `『`, `（`, `【`) have their visible ink centered at `~0.80 em`
+///   (`+0.30 * font_size` from the `1.0 em` advance center).
+///
+/// When `char_width_px` is narrow (`~0.35 * font_size`, wrapping only the ink), we shift the
+/// `CENTER_CENTER` draw anchor by `±0.30 * font_size` so the rendered ink lands inside `[x0, x1]`.
+/// When `char_width_px >= font_size` (a full 1-em cell), the offset smoothly decays to `0.0`.
+fn punct_ink_offset_x(c: char, font_size: f32, char_width_px: f32) -> f32 {
+    if font_size <= 0.0 {
+        return 0.0;
+    }
+    let t = ((font_size - char_width_px) / (0.65 * font_size)).clamp(0.0, 1.0);
+    match c {
+        '。' | '、' | '，' | '．' | '」' | '』' | '）' | '】' | '〉' | '》' | '〕' | '］' | '｝' => {
+            0.30 * font_size * t
+        }
+        '「' | '『' | '（' | '【' | '〈' | '《' | '〔' | '［' | '｛' => {
+            -0.30 * font_size * t
+        }
+        _ => 0.0,
     }
 }
 
@@ -576,6 +636,7 @@ mod tests {
             height: 0.05,
             paragraph_idx: 0,
             writing_direction: WritingDirection::LeftToRight,
+            ..Default::default()
         };
         let line2 = ParsedLine {
             text: "Box 2".to_string(),
@@ -585,6 +646,7 @@ mod tests {
             height: 0.05,
             paragraph_idx: 1,
             writing_direction: WritingDirection::LeftToRight,
+            ..Default::default()
         };
 
         ocr.raw_lines = vec![line1.clone(), line2.clone()];
@@ -631,5 +693,24 @@ mod tests {
         assert!(!state.ocr.hide_overlay);
         state.ocr.hide_overlay = true;
         assert!(state.ocr.hide_overlay);
+    }
+
+    #[test]
+    fn test_punct_ink_offset_compensates_narrow_boxes() {
+        let font_size = 30.0;
+        // Narrow ink box (0.35 * font_size = 10.5px): full compensation (±0.30 * 30 = ±9px)
+        let offset_period = punct_ink_offset_x('。', font_size, 10.5);
+        assert!((offset_period - 9.0).abs() < 0.01);
+
+        let offset_open_quote = punct_ink_offset_x('「', font_size, 10.5);
+        assert!((offset_open_quote + 9.0).abs() < 0.01);
+
+        // Full 1-em cell (30px): zero offset needed
+        assert_eq!(punct_ink_offset_x('。', font_size, 30.0), 0.0);
+        assert_eq!(punct_ink_offset_x('「', font_size, 30.0), 0.0);
+
+        // Regular kanji or ellipsis: always zero offset
+        assert_eq!(punct_ink_offset_x('軍', font_size, 10.5), 0.0);
+        assert_eq!(punct_ink_offset_x('…', font_size, 10.5), 0.0);
     }
 }

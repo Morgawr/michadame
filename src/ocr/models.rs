@@ -42,7 +42,7 @@ pub struct OcrBox {
 }
 
 /// Represents an individual OCR-detected line prior to multi-line block grouping.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct ParsedLine {
     pub text: String,
     pub center_x: f32,
@@ -51,6 +51,10 @@ pub struct ParsedLine {
     pub height: f32,
     pub paragraph_idx: usize,
     pub writing_direction: WritingDirection,
+    /// Optional normalized `[start, end]` intervals along the reading axis (X for horizontal,
+    /// Y for vertical) for each character in `text.chars()`. When empty or when its length does
+    /// not match `text.chars().count()`, callers fall back to uniform subdivision of the line box.
+    pub char_spans: Vec<(f32, f32)>,
 }
 
 /// Encapsulates raw captured screen pixels from OpenGL to be processed by the background OCR worker.
@@ -486,6 +490,7 @@ mod tests {
             height: 0.1,
             paragraph_idx: 0,
             writing_direction: WritingDirection::LeftToRight,
+            char_spans: Vec::new(),
         });
         state.last_copied_index = Some(0);
         state.last_scan_time = Some(Instant::now());
