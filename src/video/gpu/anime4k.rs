@@ -11,8 +11,6 @@ pub enum Anime4kVariant {
 struct CascadeData {
     fbos: [glow::Framebuffer; 12],
     texs: [glow::Texture; 12],
-    cascade_tex: glow::Texture,
-    cascade_fbo: glow::Framebuffer,
     input_size: (u32, u32),
 }
 
@@ -21,14 +19,10 @@ impl CascadeData {
         let texs: [glow::Texture; 12] = std::array::from_fn(|_| gl.create_texture().unwrap());
         let fbos: [glow::Framebuffer; 12] =
             std::array::from_fn(|_| gl.create_framebuffer().unwrap());
-        let cascade_tex = gl.create_texture().unwrap();
-        let cascade_fbo = gl.create_framebuffer().unwrap();
 
         let mut data = Self {
             fbos,
             texs,
-            cascade_tex,
-            cascade_fbo,
             input_size: (0, 0),
         };
         data.setup_textures(gl, width, height, num_passes);
@@ -110,47 +104,6 @@ impl CascadeData {
             );
         }
 
-        gl.bind_texture(glow::TEXTURE_2D, Some(self.cascade_tex));
-        gl.tex_image_2d(
-            glow::TEXTURE_2D,
-            0,
-            glow::RGBA8 as i32,
-            out_w as i32,
-            out_h as i32,
-            0,
-            glow::RGBA,
-            glow::UNSIGNED_BYTE,
-            None,
-        );
-        gl.tex_parameter_i32(
-            glow::TEXTURE_2D,
-            glow::TEXTURE_MIN_FILTER,
-            glow::LINEAR as i32,
-        );
-        gl.tex_parameter_i32(
-            glow::TEXTURE_2D,
-            glow::TEXTURE_MAG_FILTER,
-            glow::LINEAR as i32,
-        );
-        gl.tex_parameter_i32(
-            glow::TEXTURE_2D,
-            glow::TEXTURE_WRAP_S,
-            glow::CLAMP_TO_EDGE as i32,
-        );
-        gl.tex_parameter_i32(
-            glow::TEXTURE_2D,
-            glow::TEXTURE_WRAP_T,
-            glow::CLAMP_TO_EDGE as i32,
-        );
-        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.cascade_fbo));
-        gl.framebuffer_texture_2d(
-            glow::FRAMEBUFFER,
-            glow::COLOR_ATTACHMENT0,
-            glow::TEXTURE_2D,
-            Some(self.cascade_tex),
-            0,
-        );
-
         self.input_size = (width, height);
     }
 
@@ -159,14 +112,18 @@ impl CascadeData {
             gl.delete_texture(self.texs[i]);
             gl.delete_framebuffer(self.fbos[i]);
         }
-        gl.delete_texture(self.cascade_tex);
-        gl.delete_framebuffer(self.cascade_fbo);
     }
 }
 
+struct PassUniforms {
+    input_tex: Option<glow::UniformLocation>,
+    main_tex: Option<glow::UniformLocation>,
+    save_texs: Vec<Option<glow::UniformLocation>>,
+}
+
 pub struct Anime4kUpscaler {
-    variant: Anime4kVariant,
     programs: Vec<glow::Program>,
+    pass_uniforms: Vec<PassUniforms>,
     passes: usize,
 
     // Tracking intermediate sub-layers per recursion cycle independently
@@ -180,6 +137,7 @@ pub struct Anime4kUpscaler {
 impl Anime4kUpscaler {
     pub fn new(gl: &glow::Context, variant: Anime4kVariant) -> Self {
         let mut programs = Vec::new();
+        let mut pass_uniforms = Vec::new();
         unsafe {
             // Pick corresponding sources
             let sources = match variant {
@@ -215,8 +173,60 @@ impl Anime4kUpscaler {
                 ],
             };
 
-            for src in sources {
-                programs.push(super::programs::compile_program(gl, VS_SRC, src));
+            let save_names: &[&str] = match variant {
+                Anime4kVariant::Small => &[
+                    "conv2d_tf",
+                    "conv2d_1_tf",
+                    "conv2d_2_tf",
+                    "conv2d_last_tf",
+                    "MAIN",
+                ],
+                Anime4kVariant::Medium => &[
+                    "conv2d_tf",
+                    "conv2d_1_tf",
+                    "conv2d_2_tf",
+                    "conv2d_3_tf",
+                    "conv2d_4_tf",
+                    "conv2d_5_tf",
+                    "conv2d_6_tf",
+                    "conv2d_last_tf",
+                    "MAIN",
+                ],
+                Anime4kVariant::Large => &[
+                    "conv2d_tf",
+                    "conv2d_tf1",
+                    "conv2d_1_tf",
+                    "conv2d_1_tf1",
+                    "conv2d_2_tf",
+                    "conv2d_2_tf1",
+                    "conv2d_last_tf",
+                    "conv2d_last_tf1",
+                    "conv2d_last_tf2",
+                    "MAIN",
+                ],
+            };
+
+            for (i, src) in sources.into_iter().enumerate() {
+                let prog = super::programs::compile_program(gl, VS_SRC, src);
+                let input_tex = gl.get_uniform_location(prog, "input_tex");
+                let main_tex = gl.get_uniform_location(prog, "MAIN");
+                let save_texs = save_names
+                    .iter()
+                    .enumerate()
+                    .map(|(pass_idx, name)| {
+                        if pass_idx < i {
+                            gl.get_uniform_location(prog, name)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                programs.push(prog);
+                pass_uniforms.push(PassUniforms {
+                    input_tex,
+                    main_tex,
+                    save_texs,
+                });
             }
 
             // Init Vertex Array for Fullscreen Quad
@@ -247,9 +257,9 @@ impl Anime4kUpscaler {
             gl.enable_vertex_attrib_array(1);
 
             Self {
-                variant,
                 passes: programs.len(),
                 programs,
+                pass_uniforms,
                 cascades: Vec::new(),
                 vao,
                 vbo,
@@ -370,60 +380,24 @@ impl Anime4kUpscaler {
                         glow::CLAMP_TO_EDGE as i32,
                     );
 
-                    let loc_input = gl.get_uniform_location(self.programs[i], "input_tex");
-                    if let Some(l) = loc_input {
-                        gl.uniform_1_i32(Some(&l), 1);
+                    let uniforms = &self.pass_uniforms[i];
+                    if let Some(ref l) = uniforms.input_tex {
+                        gl.uniform_1_i32(Some(l), 1);
                     }
 
-                    // Bind all previously calculated textures to their corresponding names!
-                    let save_names: &[&str] = match self.variant {
-                        Anime4kVariant::Small => &[
-                            "conv2d_tf",
-                            "conv2d_1_tf",
-                            "conv2d_2_tf",
-                            "conv2d_last_tf",
-                            "MAIN",
-                        ],
-                        Anime4kVariant::Medium => &[
-                            "conv2d_tf",
-                            "conv2d_1_tf",
-                            "conv2d_2_tf",
-                            "conv2d_3_tf",
-                            "conv2d_4_tf",
-                            "conv2d_5_tf",
-                            "conv2d_6_tf",
-                            "conv2d_last_tf",
-                            "MAIN",
-                        ],
-                        Anime4kVariant::Large => &[
-                            "conv2d_tf",
-                            "conv2d_tf1",
-                            "conv2d_1_tf",
-                            "conv2d_1_tf1",
-                            "conv2d_2_tf",
-                            "conv2d_2_tf1",
-                            "conv2d_last_tf",
-                            "conv2d_last_tf1",
-                            "conv2d_last_tf2",
-                            "MAIN",
-                        ],
-                    };
                     let mut bind_unit = 2; // TEXTURE2
-
-                    for (pass_idx, name) in save_names.iter().enumerate() {
-                        if pass_idx < i {
-                            if let Some(l) = gl.get_uniform_location(self.programs[i], name) {
-                                // The texture for this step was computed on pass iteration `pass_idx`
-                                gl.active_texture(glow::TEXTURE0 + bind_unit);
-                                gl.bind_texture(glow::TEXTURE_2D, Some(cascade.texs[pass_idx]));
-                                gl.uniform_1_i32(Some(&l), bind_unit as i32);
-                                bind_unit += 1;
-                            }
+                    for (pass_idx, loc) in uniforms.save_texs.iter().enumerate() {
+                        if let Some(ref l) = loc {
+                            // The texture for this step was computed on pass iteration `pass_idx`
+                            gl.active_texture(glow::TEXTURE0 + bind_unit);
+                            gl.bind_texture(glow::TEXTURE_2D, Some(cascade.texs[pass_idx]));
+                            gl.uniform_1_i32(Some(l), bind_unit as i32);
+                            bind_unit += 1;
                         }
                     }
 
-                    if let Some(l) = gl.get_uniform_location(self.programs[i], "MAIN") {
-                        gl.uniform_1_i32(Some(&l), 1);
+                    if let Some(ref l) = uniforms.main_tex {
+                        gl.uniform_1_i32(Some(l), 1);
                     }
 
                     gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
@@ -432,28 +406,7 @@ impl Anime4kUpscaler {
                     current_input = Some(cascade.texs[i]);
                 }
 
-                let _run_tex = current_input.unwrap();
-                let run_fbo = cascade.fbos[self.passes - 1];
-
-                // Accumulate to cascade texture
-                gl.bind_texture(glow::TEXTURE_2D, Some(cascade.cascade_tex));
-
-                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(run_fbo));
-                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(cascade.cascade_fbo));
-                gl.blit_framebuffer(
-                    0,
-                    0,
-                    out_w as i32,
-                    out_h as i32,
-                    0,
-                    0,
-                    out_w as i32,
-                    out_h as i32,
-                    glow::COLOR_BUFFER_BIT,
-                    glow::NEAREST,
-                );
-
-                input_tex = cascade.cascade_tex;
+                input_tex = cascade.texs[self.passes - 1];
                 current_w = out_w;
                 current_h = out_h;
                 pass_idx_loop += 1;

@@ -44,28 +44,30 @@ void main() {
     vec3 color = (deconv_sample.a > 0.001) ? deconv_sample.rgb : ToSrgb(background_color);
 
     if (halo_intensity > 0.01) {
-        vec3 light = vec3(0.0);
-        float weights = 0.0;
-        vec2 stepSize = vec2(outputResolution.y / outputResolution.x, 1.0) * 0.009;
-        for (int y = -4; y <= 4; ++y) {
-            for (int x = -4; x <= 4; ++x) {
-                vec2 offset = vec2(float(x), float(y));
-                float weight = exp(-dot(offset, offset) / 8.0);
-                vec2 sample_pos = v_tc + offset * stepSize;
-                vec2 sample_corrected = vec2(sample_pos.x, 1.0 - sample_pos.y);
-                vec2 sample_centered = (sample_corrected - 0.5) / scale + 0.5;
-                if (sample_centered.x >= 0.0 && sample_centered.x <= 1.0 && sample_centered.y >= 0.0 && sample_centered.y <= 1.0) {
-                    vec3 sampleColor = texture(DeconvPass, sample_pos).rgb;
-                    light += sampleColor * sampleColor * weight;
-                    weights += weight;
+        vec2 p = abs(centered_tc - 0.5) * 2.0;
+        float border_dist = max(p.x, p.y);
+        float edge_factor = smoothstep(0.7, 1.0, border_dist);
+        if (edge_factor > 0.0001) {
+            vec3 light = vec3(0.0);
+            float weights = 0.0;
+            vec2 stepSize = vec2(outputResolution.y / outputResolution.x, 1.0) * 0.009;
+            for (int y = -4; y <= 4; ++y) {
+                for (int x = -4; x <= 4; ++x) {
+                    vec2 offset = vec2(float(x), float(y));
+                    float weight = exp(-dot(offset, offset) / 8.0);
+                    vec2 sample_pos = v_tc + offset * stepSize;
+                    vec2 sample_corrected = vec2(sample_pos.x, 1.0 - sample_pos.y);
+                    vec2 sample_centered = (sample_corrected - 0.5) / scale + 0.5;
+                    if (sample_centered.x >= 0.0 && sample_centered.x <= 1.0 && sample_centered.y >= 0.0 && sample_centered.y <= 1.0) {
+                        vec3 sampleColor = texture(DeconvPass, sample_pos).rgb;
+                        light += sampleColor * sampleColor * weight;
+                        weights += weight;
+                    }
                 }
             }
-        }
-        if (weights > 0.0) {
-            vec2 p = abs(centered_tc - 0.5) * 2.0;
-            float border_dist = max(p.x, p.y);
-            float edge_factor = smoothstep(0.7, 1.0, border_dist);
-            color += sqrt(light / weights) * (halo_intensity * 0.6) * edge_factor;
+            if (weights > 0.0) {
+                color += sqrt(light / weights) * (halo_intensity * 0.6) * edge_factor;
+            }
         }
     }
 
