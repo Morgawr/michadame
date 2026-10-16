@@ -89,6 +89,8 @@ impl BankDatabase {
     }
 
     fn from_conn(conn: Connection) -> Result<Self> {
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS mined_words (
                  id               INTEGER PRIMARY KEY AUTOINCREMENT,

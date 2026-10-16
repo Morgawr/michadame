@@ -35,7 +35,7 @@ impl FreqDatabase {
         Ok(Self { conn })
     }
 
-    fn init_schema(conn: &Connection) -> Result<()> {
+    fn init_tables(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS metadata (
@@ -48,10 +48,24 @@ impl FreqDatabase {
                 rank INTEGER NOT NULL,
                 display_value TEXT
             );
+            ",
+        )?;
+        Ok(())
+    }
+
+    fn init_indexes(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "
             CREATE INDEX IF NOT EXISTS idx_freq_term_reading ON frequencies(term, reading);
             CREATE INDEX IF NOT EXISTS idx_freq_term ON frequencies(term);
             ",
         )?;
+        Ok(())
+    }
+
+    fn init_schema(conn: &Connection) -> Result<()> {
+        Self::init_tables(conn)?;
+        Self::init_indexes(conn)?;
         Ok(())
     }
 
@@ -222,7 +236,7 @@ impl FreqDatabase {
             ",
         )?;
 
-        Self::init_schema(&conn)?;
+        Self::init_tables(&conn)?;
 
         // 1. Read index.json
         progress_cb("Reading frequency dictionary metadata...", 0.05);
@@ -321,12 +335,7 @@ impl FreqDatabase {
 
         // 4. Build indexes
         progress_cb("Building frequency indexes...", 0.93);
-        conn.execute_batch(
-            "
-            CREATE INDEX IF NOT EXISTS idx_freq_term_reading ON frequencies(term, reading);
-            CREATE INDEX IF NOT EXISTS idx_freq_term ON frequencies(term);
-            ",
-        )?;
+        Self::init_indexes(&conn)?;
 
         drop(conn);
 

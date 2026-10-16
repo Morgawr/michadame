@@ -99,7 +99,7 @@ impl DictDatabase {
         Ok(())
     }
 
-    fn init_schema(conn: &Connection) -> Result<()> {
+    fn init_tables(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS metadata (
@@ -116,10 +116,24 @@ impl DictDatabase {
                 sequence INT,
                 term_tags TEXT
             );
+            ",
+        )?;
+        Ok(())
+    }
+
+    fn init_indexes(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "
             CREATE INDEX IF NOT EXISTS idx_terms_term ON terms(term);
             CREATE INDEX IF NOT EXISTS idx_terms_reading ON terms(reading);
             ",
         )?;
+        Ok(())
+    }
+
+    fn init_schema(conn: &Connection) -> Result<()> {
+        Self::init_tables(conn)?;
+        Self::init_indexes(conn)?;
         Ok(())
     }
 
@@ -268,7 +282,7 @@ impl DictDatabase {
             ",
         )?;
 
-        Self::init_schema(&conn)?;
+        Self::init_tables(&conn)?;
 
         // 1. Read index.json
         progress_cb("Reading dictionary metadata...", 0.05);
@@ -388,12 +402,7 @@ impl DictDatabase {
 
         // 4. Build indexes
         progress_cb("Building lookup indexes...", 0.93);
-        conn.execute_batch(
-            "
-            CREATE INDEX IF NOT EXISTS idx_terms_term ON terms(term);
-            CREATE INDEX IF NOT EXISTS idx_terms_reading ON terms(reading);
-            ",
-        )?;
+        Self::init_indexes(&conn)?;
 
         // Close connection cleanly
         drop(conn);
