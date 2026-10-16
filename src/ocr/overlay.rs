@@ -154,9 +154,21 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
             let removed = state.ocr.boxes.remove(dismiss_idx);
             state.ocr.raw_lines.retain(|l| {
                 !removed.lines.iter().any(|bl| {
-                    bl.text == l.text
+                    let exact_match = bl.text == l.text
                         && (bl.center_x - l.center_x).abs() < 1e-4
-                        && (bl.center_y - l.center_y).abs() < 1e-4
+                        && (bl.center_y - l.center_y).abs() < 1e-4;
+                    let min_x = bl.center_x - bl.width * 0.5;
+                    let max_x = bl.center_x + bl.width * 0.5;
+                    let min_y = bl.center_y - bl.height * 0.5;
+                    let max_y = bl.center_y + bl.height * 0.5;
+                    let trimmed = l.text.trim();
+                    let contained_match = !trimmed.is_empty()
+                        && l.center_x >= min_x - 1e-3
+                        && l.center_x <= max_x + 1e-3
+                        && l.center_y >= min_y - 1e-3
+                        && l.center_y <= max_y + 1e-3
+                        && bl.text.contains(trimmed);
+                    exact_match || contained_match
                 })
             });
             if state.ocr.last_copied_index == Some(dismiss_idx) {
