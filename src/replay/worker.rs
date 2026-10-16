@@ -769,9 +769,14 @@ fn next_audio_block(
     backlogged: bool,
 ) -> Option<AudioBlock> {
     let block = pending.take().or_else(|| audio.try_recv().ok())?;
+    let now = now_us();
     // Keep A/V history near the same media time while video catches up;
     // newer audio must not evict queued older video from short histories.
-    if backlogged && block.at > video_at + 50_000 {
+    // Also hold back near-future audio blocks (such as multi-chunk alert chimes
+    // submitted when ALSA capture is idle) until wall-clock time reaches `block.at`.
+    if (block.at > now && block.at <= now + 10_000_000)
+        || (backlogged && block.at > video_at + 50_000)
+    {
         *pending = Some(block);
         None
     } else {
