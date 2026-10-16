@@ -4,6 +4,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+fn set_private_file_permissions(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+}
+
 pub fn quarantine_corrupted_config(path: &Path) -> Option<PathBuf> {
     if path.exists() && std::fs::metadata(path).map(|m| m.len() > 0).unwrap_or(false) {
         let parent = path.parent()?;
@@ -15,6 +23,7 @@ pub fn quarantine_corrupted_config(path: &Path) -> Option<PathBuf> {
             .unwrap_or(0);
         let quarantine_path = backups_dir.join(format!("corrupted-{}.toml", now_secs));
         if std::fs::copy(path, &quarantine_path).is_ok() {
+            set_private_file_permissions(&quarantine_path);
             tracing::warn!("Quarantined unreadable config to {:?}", quarantine_path);
             return Some(quarantine_path);
         }
@@ -33,7 +42,9 @@ pub fn create_rotating_backup(config_path: &Path) {
 
     // 1. Direct .bak file alongside config
     let bak_path = config_path.with_extension("toml.bak");
-    let _ = std::fs::copy(config_path, &bak_path);
+    if std::fs::copy(config_path, &bak_path).is_ok() {
+        set_private_file_permissions(&bak_path);
+    }
 
     // 2. Timestamped rotating backup in backups/ (rate-limited to at most once every 60 seconds)
     if let Some(parent) = config_path.parent() {
@@ -59,7 +70,9 @@ pub fn create_rotating_backup(config_path: &Path) {
 
             if !recent_backup_exists {
                 let backup_file = backups_dir.join(format!("config-{}.toml", now_secs));
-                let _ = std::fs::copy(config_path, &backup_file);
+                if std::fs::copy(config_path, &backup_file).is_ok() {
+                    set_private_file_permissions(&backup_file);
+                }
 
                 prune_old_backups(&backups_dir, 20);
             }
@@ -108,6 +121,7 @@ pub fn store_config_atomic_at(path: &Path, cfg: &MichadameConfig) -> Result<(), 
     ));
 
     confy::store_path(&tmp_path, cfg)?;
+    set_private_file_permissions(&tmp_path);
 
     if let Err(e) = std::fs::rename(&tmp_path, path) {
         let _ = std::fs::remove_file(&tmp_path);
