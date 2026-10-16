@@ -242,6 +242,11 @@ impl LiveVideoEncoder {
                     check(ffi::av_hwframe_ctx_init(frames.0))?;
                     (*enc.as_mut_ptr()).hw_frames_ctx = ffi::av_buffer_ref(frames.0);
                     ensure!(!(*enc.as_ptr()).hw_frames_ctx.is_null(), "Cannot retain VAAPI pool");
+                    (*enc.as_mut_ptr()).color_range = ffi::AVColorRange::AVCOL_RANGE_MPEG;
+                    (*enc.as_mut_ptr()).colorspace = ffi::AVColorSpace::AVCOL_SPC_BT709;
+                    (*enc.as_mut_ptr()).color_primaries = ffi::AVColorPrimaries::AVCOL_PRI_BT709;
+                    (*enc.as_mut_ptr()).color_trc =
+                        ffi::AVColorTransferCharacteristic::AVCOL_TRC_IEC61966_2_1;
                 }
 
                 let mut options = ff::Dictionary::new();
@@ -361,6 +366,10 @@ unsafe fn convert_rgba_to_frame(
     width: u32,
     height: u32,
 ) -> Result<()> {
+    ensure!(
+        width > 0 && height > 0 && rgba.len() == width as usize * height as usize * 4,
+        "Invalid RGBA surface"
+    );
     unsafe extern "C" fn borrowed_buffer(_: *mut libc::c_void, _: *mut u8) {}
     let mut input = frame::Video::empty();
     input.set_format(format::Pixel::RGBA);
@@ -382,13 +391,18 @@ unsafe fn convert_rgba_to_frame(
         .cast_mut();
     (*source).linesize[0] = -(width as i32 * 4);
 
-    let result = ffi::sws_scale_frame(sws, dst.as_mut_ptr(), source);
+    let mut output = frame::Video::empty();
+    check(ffi::av_frame_ref(output.as_mut_ptr(), dst.as_ptr()))?;
+    output.set_width(dst.width());
+    output.set_height(dst.height());
+    let result = ffi::sws_scale_frame(sws, output.as_mut_ptr(), source);
     ffi::sws_frame_end(sws);
     check(result).context("SWS RGB scaling failed")
 }
 
 struct LiveAudioEncoder {
     encoder: encoder::Audio,
+    frame: frame::Audio,
 }
 
 impl LiveAudioEncoder {
@@ -404,7 +418,16 @@ impl LiveAudioEncoder {
         enc.set_bit_rate(bitrate_kbps as usize * 1000);
         enc.set_flags(codec::Flags::GLOBAL_HEADER);
         let opened = enc.open()?;
-        Ok(Self { encoder: opened })
+        let mut frame = frame::Audio::new(
+            format::Sample::F32(format::sample::Type::Planar),
+            1024,
+            ff::ChannelLayout::STEREO,
+        );
+        frame.set_rate(48000);
+        Ok(Self {
+            encoder: opened,
+            frame,
+        })
     }
 
     fn parameters(&self) -> codec::Parameters {
@@ -413,19 +436,17 @@ impl LiveAudioEncoder {
 
     fn encode(&mut self, samples: &[[f32; 2]], pts: i64) -> Result<Vec<Packet>> {
         ensure!(samples.len() == 1024, "Expected 1024 audio samples");
-        let mut frame = frame::Audio::new(
-            format::Sample::F32(format::sample::Type::Planar),
-            1024,
-            ff::ChannelLayout::STEREO,
-        );
-        frame.set_rate(48000);
-        frame.set_pts(Some(pts));
+        unsafe {
+            check(ffi::av_frame_make_writable(self.frame.as_mut_ptr()))?;
+        }
+        self.frame.set_rate(48000);
+        self.frame.set_pts(Some(pts));
         for channel in 0..2 {
-            for (out, input) in frame.plane_mut::<f32>(channel).iter_mut().zip(samples.iter()) {
+            for (out, input) in self.frame.plane_mut::<f32>(channel).iter_mut().zip(samples.iter()) {
                 *out = input[channel];
             }
         }
-        self.encoder.send_frame(&frame)?;
+        self.encoder.send_frame(&self.frame)?;
         let mut packets = Vec::new();
         loop {
             let mut packet = Packet::empty();

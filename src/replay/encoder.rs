@@ -246,6 +246,7 @@ impl VideoEncoder {
 
 pub struct AudioEncoder {
     encoder: encoder::Audio,
+    frame: frame::Audio,
 }
 impl AudioEncoder {
     pub fn new() -> Result<Self> {
@@ -262,26 +263,30 @@ impl AudioEncoder {
         encoder.set_flags(codec::Flags::GLOBAL_HEADER);
         let encoder = encoder.open()?;
         ensure!(encoder.frame_size() == super::config::AUDIO_FRAME_SIZE as u32, "Unexpected AAC frame size");
-        Ok(Self { encoder })
-    }
-    pub fn parameters(&self) -> codec::Parameters {
-        codec::Parameters::from(&self.encoder)
-    }
-    pub fn encode(&mut self, samples: &[[f32; 2]], pts: i64) -> Result<Vec<Encoded>> {
-        ensure!(samples.len() == super::config::AUDIO_FRAME_SIZE, "Expected 1024 audio samples");
         let mut frame = frame::Audio::new(
             format::Sample::F32(format::sample::Type::Planar),
             super::config::AUDIO_FRAME_SIZE,
             ff::ChannelLayout::STEREO,
         );
         frame.set_rate(48000);
-        frame.set_pts(Some(pts));
+        Ok(Self { encoder, frame })
+    }
+    pub fn parameters(&self) -> codec::Parameters {
+        codec::Parameters::from(&self.encoder)
+    }
+    pub fn encode(&mut self, samples: &[[f32; 2]], pts: i64) -> Result<Vec<Encoded>> {
+        ensure!(samples.len() == super::config::AUDIO_FRAME_SIZE, "Expected 1024 audio samples");
+        unsafe {
+            check(ffi::av_frame_make_writable(self.frame.as_mut_ptr()))?;
+        }
+        self.frame.set_rate(48000);
+        self.frame.set_pts(Some(pts));
         for channel in 0..2 {
-            for (out, input) in frame.plane_mut::<f32>(channel).iter_mut().zip(samples.iter()) {
+            for (out, input) in self.frame.plane_mut::<f32>(channel).iter_mut().zip(samples.iter()) {
                 *out = input[channel];
             }
         }
-        self.encoder.send_frame(&frame)?;
+        self.encoder.send_frame(&self.frame)?;
         let mut packets = Vec::new();
         loop {
             let mut packet = Packet::empty();
