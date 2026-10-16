@@ -255,6 +255,7 @@ pub enum WebcamResizeCorner {
 pub struct WebcamState {
     pub config: crate::config::WebcamConfig,
     pub supported_formats: Vec<VideoFormat>,
+    pub formats_probed_for_device: Option<String>,
     pub selected_format_index: usize,
     pub active_stream: Option<crate::devices::webcam::WebcamStreamHandle>,
     pub texture: Option<egui::TextureHandle>,
@@ -274,6 +275,7 @@ impl Default for WebcamState {
         Self {
             config: crate::config::WebcamConfig::default(),
             supported_formats: Vec::new(),
+            formats_probed_for_device: None,
             selected_format_index: 0,
             active_stream: None,
             texture: None,

@@ -558,6 +558,7 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     }
                     if dev_changed {
                         state.webcam.supported_formats.clear();
+                        state.webcam.formats_probed_for_device = state.webcam.config.device.clone();
                         state.webcam.selected_format_index = 0;
                         if let Some(dev) = &state.webcam.config.device {
                             match crate::devices::video::find_video_formats(dev) {
@@ -588,19 +589,22 @@ pub fn draw_device_selectors(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 });
         });
 
-        // Ensure formats are queried if device is selected but formats are empty
+        // Ensure formats are queried once if device is selected but formats are empty
         if state.webcam.supported_formats.is_empty() {
-            if let Some(dev) = &state.webcam.config.device {
-                if let Ok(formats) = crate::devices::video::find_video_formats(dev) {
-                    state.webcam.supported_formats = formats;
-                    if let Some(saved_fourcc) = &state.webcam.config.format_fourcc {
-                        if let Some(idx) = state
-                            .webcam
-                            .supported_formats
-                            .iter()
-                            .position(|f| f.fourcc == *saved_fourcc)
-                        {
-                            state.webcam.selected_format_index = idx;
+            if let Some(dev) = state.webcam.config.device.clone() {
+                if state.webcam.formats_probed_for_device.as_deref() != Some(dev.as_str()) {
+                    state.webcam.formats_probed_for_device = Some(dev.clone());
+                    if let Ok(formats) = crate::devices::video::find_video_formats(&dev) {
+                        state.webcam.supported_formats = formats;
+                        if let Some(saved_fourcc) = &state.webcam.config.format_fourcc {
+                            if let Some(idx) = state
+                                .webcam
+                                .supported_formats
+                                .iter()
+                                .position(|f| f.fourcc == *saved_fourcc)
+                            {
+                                state.webcam.selected_format_index = idx;
+                            }
                         }
                     }
                 }

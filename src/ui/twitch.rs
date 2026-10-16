@@ -848,9 +848,23 @@ fn draw_broadcast_group(ui: &mut egui::Ui, state: &mut AppState, save_now: &mut 
                 });
 
                 if !state.twitch.config.preroll_video_path.is_empty() {
-                    let p = std::path::Path::new(&state.twitch.config.preroll_video_path);
+                    let path_str = state.twitch.config.preroll_video_path.clone();
+                    let p = std::path::Path::new(&path_str);
                     if p.exists() {
-                        if let Ok(info) = crate::video::player::probe_video_file(p) {
+                        let cache_id = egui::Id::new("preroll_video_probe_cache");
+                        let cached: Option<(String, Option<crate::video::player::VideoFileInfo>)> =
+                            ui.ctx().data_mut(|d| d.get_temp(cache_id));
+                        let info_opt = match cached {
+                            Some((cached_path, info)) if cached_path == path_str => info,
+                            _ => {
+                                let probed = crate::video::player::probe_video_file(p).ok();
+                                ui.ctx().data_mut(|d| {
+                                    d.insert_temp(cache_id, (path_str, probed.clone()))
+                                });
+                                probed
+                            }
+                        };
+                        if let Some(info) = info_opt {
                             let dur_str = crate::video::player::format_time(info.duration_secs);
                             ui.horizontal(|ui| {
                                 ui.add_space(16.0);
