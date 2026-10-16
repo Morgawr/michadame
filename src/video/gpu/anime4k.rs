@@ -18,12 +18,9 @@ struct CascadeData {
 
 impl CascadeData {
     unsafe fn new(gl: &glow::Context, width: u32, height: u32, num_passes: usize) -> Self {
-        let mut texs: [glow::Texture; 12] = [gl.create_texture().unwrap(); 12];
-        let mut fbos: [glow::Framebuffer; 12] = [gl.create_framebuffer().unwrap(); 12];
-        for i in 0..12 {
-            texs[i] = gl.create_texture().unwrap();
-            fbos[i] = gl.create_framebuffer().unwrap();
-        }
+        let texs: [glow::Texture; 12] = std::array::from_fn(|_| gl.create_texture().unwrap());
+        let fbos: [glow::Framebuffer; 12] =
+            std::array::from_fn(|_| gl.create_framebuffer().unwrap());
         let cascade_tex = gl.create_texture().unwrap();
         let cascade_fbo = gl.create_framebuffer().unwrap();
 
