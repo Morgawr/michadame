@@ -71,6 +71,13 @@ impl MineRequest {
 
 /// Recursively removes Jitendex example-sentence nodes from structured glossary content.
 pub fn strip_example_sentences(value: &mut serde_json::Value) {
+    strip_example_sentences_depth(value, 0);
+}
+
+fn strip_example_sentences_depth(value: &mut serde_json::Value, depth: usize) {
+    if depth > 64 {
+        return;
+    }
     fn is_example(v: &serde_json::Value) -> bool {
         v.get("data")
             .and_then(|d| d.get("content"))
@@ -80,14 +87,16 @@ pub fn strip_example_sentences(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Array(items) => {
             items.retain(|item| !is_example(item));
-            items.iter_mut().for_each(strip_example_sentences);
+            for item in items.iter_mut() {
+                strip_example_sentences_depth(item, depth + 1);
+            }
         }
         serde_json::Value::Object(map) => {
             if let Some(content) = map.get_mut("content") {
                 if is_example(content) {
                     *content = serde_json::Value::Array(Vec::new());
                 } else {
-                    strip_example_sentences(content);
+                    strip_example_sentences_depth(content, depth + 1);
                 }
             }
         }

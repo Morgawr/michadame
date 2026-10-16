@@ -23,9 +23,15 @@ pub fn with_dict_scale<R>(scale: f32, f: impl FnOnce() -> R) -> R {
     result
 }
 
+const MAX_JSON_WALK_DEPTH: usize = 64;
+
 #[inline]
 pub fn dict_font(size: f32) -> FontId {
-    FontId::new(size * dict_scale(), egui::FontFamily::Name(FONT_DICT_FAMILY.into()))
+    static DICT_FAMILY: std::sync::OnceLock<egui::FontFamily> = std::sync::OnceLock::new();
+    let family = DICT_FAMILY
+        .get_or_init(|| egui::FontFamily::Name(FONT_DICT_FAMILY.into()))
+        .clone();
+    FontId::new(size * dict_scale(), family)
 }
 
 /// Dark-theme palette constants
@@ -520,9 +526,16 @@ pub fn render_pill_badge(
 
 /// Top-level dispatcher for Yomitan / Jitendex structured content.
 pub fn render_structured_entry(ui: &mut egui::Ui, val: &serde_json::Value) {
+    render_structured_entry_inner(ui, val, 0);
+}
+
+fn render_structured_entry_inner(ui: &mut egui::Ui, val: &serde_json::Value, depth: usize) {
+    if depth > MAX_JSON_WALK_DEPTH {
+        return;
+    }
     if let serde_json::Value::Array(arr) = val {
         for item in arr {
-            render_structured_entry(ui, item);
+            render_structured_entry_inner(ui, item, depth + 1);
         }
         return;
     }
@@ -537,7 +550,7 @@ pub fn render_structured_entry(ui: &mut egui::Ui, val: &serde_json::Value) {
     let content_type = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
     if content_type == "structured-content" {
         if let Some(content) = obj.get("content") {
-            render_structured_entry(ui, content);
+            render_structured_entry_inner(ui, content, depth + 1);
         }
         return;
     }
@@ -564,7 +577,7 @@ pub fn render_structured_entry(ui: &mut egui::Ui, val: &serde_json::Value) {
             render_attribution(ui, val);
         }
         _ => {
-            render_generic_node(ui, val, 0);
+            render_generic_node(ui, val, depth + 1);
         }
     }
 }
@@ -816,13 +829,16 @@ fn render_attribution(ui: &mut egui::Ui, attr_val: &serde_json::Value) {
 
 /// Generic fallback renderer for arbitrary HTML/structured nodes.
 fn render_generic_node(ui: &mut egui::Ui, node: &serde_json::Value, depth: usize) {
+    if depth > MAX_JSON_WALK_DEPTH {
+        return;
+    }
     match node {
         serde_json::Value::String(s) => {
             render_plain_html_text(ui, s);
         }
         serde_json::Value::Array(arr) => {
             for child in arr {
-                render_generic_node(ui, child, depth);
+                render_generic_node(ui, child, depth + 1);
             }
         }
         serde_json::Value::Object(map) => {
@@ -874,7 +890,7 @@ fn render_generic_node(ui: &mut egui::Ui, node: &serde_json::Value, depth: usize
                             ui.horizontal_wrapped(|ui| render_inline_content(ui, content));
                         }
                     } else {
-                        render_generic_node(ui, content, depth);
+                        render_generic_node(ui, content, depth + 1);
                     }
                 }
             }
@@ -927,18 +943,21 @@ pub fn push_plain_text_segments(s: &str, out: &mut Vec<RubySegment>) {
 
 pub fn extract_ruby_segments(node: &serde_json::Value) -> Vec<RubySegment> {
     let mut segments = Vec::new();
-    collect_ruby_segments_recursive(node, &mut segments);
+    collect_ruby_segments_recursive(node, &mut segments, 0);
     segments
 }
 
-fn collect_ruby_segments_recursive(val: &serde_json::Value, out: &mut Vec<RubySegment>) {
+fn collect_ruby_segments_recursive(val: &serde_json::Value, out: &mut Vec<RubySegment>, depth: usize) {
+    if depth > MAX_JSON_WALK_DEPTH {
+        return;
+    }
     match val {
         serde_json::Value::String(s) => {
             push_plain_text_segments(s, out);
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
-                collect_ruby_segments_recursive(item, out);
+                collect_ruby_segments_recursive(item, out, depth + 1);
             }
         }
         serde_json::Value::Object(map) => {
@@ -953,7 +972,7 @@ fn collect_ruby_segments_recursive(val: &serde_json::Value, out: &mut Vec<RubySe
                     }
                 }
             } else if let Some(content) = map.get("content") {
-                collect_ruby_segments_recursive(content, out);
+                collect_ruby_segments_recursive(content, out, depth + 1);
             }
         }
         _ => {}
@@ -1130,12 +1149,22 @@ fn is_inline_tag(tag: &str) -> bool {
 
 /// True if `node` consists only of text and inline elements (no blocks like div/ul/li/br).
 fn is_inline_only(node: &serde_json::Value) -> bool {
+    is_inline_only_depth(node, 0)
+}
+
+fn is_inline_only_depth(node: &serde_json::Value, depth: usize) -> bool {
+    if depth > MAX_JSON_WALK_DEPTH {
+        return false;
+    }
     match node {
         serde_json::Value::String(_) => true,
-        serde_json::Value::Array(arr) => arr.iter().all(is_inline_only),
+        serde_json::Value::Array(arr) => arr.iter().all(|c| is_inline_only_depth(c, depth + 1)),
         serde_json::Value::Object(map) => {
             let tag = map.get("tag").and_then(|v| v.as_str()).unwrap_or("");
-            is_inline_tag(tag) && map.get("content").map_or(true, is_inline_only)
+            is_inline_tag(tag)
+                && map
+                    .get("content")
+                    .map_or(true, |c| is_inline_only_depth(c, depth + 1))
         }
         _ => true,
     }
@@ -1143,11 +1172,20 @@ fn is_inline_only(node: &serde_json::Value) -> bool {
 
 /// True if `node` contains a `<ruby>` element anywhere.
 fn contains_ruby(node: &serde_json::Value) -> bool {
+    contains_ruby_depth(node, 0)
+}
+
+fn contains_ruby_depth(node: &serde_json::Value, depth: usize) -> bool {
+    if depth > MAX_JSON_WALK_DEPTH {
+        return false;
+    }
     match node {
-        serde_json::Value::Array(arr) => arr.iter().any(contains_ruby),
+        serde_json::Value::Array(arr) => arr.iter().any(|c| contains_ruby_depth(c, depth + 1)),
         serde_json::Value::Object(map) => {
             map.get("tag").and_then(|v| v.as_str()) == Some("ruby")
-                || map.get("content").is_some_and(contains_ruby)
+                || map
+                    .get("content")
+                    .is_some_and(|c| contains_ruby_depth(c, depth + 1))
         }
         _ => false,
     }
@@ -1167,14 +1205,22 @@ fn normalize_glyphs(segments: &mut [RubySegment]) {
 /// Renders inline content (handling ruby, bold, plain text) using LayoutJob.
 pub fn render_inline_content(ui: &mut egui::Ui, node: &serde_json::Value) {
     let mut job = LayoutJob::default();
-    build_layout_job_from_node(node, &mut job, false);
+    build_layout_job_from_node(node, &mut job, false, 0);
     if !job.text.is_empty() {
         ui.label(job);
     }
 }
 
 /// Appends nodes to an egui `LayoutJob`.
-fn build_layout_job_from_node(node: &serde_json::Value, job: &mut LayoutJob, is_bold: bool) {
+fn build_layout_job_from_node(
+    node: &serde_json::Value,
+    job: &mut LayoutJob,
+    is_bold: bool,
+    depth: usize,
+) {
+    if depth > MAX_JSON_WALK_DEPTH {
+        return;
+    }
     match node {
         serde_json::Value::String(s) => {
             let color = if is_bold { COLOR_HEADWORD } else { COLOR_DEFINITION };
@@ -1190,7 +1236,7 @@ fn build_layout_job_from_node(node: &serde_json::Value, job: &mut LayoutJob, is_
         }
         serde_json::Value::Array(arr) => {
             for child in arr {
-                build_layout_job_from_node(child, job, is_bold);
+                build_layout_job_from_node(child, job, is_bold, depth + 1);
             }
         }
         serde_json::Value::Object(map) => {
@@ -1198,7 +1244,7 @@ fn build_layout_job_from_node(node: &serde_json::Value, job: &mut LayoutJob, is_
             match tag {
                 "b" | "strong" => {
                     if let Some(content) = map.get("content") {
-                        build_layout_job_from_node(content, job, true);
+                        build_layout_job_from_node(content, job, true, depth + 1);
                     }
                 }
                 "ruby" => {
@@ -1226,7 +1272,7 @@ fn build_layout_job_from_node(node: &serde_json::Value, job: &mut LayoutJob, is_
                 }
                 _ => {
                     if let Some(content) = map.get("content") {
-                        build_layout_job_from_node(content, job, is_bold);
+                        build_layout_job_from_node(content, job, is_bold, depth + 1);
                     }
                 }
             }
@@ -1296,6 +1342,13 @@ pub fn extract_ruby_components(map: &serde_json::Map<String, serde_json::Value>)
 
 /// Recursively collects all definition texts from `<li>` elements.
 fn collect_definitions(node: &serde_json::Value, out: &mut Vec<String>) {
+    collect_definitions_depth(node, out, 0);
+}
+
+fn collect_definitions_depth(node: &serde_json::Value, out: &mut Vec<String>, depth: usize) {
+    if depth > MAX_JSON_WALK_DEPTH {
+        return;
+    }
     match node {
         serde_json::Value::Object(map) => {
             let tag = map.get("tag").and_then(|v| v.as_str()).unwrap_or("");
@@ -1305,12 +1358,12 @@ fn collect_definitions(node: &serde_json::Value, out: &mut Vec<String>) {
                     out.push(text);
                 }
             } else if let Some(content) = map.get("content") {
-                collect_definitions(content, out);
+                collect_definitions_depth(content, out, depth + 1);
             }
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
-                collect_definitions(item, out);
+                collect_definitions_depth(item, out, depth + 1);
             }
         }
         _ => {}
@@ -1320,11 +1373,14 @@ fn collect_definitions(node: &serde_json::Value, out: &mut Vec<String>) {
 /// Extracts English sentence text from `example-sentence-b`, omitting attribution footnotes.
 fn extract_en_sentence_text(node: &serde_json::Value) -> String {
     let mut parts = Vec::new();
-    collect_en_text_recursive(node, &mut parts);
+    collect_en_text_recursive(node, &mut parts, 0);
     parts.join(" ").trim().to_string()
 }
 
-fn collect_en_text_recursive(val: &serde_json::Value, out: &mut Vec<String>) {
+fn collect_en_text_recursive(val: &serde_json::Value, out: &mut Vec<String>, depth: usize) {
+    if depth > MAX_JSON_WALK_DEPTH {
+        return;
+    }
     match val {
         serde_json::Value::String(s) => {
             let trimmed = s.trim();
@@ -1334,7 +1390,7 @@ fn collect_en_text_recursive(val: &serde_json::Value, out: &mut Vec<String>) {
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
-                collect_en_text_recursive(item, out);
+                collect_en_text_recursive(item, out, depth + 1);
             }
         }
         serde_json::Value::Object(map) => {
@@ -1347,7 +1403,7 @@ fn collect_en_text_recursive(val: &serde_json::Value, out: &mut Vec<String>) {
                 return;
             }
             if let Some(content) = map.get("content") {
-                collect_en_text_recursive(content, out);
+                collect_en_text_recursive(content, out, depth + 1);
             }
         }
         _ => {}
@@ -1357,11 +1413,14 @@ fn collect_en_text_recursive(val: &serde_json::Value, out: &mut Vec<String>) {
 /// Extracts plain text from a sense, skipping extra-info blocks.
 fn extract_plain_text_excluding_extras(val: &serde_json::Value) -> String {
     let mut out = String::new();
-    collect_text_skip_extras(val, &mut out);
+    collect_text_skip_extras(val, &mut out, 0);
     out.trim().to_string()
 }
 
-fn collect_text_skip_extras(val: &serde_json::Value, out: &mut String) {
+fn collect_text_skip_extras(val: &serde_json::Value, out: &mut String, depth: usize) {
+    if depth > MAX_JSON_WALK_DEPTH {
+        return;
+    }
     match val {
         serde_json::Value::String(s) => {
             if !out.is_empty() && !out.ends_with(' ') && !s.starts_with(' ') {
@@ -1371,7 +1430,7 @@ fn collect_text_skip_extras(val: &serde_json::Value, out: &mut String) {
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
-                collect_text_skip_extras(item, out);
+                collect_text_skip_extras(item, out, depth + 1);
             }
         }
         serde_json::Value::Object(map) => {
@@ -1384,7 +1443,7 @@ fn collect_text_skip_extras(val: &serde_json::Value, out: &mut String) {
                 return;
             }
             if let Some(content) = map.get("content") {
-                collect_text_skip_extras(content, out);
+                collect_text_skip_extras(content, out, depth + 1);
             }
         }
         _ => {}
@@ -1393,8 +1452,11 @@ fn collect_text_skip_extras(val: &serde_json::Value, out: &mut String) {
 
 /// Collects all tags (POS, field, dialect, misc) in a node.
 fn collect_tags(node: &serde_json::Value, out: &mut Vec<String>) {
-    let mut stack = vec![node];
-    while let Some(current) = stack.pop() {
+    let mut stack = vec![(node, 0usize)];
+    while let Some((current, depth)) = stack.pop() {
+        if depth > MAX_JSON_WALK_DEPTH {
+            continue;
+        }
         if let serde_json::Value::Object(map) = current {
             let dc = map
                 .get("data")
@@ -1410,10 +1472,10 @@ fn collect_tags(node: &serde_json::Value, out: &mut Vec<String>) {
                 match content {
                     serde_json::Value::Array(arr) => {
                         for c in arr.iter().rev() {
-                            stack.push(c);
+                            stack.push((c, depth + 1));
                         }
                     }
-                    serde_json::Value::Object(_) => stack.push(content),
+                    serde_json::Value::Object(_) => stack.push((content, depth + 1)),
                     _ => {}
                 }
             }
@@ -1423,6 +1485,17 @@ fn collect_tags(node: &serde_json::Value, out: &mut Vec<String>) {
 
 /// Recursively finds the first node where `data.content == target`.
 fn find_node_by_data_content<'a>(val: &'a serde_json::Value, target: &str) -> Option<&'a serde_json::Value> {
+    find_node_by_data_content_depth(val, target, 0)
+}
+
+fn find_node_by_data_content_depth<'a>(
+    val: &'a serde_json::Value,
+    target: &str,
+    depth: usize,
+) -> Option<&'a serde_json::Value> {
+    if depth > MAX_JSON_WALK_DEPTH {
+        return None;
+    }
     match val {
         serde_json::Value::Object(map) => {
             let dc = map
@@ -1434,7 +1507,7 @@ fn find_node_by_data_content<'a>(val: &'a serde_json::Value, target: &str) -> Op
                 return Some(val);
             }
             if let Some(content) = map.get("content") {
-                if let Some(found) = find_node_by_data_content(content, target) {
+                if let Some(found) = find_node_by_data_content_depth(content, target, depth + 1) {
                     return Some(found);
                 }
             }
@@ -1442,7 +1515,7 @@ fn find_node_by_data_content<'a>(val: &'a serde_json::Value, target: &str) -> Op
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
-                if let Some(found) = find_node_by_data_content(item, target) {
+                if let Some(found) = find_node_by_data_content_depth(item, target, depth + 1) {
                     return Some(found);
                 }
             }
@@ -1458,6 +1531,18 @@ fn collect_nodes_by_data_content<'a>(
     target: &str,
     out: &mut Vec<&'a serde_json::Value>,
 ) {
+    collect_nodes_by_data_content_depth(val, target, out, 0);
+}
+
+fn collect_nodes_by_data_content_depth<'a>(
+    val: &'a serde_json::Value,
+    target: &str,
+    out: &mut Vec<&'a serde_json::Value>,
+    depth: usize,
+) {
+    if depth > MAX_JSON_WALK_DEPTH {
+        return;
+    }
     match val {
         serde_json::Value::Object(map) => {
             let dc = map
@@ -1470,12 +1555,12 @@ fn collect_nodes_by_data_content<'a>(
                 return;
             }
             if let Some(content) = map.get("content") {
-                collect_nodes_by_data_content(content, target, out);
+                collect_nodes_by_data_content_depth(content, target, out, depth + 1);
             }
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
-                collect_nodes_by_data_content(item, target, out);
+                collect_nodes_by_data_content_depth(item, target, out, depth + 1);
             }
         }
         _ => {}
@@ -1486,12 +1571,15 @@ fn collect_nodes_by_data_content<'a>(
 pub fn extract_plain_text_from_node(node: Option<&serde_json::Value>) -> String {
     let mut result = String::new();
     if let Some(val) = node {
-        collect_text_recursive(val, &mut result);
+        collect_text_recursive(val, &mut result, 0);
     }
     result.trim().to_string()
 }
 
-fn collect_text_recursive(val: &serde_json::Value, out: &mut String) {
+fn collect_text_recursive(val: &serde_json::Value, out: &mut String, depth: usize) {
+    if depth > MAX_JSON_WALK_DEPTH {
+        return;
+    }
     match val {
         serde_json::Value::String(s) => {
             if !out.is_empty() && !out.ends_with(' ') && !s.starts_with(' ') {
@@ -1501,12 +1589,12 @@ fn collect_text_recursive(val: &serde_json::Value, out: &mut String) {
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
-                collect_text_recursive(item, out);
+                collect_text_recursive(item, out, depth + 1);
             }
         }
         serde_json::Value::Object(map) => {
             if let Some(content) = map.get("content") {
-                collect_text_recursive(content, out);
+                collect_text_recursive(content, out, depth + 1);
             }
         }
         _ => {}
