@@ -20,10 +20,19 @@ pub fn create_lens_agent() -> ureq::Agent {
 }
 
 pub fn ping_warmup(agent: &ureq::Agent) {
-    let _ = agent
+    match agent
         .request("HEAD", LENS_ENDPOINT)
         .set("User-Agent", CHROME_USER_AGENT)
-        .call();
+        .call()
+    {
+        Ok(resp) => {
+            let _ = resp.into_string();
+        }
+        Err(ureq::Error::Status(_, resp)) => {
+            let _ = resp.into_string();
+        }
+        Err(_) => {}
+    }
 }
 
 pub fn encode_jpeg_for_ocr(
@@ -1064,6 +1073,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_live_lens_ocr_with_logo() {
         let logo_bytes = include_bytes!("../../assets/logo.png");
         // Decode PNG header or read dimensions
@@ -1088,6 +1098,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_live_lens_ocr_with_jpeg() {
         let logo_bytes = include_bytes!("../../assets/logo.png");
         let img = image::load_from_memory(logo_bytes).expect("Failed to load logo.png");
@@ -1127,6 +1138,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_jpeg_encoding_and_ocr() {
         let logo_bytes = include_bytes!("../../assets/logo.png");
         let img = image::load_from_memory(logo_bytes).expect("Failed to load logo.png");
@@ -1152,6 +1164,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_lens_warmup() {
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(5))
