@@ -142,26 +142,24 @@ pub fn draw_webcam_overlay(
     }
 
     // 1. Drain latest received frames
-    if let Some(rx) = &state.webcam.frame_receiver {
-        while let Ok(frame) = rx.try_recv() {
-            state.webcam.latest_frame = Some(frame);
-        }
-    }
+    let new_frame = state.webcam.poll_frame();
 
-    // 2. Upload/update egui texture handle
-    if let Some(frame) = &state.webcam.latest_frame {
-        let color_image = egui::ColorImage::from_rgba_unmultiplied(
-            [frame.width as usize, frame.height as usize],
-            &frame.rgba,
-        );
-        if let Some(tex) = &mut state.webcam.texture {
-            tex.set(color_image, egui::TextureOptions::LINEAR);
-        } else {
-            state.webcam.texture = Some(ctx.load_texture(
-                "webcam_texture",
-                color_image,
-                egui::TextureOptions::LINEAR,
-            ));
+    // 2. Upload/update egui texture handle only when a new frame arrived or texture is uninitialized
+    if new_frame || state.webcam.texture.is_none() {
+        if let Some(frame) = &state.webcam.latest_frame {
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                [frame.width as usize, frame.height as usize],
+                &frame.rgba,
+            );
+            if let Some(tex) = &mut state.webcam.texture {
+                tex.set(color_image, egui::TextureOptions::LINEAR);
+            } else {
+                state.webcam.texture = Some(ctx.load_texture(
+                    "webcam_texture",
+                    color_image,
+                    egui::TextureOptions::LINEAR,
+                ));
+            }
         }
     }
 

@@ -134,6 +134,7 @@ impl Default for AppState {
             frames_since_last_check: 0,
             last_video_fps_check: Instant::now(),
             video_frames_since_last_check: 0,
+            last_window_title: String::new(),
             next_gui_frame_time: None,
             crt_filter: Arc::new(AtomicU8::new(CrtFilter::Off as u8)),
             scaler_filter: Arc::new(AtomicU8::new(video::types::ScalerFilter::Bicubic as u8)),
@@ -266,11 +267,13 @@ impl AppState {
         self.frames_since_last_check += 1;
         let now = Instant::now();
         let elapsed_secs = (now - self.last_fps_check).as_secs_f32();
+        let mut updated = false;
 
         if elapsed_secs >= 1.0 {
             self.gui_fps = self.frames_since_last_check as f32 / elapsed_secs;
             self.last_fps_check = now;
             self.frames_since_last_check = 0;
+            updated = true;
         }
 
         let video_elapsed_secs = (now - self.last_video_fps_check).as_secs_f32();
@@ -278,6 +281,11 @@ impl AppState {
             self.video_fps = self.video_frames_since_last_check as f32 / video_elapsed_secs;
             self.last_video_fps_check = now;
             self.video_frames_since_last_check = 0;
+            updated = true;
+        }
+
+        if !updated && !self.last_window_title.is_empty() {
+            return;
         }
 
         let audio_latency = self.hardware.audio_latency_ms.load(Ordering::Relaxed);
@@ -312,7 +320,10 @@ impl AppState {
             )
         };
 
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        if title != self.last_window_title {
+            self.last_window_title = title.clone();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        }
     }
 
     pub fn info(&mut self, text: impl Into<String>) {

@@ -292,6 +292,19 @@ impl Default for WebcamState {
     }
 }
 
+impl WebcamState {
+    pub fn poll_frame(&mut self) -> bool {
+        let mut received = false;
+        if let Some(rx) = &self.frame_receiver {
+            while let Ok(frame) = rx.try_recv() {
+                self.latest_frame = Some(frame);
+                received = true;
+            }
+        }
+        received
+    }
+}
+
 pub struct AppState {
     pub replay: crate::replay::Replay,
     pub hardware: HardwareState,
@@ -325,6 +338,7 @@ pub struct AppState {
     pub frames_since_last_check: u32,
     pub last_video_fps_check: Instant,
     pub video_frames_since_last_check: u32,
+    pub last_window_title: String,
     pub next_gui_frame_time: Option<Instant>,
 
     pub crt_filter: Arc<AtomicU8>,
