@@ -57,6 +57,7 @@ pub struct FftFilter {
     // State tracking
     last_fft_size: (u32, u32),
     last_orig_size: (u32, u32),
+    mask_generation: std::sync::atomic::AtomicU64,
 }
 
 fn fft_output_texture_internal_format() -> u32 {
@@ -232,8 +233,14 @@ impl FftFilter {
                 vbo,
                 last_fft_size: (0, 0),
                 last_orig_size: (0, 0),
+                mask_generation: std::sync::atomic::AtomicU64::new(0),
             }
         }
+    }
+
+    pub fn mask_generation(&self) -> u64 {
+        self.mask_generation
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Returns the power-of-2 FFT dimensions for a given input size.
@@ -426,6 +433,8 @@ impl FftFilter {
 
         self.last_fft_size = (fft_w, fft_h);
         self.last_orig_size = (orig_w, orig_h);
+        self.mask_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Upload mask data from CPU to GPU.
@@ -446,6 +455,8 @@ impl FftFilter {
             );
             gl.bind_texture(glow::TEXTURE_2D, None);
         }
+        self.mask_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Perform a single butterfly pass: read from tex[read_idx], write to tex[write_idx].
