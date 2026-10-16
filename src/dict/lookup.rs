@@ -494,6 +494,17 @@ fn find_span_entries(
     // 1. Check Japanese dictionary (if available)
     if let Some(db) = db {
         let mut candidates = deinflector.deinflect(sub_str);
+        let hira_str = super::database::katakana_to_hiragana(sub_str);
+        if hira_str != sub_str {
+            for cand in deinflector.deinflect(&hira_str) {
+                if !candidates
+                    .iter()
+                    .any(|c| c.term == cand.term && c.rules == cand.rules)
+                {
+                    candidates.push(cand);
+                }
+            }
+        }
         if let Ok(entries) = db.find_terms(&candidates) {
             if acc.absorb(entries) {
                 return true;

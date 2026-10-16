@@ -167,7 +167,7 @@ impl DictDatabase {
             "SELECT term, reading, definition_tags, rules, score, glossary, sequence, term_tags 
              FROM terms 
              WHERE term = ?1 OR reading = ?1 OR term = ?2 OR reading = ?2
-             ORDER BY score DESC LIMIT 20",
+             ORDER BY score DESC LIMIT 100",
         )?;
 
         let mut entries = Vec::new();
@@ -177,6 +177,7 @@ impl DictDatabase {
             let alt_kana = to_alternate_kana(&candidate.term);
             let alt = alt_kana.as_deref().unwrap_or(&candidate.term);
             let mut rows = stmt.query(params![candidate.term, alt])?;
+            let mut matched_for_candidate = 0usize;
 
             while let Some(row) = rows.next()? {
                 let term: String = row.get(0)?;
@@ -218,6 +219,10 @@ impl DictDatabase {
                     custom_name_id: None,
                     custom_tag: None,
                 });
+                matched_for_candidate += 1;
+                if matched_for_candidate >= 20 {
+                    break;
+                }
             }
         }
 
