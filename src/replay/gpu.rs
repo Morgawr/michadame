@@ -392,6 +392,7 @@ impl Readback {
                 });
                 if let Some(buffer) = buffer {
                     gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(buffer));
+                    let mut read_issued = true;
                     let is_downscaling = capture_w != width || capture_h != height;
                     if is_downscaling {
                         if self.downscale_size != (capture_w, capture_h) || self.downscale_fbo.is_none() {
@@ -491,15 +492,14 @@ impl Readback {
                             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, old_read_fbo);
                             gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, old_draw_fbo);
                         } else {
-                            gl.read_pixels(
-                                x as i32,
-                                y as i32,
-                                width as i32,
-                                height as i32,
-                                glow::RGBA,
-                                glow::UNSIGNED_BYTE,
-                                glow::PixelPackData::BufferOffset(0),
-                            );
+                            read_issued = false;
+                            self.free.push(buffer);
+                            if let Some(r) = running_replay {
+                                r.shared.video_dropped.fetch_add(1, Ordering::Relaxed);
+                            }
+                            if let Some(bc) = broadcast {
+                                bc.dropped.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     } else {
                         gl.read_pixels(
@@ -512,20 +512,22 @@ impl Readback {
                             glow::PixelPackData::BufferOffset(0),
                         );
                     }
-                    match gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
-                        Ok(fence) => {
-                            self.pending.push_back(Slot {
-                                buffer,
-                                fence,
-                                at,
-                            });
-                            self.last_at = at;
-                        }
-                        Err(e) => {
-                            gl.delete_buffer(buffer);
-                            if let Some(r) = running_replay {
-                                r.shared.message(format!("Replay stopped: {e}"));
-                                r.shared.stop.store(true, Ordering::Release);
+                    if read_issued {
+                        match gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
+                            Ok(fence) => {
+                                self.pending.push_back(Slot {
+                                    buffer,
+                                    fence,
+                                    at,
+                                });
+                                self.last_at = at;
+                            }
+                            Err(e) => {
+                                gl.delete_buffer(buffer);
+                                if let Some(r) = running_replay {
+                                    r.shared.message(format!("Replay stopped: {e}"));
+                                    r.shared.stop.store(true, Ordering::Release);
+                                }
                             }
                         }
                     }
