@@ -1,6 +1,6 @@
 use super::models::DeinflectionCandidate;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::OnceLock;
 
 pub const RULE_V1: u32 = 1 << 0;
@@ -10,6 +10,7 @@ pub const RULE_VK: u32 = 1 << 3;
 pub const RULE_VZ: u32 = 1 << 4;
 pub const RULE_ADJ_I: u32 = 1 << 5;
 pub const RULE_IRU: u32 = 1 << 6;
+pub const RULE_V5K_S: u32 = 1 << 7;
 
 /// Parses a space-separated rule string (from Yomitan term_bank) into a bitmask.
 pub fn parse_rule_flags(rules_str: &str) -> u32 {
@@ -18,17 +19,22 @@ pub fn parse_rule_flags(rules_str: &str) -> u32 {
         match rule {
             "v1" => flags |= RULE_V1,
             "v5" => flags |= RULE_V5,
+            "v5k-s" => flags |= RULE_V5 | RULE_V5K_S,
             "vs" => flags |= RULE_VS,
             "vk" => flags |= RULE_VK,
             "vz" => flags |= RULE_VZ,
             "adj-i" => flags |= RULE_ADJ_I,
             "iru" => flags |= RULE_IRU,
             _ => {
-                // If it starts with v5 (e.g. v5k, v5s, v5r), treat as v5
+                // Match Yomitan/JMdict subtype rule tags (e.g. v5k, v1-s, vs-i, vs-s, vs-c, vz)
                 if rule.starts_with("v5") {
                     flags |= RULE_V5;
                 } else if rule.starts_with("v1") {
                     flags |= RULE_V1;
+                } else if rule.starts_with("vs") {
+                    flags |= RULE_VS;
+                } else if rule.starts_with("vz") {
+                    flags |= RULE_VZ;
                 }
             }
         }
@@ -76,7 +82,7 @@ impl Deinflector {
     }
 
     pub fn from_json(json_str: &str) -> Result<Self, serde_json::Error> {
-        let parsed: HashMap<String, Vec<RawRule>> = serde_json::from_str(json_str)?;
+        let parsed: BTreeMap<String, Vec<RawRule>> = serde_json::from_str(json_str)?;
         let mut reasons = Vec::with_capacity(parsed.len());
 
         for (reason_name, raw_variants) in parsed {
@@ -122,6 +128,12 @@ impl Deinflector {
         while i < results.len() {
             let current = results[i].clone();
             i += 1;
+
+            // A bare masu stem only resolves directly to its dictionary base verb
+            // and should not chain into further deinflection steps (e.g. potential or -iru).
+            if current.reasons.last().map(|s| s.as_str()) == Some("masu stem") {
+                continue;
+            }
 
             for group in &self.reasons {
                 for variant in &group.variants {
@@ -220,6 +232,23 @@ mod tests {
             .iter()
             .find(|c| c.term == "泳ぐ" && (c.rules & RULE_V5) != 0);
         assert!(oyogu.is_some(), "Expected 泳ぐ in {:?}", candidates);
+
+        // 買っちゃう -> 買う (and NOT 書く/買く)
+        let candidates = deinflector.deinflect("買っちゃう");
+        assert!(candidates.iter().any(|c| c.term == "買う" && (c.rules & RULE_V5) != 0));
+        assert!(!candidates.iter().any(|c| c.term == "買く"));
+
+        // 行っちゃう -> 行く
+        let candidates = deinflector.deinflect("行っちゃう");
+        assert!(candidates.iter().any(|c| c.term == "行く" && (c.rules & RULE_V5) != 0));
+
+        // 読め -> 読む via imperative (not masu stem -> potential)
+        let candidates = deinflector.deinflect("読め");
+        let yomu = candidates
+            .iter()
+            .find(|c| c.term == "読む" && (c.rules & RULE_V5) != 0)
+            .expect("Expected 読む");
+        assert_eq!(yomu.reasons, vec!["imperative".to_string()]);
     }
 
     #[test]
@@ -239,5 +268,14 @@ mod tests {
             .iter()
             .find(|c| c.term == "高い" && (c.rules & RULE_ADJ_I) != 0);
         assert!(takai.is_some(), "Expected 高い in {:?}", candidates);
+    }
+
+    #[test]
+    fn test_parse_rule_flags_subtypes() {
+        assert_eq!(parse_rule_flags("vs-i"), RULE_VS);
+        assert_eq!(parse_rule_flags("vs-s"), RULE_VS);
+        assert_eq!(parse_rule_flags("vs-c"), RULE_VS);
+        assert_eq!(parse_rule_flags("vz"), RULE_VZ);
+        assert_eq!(parse_rule_flags("v5k-s"), RULE_V5 | RULE_V5K_S);
     }
 }
