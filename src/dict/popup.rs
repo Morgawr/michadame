@@ -154,10 +154,12 @@ pub fn draw_dict_popup(
                     (Some(ptr), Some(rect)) => rect.contains(ptr),
                     _ => false,
                 };
-                let external_scroll = if pointer_over_popup {
-                    0.0
-                } else {
+                let external_scroll = if !pointer_over_popup
+                    && popup.last_hover_time.elapsed().as_millis() < 50
+                {
                     ui.ctx().input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta.y))
+                } else {
+                    0.0
                 };
 
                 // Start at the top whenever the popup shows a different lookup, or it was not
