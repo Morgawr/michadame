@@ -326,7 +326,23 @@ pub fn export_clipboard(
     audio: codec::Parameters,
     packets: Vec<std::sync::Arc<Encoded>>,
 ) -> Result<usize> {
-    export(path, video, audio, packets)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    let io = format::context::StreamIo::from_write_seek(super::clipboard::LimitedFile::new(
+        file, limit,
+    ))?;
+    let output = format::output_to_stream(io, path.to_str(), Some("mp4"))?;
+    if let Err(err) = export_output(output, video, audio, packets) {
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .and_then(|f| f.set_len(0));
+        return Err(err);
+    }
     let size = std::fs::metadata(path)?.len() as usize;
     if size > limit {
         let _ = std::fs::OpenOptions::new()
