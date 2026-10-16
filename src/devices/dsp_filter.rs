@@ -299,6 +299,10 @@ impl RnnoiseStream {
 pub struct FfmpegAfftdnStream {
     graph: ff::filter::Graph,
     sample_rate: u32,
+    nr_db: f32,
+    nf_db: f32,
+    track_noise: bool,
+    gain_smooth: u32,
     pts: i64,
     frame_size: usize,
     in_l: VecDeque<f32>,
@@ -356,6 +360,10 @@ impl FfmpegAfftdnStream {
         let mut stream = Self {
             graph,
             sample_rate,
+            nr_db,
+            nf_db,
+            track_noise,
+            gain_smooth,
             pts: 0,
             frame_size,
             in_l: VecDeque::with_capacity(frame_size * 4),
@@ -366,6 +374,21 @@ impl FfmpegAfftdnStream {
 
         stream.prime();
         Ok(stream)
+    }
+
+    pub fn reset(&mut self) {
+        if let Ok(fresh) = Self::new(
+            self.sample_rate,
+            self.nr_db,
+            self.nf_db,
+            self.track_noise,
+            self.gain_smooth,
+        ) {
+            *self = fresh;
+        } else {
+            self.pts = 0;
+            self.prime();
+        }
     }
 
     fn prime(&mut self) {
@@ -735,6 +758,9 @@ impl LiveAudioDsp {
         }
         if let Some(rnnoise) = &mut self.rnnoise {
             rnnoise.reset();
+        }
+        if let Some(afftdn) = &mut self.afftdn {
+            afftdn.reset();
         }
         if let Some(exp) = &mut self.expander {
             exp.reset();

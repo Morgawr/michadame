@@ -785,12 +785,14 @@ where
                     Ok(_) => {}
                     Err(wait_error) => {
                         replay.mark_discontinuity();
+                        dsp.reset();
                         recover_alsa_capture(pcm, wait_error)?;
                     }
                 }
             }
             Err(error) => {
                 replay.mark_discontinuity();
+                dsp.reset();
                 recover_alsa_capture(pcm, error)?;
             }
         }
