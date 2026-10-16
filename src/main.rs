@@ -94,11 +94,8 @@ fn main() -> Result<(), eframe::Error> {
     };
 
     let res = eframe::run_native("Michadame Viewer", options, Box::new(creator));
-    match res {
-        Ok(()) => std::process::exit(0),
-        Err(e) => {
-            tracing::error!("Application error: {e}");
-            std::process::exit(1);
-        }
+    if let Err(ref e) = res {
+        tracing::error!("Application error: {e}");
     }
+    res
 }

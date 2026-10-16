@@ -494,11 +494,7 @@ impl eframe::App for AppState {
                     .with_min_inner_size([960.0, 770.0])
                     .with_max_inner_size([960.0, 770.0])
                     .with_resizable(false),
-                |ctx, class| {
-                    assert!(
-                        class == egui::ViewportClass::Immediate,
-                        "This egui backend doesn't support multiple viewports"
-                    );
+                |ctx, _class| {
                     self.ui.any_pointer_down |= ctx.input(|i| i.pointer.any_down());
 
                     repaint_requested |= ui::draw_main_ui(self, ctx);

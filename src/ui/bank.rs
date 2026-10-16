@@ -37,11 +37,7 @@ pub fn draw_bank_window(state: &mut AppState, ctx: &egui::Context) {
         egui::ViewportBuilder::default()
             .with_title("Michadame Mining Bank")
             .with_inner_size([900.0, 900.0]),
-        |ctx, class| {
-            assert!(
-                class == egui::ViewportClass::Immediate,
-                "This egui backend doesn't support multiple viewports"
-            );
+        |ctx, _class| {
             state.ui.any_pointer_down |= ctx.input(|i| i.pointer.any_down());
             draw_contents(state, ctx);
             if ctx.input(|i| i.viewport().close_requested()) {
