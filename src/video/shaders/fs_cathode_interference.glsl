@@ -52,7 +52,7 @@ void main() {
         scale.x = video_aspect / output_aspect;
     }
 
-    vec2 centered_tc = (v_tc - 0.5) / scale + 0.5;
+    vec2 centered_tc = (vec2(v_tc.x, 1.0 - v_tc.y) - 0.5) / scale + 0.5;
 
     // Pillarbox / letterbox / border padding outside active video area remains untouched
     if (centered_tc.x < border_crop.x || centered_tc.x > (1.0 - border_crop.y) ||
