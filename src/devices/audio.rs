@@ -285,15 +285,6 @@ fn i16_to_f32(s: i16) -> f32 {
     s as f32 / 32768.0
 }
 
-extern "C" fn alsa_error_handler(
-    _file: *const libc::c_char,
-    _line: libc::c_int,
-    _function: *const libc::c_char,
-    _err: libc::c_int,
-    _fmt: *const libc::c_char,
-) {
-}
-
 pub fn is_usable_input_device(name: &str, desc: &str, direction: Option<alsa::Direction>) -> bool {
     // If ALSA explicitly flagged it as Playback (output), skip it
     if direction == Some(alsa::Direction::Playback) {
@@ -345,13 +336,24 @@ pub fn is_usable_input_device(name: &str, desc: &str, direction: Option<alsa::Di
 }
 
 pub fn find_audio_devices() -> Result<Vec<(String, String)>> {
-    unsafe {
-        use libc::{c_int, c_void};
+    static INIT_ALSA_ERROR_HANDLER: std::sync::Once = std::sync::Once::new();
+    INIT_ALSA_ERROR_HANDLER.call_once(|| unsafe {
+        use libc::{c_char, c_int};
+        type SndLibErrorHandler =
+            unsafe extern "C" fn(*const c_char, c_int, *const c_char, c_int, *const c_char, ...);
         extern "C" {
-            fn snd_lib_error_set_handler(handler: *const c_void) -> c_int;
+            fn michadame_alsa_silent_error_handler(
+                file: *const c_char,
+                line: c_int,
+                function: *const c_char,
+                err: c_int,
+                fmt: *const c_char,
+                ...
+            );
+            fn snd_lib_error_set_handler(handler: SndLibErrorHandler) -> c_int;
         }
-        snd_lib_error_set_handler(alsa_error_handler as *const c_void);
-    }
+        snd_lib_error_set_handler(michadame_alsa_silent_error_handler);
+    });
 
     let mut sources = Vec::new();
     let mut seen_card_keys = std::collections::HashSet::new();

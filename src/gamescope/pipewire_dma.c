@@ -302,3 +302,13 @@ void gamescope_dma_stream_stop(struct gamescope_dma_stream *s) {
 
     free(s);
 }
+
+void michadame_alsa_silent_error_handler(
+    const char *file, int line, const char *function, int err, const char *fmt, ...
+) {
+    (void)file;
+    (void)line;
+    (void)function;
+    (void)err;
+    (void)fmt;
+}
