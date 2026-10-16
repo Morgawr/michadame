@@ -950,18 +950,28 @@ pub fn convert_and_scale_gl_rgba_to_rgb(
     dst_h: u32,
     out: &mut Vec<u8>,
 ) {
-    let dst_len = (dst_w * dst_h * 3) as usize;
     out.clear();
+    if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
+        return;
+    }
+    let expected_src_bytes = (src_w as usize)
+        .checked_mul(src_h as usize)
+        .and_then(|px| px.checked_mul(4))
+        .unwrap_or(0);
+    if expected_src_bytes == 0 || raw_rgba.len() < expected_src_bytes {
+        return;
+    }
+    let dst_len = (dst_w as usize) * (dst_h as usize) * 3;
     out.resize(dst_len, 0);
 
     if src_w == dst_w && src_h == dst_h {
         // Direct row-by-row flip and strip alpha
         for y in 0..dst_h {
             let src_y = src_h - 1 - y;
-            let src_row = (src_y * src_w * 4) as usize;
-            let dst_row = (y * dst_w * 3) as usize;
-            let src_slice = &raw_rgba[src_row..src_row + (src_w * 4) as usize];
-            let dst_slice = &mut out[dst_row..dst_row + (dst_w * 3) as usize];
+            let src_row = (src_y as usize) * (src_w as usize) * 4;
+            let dst_row = (y as usize) * (dst_w as usize) * 3;
+            let src_slice = &raw_rgba[src_row..src_row + (src_w as usize) * 4];
+            let dst_slice = &mut out[dst_row..dst_row + (dst_w as usize) * 3];
 
             for (p_src, p_dst) in src_slice.chunks_exact(4).zip(dst_slice.chunks_exact_mut(3)) {
                 p_dst[0] = p_src[0];
@@ -998,9 +1008,9 @@ pub fn convert_and_scale_gl_rgba_to_rgb(
         let sy0 = src_h - 1 - sy0_top;
         let sy1 = src_h - 1 - sy1_top;
 
-        let row0_offset = (sy0 * src_w * 4) as usize;
-        let row1_offset = (sy1 * src_w * 4) as usize;
-        let dst_row_offset = (dy * dst_w * 3) as usize;
+        let row0_offset = (sy0 as usize) * (src_w as usize) * 4;
+        let row1_offset = (sy1 as usize) * (src_w as usize) * 4;
+        let dst_row_offset = (dy as usize) * (dst_w as usize) * 3;
 
         for (dx, &(sx0, sx1, wx_q8)) in x_map.iter().enumerate() {
             let p00_idx = row0_offset + (sx0 * 4) as usize;
