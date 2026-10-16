@@ -430,7 +430,10 @@ impl LiveAudioEncoder {
         loop {
             let mut packet = Packet::empty();
             match self.encoder.receive_packet(&mut packet) {
-                Ok(()) => packets.push(packet),
+                Ok(()) => {
+                    packet.rescale_ts((1, 48000), (1, 1000));
+                    packets.push(packet);
+                }
                 Err(ff::Error::Other { errno }) if errno == libc::EAGAIN => break,
                 Err(ff::Error::Eof) => break,
                 Err(e) => return Err(e.into()),
@@ -644,7 +647,9 @@ fn run_broadcast_loop(
     let mut mic_clock = AudioClock::new();
     let mut mixer = TimelineMixer::new();
 
-    let mut last_audio_pts = -1i64;
+    let mut last_audio_sample_pts: Option<i64> = None;
+    let mut last_audio_mux_dts: i64 = -1;
+    let mut last_video_mux_dts: i64 = -1;
     let mut last_stat_time = Instant::now();
     let mut frames_this_sec = 0u32;
     let mut bytes_this_sec = 0u64;
@@ -655,10 +660,13 @@ fn run_broadcast_loop(
     let first_pts = 0i64;
     let pkts = video_encoder.encode(&first_frame.rgba, first_frame.width, first_frame.height, first_pts)?;
     for mut pkt in pkts {
+        let dts = pkt.dts().unwrap_or(first_pts).max(last_video_mux_dts + 1);
+        let pkt_pts = pkt.pts().unwrap_or(first_pts).max(dts);
+        last_video_mux_dts = dts;
         pkt.set_stream(0);
         pkt.set_position(-1);
-        pkt.set_pts(Some(first_pts));
-        pkt.set_dts(Some(first_pts));
+        pkt.set_pts(Some(pkt_pts));
+        pkt.set_dts(Some(dts));
         bytes_this_sec += pkt.size() as u64;
         pkt.write_interleaved(&mut output)?;
     }
@@ -688,15 +696,20 @@ fn run_broadcast_loop(
 
         // Encode mixed 48kHz stereo audio frames
         while let Some((sample_idx, samples)) = mixer.take() {
-            let audio_ms = (sample_idx as f64 * 1000.0 / 48000.0).round() as i64;
-            let audio_pts = audio_ms.max(last_audio_pts + 1);
-            last_audio_pts = audio_pts;
-            let pkts = audio_encoder.encode(&samples, audio_pts)?;
+            let sample_pts = match last_audio_sample_pts {
+                Some(prev) => sample_idx.max(prev + 1024),
+                None => sample_idx.max(0),
+            };
+            last_audio_sample_pts = Some(sample_pts);
+            let pkts = audio_encoder.encode(&samples, sample_pts)?;
             for mut pkt in pkts {
+                let dts = pkt.dts().unwrap_or(0).max(0).max(last_audio_mux_dts + 1);
+                let pts = pkt.pts().unwrap_or(dts).max(dts);
+                last_audio_mux_dts = dts;
                 pkt.set_stream(1);
                 pkt.set_position(-1);
-                pkt.set_pts(Some(audio_pts));
-                pkt.set_dts(Some(audio_pts));
+                pkt.set_pts(Some(pts));
+                pkt.set_dts(Some(dts));
                 bytes_this_sec += pkt.size() as u64;
                 pkt.write_interleaved(&mut output)?;
             }
@@ -710,10 +723,13 @@ fn run_broadcast_loop(
                 last_video_pts = pts;
                 let pkts = video_encoder.encode(&frame.rgba, frame.width, frame.height, pts)?;
                 for mut pkt in pkts {
+                    let dts = pkt.dts().unwrap_or(pts).max(last_video_mux_dts + 1);
+                    let pkt_pts = pkt.pts().unwrap_or(pts).max(dts);
+                    last_video_mux_dts = dts;
                     pkt.set_stream(0);
                     pkt.set_position(-1);
-                    pkt.set_pts(Some(pts));
-                    pkt.set_dts(Some(pts));
+                    pkt.set_pts(Some(pkt_pts));
+                    pkt.set_dts(Some(dts));
                     bytes_this_sec += pkt.size() as u64;
                     pkt.write_interleaved(&mut output)?;
                 }
