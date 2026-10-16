@@ -189,7 +189,11 @@ pub fn entry_from_json(term: &str, reading: &str, json: &str) -> Option<TermEntr
 /// Result of a background save, delivered to the UI thread.
 pub enum BankEvent {
     Saved(BankEntryMeta),
-    Failed { key: MineKey, error: String },
+    Failed {
+        key: MineKey,
+        created_at: i64,
+        error: String,
+    },
     ClipboardCopied,
     ClipboardFailed(String),
 }
@@ -219,16 +223,29 @@ impl BankCaptureHandle {
     pub fn save(&self, request: MineRequest, shot: Option<(Vec<u8>, u32, u32)>) {
         let db = self.db.clone();
         let tx = self.tx.clone();
-        let _ = std::thread::Builder::new()
+        let fail_key = request.key();
+        let created_at = request.created_at;
+        if let Err(e) = std::thread::Builder::new()
             .name("mining-bank-save".into())
             .spawn(move || {
                 let key = request.key();
                 let event = match save_entry(&db, request, shot) {
                     Ok(meta) => BankEvent::Saved(meta),
-                    Err(e) => BankEvent::Failed { key, error: e.to_string() },
+                    Err(e) => BankEvent::Failed {
+                        key,
+                        created_at,
+                        error: e.to_string(),
+                    },
                 };
                 let _ = tx.send(event);
+            })
+        {
+            let _ = self.tx.send(BankEvent::Failed {
+                key: fail_key,
+                created_at,
+                error: format!("Failed to spawn bank save thread: {e}"),
             });
+        }
     }
 }
 
@@ -704,8 +721,13 @@ impl BankState {
                     self.entries.insert(pos, meta);
                     self.rebuild_known_tags();
                 }
-                BankEvent::Failed { key, error } => {
+                BankEvent::Failed {
+                    key,
+                    created_at,
+                    error,
+                } => {
                     self.in_flight.remove(&key);
+                    self.pending_clips.remove(&created_at);
                     messages.push(Err(format!("Failed to mine word: {error}")));
                 }
                 BankEvent::ClipboardCopied => {
