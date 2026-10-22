@@ -1,6 +1,6 @@
 //! "Twitch" settings tab.
 
-use super::controls::{percent_slider_range, slider_item, sub_heading, technical_group};
+use super::controls::{percent_slider_range, slider_item, technical_group, two_columns};
 use crate::app::AppState;
 use crate::config::models::{StreamingAudioEncoder, StreamingVideoEncoder};
 use crate::twitch::{
@@ -15,7 +15,7 @@ const LABEL: egui::Color32 = egui::Color32::from_rgb(153, 153, 153);
 
 fn label(ui: &mut egui::Ui, text: &str) {
     ui.add_sized(
-        [130.0, 18.0],
+        [115.0, 18.0],
         egui::Label::new(egui::RichText::new(text).monospace().size(11.0).color(LABEL)),
     );
 }
@@ -28,43 +28,159 @@ pub fn draw_twitch_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     let mut changed = false;
     let mut save_now = false;
 
-    technical_group(ui, "Twitch Channel:", |ui| {
-        ui.horizontal(|ui| {
-            label(ui, "Channel:");
-            let edit = ui.add(
-                egui::TextEdit::singleline(&mut state.twitch.channel_input)
-                    .hint_text("your_channel_name")
-                    .desired_width(240.0),
-            );
-            let apply = ui.button("Apply").clicked() || edit.lost_focus();
-            if apply {
-                let normalized = normalize_channel(&state.twitch.channel_input);
-                state.twitch.channel_input = normalized.clone();
-                if normalized != state.twitch.config.channel {
-                    state.twitch.config.channel = normalized;
-                    save_now = true;
+    technical_group(ui, "Twitch Channel & Account:", |ui| {
+        two_columns(ui, |col1, col2| {
+            col1.horizontal(|ui| {
+                label(ui, "Channel:");
+                let edit = ui.add(
+                    egui::TextEdit::singleline(&mut state.twitch.channel_input)
+                        .hint_text("your_channel_name")
+                        .desired_width(200.0),
+                );
+                let apply = ui.button("Apply").clicked() || edit.lost_focus();
+                if apply {
+                    let normalized = normalize_channel(&state.twitch.channel_input);
+                    state.twitch.channel_input = normalized.clone();
+                    if normalized != state.twitch.config.channel {
+                        state.twitch.config.channel = normalized;
+                        save_now = true;
+                    }
+                }
+            });
+            let (color, text) = status_line(state);
+            col1.label(egui::RichText::new(text).monospace().size(11.0).color(color));
+            if state.twitch.config.chat_overlay_enabled && !state.twitch.config.channel.is_empty()
+            {
+                let (color, text) = match &state.twitch.stream_status {
+                    StreamStatus::Live {
+                        viewer_count: Some(count),
+                        ..
+                    } => (
+                        egui::Color32::from_rgb(80, 200, 120),
+                        format!("Stream: LIVE ({count} viewers)"),
+                    ),
+                    StreamStatus::Live {
+                        viewer_count: None, ..
+                    } => (
+                        egui::Color32::from_rgb(80, 200, 120),
+                        "Stream: LIVE".to_string(),
+                    ),
+                    StreamStatus::Offline => (
+                        egui::Color32::from_rgb(220, 70, 70),
+                        "Stream: offline".to_string(),
+                    ),
+                    StreamStatus::Unknown(reason) if reason.is_empty() => {
+                        (MUTED, "Stream: unknown".to_string())
+                    }
+                    StreamStatus::Unknown(reason) => (MUTED, format!("Stream: unknown ({reason})")),
+                };
+                col1.label(egui::RichText::new(text).monospace().size(11.0).color(color));
+            }
+
+            let ctx = col2.ctx().clone();
+            if let Some(token) = &state.twitch.token {
+                let login = token.login.clone();
+                col2.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("Account: Logged in as {login}"))
+                            .monospace()
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(120, 200, 140)),
+                    );
+                    if ui.button("Log out").clicked() {
+                        state.twitch.logout();
+                        changed = true;
+                    }
+                });
+                note(col2, "Authenticated for chat sending, stream key & stream info.");
+            } else {
+                match state.twitch.auth_flow.clone() {
+                    AuthFlow::Idle => {
+                        col2.horizontal(|ui| {
+                            if ui.button("Log in with Twitch").clicked() {
+                                state.twitch.start_login(&ctx);
+                                changed = true;
+                            }
+                            note(ui, "For chat sending & stream info (read-only chat works without login).");
+                        });
+                    }
+                    AuthFlow::Requesting => {
+                        col2.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Contacting Twitch…");
+                            if ui.small_button("Cancel").clicked() {
+                                state.twitch.cancel_login();
+                            }
+                        });
+                    }
+                    AuthFlow::AwaitingUser {
+                        user_code,
+                        verification_uri,
+                        expires_at,
+                    } => {
+                        col2.horizontal(|ui| {
+                            ui.label("Confirm code:");
+                            ui.label(
+                                egui::RichText::new(&user_code)
+                                    .monospace()
+                                    .size(15.0)
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(190, 150, 255)),
+                            );
+                            if ui.small_button("Copy").clicked() {
+                                ui.output_mut(|o| o.copied_text = user_code.clone());
+                            }
+                            if ui.small_button("Open page").clicked() {
+                                crate::twitch::open_in_browser(&ctx, &verification_uri);
+                            }
+                            if ui.small_button("Cancel").clicked() {
+                                state.twitch.cancel_login();
+                            }
+                            ui.spinner();
+                        });
+                        let left = expires_at
+                            .saturating_duration_since(Instant::now())
+                            .as_secs();
+                        note(
+                            col2,
+                            format!(
+                                "Waiting for approval… expires in {}:{:02}",
+                                left / 60,
+                                left % 60
+                            ),
+                        );
+                        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+                    }
                 }
             }
+
+            egui::CollapsingHeader::new(
+                egui::RichText::new("Advanced (Client ID)")
+                    .size(10.5)
+                    .color(LABEL),
+            )
+            .id_source("twitch-advanced")
+            .show(col2, |ui| {
+                ui.horizontal(|ui| {
+                    let edit = ui.add(
+                        egui::TextEdit::singleline(&mut state.twitch.client_id_input)
+                            .hint_text(crate::twitch::auth::DEFAULT_CLIENT_ID)
+                            .desired_width(240.0),
+                    );
+                    if edit.lost_focus() {
+                        let id = state.twitch.client_id_input.trim().to_string();
+                        if id != state.twitch.config.client_id {
+                            state.twitch.config.client_id = id;
+                            save_now = true;
+                        }
+                    }
+                });
+                note(
+                    ui,
+                    "Leave empty to use Michadame's built-in application.",
+                );
+            });
         });
-        note(ui, "Your Twitch login name or channel URL (e.g. twitch.tv/name).");
-        ui.add_space(2.0);
-        let (color, text) = status_line(state);
-        ui.label(egui::RichText::new(text).monospace().size(11.0).color(color));
-        if state.twitch.config.chat_overlay_enabled && !state.twitch.config.channel.is_empty() {
-            let (color, text) = match &state.twitch.stream_status {
-                StreamStatus::Live { viewer_count: Some(count), .. } => (
-                    egui::Color32::from_rgb(80, 200, 120),
-                    format!("Stream: LIVE ({count} viewers)"),
-                ),
-                StreamStatus::Live { viewer_count: None, .. } => {
-                    (egui::Color32::from_rgb(80, 200, 120), "Stream: LIVE".to_string())
-                }
-                StreamStatus::Offline => (egui::Color32::from_rgb(220, 70, 70), "Stream: offline".to_string()),
-                StreamStatus::Unknown(reason) if reason.is_empty() => (MUTED, "Stream: unknown".to_string()),
-                StreamStatus::Unknown(reason) => (MUTED, format!("Stream: unknown ({reason})")),
-            };
-            ui.label(egui::RichText::new(text).monospace().size(11.0).color(color));
-        }
     });
 
     ui.add_space(4.0);
@@ -77,349 +193,205 @@ pub fn draw_twitch_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
     ui.add_space(4.0);
 
-    technical_group(ui, "Chat Overlay:", |ui| {
-        if ui
-            .checkbox(
-                &mut state.twitch.config.chat_overlay_enabled,
-                "Show Twitch chat overlay on the video window",
-            )
-            .on_hover_text(
-                "Shows live chat along the right edge of the video window, above the CRT frame and bezel.\nPress T in the video window to hide/show it.",
-            )
-            .changed()
-        {
-            if state.twitch.config.chat_overlay_enabled {
-                state.twitch.overlay_hidden = false;
-            }
-            save_now = true;
-        }
-        if state.twitch.config.chat_overlay_enabled && state.twitch.overlay_hidden {
-            ui.horizontal(|ui| {
-                note(ui, "The overlay is hidden from the live view.");
-                if ui.small_button("Show overlay").clicked() {
+    two_columns(ui, |col1, col2| {
+        technical_group(col1, "Chat Overlay:", |ui| {
+            if ui
+                .checkbox(
+                    &mut state.twitch.config.chat_overlay_enabled,
+                    "Show Twitch chat overlay (T)",
+                )
+                .on_hover_text(
+                    "Shows live chat along the right edge of the video window, above the CRT frame and bezel.\nPress T in the video window to hide/show it.",
+                )
+                .changed()
+            {
+                if state.twitch.config.chat_overlay_enabled {
                     state.twitch.overlay_hidden = false;
                 }
-            });
-        }
-
-        ui.add_space(4.0);
-        let cfg = &mut state.twitch.config;
-        let mut dirty = false;
-        dirty |= slider_item(
-            ui,
-            "Width:",
-            percent_slider_range(&mut cfg.overlay_width_pct, 0.10..=0.50, 1.0),
-            Some("Overlay width as a share of the video window width."),
-        )
-        .changed();
-        dirty |= slider_item(
-            ui,
-            "Background:",
-            percent_slider_range(&mut cfg.overlay_opacity, 0.0..=1.0, 1.0),
-            Some("Opacity of the dark overlay background."),
-        )
-        .changed();
-        dirty |= slider_item(
-            ui,
-            "Font Size:",
-            egui::Slider::new(&mut cfg.font_size, 10.0..=28.0).step_by(1.0).suffix(" pt"),
-            None,
-        )
-        .changed();
-        dirty |= slider_item(
-            ui,
-            "Message Lifetime:",
-            egui::Slider::new(&mut cfg.message_lifetime_secs, 0..=600).custom_formatter(|n, _| {
-                if n < 1.0 {
-                    "Never".to_string()
-                } else {
-                    format!("{n:.0}s")
-                }
-            }),
-            Some("Messages fade out and disappear after this long.\n• 0: keep messages until pushed out by newer ones"),
-        )
-        .changed();
-        dirty |= slider_item(
-            ui,
-            "Max Messages:",
-            egui::Slider::new(&mut cfg.max_messages, 20..=500),
-            Some("Oldest messages are dropped beyond this count."),
-        )
-        .changed();
-        if dirty {
-            state.twitch.config_dirty = true;
-            changed = true;
-        }
-    });
-
-    ui.add_space(4.0);
-
-    technical_group(ui, "Niconico Comments:", |ui| {
-        if ui
-            .checkbox(
-                &mut state.twitch.config.niconico_enabled,
-                "Fly chat messages across the video (niconico style)",
-            )
-            .on_hover_text(
-                "Every new chat message scrolls across the picture from right to left.\nComments are drawn under the CRT effects and are included in replays and mining screenshots.",
-            )
-            .changed()
-        {
-            save_now = true;
-        }
-        ui.add_space(4.0);
-        let cfg = &mut state.twitch.config;
-        let mut dirty = false;
-        dirty |= slider_item(
-            ui,
-            "Text Size:",
-            percent_slider_range(&mut cfg.niconico_size_pct, 0.03..=0.15, 1.0),
-            Some("Comment height as a share of the picture height."),
-        )
-        .changed();
-        dirty |= slider_item(
-            ui,
-            "Crossing Time:",
-            egui::Slider::new(&mut cfg.niconico_duration_secs, 3.0..=15.0)
-                .step_by(0.5)
-                .suffix(" s"),
-            Some("Average time for a comment to cross the screen. Each comment gets a random speed around this."),
-        )
-        .changed();
-        dirty |= slider_item(
-            ui,
-            "Max On Screen:",
-            egui::Slider::new(&mut cfg.niconico_max_comments, 0..=500).custom_formatter(|n, _| {
-                if n < 1.0 {
-                    "Unlimited".to_string()
-                } else {
-                    format!("{n:.0}")
-                }
-            }),
-            Some("Most comments flying at once; the oldest are dropped beyond this.\n• 0: unlimited"),
-        )
-        .changed();
-        if dirty {
-            state.twitch.config_dirty = true;
-            changed = true;
-        }
-    });
-
-    ui.add_space(4.0);
-
-    technical_group(ui, "Video Alerts:", |ui| {
-        if ui
-            .checkbox(
-                &mut state.twitch.config.alerts_enabled,
-                "Inject alert notices into the video feed",
-            )
-            .on_hover_text(
-                "Draws animated on-screen cards for followers, subs, bits, and raids directly into the video.\nAlerts are drawn under CRT effects and are included in replays and broadcasts.",
-            )
-            .changed()
-        {
-            save_now = true;
-        }
-
-        ui.add_space(4.0);
-        let cfg = &mut state.twitch.config;
-        let mut dirty = false;
-
-        dirty |= slider_item(
-            ui,
-            "Duration:",
-            egui::Slider::new(&mut cfg.alerts_duration_secs, 2.0..=15.0)
-                .step_by(0.5)
-                .suffix(" s"),
-            Some("How long each alert notice remains on screen before sliding out."),
-        )
-        .changed();
-
-        ui.add_space(2.0);
-        ui.horizontal(|ui| {
-            label(ui, "Event Types:");
-            ui.vertical(|ui| {
+                save_now = true;
+            }
+            if state.twitch.config.chat_overlay_enabled && state.twitch.overlay_hidden {
                 ui.horizontal(|ui| {
-                    if ui.checkbox(&mut cfg.alert_follows, "Follows").changed() {
-                        dirty = true;
-                    }
-                    if ui.checkbox(&mut cfg.alert_subs, "Subscriptions").changed() {
-                        dirty = true;
+                    note(ui, "Overlay hidden from live view.");
+                    if ui.small_button("Show overlay").clicked() {
+                        state.twitch.overlay_hidden = false;
                     }
                 });
-                ui.horizontal(|ui| {
-                    if ui.checkbox(&mut cfg.alert_bits, "Bits").changed() {
-                        dirty = true;
-                    }
-                    if ui.checkbox(&mut cfg.alert_raids, "Raids").changed() {
-                        dirty = true;
-                    }
-                });
-            });
-        });
+            }
 
-        if cfg.alert_bits {
+            ui.add_space(2.0);
+            let cfg = &mut state.twitch.config;
+            let mut dirty = false;
             dirty |= slider_item(
                 ui,
-                "Min Bits:",
-                egui::Slider::new(&mut cfg.alert_min_bits, 1..=5000),
-                Some("Ignore cheers below this amount."),
+                "Width:",
+                percent_slider_range(&mut cfg.overlay_width_pct, 0.10..=0.50, 1.0),
+                Some("Overlay width as a share of the video window width."),
             )
             .changed();
-        }
-
-        if dirty {
-            state.twitch.config_dirty = true;
-            changed = true;
-        }
-
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            label(ui, "Test Alerts:");
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    if ui
-                        .button("Test Follow")
-                        .on_hover_text("Trigger a simulated follower alert")
-                        .clicked()
-                    {
-                        state.twitch.alerts.trigger_test(AlertTestKind::Follow);
-                        changed = true;
-                    }
-                    if ui
-                        .button("Test Sub")
-                        .on_hover_text("Trigger a simulated subscriber alert")
-                        .clicked()
-                    {
-                        state.twitch.alerts.trigger_test(AlertTestKind::Sub);
-                        changed = true;
-                    }
-                    if ui
-                        .button("Test Gift Sub")
-                        .on_hover_text("Trigger a simulated gift sub alert")
-                        .clicked()
-                    {
-                        state.twitch.alerts.trigger_test(AlertTestKind::GiftSub);
-                        changed = true;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    if ui
-                        .button("Test Bits")
-                        .on_hover_text("Trigger a simulated 500 bits cheer alert")
-                        .clicked()
-                    {
-                        state.twitch.alerts.trigger_test(AlertTestKind::Bits);
-                        changed = true;
-                    }
-                    if ui
-                        .button("Test Raid")
-                        .on_hover_text("Trigger a simulated raid alert")
-                        .clicked()
-                    {
-                        state.twitch.alerts.trigger_test(AlertTestKind::Raid);
-                        changed = true;
-                    }
-                });
-            });
+            dirty |= slider_item(
+                ui,
+                "Background:",
+                percent_slider_range(&mut cfg.overlay_opacity, 0.0..=1.0, 1.0),
+                Some("Opacity of the dark overlay background."),
+            )
+            .changed();
+            dirty |= slider_item(
+                ui,
+                "Font Size:",
+                egui::Slider::new(&mut cfg.font_size, 10.0..=28.0)
+                    .step_by(1.0)
+                    .suffix(" pt"),
+                None,
+            )
+            .changed();
+            dirty |= slider_item(
+                ui,
+                "Lifetime:",
+                egui::Slider::new(&mut cfg.message_lifetime_secs, 0..=600).custom_formatter(
+                    |n, _| {
+                        if n < 1.0 {
+                            "Never".to_string()
+                        } else {
+                            format!("{n:.0}s")
+                        }
+                    },
+                ),
+                Some("Messages fade out and disappear after this long.\n• 0: keep messages until pushed out by newer ones"),
+            )
+            .changed();
+            dirty |= slider_item(
+                ui,
+                "Max Messages:",
+                egui::Slider::new(&mut cfg.max_messages, 20..=500),
+                Some("Oldest messages are dropped beyond this count."),
+            )
+            .changed();
+            if dirty {
+                state.twitch.config_dirty = true;
+                changed = true;
+            }
         });
-    });
 
-    ui.add_space(4.0);
+        technical_group(col2, "Niconico Comments & Video Alerts:", |ui| {
+            if ui
+                .checkbox(
+                    &mut state.twitch.config.niconico_enabled,
+                    "Fly chat messages across video (Niconico style)",
+                )
+                .on_hover_text(
+                    "Every new chat message scrolls across the picture from right to left.\nComments are drawn under the CRT effects and are included in replays and mining screenshots.",
+                )
+                .changed()
+            {
+                save_now = true;
+            }
+            let cfg = &mut state.twitch.config;
+            let mut dirty = false;
+            dirty |= slider_item(
+                ui,
+                "Text Size:",
+                percent_slider_range(&mut cfg.niconico_size_pct, 0.03..=0.15, 1.0),
+                Some("Comment height as a share of the picture height."),
+            )
+            .changed();
+            dirty |= slider_item(
+                ui,
+                "Crossing Time:",
+                egui::Slider::new(&mut cfg.niconico_duration_secs, 3.0..=15.0)
+                    .step_by(0.5)
+                    .suffix(" s"),
+                Some("Average time for a comment to cross the screen. Each comment gets a random speed around this."),
+            )
+            .changed();
+            dirty |= slider_item(
+                ui,
+                "Max On Screen:",
+                egui::Slider::new(&mut cfg.niconico_max_comments, 0..=500).custom_formatter(
+                    |n, _| {
+                        if n < 1.0 {
+                            "Unlimited".to_string()
+                        } else {
+                            format!("{n:.0}")
+                        }
+                    },
+                ),
+                Some("Most comments flying at once; the oldest are dropped beyond this.\n• 0: unlimited"),
+            )
+            .changed();
 
-    technical_group(ui, "Twitch Account:", |ui| {
-        let ctx = ui.ctx().clone();
-        if let Some(token) = &state.twitch.token {
-            let login = token.login.clone();
+            super::controls::technical_separator(ui);
+
+            if ui
+                .checkbox(
+                    &mut cfg.alerts_enabled,
+                    "Inject alert notices into video feed",
+                )
+                .on_hover_text(
+                    "Draws animated on-screen cards for followers, subs, bits, and raids directly into the video.\nAlerts are drawn under CRT effects and are included in replays and broadcasts.",
+                )
+                .changed()
+            {
+                save_now = true;
+            }
+
+            dirty |= slider_item(
+                ui,
+                "Alert Duration:",
+                egui::Slider::new(&mut cfg.alerts_duration_secs, 2.0..=15.0)
+                    .step_by(0.5)
+                    .suffix(" s"),
+                Some("How long each alert notice remains on screen before sliding out."),
+            )
+            .changed();
+
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(format!("Logged in as {login}"))
-                        .monospace()
-                        .size(11.0)
-                        .color(egui::Color32::from_rgb(120, 200, 140)),
-                );
-                if ui.button("Log out").clicked() {
-                    state.twitch.logout();
+                ui.label(egui::RichText::new("Events:").monospace().size(11.0).color(LABEL));
+                dirty |= ui.checkbox(&mut cfg.alert_follows, "Follows").changed();
+                dirty |= ui.checkbox(&mut cfg.alert_subs, "Subs").changed();
+                dirty |= ui.checkbox(&mut cfg.alert_bits, "Bits").changed();
+                dirty |= ui.checkbox(&mut cfg.alert_raids, "Raids").changed();
+            });
+
+            if cfg.alert_bits {
+                dirty |= slider_item(
+                    ui,
+                    "Min Bits:",
+                    egui::Slider::new(&mut cfg.alert_min_bits, 1..=5000),
+                    Some("Ignore cheers below this amount."),
+                )
+                .changed();
+            }
+
+            if dirty {
+                state.twitch.config_dirty = true;
+                changed = true;
+            }
+
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Test:").monospace().size(11.0).color(LABEL));
+                if ui.small_button("Follow").on_hover_text("Trigger a simulated follower alert").clicked() {
+                    state.twitch.alerts.trigger_test(AlertTestKind::Follow);
+                    changed = true;
+                }
+                if ui.small_button("Sub").on_hover_text("Trigger a simulated subscriber alert").clicked() {
+                    state.twitch.alerts.trigger_test(AlertTestKind::Sub);
+                    changed = true;
+                }
+                if ui.small_button("Gift Sub").on_hover_text("Trigger a simulated gift sub alert").clicked() {
+                    state.twitch.alerts.trigger_test(AlertTestKind::GiftSub);
+                    changed = true;
+                }
+                if ui.small_button("Bits").on_hover_text("Trigger a simulated 500 bits cheer alert").clicked() {
+                    state.twitch.alerts.trigger_test(AlertTestKind::Bits);
+                    changed = true;
+                }
+                if ui.small_button("Raid").on_hover_text("Trigger a simulated raid alert").clicked() {
+                    state.twitch.alerts.trigger_test(AlertTestKind::Raid);
                     changed = true;
                 }
             });
-            note(ui, "You can send chat messages from the overlay's input box.");
-        } else {
-            match state.twitch.auth_flow.clone() {
-                AuthFlow::Idle => {
-                    if ui.button("Log in with Twitch").clicked() {
-                        state.twitch.start_login(&ctx);
-                        changed = true;
-                    }
-                    note(
-                        ui,
-                        "Needed only to send messages. Reading chat works without logging in.",
-                    );
-                }
-                AuthFlow::Requesting => {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Contacting Twitch…");
-                        if ui.small_button("Cancel").clicked() {
-                            state.twitch.cancel_login();
-                        }
-                    });
-                }
-                AuthFlow::AwaitingUser {
-                    user_code,
-                    verification_uri,
-                    expires_at,
-                } => {
-                    ui.label("Approve Michadame in your browser and confirm this code:");
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(&user_code)
-                                .monospace()
-                                .size(20.0)
-                                .strong()
-                                .color(egui::Color32::from_rgb(190, 150, 255)),
-                        );
-                        if ui.small_button("Copy").clicked() {
-                            ui.output_mut(|o| o.copied_text = user_code.clone());
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        if ui.button("Open activation page").clicked() {
-                            crate::twitch::open_in_browser(&ctx, &verification_uri);
-                        }
-                        if ui.button("Cancel").clicked() {
-                            state.twitch.cancel_login();
-                        }
-                        ui.spinner();
-                    });
-                    let left = expires_at.saturating_duration_since(Instant::now()).as_secs();
-                    note(ui, format!("Waiting for approval… code expires in {}:{:02}", left / 60, left % 60));
-                    ctx.request_repaint_after(std::time::Duration::from_secs(1));
-                }
-            }
-        }
-
-        ui.add_space(4.0);
-        egui::CollapsingHeader::new(egui::RichText::new("Advanced").size(11.0).color(LABEL))
-            .id_source("twitch-advanced")
-            .show(ui, |ui| {
-                sub_heading(ui, "Twitch Application Client ID");
-                ui.horizontal(|ui| {
-                    let edit = ui.add(
-                        egui::TextEdit::singleline(&mut state.twitch.client_id_input)
-                            .hint_text(crate::twitch::auth::DEFAULT_CLIENT_ID)
-                            .desired_width(280.0),
-                    );
-                    if edit.lost_focus() {
-                        let id = state.twitch.client_id_input.trim().to_string();
-                        if id != state.twitch.config.client_id {
-                            state.twitch.config.client_id = id;
-                            save_now = true;
-                        }
-                    }
-                });
-                note(ui, "Leave empty to use Michadame's built-in application. Changing it requires logging in again.");
-            });
+        });
     });
 
     // Persist slider changes once the drag is released to avoid writing every frame.
@@ -587,100 +559,42 @@ fn draw_broadcast_group(ui: &mut egui::Ui, state: &mut AppState, save_now: &mut 
 
         ui.add_space(4.0);
 
-        // Encoder / Stream configuration
+        // Encoder / Stream configuration in 2 columns
         ui.add_enabled_ui(!is_broadcasting, |ui| {
-            // Video & Audio Bitrate
-            ui.horizontal(|ui| {
-                label(ui, "Video Bitrate:");
-                let mut v_kbps = state.twitch.config.video_bitrate_kbps;
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut v_kbps)
-                            .clamp_range(500..=12000)
-                            .speed(50)
-                            .suffix(" kbps"),
-                    )
-                    .on_hover_text("Target video bitrate for Twitch streaming (6000 kbps recommended for 1080p60)")
-                    .changed()
-                {
-                    state.twitch.config.video_bitrate_kbps = v_kbps;
-                    *save_now = true;
-                    changed = true;
-                }
+            two_columns(ui, |col1, col2| {
+                // Left column: Bitrates, Encoder, Pre-roll
+                col1.horizontal(|ui| {
+                    label(ui, "Video Bitrate:");
+                    let mut v_kbps = state.twitch.config.video_bitrate_kbps;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut v_kbps)
+                                .clamp_range(500..=12000)
+                                .speed(50)
+                                .suffix(" kbps"),
+                        )
+                        .on_hover_text("Target video bitrate for Twitch streaming (6000 kbps recommended for 1080p60)")
+                        .changed()
+                    {
+                        state.twitch.config.video_bitrate_kbps = v_kbps;
+                        *save_now = true;
+                        changed = true;
+                    }
 
-                ui.add_space(16.0);
-
-                label(ui, "Audio Bitrate:");
-                let cur_ab = state.twitch.config.audio_bitrate_kbps;
-                let bitrates = [64, 96, 128, 160, 192, 256, 320];
-                egui::ComboBox::from_id_source("twitch_audio_bitrate")
-                    .selected_text(format!("{} kbps", cur_ab))
-                    .show_ui(ui, |ui| {
-                        for &br in &bitrates {
-                            if ui
-                                .selectable_value(
-                                    &mut state.twitch.config.audio_bitrate_kbps,
-                                    br,
-                                    format!("{br} kbps"),
-                                )
-                                .clicked()
-                            {
-                                *save_now = true;
-                                changed = true;
-                            }
-                        }
-                    });
-            });
-
-            ui.add_space(3.0);
-
-            // Video Encoder & Preset
-            ui.horizontal(|ui| {
-                label(ui, "Video Encoder:");
-                let enc_text = match state.twitch.config.video_encoder {
-                    StreamingVideoEncoder::SoftwareX264 => "Software (x264)",
-                    StreamingVideoEncoder::HardwareVaapi => "Hardware (VAAPI H.264)",
-                };
-                egui::ComboBox::from_id_source("twitch_video_encoder")
-                    .selected_text(enc_text)
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_value(
-                                &mut state.twitch.config.video_encoder,
-                                StreamingVideoEncoder::SoftwareX264,
-                                "Software (x264)",
-                            )
-                            .clicked()
-                        {
-                            *save_now = true;
-                            changed = true;
-                        }
-                        if ui
-                            .selectable_value(
-                                &mut state.twitch.config.video_encoder,
-                                StreamingVideoEncoder::HardwareVaapi,
-                                "Hardware (VAAPI H.264)",
-                            )
-                            .clicked()
-                        {
-                            *save_now = true;
-                            changed = true;
-                        }
-                    });
-
-                if state.twitch.config.video_encoder == StreamingVideoEncoder::SoftwareX264 {
-                    ui.add_space(16.0);
-                    label(ui, "Encoder Preset:");
-                    let presets = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"];
-                    egui::ComboBox::from_id_source("twitch_encoder_preset")
-                        .selected_text(&state.twitch.config.encoder_preset)
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new("Audio:").monospace().size(11.0).color(LABEL));
+                    let cur_ab = state.twitch.config.audio_bitrate_kbps;
+                    let bitrates = [64, 96, 128, 160, 192, 256, 320];
+                    egui::ComboBox::from_id_source("twitch_audio_bitrate")
+                        .width(80.0)
+                        .selected_text(format!("{} kbps", cur_ab))
                         .show_ui(ui, |ui| {
-                            for &p in &presets {
+                            for &br in &bitrates {
                                 if ui
                                     .selectable_value(
-                                        &mut state.twitch.config.encoder_preset,
-                                        p.to_string(),
-                                        p,
+                                        &mut state.twitch.config.audio_bitrate_kbps,
+                                        br,
+                                        format!("{br} kbps"),
                                     )
                                     .clicked()
                                 {
@@ -689,212 +603,212 @@ fn draw_broadcast_group(ui: &mut egui::Ui, state: &mut AppState, save_now: &mut 
                                 }
                             }
                         });
-                }
-            });
+                });
 
-            ui.add_space(3.0);
+                col1.horizontal(|ui| {
+                    label(ui, "Video Encoder:");
+                    let enc_text = match state.twitch.config.video_encoder {
+                        StreamingVideoEncoder::SoftwareX264 => "Software (x264)",
+                        StreamingVideoEncoder::HardwareVaapi => "Hardware (VAAPI H.264)",
+                    };
+                    egui::ComboBox::from_id_source("twitch_video_encoder")
+                        .width(135.0)
+                        .selected_text(enc_text)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_value(
+                                    &mut state.twitch.config.video_encoder,
+                                    StreamingVideoEncoder::SoftwareX264,
+                                    "Software (x264)",
+                                )
+                                .clicked()
+                            {
+                                *save_now = true;
+                                changed = true;
+                            }
+                            if ui
+                                .selectable_value(
+                                    &mut state.twitch.config.video_encoder,
+                                    StreamingVideoEncoder::HardwareVaapi,
+                                    "Hardware (VAAPI H.264)",
+                                )
+                                .clicked()
+                            {
+                                *save_now = true;
+                                changed = true;
+                            }
+                        });
 
-            // Audio Encoder
-            ui.horizontal(|ui| {
-                label(ui, "Audio Encoder:");
-                egui::ComboBox::from_id_source("twitch_audio_encoder")
-                    .selected_text("AAC (Default)")
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut state.twitch.config.audio_encoder,
-                            StreamingAudioEncoder::Aac,
-                            "AAC (Default)",
-                        );
-                    });
-            });
-
-            ui.add_space(3.0);
-
-            // Ingest Server
-            ui.horizontal(|ui| {
-                label(ui, "Ingest Server:");
-                let edit = ui.add(
-                    egui::TextEdit::singleline(&mut state.twitch.config.ingest_server)
-                        .hint_text("rtmps://live.twitch.tv:443/app/")
-                        .desired_width(260.0),
-                );
-                if edit.lost_focus() {
-                    if state.twitch.config.ingest_server.trim().is_empty() {
-                        state.twitch.config.ingest_server =
-                            "rtmps://live.twitch.tv:443/app/".to_string();
+                    if state.twitch.config.video_encoder == StreamingVideoEncoder::SoftwareX264 {
+                        ui.label(egui::RichText::new("Preset:").monospace().size(11.0).color(LABEL));
+                        let presets = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"];
+                        egui::ComboBox::from_id_source("twitch_encoder_preset")
+                            .width(80.0)
+                            .selected_text(&state.twitch.config.encoder_preset)
+                            .show_ui(ui, |ui| {
+                                for &p in &presets {
+                                    if ui
+                                        .selectable_value(
+                                            &mut state.twitch.config.encoder_preset,
+                                            p.to_string(),
+                                            p,
+                                        )
+                                        .clicked()
+                                    {
+                                        *save_now = true;
+                                        changed = true;
+                                    }
+                                }
+                            });
                     }
-                    *save_now = true;
-                    changed = true;
-                }
-                if ui
-                    .small_button("Reset")
-                    .on_hover_text("Reset to default secure RTMPS server")
-                    .clicked()
-                {
-                    state.twitch.config.ingest_server =
-                        "rtmps://live.twitch.tv:443/app/".to_string();
-                    *save_now = true;
-                    changed = true;
-                }
-            });
+                });
 
-            ui.add_space(3.0);
-
-            // Stream Key
-            ui.horizontal(|ui| {
-                label(ui, "Stream Key:");
-                let show = state.twitch.show_stream_key;
-                let edit = ui.add(
-                    egui::TextEdit::singleline(&mut state.twitch.stream_key_input)
-                        .password(!show)
-                        .hint_text("live_...")
-                        .desired_width(210.0),
-                );
-                if edit.lost_focus() || edit.changed() {
-                    let trimmed = state.twitch.stream_key_input.trim().to_string();
-                    if trimmed != state.twitch.config.stream_key {
-                        state.twitch.config.stream_key = trimmed;
+                col1.horizontal(|ui| {
+                    label(ui, "Pre-roll Video:");
+                    if ui
+                        .checkbox(
+                            &mut state.twitch.config.preroll_enabled,
+                            "Enable pre-roll video",
+                        )
+                        .on_hover_text("Play a preset video file with audio before going live, seamlessly fading to the real stream when it ends")
+                        .changed()
+                    {
                         *save_now = true;
                         changed = true;
                     }
-                }
-                let toggle_label = if show { "Hide" } else { "Show" };
-                if ui.small_button(toggle_label).clicked() {
-                    state.twitch.show_stream_key = !show;
-                }
+                });
 
-                let has_token = state.twitch.token.is_some();
-                let fetch_btn = ui.add_enabled(
-                    has_token,
-                    egui::Button::new(egui::RichText::new("Fetch from Twitch").size(11.0)),
-                );
-                if fetch_btn.clicked() {
-                    state.twitch.try_fetch_stream_key();
-                    *save_now = true;
-                    changed = true;
-                }
-                if !has_token {
-                    fetch_btn.on_hover_text("Log in to Twitch below under 'Twitch Account' to auto-fetch your stream key");
-                }
-            });
+                if state.twitch.config.preroll_enabled {
+                    col1.horizontal(|ui| {
+                        label(ui, "Video File:");
+                        let path_display = if state.twitch.config.preroll_video_path.is_empty() {
+                            "(No video file selected)".to_string()
+                        } else {
+                            let p = std::path::Path::new(&state.twitch.config.preroll_video_path);
+                            p.file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| state.twitch.config.preroll_video_path.clone())
+                        };
 
-            ui.add_space(3.0);
+                        let path_lbl = ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(&path_display)
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(if state.twitch.config.preroll_video_path.is_empty() {
+                                        MUTED
+                                    } else {
+                                        egui::Color32::WHITE
+                                    }),
+                            )
+                            .truncate(true),
+                        );
+                        if !state.twitch.config.preroll_video_path.is_empty() {
+                            path_lbl.on_hover_text(&state.twitch.config.preroll_video_path);
+                        }
 
-            // Pre-roll Video
-            ui.horizontal(|ui| {
-                label(ui, "Pre-roll Video:");
-                if ui
-                    .checkbox(
-                        &mut state.twitch.config.preroll_enabled,
-                        "Enable pre-roll video",
-                    )
-                    .on_hover_text("Play a preset video file with audio before going live, seamlessly fading to the real stream when it ends")
-                    .changed()
-                {
-                    *save_now = true;
-                    changed = true;
-                }
-            });
-
-            if state.twitch.config.preroll_enabled {
-                ui.horizontal(|ui| {
-                    ui.add_space(16.0);
-                    label(ui, "Video File:");
-                    let path_display = if state.twitch.config.preroll_video_path.is_empty() {
-                        "(No video file selected)".to_string()
-                    } else {
-                        let p = std::path::Path::new(&state.twitch.config.preroll_video_path);
-                        p.file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| state.twitch.config.preroll_video_path.clone())
-                    };
-
-                    let path_lbl = ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(&path_display)
-                                .monospace()
-                                .size(11.0)
-                                .color(if state.twitch.config.preroll_video_path.is_empty() {
-                                    MUTED
-                                } else {
-                                    egui::Color32::WHITE
-                                }),
-                        )
-                        .truncate(true),
-                    );
-                    if !state.twitch.config.preroll_video_path.is_empty() {
-                        path_lbl.on_hover_text(&state.twitch.config.preroll_video_path);
-                    }
-
-                    if ui
-                        .small_button("Browse…")
-                        .on_hover_text("Pick a video file from disk (e.g. .mp4, .webm, .mkv)")
-                        .clicked()
-                    {
-                        state.twitch.open_preroll_file_dialog(ui.ctx());
-                    }
-
-                    if !state.twitch.config.preroll_video_path.is_empty() {
                         if ui
-                            .small_button("Clear")
-                            .on_hover_text("Remove pre-roll video file selection")
+                            .small_button("Browse…")
+                            .on_hover_text("Pick a video file from disk (e.g. .mp4, .webm, .mkv)")
                             .clicked()
                         {
-                            state.twitch.config.preroll_video_path.clear();
+                            state.twitch.open_preroll_file_dialog(ui.ctx());
+                        }
+
+                        if !state.twitch.config.preroll_video_path.is_empty() {
+                            if ui
+                                .small_button("Clear")
+                                .on_hover_text("Remove pre-roll video file selection")
+                                .clicked()
+                            {
+                                state.twitch.config.preroll_video_path.clear();
+                                *save_now = true;
+                                changed = true;
+                            }
+                        }
+                    });
+                }
+
+                // Right column: Ingest Server, Stream Key, Audio Encoder
+                col2.horizontal(|ui| {
+                    label(ui, "Ingest Server:");
+                    let edit = ui.add(
+                        egui::TextEdit::singleline(&mut state.twitch.config.ingest_server)
+                            .hint_text("rtmps://live.twitch.tv:443/app/")
+                            .desired_width(220.0),
+                    );
+                    if edit.lost_focus() {
+                        if state.twitch.config.ingest_server.trim().is_empty() {
+                            state.twitch.config.ingest_server =
+                                "rtmps://live.twitch.tv:443/app/".to_string();
+                        }
+                        *save_now = true;
+                        changed = true;
+                    }
+                    if ui
+                        .small_button("Reset")
+                        .on_hover_text("Reset to default secure RTMPS server")
+                        .clicked()
+                    {
+                        state.twitch.config.ingest_server =
+                            "rtmps://live.twitch.tv:443/app/".to_string();
+                        *save_now = true;
+                        changed = true;
+                    }
+                });
+
+                col2.horizontal(|ui| {
+                    label(ui, "Stream Key:");
+                    let show = state.twitch.show_stream_key;
+                    let edit = ui.add(
+                        egui::TextEdit::singleline(&mut state.twitch.stream_key_input)
+                            .password(!show)
+                            .hint_text("live_...")
+                            .desired_width(150.0),
+                    );
+                    if edit.lost_focus() || edit.changed() {
+                        let trimmed = state.twitch.stream_key_input.trim().to_string();
+                        if trimmed != state.twitch.config.stream_key {
+                            state.twitch.config.stream_key = trimmed;
                             *save_now = true;
                             changed = true;
                         }
                     }
+                    let toggle_label = if show { "Hide" } else { "Show" };
+                    if ui.small_button(toggle_label).clicked() {
+                        state.twitch.show_stream_key = !show;
+                    }
+
+                    let has_token = state.twitch.token.is_some();
+                    let fetch_btn = ui.add_enabled(
+                        has_token,
+                        egui::Button::new(egui::RichText::new("Fetch").size(11.0)),
+                    );
+                    if fetch_btn.clicked() {
+                        state.twitch.try_fetch_stream_key();
+                        *save_now = true;
+                        changed = true;
+                    }
+                    if !has_token {
+                        fetch_btn.on_hover_text("Log in to Twitch above to auto-fetch your stream key");
+                    }
                 });
 
-                if !state.twitch.config.preroll_video_path.is_empty() {
-                    let path_str = state.twitch.config.preroll_video_path.clone();
-                    let p = std::path::Path::new(&path_str);
-                    if p.exists() {
-                        let cache_id = egui::Id::new("preroll_video_probe_cache");
-                        let cached: Option<(String, Option<crate::video::player::VideoFileInfo>)> =
-                            ui.ctx().data_mut(|d| d.get_temp(cache_id));
-                        let info_opt = match cached {
-                            Some((cached_path, info)) if cached_path == path_str => info,
-                            _ => {
-                                let probed = crate::video::player::probe_video_file(p).ok();
-                                ui.ctx().data_mut(|d| {
-                                    d.insert_temp(cache_id, (path_str, probed.clone()))
-                                });
-                                probed
-                            }
-                        };
-                        if let Some(info) = info_opt {
-                            let dur_str = crate::video::player::format_time(info.duration_secs);
-                            ui.horizontal(|ui| {
-                                ui.add_space(16.0);
-                                note(
-                                    ui,
-                                    &format!(
-                                        "Duration: {} ({:.1}s) · Resolution: {}x{} · {:.1} fps",
-                                        dur_str, info.duration_secs, info.width, info.height, info.framerate
-                                    ),
-                                );
-                            });
-                        }
-                    } else {
-                        ui.horizontal(|ui| {
-                            ui.add_space(16.0);
-                            ui.label(
-                                egui::RichText::new("⚠ Selected file not found on disk")
-                                    .size(10.5)
-                                    .color(egui::Color32::from_rgb(240, 100, 100)),
+                col2.horizontal(|ui| {
+                    label(ui, "Audio Encoder:");
+                    egui::ComboBox::from_id_source("twitch_audio_encoder")
+                        .selected_text("AAC (Default)")
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut state.twitch.config.audio_encoder,
+                                StreamingAudioEncoder::Aac,
+                                "AAC (Default)",
                             );
                         });
-                    }
-                }
-            }
+                    note(ui, "Clamped to 1080p max.");
+                });
+            });
         });
-
-        note(
-            ui,
-            "Stream output is clamped to 1080p max. Excludes the Twitch chat overlay and debug window.",
-        );
     });
     changed
 }

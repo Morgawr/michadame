@@ -163,11 +163,9 @@ pub fn draw_shaders_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     changed = true;
                 }
             }
-        });
 
-        ui.add_space(2.0);
+            ui.add_space(6.0);
 
-        ui.horizontal_wrapped(|ui| {
             if ui
                 .checkbox(&mut state.video.fft_filter_enabled, "FFT Mask Filter")
                 .changed()
@@ -728,11 +726,11 @@ pub fn draw_shaders_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     changed
 }
 
-pub fn draw_geometry_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
+pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     let mut changed = false;
 
-    // Group 1: Deinterlace Filter
-    technical_group(ui, "Deinterlace Filter:", |ui| {
+    // Group 1: Geometry, Cropping & Deinterlace
+    technical_group(ui, "Geometry, Cropping & Deinterlace:", |ui| {
         ui.horizontal_wrapped(|ui| {
             if ui
                 .checkbox(&mut state.video.deinterlace_filter_enabled, "Deinterlace Filter")
@@ -915,12 +913,10 @@ pub fn draw_geometry_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 _ => {}
             }
         }
-    });
 
-    ui.add_space(4.0);
+        technical_separator(ui);
+        sub_heading(ui, "Aspect & Scaling:");
 
-    // Group 2: Aspect & Scaling
-    technical_group(ui, "Aspect & Scaling:", |ui| {
         two_columns(ui, |c1, c2| {
             let slider = percent_slider_range(&mut state.video.vibrance, 0.0..=3.0, 3.0);
             if slider_item(c1, "Vibrance (Saturation):", slider, None).changed() {
@@ -1063,126 +1059,188 @@ pub fn draw_geometry_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         });
     });
 
-    changed
-}
+    ui.add_space(4.0);
 
-pub fn draw_effects_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
-    let mut changed = false;
-
-    // Group 1: Visual Tweaks
-    technical_group(ui, "Visual Tweaks:", |ui| {
-        if ui
-            .checkbox(
-                &mut state.video.use_magenta_background,
-                "Magenta Background",
-            )
-            .on_hover_text("Uses a magenta background around the video stream instead of black.")
-            .changed()
-        {
-            crate::config::save_config(state);
-            changed = true;
-        }
-
-        technical_separator(ui);
-
-        if ui
-            .checkbox(
-                &mut state.video.retro_pc_frame,
-                "Retro PC Monitor Frame",
-            )
-            .on_hover_text(
-                "Displays a vintage NEC PC-98 CRT monitor casing in empty areas around the screen (requires CRT shader).",
-            )
-            .changed()
-        {
-            crate::config::save_config(state);
-            changed = true;
-        }
-
-        if state.video.retro_pc_frame {
-            ui.add_space(3.0);
-            two_columns(ui, |c1, c2| {
-                let slider = egui::Slider::new(&mut state.video.retro_pc_ambient_glow, 0.0..=1.0)
-                    .step_by(0.05)
-                    .custom_formatter(|n, _| {
-                        if n <= 0.001 {
-                            "Off".to_string()
-                        } else {
-                            format!("{:.0}%", n * 100.0)
-                        }
-                    })
-                    .custom_parser(|s| {
-                        let s = s.trim().trim_end_matches('%').trim();
-                        if s.eq_ignore_ascii_case("off") {
-                            Some(0.0)
-                        } else {
-                            s.parse::<f64>().ok().map(|v| if v > 1.0 { (v / 100.0) as f64 } else { v })
-                        }
-                    });
-                if slider_item(
-                    c1,
-                    "Bezel Ambient Glow:",
-                    slider,
-                    Some("Controls the intensity of the real-time diffuse halo glow reflecting from the active video feed onto the deep inner bezel sides (0% = Off)."),
+    // Group 2: Monitor Bezel, Glass & Ambient Effects
+    technical_group(ui, "Monitor Bezel, Glass & Ambient Effects:", |ui| {
+        two_columns(ui, |c1, c2| {
+            if c1
+                .checkbox(
+                    &mut state.video.retro_pc_frame,
+                    "Retro PC Monitor Frame",
+                )
+                .on_hover_text(
+                    "Displays a vintage NEC PC-98 CRT monitor casing in empty areas around the screen (requires CRT shader).",
                 )
                 .changed()
-                {
-                    crate::config::save_config(state);
-                    changed = true;
-                }
+            {
+                crate::config::save_config(state);
+                changed = true;
+            }
 
-                c2.horizontal(|ui| {
-                    if ui
-                        .checkbox(
-                            &mut state.video.retro_pc_frame_dark_mode,
-                            "Dark Room Bezel",
-                        )
-                        .on_hover_text(
-                            "Tones down bezel brightness as if room lights are turned off (automatically enabled during Lights Off Night Mode).",
-                        )
-                        .changed()
+            if c2
+                .checkbox(
+                    &mut state.video.lights_off_night_mode,
+                    "Lights Off Night Mode (K)",
+                )
+                .on_hover_text(
+                    "Simulates turning off room lights: darkens CRT bezels, enhances ambient glow reflections, and disables ceiling/camera flash reflections (press 'K').",
+                )
+                .changed()
+            {
+                crate::config::save_config(state);
+                changed = true;
+            }
+        });
+
+        two_columns(ui, |c1, c2| {
+            if c1
+                .checkbox(
+                    &mut state.video.crt_glass_enabled,
+                    "Glossy Screen Glass Effect",
+                )
+                .on_hover_text(
+                    "Simulates a photorealistic curved CRT glass patina, refractions, and reflections reacting to screen light (requires CRT shader).",
+                )
+                .changed()
+            {
+                crate::config::save_config(state);
+                changed = true;
+            }
+
+            if c2
+                .checkbox(
+                    &mut state.cathode_interference.enabled,
+                    "Cathode Glow & Interference",
+                )
+                .on_hover_text(
+                    "Simulates CRT cathode ray flickering, electrical bloom, and subtle analog RF interference.",
+                )
+                .changed()
+            {
+                changed = true;
+            }
+        });
+
+        two_columns(ui, |c1, c2| {
+            if c1
+                .checkbox(
+                    &mut state.video.retro_software_mouse,
+                    "Retro Software Mouse Pointer",
+                )
+                .on_hover_text(
+                    "Renders a vintage pixelated software mouse cursor directly inside the CRT video feed with scanlines and glass effects while hovering the screen.\nThe real hardware cursor is automatically restored outside the CRT surface or when the foreground dictionary popup is active.",
+                )
+                .changed()
+            {
+                crate::config::save_config(state);
+                changed = true;
+            }
+
+            if c2
+                .checkbox(
+                    &mut state.video.use_magenta_background,
+                    "Magenta Background",
+                )
+                .on_hover_text("Uses a magenta background around the video stream instead of black.")
+                .changed()
+            {
+                crate::config::save_config(state);
+                changed = true;
+            }
+        });
+
+        if state.video.retro_pc_frame || state.video.lights_off_night_mode {
+            technical_separator(ui);
+            sub_heading(ui, "Bezel & Night Mode Lighting:");
+
+            if state.video.retro_pc_frame {
+                two_columns(ui, |c1, c2| {
+                    let slider = egui::Slider::new(&mut state.video.retro_pc_ambient_glow, 0.0..=1.0)
+                        .step_by(0.05)
+                        .custom_formatter(|n, _| {
+                            if n <= 0.001 {
+                                "Off".to_string()
+                            } else {
+                                format!("{:.0}%", n * 100.0)
+                            }
+                        })
+                        .custom_parser(|s| {
+                            let s = s.trim().trim_end_matches('%').trim();
+                            if s.eq_ignore_ascii_case("off") {
+                                Some(0.0)
+                            } else {
+                                s.parse::<f64>().ok().map(|v| if v > 1.0 { (v / 100.0) as f64 } else { v })
+                            }
+                        });
+                    if slider_item(
+                        c1,
+                        "Bezel Ambient Glow:",
+                        slider,
+                        Some("Controls the intensity of the real-time diffuse halo glow reflecting from the active video feed onto the deep inner bezel sides (0% = Off)."),
+                    )
+                    .changed()
+                    {
+                        crate::config::save_config(state);
+                        changed = true;
+                    }
+
+                    c2.horizontal(|ui| {
+                        if ui
+                            .checkbox(
+                                &mut state.video.retro_pc_frame_dark_mode,
+                                "Dark Room Bezel",
+                            )
+                            .on_hover_text(
+                                "Tones down bezel brightness as if room lights are turned off (automatically enabled during Lights Off Night Mode).",
+                            )
+                            .changed()
+                        {
+                            crate::config::save_config(state);
+                            changed = true;
+                        }
+                    });
+                });
+            }
+
+            if state.video.lights_off_night_mode {
+                two_columns(ui, |c1, _| {
+                    let slider = egui::Slider::new(&mut state.video.night_mode_glow_intensity, 0.0..=1.0)
+                        .step_by(0.05)
+                        .custom_formatter(|n, _| {
+                            if n <= 0.001 {
+                                "Off".to_string()
+                            } else {
+                                format!("{:.0}%", n * 100.0)
+                            }
+                        })
+                        .custom_parser(|s| {
+                            let s = s.trim().trim_end_matches('%').trim();
+                            if s.eq_ignore_ascii_case("off") {
+                                Some(0.0)
+                            } else {
+                                s.parse::<f64>().ok().map(|v| if v > 1.0 { (v / 100.0) as f64 } else { v })
+                            }
+                        });
+                    if slider_item(
+                        c1,
+                        "Night Halo Glow:",
+                        slider,
+                        Some("Extra ambient halo glow intensity when Lights Off Night Mode is active (0% = Off)."),
+                    )
+                    .changed()
                     {
                         crate::config::save_config(state);
                         changed = true;
                     }
                 });
-            });
-        }
-
-        technical_separator(ui);
-
-        if ui
-            .checkbox(
-                &mut state.video.retro_software_mouse,
-                "Retro Software Mouse Pointer",
-            )
-            .on_hover_text(
-                "Renders a vintage pixelated software mouse cursor directly inside the CRT video feed with scanlines and glass effects while hovering the screen.\nThe real hardware cursor is automatically restored outside the CRT surface or when the foreground dictionary popup is active.",
-            )
-            .changed()
-        {
-            crate::config::save_config(state);
-            changed = true;
-        }
-
-        technical_separator(ui);
-
-        if ui
-            .checkbox(
-                &mut state.video.crt_glass_enabled,
-                "Glossy Screen Glass Effect",
-            )
-            .on_hover_text(
-                "Simulates a photorealistic curved CRT glass patina, refractions, and reflections reacting to screen light (requires CRT shader).",
-            )
-            .changed()
-        {
-            crate::config::save_config(state);
-            changed = true;
+            }
         }
 
         if state.video.crt_glass_enabled {
-            ui.add_space(3.0);
+            technical_separator(ui);
+            sub_heading(ui, "CRT Glass & Reflections:");
+
             two_columns(ui, |c1, c2| {
                 let slider = percent_slider(&mut state.video.crt_glass_intensity, 0.0..=1.0);
                 if slider_item(
@@ -1211,86 +1269,76 @@ pub fn draw_effects_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 }
             });
 
-            ui.add_space(3.0);
-            ui.horizontal(|ui| {
-                if ui
-                    .checkbox(
-                        &mut state.video.crt_glass_ceiling_light_enabled,
-                        "Ceiling Light Reflections",
-                    )
-                    .on_hover_text(
-                        "Simulates overhead twin-tube fluorescent office light reflections on the glass surface.",
-                    )
-                    .changed()
-                {
-                    crate::config::save_config(state);
-                    changed = true;
-                }
+            ui.add_space(2.0);
+            two_columns(ui, |c1, c2| {
+                c1.horizontal(|ui| {
+                    if ui
+                        .checkbox(
+                            &mut state.video.crt_glass_ceiling_light_enabled,
+                            "Ceiling Light Reflections",
+                        )
+                        .on_hover_text(
+                            "Simulates overhead twin-tube fluorescent office light reflections on the glass surface.",
+                        )
+                        .changed()
+                    {
+                        crate::config::save_config(state);
+                        changed = true;
+                    }
+                });
+
+                c2.horizontal(|ui| {
+                    if ui
+                        .checkbox(
+                            &mut state.video.crt_glass_photographer_enabled,
+                            "Photographer Reflection",
+                        )
+                        .on_hover_text(
+                            "Simulates an anonymous, diffuse dark silhouette reflection of a person taking a photo with a smartphone.",
+                        )
+                        .changed()
+                    {
+                        crate::config::save_config(state);
+                        changed = true;
+                    }
+                });
             });
 
-            ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                if ui
-                    .checkbox(
-                        &mut state.video.crt_glass_photographer_enabled,
-                        "Photographer Reflection",
-                    )
-                    .on_hover_text(
-                        "Simulates an anonymous, diffuse dark silhouette reflection of a person taking a photo with a smartphone.",
-                    )
-                    .changed()
-                {
-                    crate::config::save_config(state);
-                    changed = true;
-                }
+            two_columns(ui, |c1, c2| {
+                c1.horizontal(|ui| {
+                    if ui
+                        .checkbox(
+                            &mut state.video.crt_glass_flash_enabled,
+                            "Camera Flash Reflection",
+                        )
+                        .on_hover_text(
+                            "Simulates a warm diffuse camera flash reflection on the lower-right area of the screen.",
+                        )
+                        .changed()
+                    {
+                        crate::config::save_config(state);
+                        changed = true;
+                    }
+                });
 
                 if state.video.crt_glass_photographer_enabled {
-                    ui.add_space(6.0);
-                    ui.label(
-                        egui::RichText::new("Photographer Intensity:")
-                            .monospace()
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(153, 153, 153)),
-                    );
                     let slider = percent_slider(&mut state.video.crt_glass_photographer_intensity, 0.0..=1.0);
-                    if ui.add(slider).changed() {
+                    if slider_item(c2, "Photographer Int.:", slider, None).changed() {
                         crate::config::save_config(state);
                         changed = true;
                     }
                 }
             });
 
-            ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                if ui
-                    .checkbox(
-                        &mut state.video.crt_glass_flash_enabled,
-                        "Camera Flash Reflection",
-                    )
-                    .on_hover_text(
-                        "Simulates a warm diffuse camera flash reflection on the lower-right area of the screen.",
-                    )
-                    .changed()
-                {
-                    crate::config::save_config(state);
-                    changed = true;
-                }
-
-                if state.video.crt_glass_flash_enabled {
-                    ui.add_space(6.0);
-                    ui.label(
-                        egui::RichText::new("Flash Intensity:")
-                            .monospace()
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(153, 153, 153)),
-                    );
+            if state.video.crt_glass_flash_enabled {
+                two_columns(ui, |c1, _| {
                     let slider = percent_slider(&mut state.video.crt_glass_flash_intensity, 0.0..=1.0);
-                    if ui.add(slider).changed() {
+                    if slider_item(c1, "Flash Intensity:", slider, None).changed() {
                         crate::config::save_config(state);
                         changed = true;
                     }
-                }
-            });
+                });
+            }
 
             if state.video.lights_off_night_mode {
                 ui.label(
@@ -1303,75 +1351,16 @@ pub fn draw_effects_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             }
         }
 
-        technical_separator(ui);
-
-        ui.horizontal(|ui| {
-            if ui
-                .checkbox(
-                    &mut state.video.lights_off_night_mode,
-                    "Lights Off Night Mode (K)",
-                )
-                .on_hover_text(
-                    "Simulates turning off room lights: darkens CRT bezels, enhances ambient glow reflections, and disables ceiling/camera flash reflections (press 'K').",
-                )
-                .changed()
-            {
-                crate::config::save_config(state);
-                changed = true;
-            }
-
-            if state.video.lights_off_night_mode {
-                ui.add_space(6.0);
+        if state.cathode_interference.enabled {
+            technical_separator(ui);
+            ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new("Night Mode Halo Glow:")
+                    egui::RichText::new("Cathode Glow & Interference Parameters:")
                         .monospace()
                         .size(11.0)
+                        .strong()
                         .color(egui::Color32::from_rgb(153, 153, 153)),
                 );
-                let slider = egui::Slider::new(&mut state.video.night_mode_glow_intensity, 0.0..=1.0)
-                    .step_by(0.05)
-                    .custom_formatter(|n, _| {
-                        if n <= 0.001 {
-                            "Off".to_string()
-                        } else {
-                            format!("{:.0}%", n * 100.0)
-                        }
-                    })
-                    .custom_parser(|s| {
-                        let s = s.trim().trim_end_matches('%').trim();
-                        if s.eq_ignore_ascii_case("off") {
-                            Some(0.0)
-                        } else {
-                            s.parse::<f64>().ok().map(|v| if v > 1.0 { (v / 100.0) as f64 } else { v })
-                        }
-                    });
-                if ui.add(slider).changed() {
-                    crate::config::save_config(state);
-                    changed = true;
-                }
-            }
-        });
-    });
-
-    ui.add_space(4.0);
-
-    // Group 2: Cathode Glow & Interference
-    technical_group(ui, "", |ui| {
-        ui.horizontal(|ui| {
-            if ui
-                .checkbox(
-                    &mut state.cathode_interference.enabled,
-                    "Cathode Glow & Interference",
-                )
-                .on_hover_text(
-                    "Simulates CRT cathode ray flickering, electrical bloom, and subtle analog RF interference.",
-                )
-                .changed()
-            {
-                changed = true;
-            }
-
-            if state.cathode_interference.enabled {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Save as Defaults").clicked() {
                         state.cathode_interference_defaults = state.cathode_interference.clone();
@@ -1388,11 +1377,8 @@ pub fn draw_effects_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         changed = true;
                     }
                 });
-            }
-        });
-
-        if state.cathode_interference.enabled {
-            ui.add_space(4.0);
+            });
+            ui.add_space(2.0);
             two_columns(ui, |c1, c2| {
                 let slider = percent_slider(&mut state.cathode_interference.intensity, 0.0..=1.0);
                 if slider_item(

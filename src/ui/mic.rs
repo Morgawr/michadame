@@ -1,5 +1,5 @@
 use crate::app::AppState;
-use crate::ui::controls::technical_group;
+use crate::ui::controls::{sub_heading, technical_group, technical_separator, two_columns};
 use eframe::egui;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -14,39 +14,73 @@ pub enum SelectedFilterTab {
 pub fn draw_mic_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     let mut changed = false;
 
-    // Repaint while Mic tab is active to smoothly animate the live dB meter
+    // Repaint while Audio & Mic tab is active to smoothly animate the live dB meter
     ui.ctx().request_repaint_after(Duration::from_millis(16));
 
-    // --- Master Volume, Level Meter & Monitor Mode ---
-    technical_group(ui, "Microphone Output & Live Monitor:", |ui| {
+    // --- Unified Microphone Input, Volume, Live Monitor & Filters ---
+    technical_group(ui, "Microphone & Voice Filters:", |ui| {
         let is_stream_active = state.mic.active_stream.is_some();
 
+        // Row 1: Enable Checkbox + Mic Input Device Selector + Monitor Checkbox + Status Indicator
         ui.horizontal(|ui| {
-            if is_stream_active {
-                ui.label(
-                    egui::RichText::new("● Mic Active")
-                        .color(egui::Color32::from_rgb(46, 204, 113))
-                        .strong()
-                        .monospace()
-                        .size(11.0),
-                );
-            } else if state.mic.config.enabled {
-                ui.label(
-                    egui::RichText::new("○ Mic Connecting...")
-                        .color(egui::Color32::from_rgb(241, 196, 15))
-                        .monospace()
-                        .size(11.0),
-                );
-            } else {
-                ui.label(
-                    egui::RichText::new("○ Mic Disabled (Turn on in Capture Devices tab)")
-                        .color(egui::Color32::from_rgb(149, 165, 166))
-                        .monospace()
-                        .size(11.0),
-                );
+            let mut mic_enabled = state.mic.config.enabled;
+            if ui
+                .checkbox(&mut mic_enabled, "Enable Microphone")
+                .on_hover_text("Enables microphone audio input capture and recording into the replay buffer.")
+                .changed()
+            {
+                state.mic.config.enabled = mic_enabled;
+                if mic_enabled && state.mic.config.device_name.is_none() {
+                    state.mic.config.device_name = state
+                        .hardware
+                        .audio_sources
+                        .first()
+                        .map(|(_, name)| name.clone());
+                }
+                crate::config::save_config(state);
+                crate::config::save_global_hardware_config(state);
+                state.sync_mic_stream();
+                changed = true;
             }
 
-            ui.add_space(16.0);
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new("Mic Input:")
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(170, 170, 170)),
+            );
+            let selected_mic_desc = state
+                .hardware
+                .audio_sources
+                .iter()
+                .find(|(_, name)| Some(name) == state.mic.config.device_name.as_ref())
+                .map(|(desc, _)| desc.clone())
+                .unwrap_or_else(|| "Select a Microphone".to_string());
+
+            egui::ComboBox::from_id_source("mic_device_selector")
+                .selected_text(selected_mic_desc)
+                .width(230.0)
+                .show_ui(ui, |ui| {
+                    let mut combo_changed = false;
+                    for (desc, name) in &state.hardware.audio_sources {
+                        combo_changed |= ui
+                            .selectable_value(
+                                &mut state.mic.config.device_name,
+                                Some(name.clone()),
+                                desc,
+                            )
+                            .changed();
+                    }
+                    if combo_changed {
+                        crate::config::save_config(state);
+                        crate::config::save_global_hardware_config(state);
+                        state.sync_mic_stream();
+                        changed = true;
+                    }
+                });
+
+            ui.add_space(6.0);
 
             let mut monitor = state.mic.config.monitor;
             if ui
@@ -55,59 +89,73 @@ pub fn draw_mic_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 .changed()
             {
                 state.mic.config.monitor = monitor;
-                if let Some(stream) = &state.mic.active_stream {
-                    if let Ok(mut w) = stream.config.write() {
-                        *w = state.mic.config.clone();
-                    }
-                }
+                sync_mic_config_to_stream(state);
                 crate::config::save_global_hardware_config(state);
                 changed = true;
             }
-        });
 
-        ui.add_space(6.0);
-
-        // Volume Slider
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("Volume:")
-                    .monospace()
-                    .size(11.0)
-                    .color(egui::Color32::from_rgb(170, 170, 170)),
-            );
-            let mut vol_percent = (state.mic.config.volume * 100.0).round();
-            if ui
-                .add(
-                    egui::Slider::new(&mut vol_percent, 0.0..=150.0)
-                        .custom_formatter(|val, _| format!("{:.0}%", val)),
-                )
-                .changed()
-            {
-                state.mic.config.volume = (vol_percent / 100.0).clamp(0.0, 2.0);
-                if let Some(stream) = &state.mic.active_stream {
-                    if let Ok(mut w) = stream.config.write() {
-                        *w = state.mic.config.clone();
-                    }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if is_stream_active {
+                    ui.label(
+                        egui::RichText::new("● Mic Active")
+                            .color(egui::Color32::from_rgb(46, 204, 113))
+                            .strong()
+                            .monospace()
+                            .size(11.0),
+                    );
+                } else if state.mic.config.enabled {
+                    ui.label(
+                        egui::RichText::new("○ Mic Connecting...")
+                            .color(egui::Color32::from_rgb(241, 196, 15))
+                            .monospace()
+                            .size(11.0),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new("○ Mic Disabled")
+                            .color(egui::Color32::from_rgb(149, 165, 166))
+                            .monospace()
+                            .size(11.0),
+                    );
                 }
-                crate::config::save_global_hardware_config(state);
-                changed = true;
-            }
+            });
         });
 
-        ui.add_space(6.0);
+        ui.add_space(4.0);
 
-        // Live Feedback dB Peak Meter with Green / Orange / Red zones
-        let current_db = f32::from_bits(state.mic.current_level_db.load(Ordering::Relaxed));
-        let peak_db = f32::from_bits(state.mic.peak_level_db.load(Ordering::Relaxed));
-        let clipping = state.mic.is_clipping.load(Ordering::Relaxed) || current_db >= 0.0;
+        // Row 2: Volume Slider + Live Feedback dB Peak Meter side-by-side
+        two_columns(ui, |col1, col2| {
+            col1.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Volume:")
+                        .monospace()
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(170, 170, 170)),
+                );
+                let mut vol_percent = (state.mic.config.volume * 100.0).round();
+                if ui
+                    .add(
+                        egui::Slider::new(&mut vol_percent, 0.0..=150.0)
+                            .custom_formatter(|val, _| format!("{:.0}%", val)),
+                    )
+                    .changed()
+                {
+                    state.mic.config.volume = (vol_percent / 100.0).clamp(0.0, 2.0);
+                    sync_mic_config_to_stream(state);
+                    crate::config::save_global_hardware_config(state);
+                    changed = true;
+                }
+            });
 
-        draw_db_meter(ui, current_db, peak_db, clipping);
-    });
+            let current_db = f32::from_bits(state.mic.current_level_db.load(Ordering::Relaxed));
+            let peak_db = f32::from_bits(state.mic.peak_level_db.load(Ordering::Relaxed));
+            let clipping = state.mic.is_clipping.load(Ordering::Relaxed) || current_db >= 0.0;
+            draw_db_meter(col2, current_db, peak_db, clipping);
+        });
 
-    ui.add_space(6.0);
+        technical_separator(ui);
+        sub_heading(ui, "Audio Filters (In Order: Gate -> Gain -> Compressor):");
 
-    // --- Audio Filters Section (OBS-style filter stack) ---
-    technical_group(ui, "Audio Filters (In Order: Gate -> Gain -> Compressor):", |ui| {
         // Persistent selected filter tab in UI memory
         let filter_tab_id = ui.id().with("selected_mic_filter_tab");
         let mut selected_tab = ui.data_mut(|d| {
@@ -192,28 +240,28 @@ pub fn draw_mic_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             slider_changed |= ui.add(egui::Slider::new(&mut gate.close_threshold_db, -96.0..=0.0).suffix(" dB").custom_formatter(|v, _| format!("{:.2} dB", v))).changed();
                         });
 
-                        ui.add_space(3.0);
+                        ui.add_space(2.0);
 
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new("Open Threshold: ").monospace().size(11.0).color(egui::Color32::from_rgb(170, 170, 170)));
                             slider_changed |= ui.add(egui::Slider::new(&mut gate.open_threshold_db, -96.0..=0.0).suffix(" dB").custom_formatter(|v, _| format!("{:.2} dB", v))).changed();
                         });
 
-                        ui.add_space(3.0);
+                        ui.add_space(2.0);
 
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new("Attack Time:    ").monospace().size(11.0).color(egui::Color32::from_rgb(170, 170, 170)));
                             slider_changed |= ui.add(egui::Slider::new(&mut gate.attack_time_ms, 0.0..=500.0).suffix(" ms").custom_formatter(|v, _| format!("{:.0} ms", v))).changed();
                         });
 
-                        ui.add_space(3.0);
+                        ui.add_space(2.0);
 
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new("Hold Time:      ").monospace().size(11.0).color(egui::Color32::from_rgb(170, 170, 170)));
                             slider_changed |= ui.add(egui::Slider::new(&mut gate.hold_time_ms, 0.0..=2000.0).suffix(" ms").custom_formatter(|v, _| format!("{:.0} ms", v))).changed();
                         });
 
-                        ui.add_space(3.0);
+                        ui.add_space(2.0);
 
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new("Release Time:   ").monospace().size(11.0).color(egui::Color32::from_rgb(170, 170, 170)));
@@ -234,28 +282,28 @@ pub fn draw_mic_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             slider_changed |= ui.add(egui::Slider::new(&mut comp.ratio, 1.0..=32.0).custom_formatter(|v, _| format!("{:.2}:1", v))).changed();
                         });
 
-                        ui.add_space(3.0);
+                        ui.add_space(2.0);
 
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new("Threshold:  ").monospace().size(11.0).color(egui::Color32::from_rgb(170, 170, 170)));
                             slider_changed |= ui.add(egui::Slider::new(&mut comp.threshold_db, -60.0..=0.0).suffix(" dB").custom_formatter(|v, _| format!("{:.2} dB", v))).changed();
                         });
 
-                        ui.add_space(3.0);
+                        ui.add_space(2.0);
 
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new("Attack:     ").monospace().size(11.0).color(egui::Color32::from_rgb(170, 170, 170)));
                             slider_changed |= ui.add(egui::Slider::new(&mut comp.attack_time_ms, 1.0..=500.0).suffix(" ms").custom_formatter(|v, _| format!("{:.0} ms", v))).changed();
                         });
 
-                        ui.add_space(3.0);
+                        ui.add_space(2.0);
 
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new("Release:    ").monospace().size(11.0).color(egui::Color32::from_rgb(170, 170, 170)));
                             slider_changed |= ui.add(egui::Slider::new(&mut comp.release_time_ms, 1.0..=1000.0).suffix(" ms").custom_formatter(|v, _| format!("{:.0} ms", v))).changed();
                         });
 
-                        ui.add_space(3.0);
+                        ui.add_space(2.0);
 
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new("Output Gain:").monospace().size(11.0).color(egui::Color32::from_rgb(170, 170, 170)));

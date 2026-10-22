@@ -38,14 +38,12 @@ pub struct HardwareState {
 pub enum SettingsTab {
     #[default]
     Shaders,
-    Geometry,
-    Effects,
-    Devices,
-    Mic,
-    AudioReplay,
+    GeometryBezel,
+    CaptureReplay,
+    AudioMic,
+    Pc98,
     OcrDict,
     Twitch,
-    Pc98,
     Hotkeys,
 }
 

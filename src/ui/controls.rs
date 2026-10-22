@@ -235,7 +235,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             let can_stream = !state.hardware.selected_video_device.is_empty()
                                 && state.hardware.selected_resolution.0 > 0;
                             let start_btn = egui::Button::new(
-                                egui::RichText::new("Start Stream")
+                                egui::RichText::new("HDMI")
                                     .size(11.0)
                                     .color(egui::Color32::from_rgb(204, 255, 204)),
                             )
@@ -248,7 +248,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             }
 
                             let open_btn = egui::Button::new(
-                                egui::RichText::new("Open Video File")
+                                egui::RichText::new("Video File")
                                     .size(11.0)
                                     .color(egui::Color32::from_rgb(204, 230, 255)),
                             )
@@ -260,7 +260,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             }
 
                             let gamescope_btn = egui::Button::new(
-                                egui::RichText::new("Hook Gamescope")
+                                egui::RichText::new("Local Game")
                                     .size(11.0)
                                     .color(egui::Color32::from_rgb(255, 230, 150)),
                             )
@@ -273,7 +273,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             }
 
                             let pc98_btn = egui::Button::new(
-                                egui::RichText::new("Boot PC-98")
+                                egui::RichText::new("PC98 Game")
                                     .size(11.0)
                                     .color(egui::Color32::from_rgb(210, 255, 220)),
                             )
@@ -410,35 +410,53 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
     ui.add_space(6.0);
 
-    // --- Tab Notebook Headers: Classic Technical Linux Tab Bar ---
+    // --- Tab Notebook Headers: Classic Technical Linux Single-Row Balanced Tab Bar ---
     egui::Frame::none()
         .fill(egui::Color32::from_rgb(20, 20, 20)) // #141414
         .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(58, 58, 58))) // #3a3a3a
         .inner_margin(egui::Margin {
-            left: 6.0,
-            right: 6.0,
+            left: 4.0,
+            right: 4.0,
             top: 4.0,
             bottom: 0.0,
         })
         .rounding(egui::Rounding::ZERO)
         .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
+            let avail_w = ui.available_width();
+            ui.set_width(avail_w);
+            ui.horizontal(|ui| {
+                let spacing = 2.0;
+                ui.spacing_mut().item_spacing = egui::vec2(spacing, 0.0);
                 let tabs = [
                     (SettingsTab::Shaders, "Shaders"),
-                    (SettingsTab::Geometry, "Geometry / Deinterlace"),
-                    (SettingsTab::Effects, "Effects / Bezel"),
-                    (SettingsTab::Devices, "Capture Devices"),
-                    (SettingsTab::Pc98, "PC-98 Emulator"),
-                    (SettingsTab::AudioReplay, "Audio / Replay"),
-                    (SettingsTab::Mic, "Mic"),
-                    (SettingsTab::OcrDict, "OCR / Dictionaries"),
+                    (SettingsTab::GeometryBezel, "Geometry & Bezel"),
+                    (SettingsTab::CaptureReplay, "Capture & Replay"),
+                    (SettingsTab::AudioMic, "Audio & Mic"),
+                    (SettingsTab::Pc98, "PC-98"),
+                    (SettingsTab::OcrDict, "OCR & Dict"),
                     (SettingsTab::Twitch, "Twitch"),
                     (SettingsTab::Hotkeys, "Hotkeys"),
                 ];
-                for (tab, label) in tabs {
+
+                // Measure natural text widths so we can distribute remaining horizontal space evenly
+                // across all 8 tabs, filling the single row edge-to-edge with balanced padding.
+                let font_id = egui::FontId::monospace(11.0);
+                let text_widths: Vec<f32> = ui.fonts(|f| {
+                    tabs.iter()
+                        .map(|(_, label)| {
+                            f.layout_no_wrap((*label).to_string(), font_id.clone(), egui::Color32::WHITE)
+                                .size()
+                                .x
+                        })
+                        .collect()
+                });
+                let total_text_w: f32 = text_widths.iter().sum();
+                let total_spacing = spacing * (tabs.len().saturating_sub(1) as f32);
+                let extra_per_tab = ((avail_w - total_text_w - total_spacing) / (tabs.len() as f32)).max(8.0);
+
+                for ((tab, label), text_w) in tabs.into_iter().zip(text_widths.into_iter()) {
                     let is_active = state.ui.active_settings_tab == tab;
+                    let btn_w = text_w + extra_per_tab;
                     let tab_btn = if is_active {
                         egui::Button::new(
                             egui::RichText::new(label)
@@ -448,20 +466,20 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                 .color(egui::Color32::WHITE),
                         )
                         .fill(egui::Color32::from_rgb(26, 26, 26)) // #1a1a1a
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(74, 74, 74)))
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(84, 136, 184)))
                         .rounding(egui::Rounding::ZERO)
                     } else {
                         egui::Button::new(
                             egui::RichText::new(label)
                                 .monospace()
                                 .size(11.0)
-                                .color(egui::Color32::from_rgb(136, 136, 136)), // #888888
+                                .color(egui::Color32::from_rgb(148, 148, 148)),
                         )
                         .fill(egui::Color32::from_rgb(34, 34, 34)) // #222222
                         .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(56, 56, 56))) // #383838
                         .rounding(egui::Rounding::ZERO)
                     };
-                    if ui.add(tab_btn).clicked() {
+                    if ui.add_sized([btn_w, 24.0], tab_btn).clicked() {
                         state.ui.active_settings_tab = tab;
                     }
                 }
@@ -481,25 +499,12 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 SettingsTab::Shaders => {
                     changed |= filters::draw_shaders_tab(ui, state);
                 }
-                SettingsTab::Geometry => {
-                    changed |= filters::draw_geometry_tab(ui, state);
+                SettingsTab::GeometryBezel => {
+                    changed |= filters::draw_geometry_bezel_tab(ui, state);
                 }
-                SettingsTab::Effects => {
-                    changed |= filters::draw_effects_tab(ui, state);
-                }
-                SettingsTab::Devices => {
-                    changed |= devices::draw_device_selectors(ui, state);
-                }
-                SettingsTab::AudioReplay => {
-                    if crate::replay::ui::draw_audio_filter_group(&mut state.replay, ui) {
-                        crate::config::save_config(state);
-                        crate::config::save_global_hardware_config(state);
-                        let _ = crate::config::save_replay_config(&state.replay.config);
-                        changed = true;
-                    }
-
+                SettingsTab::CaptureReplay => {
+                    changed |= devices::draw_capture_and_webcam_selectors(ui, state);
                     ui.add_space(4.0);
-
                     if crate::replay::ui::draw_replay_buffer_group(
                         &mut state.replay,
                         ui,
@@ -513,17 +518,28 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         }
                     }
                 }
-                SettingsTab::Mic => {
+                SettingsTab::AudioMic => {
+                    technical_group(ui, "Game Audio Input & Noise Filter:", |ui| {
+                        changed |= devices::draw_audio_device_controls(ui, state);
+                        technical_separator(ui);
+                        if crate::replay::ui::draw_audio_filter_contents(&mut state.replay, ui) {
+                            crate::config::save_config(state);
+                            crate::config::save_global_hardware_config(state);
+                            let _ = crate::config::save_replay_config(&state.replay.config);
+                            changed = true;
+                        }
+                    });
+                    ui.add_space(4.0);
                     changed |= crate::ui::mic::draw_mic_tab(ui, state);
+                }
+                SettingsTab::Pc98 => {
+                    changed |= super::pc98::draw_pc98_tab(ui, state);
                 }
                 SettingsTab::OcrDict => {
                     draw_ocr_dict_tab(ui, state, &mut changed);
                 }
                 SettingsTab::Twitch => {
                     changed |= super::twitch::draw_twitch_tab(ui, state);
-                }
-                SettingsTab::Pc98 => {
-                    changed |= super::pc98::draw_pc98_tab(ui, state);
                 }
                 SettingsTab::Hotkeys => {
                     draw_hotkeys_tab(ui);
@@ -573,51 +589,55 @@ fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool
 
         ui.add_space(4.0);
 
-        if ui
-            .checkbox(&mut state.ocr.hide_overlay, "Hide OCR boxes overlay")
-            .on_hover_text(
-                "Hides the blue bounding boxes and replacement text overlay on the video feed.\nDictionary lookup on hover and popup behavior will continue to work normally.",
-            )
-            .changed()
-        {
-            crate::config::save_config(state);
-            *changed = true;
-        }
+        two_columns(ui, |col1, col2| {
+            if col1
+                .checkbox(&mut state.ocr.hide_overlay, "Hide OCR boxes overlay")
+                .on_hover_text(
+                    "Hides the blue bounding boxes and replacement text overlay on the video feed.\nDictionary lookup on hover and popup behavior will continue to work normally.",
+                )
+                .changed()
+            {
+                crate::config::save_config(state);
+                *changed = true;
+            }
 
-        if ui
-            .checkbox(
-                &mut state.dict.popup_under_crt,
-                "Show dictionary popup under CRT filters",
-            )
-            .on_hover_text(
-                "Renders the dictionary lookup window underneath CRT filters, glass reflections, and bezel borders instead of on top of them.\nClamps the popup within the visible CRT viewport so it never cuts into the borders.",
-            )
-            .changed()
-        {
-            crate::config::save_config(state);
-            *changed = true;
-        }
+            if col2
+                .checkbox(
+                    &mut state.dict.popup_under_crt,
+                    "Show dictionary popup under CRT filters",
+                )
+                .on_hover_text(
+                    "Renders the dictionary lookup window underneath CRT filters, glass reflections, and bezel borders instead of on top of them.\nClamps the popup within the visible CRT viewport so it never cuts into the borders.",
+                )
+                .changed()
+            {
+                crate::config::save_config(state);
+                *changed = true;
+            }
+        });
 
-        if ui
-            .checkbox(
-                &mut state.twitch.config.share_mined_words_to_chat,
-                "Share mined words to Twitch chat (when live)",
-            )
-            .on_hover_text(
-                "When live streaming, automatically posts newly mined words with their sentence and Jitendex definition into Twitch chat.",
-            )
-            .changed()
-        {
-            crate::config::save_config(state);
-            *changed = true;
-        }
+        two_columns(ui, |col1, col2| {
+            if col1
+                .checkbox(
+                    &mut state.twitch.config.share_mined_words_to_chat,
+                    "Share mined words to Twitch chat (when live)",
+                )
+                .on_hover_text(
+                    "When live streaming, automatically posts newly mined words with their sentence and Jitendex definition into Twitch chat.",
+                )
+                .changed()
+            {
+                crate::config::save_config(state);
+                *changed = true;
+            }
 
-        ui.label(
-            egui::RichText::new("Space = capture OCR, Shift + Space = clear OCR boxes")
-                .monospace()
-                .size(11.0)
-                .color(egui::Color32::from_rgb(102, 102, 102)),
-        );
+            col2.label(
+                egui::RichText::new("Space = capture OCR, Shift + Space = clear OCR boxes")
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(102, 102, 102)),
+            );
+        });
 
         if state.ocr.is_processing.load(Ordering::Relaxed) {
             ui.horizontal(|ui| {
@@ -629,239 +649,234 @@ fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool
 
     ui.add_space(4.0);
 
-    technical_group(ui, "Japanese Dictionary (Jitendex):", |ui| {
-        if state.dict.update_available {
-            ui.label(
-                egui::RichText::new("(!) An update is available for Jitendex!")
-                    .color(egui::Color32::from_rgb(251, 191, 36))
-                    .monospace()
-                    .size(11.0),
-            );
-        }
-
-        if let Some(meta) = &state.dict.installed_metadata {
-            ui.label(
-                egui::RichText::new(format!(
-                    "Installed: {} entries (rev {})",
-                    meta.total_entries, meta.revision
-                ))
-                .monospace()
-                .size(11.0)
-                .color(egui::Color32::from_rgb(136, 136, 136)),
-            );
-        } else {
-            ui.label(
-                egui::RichText::new("Status: Not installed - click Sync to download")
-                    .monospace()
-                    .size(11.0)
-                    .color(egui::Color32::from_rgb(251, 191, 36)),
-            );
-        }
-
-        ui.add_space(3.0);
-
-        let is_syncing = state.dict.is_syncing.load(Ordering::Relaxed);
-        if is_syncing {
-            let (msg, prog) = if let Ok(lock) = state.dict.sync_progress.lock() {
-                lock.clone().unwrap_or(("Syncing dictionary...".into(), 0.0))
-            } else {
-                ("Syncing dictionary...".into(), 0.0)
-            };
-            ui.add(egui::ProgressBar::new(prog).text(msg).animate(true));
-        } else {
-            ui.horizontal(|ui| {
-                let button_text = if state.dict.update_available {
-                    "Sync Jitendex Dictionary (!)"
-                } else {
-                    "Sync Jitendex Dictionary"
-                };
-
-                let sync_btn = egui::Button::new(
-                    egui::RichText::new(button_text).color(if state.dict.update_available {
-                        egui::Color32::from_rgb(251, 191, 36)
-                    } else {
-                        ui.visuals().text_color()
-                    }),
+    two_columns(ui, |col1, col2| {
+        technical_group(col1, "Japanese Dictionary (Jitendex):", |ui| {
+            if state.dict.update_available {
+                ui.label(
+                    egui::RichText::new("(!) An update is available for Jitendex!")
+                        .color(egui::Color32::from_rgb(251, 191, 36))
+                        .monospace()
+                        .size(11.0),
                 );
+            }
 
-                if ui
-                    .add(sync_btn)
-                    .on_hover_text("Download and index the latest Jitendex dictionary release from jitendex.org")
-                    .clicked()
-                {
-                    state.dict.trigger_sync();
-                }
-
-                if state.dict.is_checking_update.load(Ordering::Relaxed) {
-                    ui.spinner();
-                    ui.label(egui::RichText::new("Checking for updates...").weak().small());
-                } else if ui.small_button("Check Updates").clicked() {
-                    state.dict.trigger_check_version();
-                }
-            });
-        }
-    });
-
-    ui.add_space(4.0);
-
-    technical_group(ui, "", |ui| {
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("Frequency Dictionary (Jiten Global):")
+            if let Some(meta) = &state.dict.installed_metadata {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Installed: {} entries (rev {})",
+                        meta.total_entries, meta.revision
+                    ))
                     .monospace()
                     .size(11.0)
-                    .strong()
-                    .color(egui::Color32::from_rgb(224, 224, 224)),
-            );
-            if state.dict.freq_update_available {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new("(!) Update available")
-                            .monospace()
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(208, 144, 48)),
+                    .color(egui::Color32::from_rgb(136, 136, 136)),
+                );
+            } else {
+                ui.label(
+                    egui::RichText::new("Status: Not installed - click Sync to download")
+                        .monospace()
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(251, 191, 36)),
+                );
+            }
+
+            ui.add_space(3.0);
+
+            let is_syncing = state.dict.is_syncing.load(Ordering::Relaxed);
+            if is_syncing {
+                let (msg, prog) = if let Ok(lock) = state.dict.sync_progress.lock() {
+                    lock.clone().unwrap_or(("Syncing dictionary...".into(), 0.0))
+                } else {
+                    ("Syncing dictionary...".into(), 0.0)
+                };
+                ui.add(egui::ProgressBar::new(prog).text(msg).animate(true));
+            } else {
+                ui.horizontal(|ui| {
+                    let button_text = if state.dict.update_available {
+                        "Sync Jitendex Dictionary (!)"
+                    } else {
+                        "Sync Jitendex Dictionary"
+                    };
+
+                    let sync_btn = egui::Button::new(
+                        egui::RichText::new(button_text).color(if state.dict.update_available {
+                            egui::Color32::from_rgb(251, 191, 36)
+                        } else {
+                            ui.visuals().text_color()
+                        }),
                     );
+
+                    if ui
+                        .add(sync_btn)
+                        .on_hover_text("Download and index the latest Jitendex dictionary release from jitendex.org")
+                        .clicked()
+                    {
+                        state.dict.trigger_sync();
+                    }
+
+                    if state.dict.is_checking_update.load(Ordering::Relaxed) {
+                        ui.spinner();
+                        ui.label(egui::RichText::new("Checking...").weak().small());
+                    } else if ui.small_button("Check Updates").clicked() {
+                        state.dict.trigger_check_version();
+                    }
                 });
             }
         });
-        ui.add_space(4.0);
 
-        if let Some(meta) = &state.dict.installed_freq_metadata {
-            ui.label(
-                egui::RichText::new(format!(
-                    "Installed: {} entries (rev {})",
-                    meta.total_entries, meta.revision
-                ))
-                .monospace()
-                .size(11.0)
-                .color(egui::Color32::from_rgb(136, 136, 136)),
-            );
-        } else {
-            ui.label(
-                egui::RichText::new("Status: Not installed - click Sync to download")
+        technical_group(col2, "Frequency Dictionary (Jiten Global):", |ui| {
+            if state.dict.freq_update_available {
+                ui.label(
+                    egui::RichText::new("(!) An update is available for Jiten Frequency!")
+                        .monospace()
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(208, 144, 48)),
+                );
+            }
+
+            if let Some(meta) = &state.dict.installed_freq_metadata {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Installed: {} entries (rev {})",
+                        meta.total_entries, meta.revision
+                    ))
                     .monospace()
                     .size(11.0)
-                    .color(egui::Color32::from_rgb(251, 191, 36)),
-            );
-        }
-
-        ui.add_space(3.0);
-
-        let is_freq_syncing = state.dict.is_freq_syncing.load(Ordering::Relaxed);
-        if is_freq_syncing {
-            let (msg, prog) = if let Ok(lock) = state.dict.freq_sync_progress.lock() {
-                lock.clone().unwrap_or(("Syncing frequency dictionary...".into(), 0.0))
-            } else {
-                ("Syncing frequency dictionary...".into(), 0.0)
-            };
-            ui.add(egui::ProgressBar::new(prog).text(msg).animate(true));
-        } else {
-            ui.horizontal(|ui| {
-                let button_text = if state.dict.freq_update_available {
-                    "Sync Jiten Frequency (!)"
-                } else {
-                    "Sync Jiten Frequency"
-                };
-
-                let sync_btn = egui::Button::new(
-                    egui::RichText::new(button_text).color(if state.dict.freq_update_available {
-                        egui::Color32::from_rgb(251, 191, 36)
-                    } else {
-                        ui.visuals().text_color()
-                    }),
+                    .color(egui::Color32::from_rgb(136, 136, 136)),
                 );
+            } else {
+                ui.label(
+                    egui::RichText::new("Status: Not installed - click Sync to download")
+                        .monospace()
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(251, 191, 36)),
+                );
+            }
 
-                if ui
-                    .add(sync_btn)
-                    .on_hover_text("Download and index the latest Jiten Global frequency dictionary from jiten.moe")
-                    .clicked()
-                {
-                    state.dict.trigger_freq_sync();
-                }
+            ui.add_space(3.0);
 
-                if state.dict.is_checking_freq_update.load(Ordering::Relaxed) {
-                    ui.spinner();
-                    ui.label(egui::RichText::new("Checking for updates...").weak().small());
-                } else if ui.small_button("Check Updates").clicked() {
-                    state.dict.trigger_check_freq_version();
-                }
-            });
-        }
+            let is_freq_syncing = state.dict.is_freq_syncing.load(Ordering::Relaxed);
+            if is_freq_syncing {
+                let (msg, prog) = if let Ok(lock) = state.dict.freq_sync_progress.lock() {
+                    lock.clone().unwrap_or(("Syncing frequency dictionary...".into(), 0.0))
+                } else {
+                    ("Syncing frequency dictionary...".into(), 0.0)
+                };
+                ui.add(egui::ProgressBar::new(prog).text(msg).animate(true));
+            } else {
+                ui.horizontal(|ui| {
+                    let button_text = if state.dict.freq_update_available {
+                        "Sync Jiten Frequency (!)"
+                    } else {
+                        "Sync Jiten Frequency"
+                    };
+
+                    let sync_btn = egui::Button::new(
+                        egui::RichText::new(button_text).color(if state.dict.freq_update_available {
+                            egui::Color32::from_rgb(251, 191, 36)
+                        } else {
+                            ui.visuals().text_color()
+                        }),
+                    );
+
+                    if ui
+                        .add(sync_btn)
+                        .on_hover_text("Download and index the latest Jiten Global frequency dictionary from jiten.moe")
+                        .clicked()
+                    {
+                        state.dict.trigger_freq_sync();
+                    }
+
+                    if state.dict.is_checking_freq_update.load(Ordering::Relaxed) {
+                        ui.spinner();
+                        ui.label(egui::RichText::new("Checking...").weak().small());
+                    } else if ui.small_button("Check Updates").clicked() {
+                        state.dict.trigger_check_freq_version();
+                    }
+                });
+            }
+        });
     });
 }
 
 fn draw_hotkeys_tab(ui: &mut egui::Ui) {
     technical_group(ui, "Keyboard Shortcuts:", |ui| {
-        let avail_w = ui.available_width();
-        egui::Grid::new("hotkeys_grid")
-            .striped(true)
-            .num_columns(2)
-            .min_col_width(160.0)
-            .spacing([24.0, 6.0])
-            .show(ui, |ui| {
-                ui.label(
-                    egui::RichText::new("Key")
-                        .monospace()
-                        .size(11.0)
-                        .strong()
-                        .color(egui::Color32::from_rgb(119, 119, 119)),
-                );
-                ui.label(
-                    egui::RichText::new("Action")
-                        .monospace()
-                        .size(11.0)
-                        .strong()
-                        .color(egui::Color32::from_rgb(119, 119, 119)),
-                );
-                ui.end_row();
+        let shortcuts = [
+            ("F", "Toggle Fullscreen"),
+            ("M", "Toggle Controls (Settings Window)"),
+            ("B", "Toggle Mining Bank Window"),
+            ("L", "Toggle Studio Window"),
+            ("C", "Cycle CRT Filter (Off / Lottes / Halo)"),
+            ("K", "Toggle Lights Off Night Mode"),
+            ("G", "Toggle 480p Pixelate Filter"),
+            ("Q", "Stop Stream Confirmation Dialog"),
+            ("T", "Hide / Show Twitch Chat Overlay"),
+            ("Escape", "Exit Fullscreen / Dismiss Popups"),
+            ("P", "Toggle Play / Pause (Video Player)"),
+            ("← / →", "Seek -5s / +5s (Video Player)"),
+            ("Space", "Capture OCR (Google Lens)"),
+            ("Shift + Space", "Clear OCR Bounding Boxes"),
+            ("Shift + Tab", "Toggle Gamescope / PC-98 Input"),
+            ("F12", "Open / Close NP2 Menu (PC-98 Mode)"),
+            ("Ctrl + C", "Export 15s Replay Clip to Clipboard"),
+            ("Ctrl + Shift + C", "Export 7s Audio Clip to Clipboard"),
+            ("F1 – F12", "Save Replay Buffer (Capture & Replay tab)"),
+        ];
 
-                let shortcuts = [
-                    ("F", "Toggle Fullscreen"),
-                    ("M", "Toggle Controls (Settings Window)"),
-                    ("B", "Toggle Mining Bank Window"),
-                    ("L", "Toggle Studio Window"),
-                    ("C", "Cycle CRT Filter (Off / Lottes / Halo)"),
-                    ("K", "Toggle Lights Off Night Mode"),
-                    ("G", "Toggle 480p Pixelate Filter"),
-                    ("Q", "Stop Stream Confirmation Dialog"),
-                    ("T", "Hide / Show Twitch Chat Overlay (when enabled)"),
-                    ("Escape", "Exit Fullscreen / Close Dialogs / Dismiss Popups"),
-                    ("P", "Toggle Play / Pause (Video Player Mode)"),
-                    ("← / →", "Seek -5s / +5s (Video Player Mode)"),
-                    ("Space", "Capture OCR (Google Lens)"),
-                    ("Shift + Space", "Clear OCR Bounding Boxes"),
-                    ("Shift + Tab", "Toggle Gamescope / PC-98 Input Passthrough / Pause"),
-                    ("F12", "Open / Close Neko Project II OSD Menu (in PC-98 Mode)"),
-                    ("Ctrl + C", "Export 15s Replay Clip to Clipboard"),
-                    ("Ctrl + Shift + C", "Export 7s Audio-Only Clip to Clipboard"),
-                    (
-                        "F1 – F12",
-                        "Save Replay Buffer to Disk (Durations configured in Audio / Replay tab)",
-                    ),
-                ];
+        let mid = (shortcuts.len() + 1) / 2;
+        let (left_shortcuts, right_shortcuts) = shortcuts.split_at(mid);
 
-                for (key, desc) in shortcuts {
-                    ui.add_sized(
-                        [160.0, 18.0],
-                        egui::Label::new(
-                            egui::RichText::new(key)
+        two_columns(ui, |col1, col2| {
+            let draw_hotkey_grid = |col: &mut egui::Ui, id: &str, list: &[(&str, &str)]| {
+                let col_w = col.available_width();
+                egui::Grid::new(id)
+                    .striped(true)
+                    .num_columns(2)
+                    .min_col_width(115.0)
+                    .spacing([12.0, 5.0])
+                    .show(col, |ui| {
+                        ui.label(
+                            egui::RichText::new("Key")
                                 .monospace()
                                 .size(11.0)
                                 .strong()
-                                .color(egui::Color32::WHITE),
-                        ),
-                    );
-                    let action_w = (avail_w - 160.0 - 24.0).max(100.0);
-                    ui.add_sized(
-                        [action_w, 18.0],
-                        egui::Label::new(
-                            egui::RichText::new(desc)
+                                .color(egui::Color32::from_rgb(119, 119, 119)),
+                        );
+                        ui.label(
+                            egui::RichText::new("Action")
+                                .monospace()
                                 .size(11.0)
-                                .color(egui::Color32::from_rgb(208, 208, 208)),
-                        ),
-                    );
-                    ui.end_row();
-                }
-            });
+                                .strong()
+                                .color(egui::Color32::from_rgb(119, 119, 119)),
+                        );
+                        ui.end_row();
+
+                        for (key, desc) in list {
+                            ui.add_sized(
+                                [115.0, 18.0],
+                                egui::Label::new(
+                                    egui::RichText::new(*key)
+                                        .monospace()
+                                        .size(11.0)
+                                        .strong()
+                                        .color(egui::Color32::WHITE),
+                                ),
+                            );
+                            let action_w = (col_w - 115.0 - 16.0).max(80.0);
+                            ui.add_sized(
+                                [action_w, 18.0],
+                                egui::Label::new(
+                                    egui::RichText::new(*desc)
+                                        .size(11.0)
+                                        .color(egui::Color32::from_rgb(208, 208, 208)),
+                                ),
+                            );
+                            ui.end_row();
+                        }
+                    });
+            };
+
+            draw_hotkey_grid(col1, "hotkeys_grid_left", left_shortcuts);
+            draw_hotkey_grid(col2, "hotkeys_grid_right", right_shortcuts);
+        });
     });
 }

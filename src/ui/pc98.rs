@@ -88,14 +88,6 @@ pub fn draw_pc98_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     state.start_pc98_mode(ui.ctx());
                     changed = true;
                 }
-
-                ui.label(
-                    egui::RichText::new(
-                        "Automatically downloads np2kai_libretro.so on first launch if not installed.",
-                    )
-                    .size(10.5)
-                    .color(egui::Color32::from_rgb(136, 136, 136)),
-                );
             }
         });
 
@@ -474,15 +466,6 @@ pub fn draw_pc98_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 }
 
 fn draw_game_library_section(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool) {
-    ui.label(
-        egui::RichText::new(
-            "Point Michadame to your PC-98 games folder and base MS-DOS drive. Selecting a game automatically mounts the required floppy and hard disks.",
-        )
-        .size(10.5)
-        .color(egui::Color32::from_rgb(136, 136, 136)),
-    );
-    ui.add_space(4.0);
-
     // 1. Root Games Folder row
     ui.horizontal(|ui| {
         ui.add_sized(
