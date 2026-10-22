@@ -1,0 +1,215 @@
+pub mod core_sync;
+pub mod input;
+pub mod libretro;
+
+use eframe::egui;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
+use std::thread::JoinHandle;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pc98MediaSlot {
+    Fdd1,
+    Fdd2,
+    Hdd1,
+    Hdd2,
+    CdRom,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Pc98Config {
+    pub fdd1_path: String,
+    pub fdd2_path: String,
+    pub hdd1_path: String,
+    pub hdd2_path: String,
+    pub cdrom_path: String,
+    pub model: String,
+    pub cpu_feature: String,
+    pub base_clock: String,
+    pub clock_mult: u32,
+    pub ram_mb: u32,
+    pub sound_board: String,
+    pub gdc_type: String,
+    pub skipline_revisions: bool,
+    pub fast_memcheck: bool,
+    pub floppy_seek_sound: bool,
+    pub floppy_seek_volume: u32,
+    pub beep_volume: u32,
+    #[serde(default = "default_pc98_mouse_sensitivity")]
+    pub mouse_sensitivity: f32,
+}
+
+pub fn default_pc98_mouse_sensitivity() -> f32 {
+    0.5
+}
+
+impl Default for Pc98Config {
+    fn default() -> Self {
+        Self {
+            fdd1_path: String::new(),
+            fdd2_path: String::new(),
+            hdd1_path: String::new(),
+            hdd2_path: String::new(),
+            cdrom_path: String::new(),
+            model: "PC-9801VX".to_string(),
+            cpu_feature: "Intel 80386".to_string(),
+            base_clock: "2.4576 MHz".to_string(),
+            clock_mult: 16,
+            ram_mb: 16,
+            sound_board: "PC9801-26K + 86".to_string(),
+            gdc_type: "uPD7220".to_string(),
+            skipline_revisions: true,
+            fast_memcheck: false,
+            floppy_seek_sound: true,
+            floppy_seek_volume: 80,
+            beep_volume: 3,
+            mouse_sensitivity: default_pc98_mouse_sensitivity(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum Pc98Command {
+    Stop,
+    Reset,
+    SetVolume(f32),
+    MountFdd { drive: u8, path: Option<PathBuf> },
+    TriggerMenu,
+    UpdateOptions(Pc98Config),
+}
+
+#[derive(Debug, Clone)]
+pub enum Pc98Event {
+    SyncProgress(String),
+    Started {
+        width: u32,
+        height: u32,
+        fps: f64,
+    },
+    ResolutionChanged {
+        width: u32,
+        height: u32,
+    },
+    Info(String),
+    Failed(String),
+    Stopped,
+}
+
+pub struct Pc98InputState {
+    pub keys: [bool; 512],
+    pub mouse_dx: i32,
+    pub mouse_dy: i32,
+    pub mouse_rem_x: f32,
+    pub mouse_rem_y: f32,
+    pub mouse_left: bool,
+    pub mouse_right: bool,
+    pub mouse_middle: bool,
+    /// Keys pulsed for a small number of emulator frames `(retro_key, remaining_frames)`.
+    pub pulse_keys: Vec<(u32, u8)>,
+}
+
+impl Default for Pc98InputState {
+    fn default() -> Self {
+        Self {
+            keys: [false; 512],
+            mouse_dx: 0,
+            mouse_dy: 0,
+            mouse_rem_x: 0.0,
+            mouse_rem_y: 0.0,
+            mouse_left: false,
+            mouse_right: false,
+            mouse_middle: false,
+            pulse_keys: Vec::new(),
+        }
+    }
+}
+
+impl Pc98InputState {
+    pub fn release_all(&mut self) {
+        self.keys.fill(false);
+        self.mouse_dx = 0;
+        self.mouse_dy = 0;
+        self.mouse_rem_x = 0.0;
+        self.mouse_rem_y = 0.0;
+        self.mouse_left = false;
+        self.mouse_right = false;
+        self.mouse_middle = false;
+        self.pulse_keys.clear();
+    }
+
+    pub fn pulse_key(&mut self, retro_key: u32, frames: u8) {
+        if let Some(entry) = self.pulse_keys.iter_mut().find(|(k, _)| *k == retro_key) {
+            entry.1 = entry.1.max(frames);
+        } else {
+            self.pulse_keys.push((retro_key, frames));
+        }
+    }
+}
+
+pub struct Pc98State {
+    pub is_active: bool,
+    pub is_starting: bool,
+    pub status_message: Option<String>,
+    pub passthrough_enabled: bool,
+    pub config: Pc98Config,
+    pub resolution: (u32, u32),
+    pub input_state: Arc<Mutex<Pc98InputState>>,
+    pub command_tx: Option<crossbeam_channel::Sender<Pc98Command>>,
+    pub event_rx: Option<crossbeam_channel::Receiver<Pc98Event>>,
+    pub stop_requested: Arc<AtomicBool>,
+    pub worker_thread: Option<JoinHandle<()>>,
+    pub prev_modifiers: egui::Modifiers,
+    pub file_picker_rx: Option<crossbeam_channel::Receiver<(Pc98MediaSlot, PathBuf)>>,
+}
+
+impl Default for Pc98State {
+    fn default() -> Self {
+        Self {
+            is_active: false,
+            is_starting: false,
+            status_message: None,
+            passthrough_enabled: true,
+            config: Pc98Config::default(),
+            resolution: (640, 400),
+            input_state: Arc::new(Mutex::new(Pc98InputState::default())),
+            command_tx: None,
+            event_rx: None,
+            stop_requested: Arc::new(AtomicBool::new(false)),
+            worker_thread: None,
+            prev_modifiers: egui::Modifiers::default(),
+            file_picker_rx: None,
+        }
+    }
+}
+
+impl Pc98State {
+    pub fn toggle_passthrough(&mut self) -> bool {
+        self.passthrough_enabled = !self.passthrough_enabled;
+        if !self.passthrough_enabled {
+            self.release_all_inputs();
+        }
+        self.passthrough_enabled
+    }
+
+    pub fn release_all_inputs(&mut self) {
+        if let Ok(mut input) = self.input_state.lock() {
+            input.release_all();
+        }
+        self.prev_modifiers = egui::Modifiers::default();
+    }
+
+    pub fn send_command(&self, cmd: Pc98Command) {
+        if let Some(ref tx) = self.command_tx {
+            let _ = tx.send(cmd);
+        }
+    }
+
+    pub fn request_stop(&self) {
+        self.stop_requested.store(true, Ordering::Relaxed);
+    }
+}

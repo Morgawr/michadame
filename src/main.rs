@@ -9,6 +9,7 @@ mod bank;
 mod twitch;
 pub mod dict;
 pub mod gamescope;
+pub mod pc98;
 
 use anyhow::Result;
 use eframe::egui;

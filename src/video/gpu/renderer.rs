@@ -233,6 +233,8 @@ pub struct CrtFilterRenderer {
     retro_mouse_brightboost_loc: Option<glow::UniformLocation>,
     linearize_prog: glow::Program,
     linearize_sampler_loc: Option<glow::UniformLocation>,
+    linearize_overscan_loc: Option<glow::UniformLocation>,
+    linearize_underscan_loc: Option<glow::UniformLocation>,
 
     post_fbos: [glow::Framebuffer; 2],
     post_textures: [glow::Texture; 2],
@@ -419,9 +421,17 @@ impl CrtFilterRenderer {
 
             let linearize_prog = compile_program(gl, VS_SRC, FS_LINEARIZE);
             let linearize_sampler_loc = gl.get_uniform_location(linearize_prog, "srgb_tex");
+            let linearize_overscan_loc = gl.get_uniform_location(linearize_prog, "overscan_offset");
+            let linearize_underscan_loc = gl.get_uniform_location(linearize_prog, "underscan_stretch");
             gl.use_program(Some(linearize_prog));
             if let Some(ref loc) = linearize_sampler_loc {
                 gl.uniform_1_i32(Some(loc), 0);
+            }
+            if let Some(ref loc) = linearize_overscan_loc {
+                gl.uniform_2_f32(Some(loc), 0.0, 0.0);
+            }
+            if let Some(ref loc) = linearize_underscan_loc {
+                gl.uniform_2_f32(Some(loc), 1.0, 1.0);
             }
             gl.use_program(None);
 
@@ -953,6 +963,8 @@ impl CrtFilterRenderer {
                 retro_mouse_brightboost_loc,
                 linearize_prog,
                 linearize_sampler_loc,
+                linearize_overscan_loc,
+                linearize_underscan_loc,
                 post_fbos,
                 post_textures,
                 last_post_size: (0, 0),
@@ -1231,6 +1243,75 @@ impl CrtFilterRenderer {
                     (1.0 + underscan_y).max(0.01),
                 );
                 rendered_input = true;
+            } else if frame.format == Pixel::RGBA {
+                let expected_len = (frame.width * frame.height * 4) as usize;
+                if frame.data.len() != expected_len {
+                    tracing::warn!(
+                        "Skipping frame with invalid RGBA data length: expected {}, got {}",
+                        expected_len,
+                        frame.data.len()
+                    );
+                    return self.pass_textures[6];
+                }
+
+                gl.use_program(Some(self.linearize_prog));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.yuv_planes[0]));
+                let needs_realloc = frame.width != self.last_frame_size.0
+                    || frame.height != self.last_frame_size.1
+                    || Some(frame.format) != self.last_frame_format;
+                if needs_realloc {
+                    gl.tex_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        glow::RGBA8 as i32,
+                        frame.width as i32,
+                        frame.height as i32,
+                        0,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        None,
+                    );
+                }
+                gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[0]));
+                if needs_realloc {
+                    gl.buffer_data_size(
+                        glow::PIXEL_UNPACK_BUFFER,
+                        frame.data.len() as i32,
+                        glow::STREAM_DRAW,
+                    );
+                }
+                gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, &frame.data);
+                gl.tex_sub_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    0,
+                    0,
+                    frame.width as i32,
+                    frame.height as i32,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::BufferOffset(0),
+                );
+                gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
+                if needs_realloc {
+                    self.last_frame_size = (frame.width, frame.height);
+                    self.last_frame_format = Some(frame.format);
+                }
+                if let Some(ref loc) = self.linearize_sampler_loc {
+                    gl.uniform_1_i32(Some(loc), 0);
+                }
+                if let Some(ref loc) = self.linearize_overscan_loc {
+                    gl.uniform_2_f32(Some(loc), overscan_x, overscan_y);
+                }
+                if let Some(ref loc) = self.linearize_underscan_loc {
+                    gl.uniform_2_f32(
+                        Some(loc),
+                        (1.0 + underscan_x).max(0.01),
+                        (1.0 + underscan_y).max(0.01),
+                    );
+                }
+                rendered_input = true;
             } else {
                 tracing::warn!("Skipping unsupported pixel format: {:?}", frame.format);
             }
@@ -1311,6 +1392,12 @@ impl CrtFilterRenderer {
         gl.use_program(Some(self.linearize_prog));
         if let Some(loc) = &self.linearize_sampler_loc {
             gl.uniform_1_i32(Some(loc), 0);
+        }
+        if let Some(loc) = &self.linearize_overscan_loc {
+            gl.uniform_2_f32(Some(loc), 0.0, 0.0);
+        }
+        if let Some(loc) = &self.linearize_underscan_loc {
+            gl.uniform_2_f32(Some(loc), 1.0, 1.0);
         }
         gl.active_texture(glow::TEXTURE0);
         gl.bind_texture(glow::TEXTURE_2D, Some(fallback_texture));
@@ -2040,6 +2127,7 @@ impl CrtFilterRenderer {
                     halo_params,
                     scissor_enabled && !has_post,
                     upstream_target_fbo,
+                    !run_pixelate,
                 );
             } else if run_pixelate {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, upstream_target_fbo);

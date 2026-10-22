@@ -10,6 +10,7 @@ pub mod fft_mask;
 pub mod filters;
 pub mod mic;
 pub mod networking;
+pub mod pc98;
 pub mod profiles;
 pub mod tag_input;
 pub mod twitch;
@@ -104,9 +105,10 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
         .gamescope_hook
         .as_ref()
         .map_or(false, |h| h.is_active && h.passthrough_enabled);
+    let pc98_passthrough = state.pc98.is_active && state.pc98.passthrough_enabled;
 
     let mut hotkey_repaint = false;
-    if !gamescope_passthrough {
+    if !gamescope_passthrough && !pc98_passthrough {
         state.replay.shortcuts(ctx);
         if check_toggle_key(ctx, egui::Key::L) {
             state.ui.studio_window_open = !state.ui.studio_window_open;

@@ -46,7 +46,12 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         );
 
         let box_id = ui.id().with("ocr_box").with(idx);
-        let response = ui.interact(box_rect, box_id, egui::Sense::click());
+        let ocr_sense = egui::Sense {
+            click: true,
+            drag: false,
+            focusable: false,
+        };
+        let response = ui.interact(box_rect, box_id, ocr_sense);
 
         let is_recently_copied = state.ocr.last_copied_index == Some(idx);
         let is_hovered = response.hovered() && !pointer_in_popup;

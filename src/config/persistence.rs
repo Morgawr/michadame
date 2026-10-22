@@ -272,6 +272,8 @@ pub fn sync_active_profile_in_state(state: &mut AppState) {
         state.video_profile = current_profile_data;
     } else if state.gamescope_hook.as_ref().map_or(false, |g| g.is_active) {
         state.gamescope_profile = current_profile_data;
+    } else if state.pc98.is_active {
+        state.pc98_profile = current_profile_data;
     } else {
         state
             .profiles
@@ -334,10 +336,10 @@ pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(
 
     let mut cfg = confy::load_path::<MichadameConfig>(path)?;
 
-    cfg.replay = state.replay.config.clone();
+    cfg. replay = state.replay.config.clone();
     cfg.video_device = Some(state.hardware.selected_video_device.clone());
     cfg.usb_device = state.hardware.selected_usb_device.clone();
-    if state.video_player.is_none() && state.gamescope_hook.is_none() {
+    if state.video_player.is_none() && state.gamescope_hook.is_none() && !state.pc98.is_active {
         cfg.video_resolution = if state.hardware.selected_resolution.0 > 0 {
             Some(state.hardware.selected_resolution)
         } else {
@@ -367,14 +369,21 @@ pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(
     cfg.twitch = state.twitch.config.clone();
     cfg.mic = state.mic.config.clone();
     cfg.webcam = state.webcam.config.clone();
+    cfg.pc98 = state.pc98.config.clone();
 
     let current_profile_data = build_profile_from_state(state);
     if state.video_player.is_some() {
         cfg.video_profile = Some(current_profile_data);
         cfg.gamescope_profile = Some(state.gamescope_profile.clone());
+        cfg.pc98_profile = Some(state.pc98_profile.clone());
     } else if state.gamescope_hook.as_ref().map_or(false, |g| g.is_active) {
         cfg.gamescope_profile = Some(current_profile_data);
         cfg.video_profile = Some(state.video_profile.clone());
+        cfg.pc98_profile = Some(state.pc98_profile.clone());
+    } else if state.pc98.is_active {
+        cfg.pc98_profile = Some(current_profile_data);
+        cfg.video_profile = Some(state.video_profile.clone());
+        cfg.gamescope_profile = Some(state.gamescope_profile.clone());
     } else {
         let mut profiles = state.profiles.clone();
         profiles.insert(state.active_profile.clone(), current_profile_data);
@@ -382,6 +391,7 @@ pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(
         cfg.profiles = profiles;
         cfg.video_profile = Some(state.video_profile.clone());
         cfg.gamescope_profile = Some(state.gamescope_profile.clone());
+        cfg.pc98_profile = Some(state.pc98_profile.clone());
     }
 
     store_config_atomic_at(path, &cfg)
@@ -689,6 +699,11 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     state.active_profile = cfg.active_profile.clone();
     state.video_profile = cfg.video_profile.clone().unwrap_or_default();
     state.gamescope_profile = cfg.gamescope_profile.clone().unwrap_or_default();
+    state.pc98_profile = cfg
+        .pc98_profile
+        .clone()
+        .unwrap_or_else(super::models::default_pc98_profile);
+    state.pc98.config = cfg.pc98.clone();
 
     state.hardware.audio_buffer_size = cfg.audio_buffer_size.unwrap_or(1024);
     state.hardware.audio_sample_rate = cfg.audio_sample_rate.unwrap_or(48000);

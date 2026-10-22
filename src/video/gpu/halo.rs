@@ -398,9 +398,9 @@ impl HaloRenderer {
         params: &HaloShaderParams,
         scissor_enabled: bool,
         target_fbo: Option<glow::Framebuffer>,
+        allow_bilinear_preupscale: bool,
     ) {
-        let in_w = input_res.0.max(1);
-        let in_h = input_res.1.max(1);
+        let (in_w, in_h) = halo_working_resolution(input_res, allow_bilinear_preupscale);
         let out_w = (output_size.0 as u32).max(1);
         let out_h = (output_size.1 as u32).max(1);
 
@@ -412,13 +412,43 @@ impl HaloRenderer {
 
         gl.bind_vertex_array(Some(self.vertex_array));
 
-        // Pass 0: Linearize / Clamping
+        // Pass 0: Linearize / Clamping (with hardware bilinear pre-upscale to 1080p for sub-1080p sources)
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[0]));
         gl.viewport(0, 0, in_w as i32, in_h as i32);
         gl.use_program(Some(self.linearize_prog));
         gl.active_texture(glow::TEXTURE0);
         gl.bind_texture(glow::TEXTURE_2D, Some(input_texture));
+        let force_linear = allow_bilinear_preupscale && (in_w != input_res.0 || in_h != input_res.1);
+        let (prev_min_filter, prev_mag_filter) = if force_linear {
+            let min_f = gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER);
+            let mag_f = gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER);
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR as i32,
+            );
+            (min_f, mag_f)
+        } else {
+            (0, 0)
+        };
         gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        if force_linear {
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                prev_min_filter,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                prev_mag_filter,
+            );
+        }
 
         // Pass 1: Glow Horizontal
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[1]));
@@ -581,5 +611,38 @@ impl HaloRenderer {
                 gl.delete_texture(texture);
             }
         }
+    }
+}
+
+/// Computes the working resolution for Halo's Linearize/Glow/Bloom/Scanline passes.
+/// Sub-1080p sources (such as PC-98 640x400 or SD 640x480) are bilinearly pre-upscaled to
+/// 1080p equivalent height (e.g. 1728x1080 for 640x400) so `fs_halo_scanlines.glsl`
+/// does not collapse 400 lines down to 200 or snap horizontal text edges to coarse 640px texels.
+pub fn halo_working_resolution(
+    input_res: (u32, u32),
+    allow_bilinear_preupscale: bool,
+) -> (u32, u32) {
+    let raw_w = input_res.0.max(1);
+    let raw_h = input_res.1.max(1);
+    if allow_bilinear_preupscale && raw_h < 1080 {
+        let up_h = 1080u32;
+        let up_w = ((raw_w as u64 * 1080 + (raw_h as u64 / 2)) / raw_h as u64).max(1) as u32;
+        (up_w, up_h)
+    } else {
+        (raw_w, raw_h)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_halo_working_resolution_preupscales_pc98_640x400() {
+        assert_eq!(halo_working_resolution((640, 400), true), (1728, 1080));
+        assert_eq!(halo_working_resolution((640, 480), true), (1440, 1080));
+        assert_eq!(halo_working_resolution((1920, 1080), true), (1920, 1080));
+        assert_eq!(halo_working_resolution((3840, 2160), true), (3840, 2160));
+        assert_eq!(halo_working_resolution((640, 400), false), (640, 400));
     }
 }

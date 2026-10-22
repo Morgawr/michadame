@@ -358,6 +358,20 @@ pub struct Profile {
     pub audio_filter: Option<crate::replay::config::AudioFilterConfig>,
 }
 
+pub fn default_pc98_profile() -> Profile {
+    Profile {
+        crt_filter: Some(2),
+        selected_crt_filter: Some(2),
+        scaler_filter: Some(crate::video::types::ScalerFilter::Bilinear as u8),
+        retro_pc_frame: Some(true),
+        retro_pc_ambient_glow: Some(0.55),
+        // PC-98 native framebuffer is 640x400 (16:10 square pixels), displayed on a 4:3 CRT tube
+        // (pixel aspect ratio 5:6 = 0.8333333).
+        horizontal_stretch: Some(5.0 / 6.0),
+        ..Default::default()
+    }
+}
+
 #[derive(Deserialize, Clone)]
 #[serde(default)]
 pub struct LegacyConfig {
@@ -469,6 +483,10 @@ pub struct LegacyConfig {
     #[serde(default)]
     pub gamescope_profile: Option<Profile>,
     #[serde(default)]
+    pub pc98_profile: Option<Profile>,
+    #[serde(default)]
+    pub pc98: crate::pc98::Pc98Config,
+    #[serde(default)]
     pub twitch: TwitchConfig,
     #[serde(default)]
     pub mic: MicConfig,
@@ -577,6 +595,8 @@ impl Default for LegacyConfig {
             popup_under_crt: None,
             video_profile: None,
             gamescope_profile: None,
+            pc98_profile: None,
+            pc98: crate::pc98::Pc98Config::default(),
             twitch: TwitchConfig::default(),
             mic: MicConfig::default(),
             webcam: WebcamConfig::default(),
@@ -616,12 +636,16 @@ pub struct MichadameConfig {
     pub twitch: TwitchConfig,
     pub mic: MicConfig,
     pub webcam: WebcamConfig,
+    #[serde(default)]
+    pub pc98: crate::pc98::Pc98Config,
     // confy's TOML serializer requires scalar fields before nested tables.
     pub replay: crate::replay::config::ReplayConfig,
     #[serde(default)]
     pub video_profile: Option<Profile>,
     #[serde(default)]
     pub gamescope_profile: Option<Profile>,
+    #[serde(default)]
+    pub pc98_profile: Option<Profile>,
     pub profiles: BTreeMap<String, Profile>,
 }
 
@@ -651,11 +675,13 @@ impl Default for MichadameConfig {
             twitch: TwitchConfig::default(),
             mic: MicConfig::default(),
             webcam: WebcamConfig::default(),
+            pc98: crate::pc98::Pc98Config::default(),
             bank_current_tag: None,
             bank_compact_mode: None,
             popup_under_crt: Some(false),
             video_profile: None,
             gamescope_profile: None,
+            pc98_profile: None,
             profiles,
         }
     }

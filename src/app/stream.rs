@@ -221,6 +221,8 @@ impl AppState {
     }
 
     pub fn stop_stream(&mut self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+        ctx.set_cursor_icon(egui::CursorIcon::Default);
         if self.ui.is_fullscreen {
             self.ui.is_fullscreen = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
@@ -255,6 +257,7 @@ impl AppState {
 
         self.stop_video_file();
         self.stop_gamescope_hook();
+        self.stop_pc98_mode();
 
         if audio_was_active {
             self.info("Stream stopped and audio stream dropped.");
@@ -826,8 +829,271 @@ impl AppState {
                 .command_sender
                 .send(crate::video::player::PlayerCommand::SetVolume(volume));
         }
+        if let Some(ref tx) = self.pc98.command_tx {
+            let _ = tx.send(crate::pc98::Pc98Command::SetVolume(volume));
+        }
         self.replay.set_game_volume(volume);
         self.twitch.set_master_volume(volume);
+    }
+
+    pub fn start_pc98_mode(&mut self, ctx: &egui::Context) {
+        self.stop_stream_resources();
+
+        // Stash current normal profile and capture card parameters
+        let current_normal = crate::config::build_profile_from_state(self);
+        self.profiles.insert(self.active_profile.clone(), current_normal);
+        self.previous_pc98_normal_profile = Some(self.active_profile.clone());
+        self.previous_capture_resolution = self.hardware.selected_resolution;
+        self.previous_capture_framerate = self.hardware.selected_framerate;
+
+        // Apply dedicated PC-98 profile (defaults to Halo CRT + Retro PC Bezel)
+        crate::config::apply_profile_to_state(self, &self.pc98_profile.clone());
+
+        self.hardware.selected_resolution = (640, 400);
+        self.hardware.selected_framerate = 56;
+        let new_size = egui::vec2(800.0, 600.0);
+        ctx.send_viewport_cmd_to(
+            egui::ViewportId::ROOT,
+            egui::ViewportCommand::InnerSize(new_size),
+        );
+
+        let (frame_tx, frame_rx) = crossbeam_channel::bounded(2);
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let input_state = Arc::new(std::sync::Mutex::new(crate::pc98::Pc98InputState::default()));
+
+        self.latest_frame = None;
+        self.gui_fps = 0.0;
+        self.video_fps = 0.0;
+        self.frames_since_last_check = 0;
+        self.video_frames_since_last_check = 0;
+        self.last_fps_check = std::time::Instant::now();
+        self.last_video_fps_check = self.last_fps_check;
+
+        self.frame_receiver = Some(frame_rx);
+        self.pc98.event_rx = Some(event_rx);
+        self.pc98.command_tx = Some(cmd_tx);
+        self.pc98.stop_requested = Arc::clone(&stop_requested);
+        self.pc98.input_state = Arc::clone(&input_state);
+        self.pc98.is_active = true;
+        self.pc98.passthrough_enabled = true;
+        self.pc98.status_message = Some("Starting NEC PC-98 emulator...".to_string());
+        self.pc98.resolution = (640, 400);
+
+        let repaint_ctx = ctx.clone();
+        let request_repaint: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            repaint_ctx.request_repaint();
+        });
+
+        self.replay.set_game_volume(self.hardware.master_volume);
+        self.replay.sync_audio_filter();
+
+        let worker_params = crate::pc98::libretro::Pc98WorkerParams {
+            config: self.pc98.config.clone(),
+            frame_tx,
+            event_tx: event_tx.clone(),
+            command_rx: cmd_rx,
+            input_state,
+            stop_requested,
+            request_repaint: request_repaint.clone(),
+            peak_amplitude: Arc::clone(&self.hardware.audio_peak_amplitude),
+            audio_latency_ms: Arc::clone(&self.hardware.audio_latency_ms),
+            replay_audio: self.replay.audio.clone(),
+            master_volume: self.hardware.master_volume,
+        };
+
+        let handle = thread::Builder::new()
+            .name("pc98-libretro-worker".to_string())
+            .spawn(move || {
+                match crate::pc98::libretro::run_pc98_worker(worker_params) {
+                    Ok(()) => {
+                        let _ = event_tx.send(crate::pc98::Pc98Event::Stopped);
+                    }
+                    Err(e) => {
+                        let _ = event_tx.send(crate::pc98::Pc98Event::Failed(format!("{e:#}")));
+                    }
+                }
+                request_repaint();
+            })
+            .ok();
+
+        self.pc98.worker_thread = handle;
+        self.ui.video_window_open = true;
+        self.ui.control_window_open = false;
+        ctx.request_repaint();
+    }
+
+    pub fn stop_pc98_mode(&mut self) {
+        if self.pc98.is_active {
+            // Save PC-98 profile changes while PC-98 mode is still active
+            self.pc98_profile = crate::config::build_profile_from_state(self);
+            crate::config::save_config(self);
+            crate::config::flush_pending_config(self);
+        }
+
+        self.pc98.request_stop();
+        if let Some(tx) = self.pc98.command_tx.take() {
+            let _ = tx.send(crate::pc98::Pc98Command::Stop);
+        }
+        if let Some(handle) = self.pc98.worker_thread.take() {
+            reap_video_thread(handle);
+        }
+
+        if self.pc98.is_active {
+            self.pc98.is_active = false;
+            self.pc98.status_message = None;
+
+            if self.previous_capture_resolution.0 > 0 {
+                self.hardware.selected_resolution = self.previous_capture_resolution;
+                self.hardware.selected_framerate = self.previous_capture_framerate;
+            }
+            if let Some(prev_name) = self.previous_pc98_normal_profile.take() {
+                self.active_profile = prev_name;
+            }
+            let profile_to_apply = self.profiles.get(&self.active_profile).cloned();
+            if let Some(profile) = profile_to_apply {
+                crate::config::apply_profile_to_state(self, &profile);
+            }
+        }
+
+        self.pc98.event_rx = None;
+        self.frame_receiver = None;
+        self.latest_frame = None;
+    }
+
+    pub fn handle_pc98_events(&mut self, ctx: &egui::Context) -> bool {
+        let mut handled = false;
+        if let Some(rx) = &self.pc98.file_picker_rx {
+            if let Ok((slot, raw_path)) = rx.try_recv() {
+                let path = match crate::pc98::core_sync::resolve_or_extract_media_path(&raw_path, slot) {
+                    Ok(resolved) => resolved,
+                    Err(e) => {
+                        self.error(format!("Failed to load PC-98 disk archive: {e}"));
+                        raw_path
+                    }
+                };
+                let path_str = path.to_string_lossy().to_string();
+                match slot {
+                    crate::pc98::Pc98MediaSlot::Fdd1 => {
+                        self.pc98.config.fdd1_path = path_str.clone();
+                        self.pc98.send_command(crate::pc98::Pc98Command::MountFdd {
+                            drive: 0,
+                            path: Some(path),
+                        });
+                    }
+                    crate::pc98::Pc98MediaSlot::Fdd2 => {
+                        self.pc98.config.fdd2_path = path_str.clone();
+                        self.pc98.send_command(crate::pc98::Pc98Command::MountFdd {
+                            drive: 1,
+                            path: Some(path),
+                        });
+                    }
+                    crate::pc98::Pc98MediaSlot::Hdd1 => {
+                        self.pc98.config.hdd1_path = path_str;
+                        if self.pc98.is_active {
+                            self.info("HDD1 updated. Reboot PC-98 mode to apply HDD changes.");
+                        }
+                    }
+                    crate::pc98::Pc98MediaSlot::Hdd2 => {
+                        self.pc98.config.hdd2_path = path_str;
+                        if self.pc98.is_active {
+                            self.info("HDD2 updated. Reboot PC-98 mode to apply HDD changes.");
+                        }
+                    }
+                    crate::pc98::Pc98MediaSlot::CdRom => {
+                        self.pc98.config.cdrom_path = path_str;
+                        if self.pc98.is_active {
+                            self.info("CD-ROM updated. Reboot PC-98 mode to apply CD-ROM changes.");
+                        }
+                    }
+                }
+                crate::config::save_config(self);
+                handled = true;
+            }
+        }
+
+        while let Some(rx) = self.pc98.event_rx.as_ref() {
+            let event = match rx.try_recv() {
+                Ok(ev) => ev,
+                Err(crossbeam_channel::TryRecvError::Empty) => break,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => break,
+            };
+            handled = true;
+            match event {
+                crate::pc98::Pc98Event::SyncProgress(msg) => {
+                    self.pc98.status_message = Some(msg.clone());
+                    self.info(msg);
+                }
+                crate::pc98::Pc98Event::Started { width, height, fps } => {
+                    self.pc98.status_message = None;
+                    self.pc98.resolution = (width, height);
+                    self.hardware.selected_resolution = (width, height);
+                    self.hardware.selected_framerate = (fps.round() as u32).max(1);
+                    self.info(
+                        "NEC PC-98 booted! Keyboard/mouse passthrough active (Shift+Tab to release, F12 for NP2 menu).",
+                    );
+                }
+                crate::pc98::Pc98Event::ResolutionChanged { width, height } => {
+                    self.pc98.resolution = (width, height);
+                    self.hardware.selected_resolution = (width, height);
+                }
+                crate::pc98::Pc98Event::Info(msg) => {
+                    self.info(msg);
+                }
+                crate::pc98::Pc98Event::Failed(err) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+                    ctx.set_cursor_icon(egui::CursorIcon::Default);
+                    self.error(format!("PC-98 emulator error: {err}"));
+                    self.stop_pc98_mode();
+                    self.ui.video_window_open = false;
+                    self.ui.control_window_open = true;
+                }
+                crate::pc98::Pc98Event::Stopped => {}
+            }
+        }
+        if handled {
+            ctx.request_repaint();
+        }
+        handled
+    }
+
+    pub fn open_pc98_media_dialog(&mut self, slot: crate::pc98::Pc98MediaSlot, ctx: &egui::Context) {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.pc98.file_picker_rx = Some(rx);
+        let ctx_clone = ctx.clone();
+        let _ = std::thread::Builder::new()
+            .name("pc98-media-picker".to_string())
+            .spawn(move || {
+                let dialog = match slot {
+                    crate::pc98::Pc98MediaSlot::Fdd1 | crate::pc98::Pc98MediaSlot::Fdd2 => {
+                        rfd::FileDialog::new()
+                            .add_filter(
+                                "PC-98 Floppy Disk Images (.d88/.fdi/.hdm/.zip)",
+                                &["d88", "88d", "fdi", "hdm", "xdf", "dup", "2hd", "tfd", "nfd", "flp", "bin", "zip"],
+                            )
+                            .add_filter("All files", &["*"])
+                            .set_title("Select PC-98 Floppy Disk Image")
+                    }
+                    crate::pc98::Pc98MediaSlot::Hdd1 | crate::pc98::Pc98MediaSlot::Hdd2 => {
+                        rfd::FileDialog::new()
+                            .add_filter(
+                                "PC-98 Hard Disk Images (.hdi/.nhd/.thd/.zip)",
+                                &["hdi", "thd", "nhd", "vhd", "slh", "zip"],
+                            )
+                            .add_filter("All files", &["*"])
+                            .set_title("Select PC-98 Hard Disk Image")
+                    }
+                    crate::pc98::Pc98MediaSlot::CdRom => rfd::FileDialog::new()
+                        .add_filter("CD-ROM Images (.cue/.ccd/.iso/.zip)", &["cue", "ccd", "cdm", "mds", "nrg", "iso", "zip"])
+                        .add_filter("All files", &["*"])
+                        .set_title("Select PC-98 CD-ROM Image"),
+                };
+                if let Some(path) = dialog.pick_file() {
+                    let _ = tx.send((slot, path));
+                    ctx_clone.request_repaint();
+                }
+            });
     }
 }
 
@@ -1124,5 +1390,56 @@ mod tests {
         assert!(state.frame_receiver.is_none());
         assert!(state.latest_frame.is_none());
         assert!(!state.ui.video_window_open);
+    }
+
+    #[test]
+    fn test_pc98_mode_profile_and_resolution_restoration() {
+        let mut state = AppState::default();
+        // Default PC-98 profile has Halo CRT (2) and retro_pc_frame enabled
+        assert_eq!(state.pc98_profile.crt_filter, Some(2));
+        assert_eq!(state.pc98_profile.retro_pc_frame, Some(true));
+
+        let saturn_profile = crate::config::Profile {
+            crt_hard_scan: Some(-10.0),
+            vibrance: Some(1.3),
+            video_resolution: Some((720, 480)),
+            ..Default::default()
+        };
+        state.profiles.insert("Saturn".to_string(), saturn_profile);
+        state.active_profile = "Saturn".to_string();
+        state.hardware.selected_resolution = (720, 480);
+        state.hardware.selected_framerate = 60;
+        let saturn = state.profiles.get("Saturn").unwrap().clone();
+        crate::config::apply_profile_to_state(&mut state, &saturn);
+
+        // Simulate entering PC-98 mode
+        let current_normal = crate::config::build_profile_from_state(&state);
+        state
+            .profiles
+            .insert(state.active_profile.clone(), current_normal);
+        state.previous_pc98_normal_profile = Some(state.active_profile.clone());
+        state.previous_capture_resolution = state.hardware.selected_resolution;
+        state.previous_capture_framerate = state.hardware.selected_framerate;
+
+        let pc98_prof = state.pc98_profile.clone();
+        crate::config::apply_profile_to_state(&mut state, &pc98_prof);
+        assert!(state.video.retro_pc_frame);
+
+        state.pc98.is_active = true;
+        state.hardware.selected_resolution = (640, 400);
+        state.hardware.selected_framerate = 56;
+
+        // User tweaks vibrance while in PC-98 mode
+        state.video.vibrance = 1.45;
+
+        state.stop_pc98_mode();
+
+        assert!(!state.pc98.is_active);
+        assert_eq!(state.pc98_profile.vibrance, Some(1.45));
+        assert_eq!(state.active_profile, "Saturn");
+        assert_eq!(state.hardware.selected_resolution, (720, 480));
+        assert_eq!(state.hardware.selected_framerate, 60);
+        assert_eq!(state.crt.hard_scan, -10.0);
+        assert_eq!(state.video.vibrance, 1.3);
     }
 }

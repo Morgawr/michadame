@@ -166,9 +166,12 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     ui.horizontal(|ui| {
                         if state.ui.video_window_open {
                             let is_gamescope = state.gamescope_hook.as_ref().map_or(false, |h| h.is_active);
+                            let is_pc98 = state.pc98.is_active;
                             let is_file_mode = state.video_player.is_some();
                             let label = if is_gamescope {
                                 "Stop Gamescope"
+                            } else if is_pc98 {
+                                "Stop PC-98"
                             } else if is_file_mode {
                                 "Stop Video"
                             } else {
@@ -186,6 +189,8 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                 state.stop_stream(ui.ctx());
                                 state.info(if is_gamescope {
                                     "Gamescope hook stopped."
+                                } else if is_pc98 {
+                                    "PC-98 emulator stopped."
                                 } else if is_file_mode {
                                     "Video playback stopped."
                                 } else {
@@ -206,6 +211,24 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                             .size(10.5)
                                             .color(color),
                                     );
+                                }
+                            } else if is_pc98 {
+                                let (icon, input_label, color) = if state.pc98.passthrough_enabled {
+                                    ("⌨", "Passthrough", egui::Color32::from_rgb(140, 240, 140))
+                                } else {
+                                    ("🚫", "Input Paused", egui::Color32::from_rgb(255, 120, 120))
+                                };
+                                ui.label(
+                                    egui::RichText::new(format!("{} {}", icon, input_label))
+                                        .monospace()
+                                        .size(10.5)
+                                        .color(color),
+                                );
+                                if ui.small_button("Reset").on_hover_text("Warm-reset PC-98").clicked() {
+                                    state.pc98.send_command(crate::pc98::Pc98Command::Reset);
+                                }
+                                if ui.small_button("NP2 Menu").on_hover_text("Toggle Neko Project II OSD menu (F12)").clicked() {
+                                    state.pc98.send_command(crate::pc98::Pc98Command::TriggerMenu);
                                 }
                             }
                         } else {
@@ -249,9 +272,25 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                 state.info("Gamescope hook starting...");
                             }
 
+                            let pc98_btn = egui::Button::new(
+                                egui::RichText::new("Boot PC-98")
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(210, 255, 220)),
+                            )
+                            .fill(egui::Color32::from_rgb(24, 72, 42))
+                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 118, 68)))
+                            .rounding(egui::Rounding::ZERO);
+                            if ui
+                                .add(pc98_btn)
+                                .on_hover_text("Boot embedded NEC PC-98 emulator (Neko Project II Kai) inside CRT monitor")
+                                .clicked()
+                            {
+                                state.start_pc98_mode(ui.ctx());
+                            }
+
                             if !can_stream {
                                 ui.label(
-                                    egui::RichText::new("Select format for capture card, open local video, or hook Gamescope.")
+                                    egui::RichText::new("Select format for capture card, open local video, hook Gamescope, or boot PC-98.")
                                         .weak()
                                         .small(),
                                 );
@@ -391,6 +430,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     (SettingsTab::Geometry, "Geometry / Deinterlace"),
                     (SettingsTab::Effects, "Effects / Bezel"),
                     (SettingsTab::Devices, "Capture Devices"),
+                    (SettingsTab::Pc98, "PC-98 Emulator"),
                     (SettingsTab::AudioReplay, "Audio / Replay"),
                     (SettingsTab::Mic, "Mic"),
                     (SettingsTab::OcrDict, "OCR / Dictionaries"),
@@ -481,6 +521,9 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 }
                 SettingsTab::Twitch => {
                     changed |= super::twitch::draw_twitch_tab(ui, state);
+                }
+                SettingsTab::Pc98 => {
+                    changed |= super::pc98::draw_pc98_tab(ui, state);
                 }
                 SettingsTab::Hotkeys => {
                     draw_hotkeys_tab(ui);
@@ -787,7 +830,8 @@ fn draw_hotkeys_tab(ui: &mut egui::Ui) {
                     ("← / →", "Seek -5s / +5s (Video Player Mode)"),
                     ("Space", "Capture OCR (Google Lens)"),
                     ("Shift + Space", "Clear OCR Bounding Boxes"),
-                    ("Shift + Tab", "Toggle Gamescope Input Passthrough / Pause"),
+                    ("Shift + Tab", "Toggle Gamescope / PC-98 Input Passthrough / Pause"),
+                    ("F12", "Open / Close Neko Project II OSD Menu (in PC-98 Mode)"),
                     ("Ctrl + C", "Export 15s Replay Clip to Clipboard"),
                     ("Ctrl + Shift + C", "Export 7s Audio-Only Clip to Clipboard"),
                     (

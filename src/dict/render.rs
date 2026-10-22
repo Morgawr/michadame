@@ -147,7 +147,12 @@ pub fn render_term_entry(
 
 /// Vector trash-can button to delete an entry from custom names.
 fn render_delete_name_button(ui: &mut egui::Ui, size: f32) -> bool {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    let non_focus_click = egui::Sense {
+        click: true,
+        drag: false,
+        focusable: false,
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), non_focus_click);
     let hovered = response.hovered();
     let (fill, stroke_color, icon_color) = if hovered {
         (
@@ -211,7 +216,12 @@ fn render_delete_name_button(ui: &mut egui::Ui, size: f32) -> bool {
 /// Round `+` / `…` / `✔` button used to add an entry to the mining bank.
 fn render_mine_button(ui: &mut egui::Ui, status: crate::bank::MineStatus, size: f32) -> bool {
     use crate::bank::MineStatus;
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    let non_focus_click = egui::Sense {
+        click: true,
+        drag: false,
+        focusable: false,
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), non_focus_click);
     let hovered = response.hovered() && status == MineStatus::Available;
     let (fill, stroke, glyph, glyph_color) = match status {
         MineStatus::Available => (
@@ -248,7 +258,12 @@ fn render_mine_button(ui: &mut egui::Ui, status: crate::bank::MineStatus, size: 
 /// Round `++` / `…` / `✔` button used to add an entry to the mining bank and create a Twitch clip.
 fn render_mine_and_clip_button(ui: &mut egui::Ui, status: crate::bank::MineStatus, size: f32) -> bool {
     use crate::bank::MineStatus;
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    let non_focus_click = egui::Sense {
+        click: true,
+        drag: false,
+        focusable: false,
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), non_focus_click);
     let hovered = response.hovered() && status == MineStatus::Available;
     let (fill, stroke, glyph, glyph_color) = match status {
         MineStatus::Available => (

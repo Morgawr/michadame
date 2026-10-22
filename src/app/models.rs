@@ -45,6 +45,7 @@ pub enum SettingsTab {
     AudioReplay,
     OcrDict,
     Twitch,
+    Pc98,
     Hotkeys,
 }
 
@@ -352,11 +353,14 @@ pub struct AppState {
     pub new_profile_name: String,
     pub video_profile: config::Profile,
     pub gamescope_profile: config::Profile,
+    pub pc98_profile: config::Profile,
     pub previous_normal_profile: Option<String>,
     pub previous_gamescope_normal_profile: Option<String>,
+    pub previous_pc98_normal_profile: Option<String>,
     pub previous_capture_resolution: (u32, u32),
     pub previous_capture_framerate: u32,
     pub gamescope_hook: Option<crate::gamescope::GamescopeHookState>,
+    pub pc98: crate::pc98::Pc98State,
 
     pub fft_filter: Option<Arc<Mutex<crate::video::gpu::FftFilter>>>,
     pub fft_mask_data: Vec<u8>,

@@ -151,11 +151,14 @@ impl Default for AppState {
             new_profile_name: String::new(),
             video_profile: config::Profile::default(),
             gamescope_profile: config::Profile::default(),
+            pc98_profile: config::models::default_pc98_profile(),
             previous_normal_profile: None,
             previous_gamescope_normal_profile: None,
+            previous_pc98_normal_profile: None,
             previous_capture_resolution: (0, 0),
             previous_capture_framerate: 0,
             gamescope_hook: None,
+            pc98: crate::pc98::Pc98State::default(),
             fft_filter: None,
             fft_mask_data: Vec::new(),
             fft_mask_dirty: false,
@@ -313,6 +316,11 @@ impl AppState {
                     self.gui_fps, self.video_fps, audio_latency
                 )
             }
+        } else if self.pc98.is_active {
+            format!(
+                "Michadame Viewer | NEC PC-98 ({}x{}) | UI: {:.1} FPS | Video: {:.1} FPS | Audio Latency: {} ms",
+                self.pc98.resolution.0, self.pc98.resolution.1, self.gui_fps, self.video_fps, audio_latency
+            )
         } else {
             format!(
                 "Michadame Viewer | UI: {:.1} FPS | Video: {:.1} FPS | Audio Latency: {} ms",
@@ -455,14 +463,10 @@ impl eframe::App for AppState {
         }
         self.ui.is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
 
-        // If Gamescope hook is active and passthrough is paused (michadame control mode),
-        // ensure any widget focus captured by Shift+Tab tab-navigation is cleared so hotkeys work,
-        // unless a dialog or controls window is open for explicit user text input.
-        if self
-            .gamescope_hook
-            .as_ref()
-            .map_or(false, |h| h.is_active && !h.passthrough_enabled)
-        {
+        // If Gamescope hook or PC-98 mode is active, ensure any widget focus captured by
+        // Shift+Tab tab-navigation is cleared so hotkeys and passthrough work cleanly,
+        // unless a dialog, Twitch overlay input, or controls window is open for explicit user text input.
+        if self.gamescope_hook.as_ref().map_or(false, |h| h.is_active) || self.pc98.is_active {
             if !self.ui.control_window_open
                 && !self.ui.show_stop_stream_dialog
                 && !self.ui.show_quit_dialog
@@ -479,8 +483,9 @@ impl eframe::App for AppState {
             .gamescope_hook
             .as_ref()
             .map_or(false, |h| h.is_active && h.passthrough_enabled);
+        let pc98_passthrough = self.pc98.is_active && self.pc98.passthrough_enabled;
 
-        if !gamescope_passthrough {
+        if !gamescope_passthrough && !pc98_passthrough {
             self.replay.shortcuts(ctx);
         }
         let mut repaint_requested = false;
@@ -550,12 +555,9 @@ impl eframe::App for AppState {
             .gamescope_hook
             .as_ref()
             .map_or(false, |h| h.is_active && h.passthrough_enabled);
+        let pc98_passthrough = self.pc98.is_active && self.pc98.passthrough_enabled;
 
-        if self
-            .gamescope_hook
-            .as_ref()
-            .map_or(false, |h| h.is_active && !h.passthrough_enabled)
-        {
+        if self.gamescope_hook.as_ref().map_or(false, |h| h.is_active) || self.pc98.is_active {
             if !self.ui.control_window_open
                 && !self.ui.show_stop_stream_dialog
                 && !self.ui.show_quit_dialog
@@ -568,9 +570,9 @@ impl eframe::App for AppState {
             }
         }
 
-        // Video-window hotkeys must not fire while typing or while Gamescope passthrough is active.
+        // Video-window hotkeys must not fire while typing or while Gamescope/PC-98 passthrough is active.
         let typing = ctx.wants_keyboard_input();
-        if !gamescope_passthrough {
+        if !gamescope_passthrough && !pc98_passthrough {
             if !typing && ctx.input(|i| i.key_pressed(egui::Key::F)) {
                 let is_fullscreen = !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(is_fullscreen));
@@ -706,6 +708,7 @@ impl eframe::App for AppState {
         repaint_requested |= self.handle_video_thread_events(ctx);
         repaint_requested |= self.handle_audio_thread_events(ctx);
         repaint_requested |= self.handle_video_file_player_events(ctx);
+        repaint_requested |= self.handle_pc98_events(ctx);
 
         if let Some(ref mut p) = self.video_player {
             if !p.is_seeking {

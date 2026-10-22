@@ -75,24 +75,36 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
     state.ocr.start_worker(Some(ctx.clone()));
 
     let is_gamescope = state.gamescope_hook.as_ref().map_or(false, |h| h.is_active);
+    let is_pc98 = state.pc98.is_active;
     let mut passthrough_active = false;
     if is_gamescope {
         let toggle_passthrough = ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
         if toggle_passthrough {
             if let Some(hook) = &mut state.gamescope_hook {
-                let now_enabled = hook.toggle_passthrough();
-                if !now_enabled {
-                    ctx.memory_mut(|m| {
-                        m.stop_text_input();
-                        if let Some(id) = m.focused() {
-                            m.surrender_focus(id);
-                        }
-                    });
-                }
+                let _now_enabled = hook.toggle_passthrough();
+                ctx.memory_mut(|m| {
+                    m.stop_text_input();
+                    if let Some(id) = m.focused() {
+                        m.surrender_focus(id);
+                    }
+                });
                 ctx.request_repaint();
             }
         }
         passthrough_active = state.gamescope_hook.as_ref().map_or(false, |h| h.passthrough_enabled);
+    } else if is_pc98 {
+        let toggle_passthrough = ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
+        if toggle_passthrough {
+            let _now_enabled = state.pc98.toggle_passthrough();
+            ctx.memory_mut(|m| {
+                m.stop_text_input();
+                if let Some(id) = m.focused() {
+                    m.surrender_focus(id);
+                }
+            });
+            ctx.request_repaint();
+        }
+        passthrough_active = state.pc98.passthrough_enabled;
     }
 
     let mut new_dma_frame_received = false;
@@ -135,7 +147,12 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         });
     }
     if state.ui.video_window_open {
-        let response = ui.allocate_response(ui.available_size(), egui::Sense::click());
+        let non_focus_click = egui::Sense {
+            click: true,
+            drag: false,
+            focusable: false,
+        };
+        let response = ui.allocate_response(ui.available_size(), non_focus_click);
         let video_texture = state
             .video_texture
             .as_ref()
@@ -239,6 +256,30 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 i.events.retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
             });
         } else if is_gamescope {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+        } else if is_pc98 && passthrough_active {
+            let has_system_dialog = state.ui.show_quit_dialog
+                || state.ui.show_stop_stream_dialog
+                || state.ui.show_first_run_dialog
+                || (state.config_load_error.is_some() && !state.ui.dismissed_config_error)
+                || state.video.fft_mask_window_open
+                || state.ui.debug_open;
+
+            if is_window_focused && !has_system_dialog {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::Locked));
+                ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+                let target_res = state.pc98.resolution;
+                crate::pc98::input::forward_pc98_inputs(&mut state.pc98, ctx, video_rect, target_res);
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+                state.pc98.release_all_inputs();
+            }
+            ctx.input_mut(|i| {
+                i.events.retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
+            });
+        } else if is_pc98 {
             ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
             ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
         }
@@ -1028,6 +1069,9 @@ pub fn is_software_mouse_active(state: &AppState, is_on_crt_surface: bool) -> bo
     if state.gamescope_hook.as_ref().map_or(false, |h| h.is_active && h.is_cursor_hidden()) {
         return false;
     }
+    if state.pc98.is_active && state.pc98.passthrough_enabled {
+        return false;
+    }
     let filter = CrtFilter::from_u8(state.crt_filter.load(Ordering::Relaxed));
     let is_crt_on = filter != CrtFilter::Off;
     let popup_active = state.dict.popup.is_some();
@@ -1081,17 +1125,21 @@ pub fn is_passthrough_host_cursor_hidden(
     if state.twitch.preroll.is_some() {
         return false;
     }
-    let Some(hook) = &state.gamescope_hook else {
-        return false;
-    };
-    if !hook.is_active || !hook.passthrough_enabled || is_hovering_controls {
+    let passthrough_on = state
+        .gamescope_hook
+        .as_ref()
+        .map_or(false, |h| h.is_active && h.passthrough_enabled)
+        || (state.pc98.is_active && state.pc98.passthrough_enabled);
+    if !passthrough_on || is_hovering_controls {
         return false;
     }
-    let Some(pos) = pointer_pos else {
-        return false;
-    };
-    if !video_rect.contains(pos) {
-        return false;
+    if !(state.pc98.is_active && state.pc98.passthrough_enabled) {
+        let Some(pos) = pointer_pos else {
+            return false;
+        };
+        if !video_rect.contains(pos) {
+            return false;
+        }
     }
 
     let has_system_dialog = state.ui.show_quit_dialog

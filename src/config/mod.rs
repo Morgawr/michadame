@@ -131,8 +131,10 @@ impl From<LegacyConfig> for MichadameConfig {
             twitch: legacy.twitch,
             mic: legacy.mic,
             webcam: legacy.webcam,
+            pc98: legacy.pc98,
             video_profile: legacy.video_profile,
             gamescope_profile: legacy.gamescope_profile,
+            pc98_profile: legacy.pc98_profile,
             profiles,
         }
     }
@@ -244,6 +246,8 @@ mod tests {
             popup_under_crt: Some(false),
             video_profile: None,
             gamescope_profile: None,
+            pc98_profile: None,
+            pc98: Default::default(),
             twitch: Default::default(),
             mic: Default::default(),
             webcam: Default::default(),
@@ -381,6 +385,8 @@ mod tests {
             popup_under_crt: None,
             video_profile: None,
             gamescope_profile: None,
+            pc98_profile: None,
+            pc98: Default::default(),
             twitch: Default::default(),
             mic: Default::default(),
             webcam: Default::default(),
