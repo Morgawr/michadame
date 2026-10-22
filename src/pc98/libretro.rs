@@ -899,13 +899,7 @@ unsafe fn run_loaded_core(
     let mut current_fdd1: Option<PathBuf> = {
         let s = initial_config.fdd1_path.trim();
         if !s.is_empty() && Path::new(s).exists() {
-            Some(
-                super::core_sync::resolve_or_extract_media_path(
-                    Path::new(s),
-                    super::Pc98MediaSlot::Fdd1,
-                )
-                .unwrap_or_else(|_| PathBuf::from(s)),
-            )
+            Some(PathBuf::from(s))
         } else {
             None
         }
@@ -913,13 +907,7 @@ unsafe fn run_loaded_core(
     let mut current_fdd2: Option<PathBuf> = {
         let s = initial_config.fdd2_path.trim();
         if !s.is_empty() && Path::new(s).exists() {
-            Some(
-                super::core_sync::resolve_or_extract_media_path(
-                    Path::new(s),
-                    super::Pc98MediaSlot::Fdd2,
-                )
-                .unwrap_or_else(|_| PathBuf::from(s)),
-            )
+            Some(PathBuf::from(s))
         } else {
             None
         }

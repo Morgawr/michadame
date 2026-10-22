@@ -269,8 +269,7 @@ pub fn prepare_boot_cmd(config: &Pc98Config) -> Result<Option<PathBuf>> {
         if !path_str.is_empty() {
             let p = Path::new(path_str);
             if p.exists() {
-                let resolved = resolve_or_extract_media_path(p, slot).unwrap_or_else(|_| p.to_path_buf());
-                args.push(format!("\"{}\"", resolved.to_string_lossy()));
+                args.push(format!("\"{}\"", p.to_string_lossy()));
             }
         }
     }
@@ -289,123 +288,6 @@ pub fn prepare_boot_cmd(config: &Pc98Config) -> Result<Option<PathBuf>> {
         .with_context(|| format!("Failed to write PC-98 boot command file {:?}", cmd_path))?;
 
     Ok(Some(cmd_path))
-}
-
-/// If `path` is a `.zip` archive, extracts its disk images into
-/// `<saves_dir>/extracted/<zip_stem>/` (preserving existing extracted files so save writes
-/// on the virtual disk are retained across reboots) and returns the primary disk image
-/// matching `slot`. Otherwise returns `path` unchanged.
-pub fn resolve_or_extract_media_path(path: &Path, slot: Pc98MediaSlot) -> Result<PathBuf> {
-    let is_zip = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("zip"));
-    if !is_zip {
-        return Ok(path.to_path_buf());
-    }
-
-    let extract_root = saves_dir().join("extracted");
-    resolve_or_extract_media_path_into(path, slot, &extract_root)
-}
-
-pub fn resolve_or_extract_media_path_into(
-    path: &Path,
-    slot: Pc98MediaSlot,
-    extract_root: &Path,
-) -> Result<PathBuf> {
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("pc98_media");
-    let target_dir = extract_root.join(stem);
-    fs::create_dir_all(&target_dir)
-        .with_context(|| format!("Failed to create extraction directory {:?}", target_dir))?;
-
-    let file = fs::File::open(path)
-        .with_context(|| format!("Failed to open zip archive {:?}", path))?;
-    let mut archive = zip::ZipArchive::new(file)
-        .with_context(|| format!("Invalid zip archive {:?}", path))?;
-
-    let allowed_exts: &[&str] = match slot {
-        Pc98MediaSlot::Fdd1 | Pc98MediaSlot::Fdd2 => super::library::FDD_EXTS,
-        Pc98MediaSlot::Hdd1 | Pc98MediaSlot::Hdd2 | Pc98MediaSlot::DosHdd => {
-            super::library::HDD_EXTS
-        }
-        Pc98MediaSlot::CdRom => super::library::CDROM_EXTS,
-        Pc98MediaSlot::GamesDir => &[],
-    };
-
-    // For CD-ROM archives (.cue + .bin), also extract companion .bin/.img track files
-    let companion_exts: &[&str] = match slot {
-        Pc98MediaSlot::CdRom => &["bin", "img", "sub"],
-        _ => &[],
-    };
-
-    let mut primary_matches = Vec::new();
-    let mut alt_matches = Vec::new();
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i)?;
-        if entry.is_dir() {
-            continue;
-        }
-        let Some(enclosed) = entry.enclosed_name().map(|p| p.to_path_buf()) else {
-            continue;
-        };
-        let Some(ext) = enclosed.extension().and_then(|e| e.to_str()) else {
-            continue;
-        };
-        let is_allowed = allowed_exts
-            .iter()
-            .any(|allowed| ext.eq_ignore_ascii_case(allowed));
-        let is_companion = companion_exts
-            .iter()
-            .any(|comp| ext.eq_ignore_ascii_case(comp));
-        if !is_allowed && !is_companion {
-            continue;
-        }
-        let Some(file_name) = enclosed.file_name().map(|f| f.to_os_string()) else {
-            continue;
-        };
-        let is_alt = enclosed.components().any(|c| {
-            c.as_os_str()
-                .to_str()
-                .is_some_and(|s| s.eq_ignore_ascii_case("alts") || s.eq_ignore_ascii_case("alt"))
-        });
-        let dst_path = if is_alt {
-            let alt_dir = target_dir.join("alts");
-            fs::create_dir_all(&alt_dir)?;
-            alt_dir.join(&file_name)
-        } else {
-            target_dir.join(&file_name)
-        };
-        if !dst_path.exists() {
-            let mut out = fs::File::create(&dst_path)?;
-            std::io::copy(&mut entry, &mut out)?;
-            out.flush()?;
-        }
-        if is_allowed {
-            if is_alt {
-                alt_matches.push(dst_path);
-            } else {
-                primary_matches.push(dst_path);
-            }
-        }
-    }
-
-    primary_matches.sort();
-    alt_matches.sort();
-    primary_matches
-        .into_iter()
-        .next()
-        .or_else(|| alt_matches.into_iter().next())
-        .with_context(|| {
-            format!(
-                "No compatible PC-98 {:?} disk image ({}) found inside {:?}",
-                slot,
-                allowed_exts.join("/"),
-                path
-            )
-        })
 }
 
 #[cfg(test)]
@@ -434,58 +316,5 @@ mod tests {
             fs::read(&target_so).unwrap(),
             b"\x7fELF-dummy-np2kai-core"
         );
-    }
-
-    #[test]
-    fn test_resolve_or_extract_media_path_from_zip() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let zip_path = tmp_dir.path().join("Slayers [HD].zip");
-        {
-            let file = fs::File::create(&zip_path).unwrap();
-            let mut writer = zip::ZipWriter::new(file);
-            writer
-                .start_file("Slayers/Slayers.hdi", SimpleFileOptions::default())
-                .unwrap();
-            writer.write_all(b"dummy-hdi-image").unwrap();
-            writer.finish().unwrap();
-        }
-
-        let extract_root = tmp_dir.path().join("extracted");
-        let resolved =
-            resolve_or_extract_media_path_into(&zip_path, Pc98MediaSlot::Hdd1, &extract_root)
-                .unwrap();
-        assert!(resolved.ends_with("Slayers.hdi"));
-        assert_eq!(fs::read(&resolved).unwrap(), b"dummy-hdi-image");
-    }
-
-    #[test]
-    fn test_resolve_or_extract_media_skips_unmatched_and_prefers_non_alt() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let zip_path = tmp_dir.path().join("Canaan.zip");
-        {
-            let file = fs::File::create(&zip_path).unwrap();
-            let mut writer = zip::ZipWriter::new(file);
-            writer
-                .start_file("Canaan/scp/Disk A.scp", SimpleFileOptions::default())
-                .unwrap();
-            writer.write_all(b"huge-scp-flux").unwrap();
-            writer
-                .start_file("Canaan/d88/alts/Disk A (Alt).d88", SimpleFileOptions::default())
-                .unwrap();
-            writer.write_all(b"alt-d88").unwrap();
-            writer
-                .start_file("Canaan/d88/Disk A.d88", SimpleFileOptions::default())
-                .unwrap();
-            writer.write_all(b"primary-d88").unwrap();
-            writer.finish().unwrap();
-        }
-
-        let extract_root = tmp_dir.path().join("extracted");
-        let resolved =
-            resolve_or_extract_media_path_into(&zip_path, Pc98MediaSlot::Fdd1, &extract_root)
-                .unwrap();
-        assert!(resolved.ends_with("Disk A.d88"));
-        assert_eq!(fs::read(&resolved).unwrap(), b"primary-d88");
-        assert!(!extract_root.join("Canaan/Disk A.scp").exists());
     }
 }

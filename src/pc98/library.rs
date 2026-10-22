@@ -1,5 +1,4 @@
-use super::core_sync::{resolve_or_extract_media_path, saves_dir};
-use super::{Pc98Config, Pc98MediaSlot};
+use super::Pc98Config;
 use anyhow::Result;
 use std::collections::BTreeMap;
 use std::fs;
@@ -158,56 +157,16 @@ pub fn has_io_sys_dir_entry(data: &[u8]) -> bool {
     false
 }
 
-fn read_prefix_from_file_or_zip(path: &Path, max_bytes: usize, prefer_hdd: bool) -> Option<(String, Vec<u8>)> {
+fn read_prefix_from_file(path: &Path, max_bytes: usize) -> Option<(String, Vec<u8>)> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if ext == "zip" {
-        let file = fs::File::open(path).ok()?;
-        let mut archive = zip::ZipArchive::new(file).ok()?;
-        let allowed = if prefer_hdd { HDD_EXTS } else { FDD_EXTS };
-        let mut best_idx = None;
-        let mut best_name = String::new();
-        for i in 0..archive.len() {
-            let Ok(entry) = archive.by_index_raw(i) else {
-                continue;
-            };
-            if entry.is_dir() {
-                continue;
-            }
-            let name = entry.name().to_string();
-            let lower = name.to_ascii_lowercase();
-            if lower.contains("/alts/") || lower.contains("\\alts\\") {
-                continue;
-            }
-            let Some((_, e)) = lower.rsplit_once('.') else {
-                continue;
-            };
-            if allowed.iter().any(|a| e == *a) {
-                if best_idx.is_none() || natural_cmp(&name, &best_name).is_lt() {
-                    best_idx = Some(i);
-                    best_name = name;
-                }
-            }
-        }
-        let idx = best_idx?;
-        let entry = archive.by_index(idx).ok()?;
-        let inner_ext = Path::new(&best_name)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let mut buf = Vec::with_capacity(max_bytes.min(65536));
-        entry.take(max_bytes as u64).read_to_end(&mut buf).ok()?;
-        Some((inner_ext, buf))
-    } else {
-        let file = fs::File::open(path).ok()?;
-        let mut buf = Vec::with_capacity(max_bytes.min(65536));
-        file.take(max_bytes as u64).read_to_end(&mut buf).ok()?;
-        Some((ext, buf))
-    }
+    let file = fs::File::open(path).ok()?;
+    let mut buf = Vec::with_capacity(max_bytes.min(65536));
+    file.take(max_bytes as u64).read_to_end(&mut buf).ok()?;
+    Some((ext, buf))
 }
 
 /// Extracts the logical sector payload (starting at Track 0 Sector 1) from a floppy image header.
@@ -285,7 +244,7 @@ fn extract_floppy_payload(ext: &str, data: &[u8]) -> Option<Vec<u8>> {
 /// Inspects a PC-98 floppy image's boot sector (Track 0, Sector 1) and FAT root directory
 /// to determine whether the disk is self-bootable or requires a separate MS-DOS boot drive.
 pub fn is_floppy_self_bootable(path: &Path) -> bool {
-    let Some((ext, raw)) = read_prefix_from_file_or_zip(path, 196_608, false) else {
+    let Some((ext, raw)) = read_prefix_from_file(path, 196_608) else {
         return false;
     };
     let Some(payload) = extract_floppy_payload(&ext, &raw) else {
@@ -344,7 +303,7 @@ pub fn is_floppy_self_bootable(path: &Path) -> bool {
 
 /// Checks whether a floppy disk image contains an `AUTOEXEC.BAT` entry in its directory area.
 pub fn floppy_has_autoexec(path: &Path) -> bool {
-    let Some((ext, raw)) = read_prefix_from_file_or_zip(path, 196_608, false) else {
+    let Some((ext, raw)) = read_prefix_from_file(path, 196_608) else {
         return false;
     };
     let Some(payload) = extract_floppy_payload(&ext, &raw) else {
@@ -359,7 +318,7 @@ pub fn floppy_has_autoexec(path: &Path) -> bool {
 /// Inspects a PC-98 hard disk image (`.hdi`, `.nhd`, etc.) and returns
 /// `(is_self_bootable, has_autoexec_bat)`.
 pub fn inspect_hdd_image(path: &Path) -> (bool, bool) {
-    let Some((_ext, data)) = read_prefix_from_file_or_zip(path, 262_144, true) else {
+    let Some((_ext, data)) = read_prefix_from_file(path, 262_144) else {
         return (true, true);
     };
     if data.len() < 8192 {
@@ -533,7 +492,7 @@ fn is_installer_stem(stem_upper: &str) -> bool {
 /// Inspects the FAT12 root directory of a floppy image mounted in `FDD 1` (`B:`)
 /// and returns the command sequence to switch to `B:` and start the game or installer.
 pub fn detect_floppy_startup_command(fdd1_path: &Path) -> String {
-    let Some((ext, raw)) = read_prefix_from_file_or_zip(fdd1_path, 262_144, false) else {
+    let Some((ext, raw)) = read_prefix_from_file(fdd1_path, 262_144) else {
         return "b:\ndir /w\n".to_string();
     };
     let Some(payload) = extract_floppy_payload(&ext, &raw) else {
@@ -671,7 +630,7 @@ pub fn detect_floppy_startup_command(fdd1_path: &Path) -> String {
 }
 
 fn detect_hdd_fallback_command(hdd1_path: &Path) -> Option<String> {
-    let Some((_ext, data)) = read_prefix_from_file_or_zip(hdd1_path, 262_144, true) else {
+    let Some((_ext, data)) = read_prefix_from_file(hdd1_path, 262_144) else {
         return None;
     };
     if data.len() < 8192 {
@@ -990,64 +949,12 @@ struct RawFolderMedia {
     floppies: Vec<PathBuf>,
     hdds: Vec<PathBuf>,
     cdroms: Vec<PathBuf>,
-    zip_floppies: Vec<PathBuf>,
-    zip_hdds: Vec<PathBuf>,
-    zip_cdroms: Vec<PathBuf>,
 }
 
 impl RawFolderMedia {
     fn is_empty(&self) -> bool {
-        self.floppies.is_empty()
-            && self.hdds.is_empty()
-            && self.cdroms.is_empty()
-            && self.zip_floppies.is_empty()
-            && self.zip_hdds.is_empty()
-            && self.zip_cdroms.is_empty()
+        self.floppies.is_empty() && self.hdds.is_empty() && self.cdroms.is_empty()
     }
-}
-
-fn classify_zip_archive(zip_path: &Path) -> (bool, bool, bool) {
-    let fname_lower = zip_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if fname_lower.contains("extra") || fname_lower.contains("manual") {
-        return (false, false, false);
-    }
-
-    let Ok(file) = fs::File::open(zip_path) else {
-        return (false, false, false);
-    };
-    let Ok(mut archive) = zip::ZipArchive::new(file) else {
-        return (false, false, false);
-    };
-
-    let mut has_fdd = false;
-    let mut has_hdd = false;
-    let mut has_cd = false;
-
-    for i in 0..archive.len() {
-        let Ok(entry) = archive.by_index_raw(i) else {
-            continue;
-        };
-        if entry.is_dir() {
-            continue;
-        }
-        let name = entry.name();
-        let Some((_, ext)) = name.rsplit_once('.') else {
-            continue;
-        };
-        if is_hdd_ext(ext) {
-            has_hdd = true;
-        } else if is_fdd_ext(ext) {
-            has_fdd = true;
-        } else if is_cdrom_ext(ext) {
-            has_cd = true;
-        }
-    }
-
-    (has_fdd, has_hdd, has_cd)
 }
 
 /// Attempts to automatically locate a master bootable MS-DOS hard disk image
@@ -1144,9 +1051,8 @@ pub fn scan_games_directory(root_dir: &Path, dos_hdd_path: &str) -> Result<Vec<P
                 let is_fdd = is_fdd_ext(ext);
                 let is_hdd = is_hdd_ext(ext);
                 let is_cd = is_cdrom_ext(ext);
-                let is_zip = ext.eq_ignore_ascii_case("zip");
 
-                if !is_fdd && !is_hdd && !is_cd && !is_zip {
+                if !is_fdd && !is_hdd && !is_cd {
                     continue;
                 }
 
@@ -1176,15 +1082,6 @@ pub fn scan_games_directory(root_dir: &Path, dos_hdd_path: &str) -> Result<Vec<P
                     media.floppies.push(path);
                 } else if is_cd {
                     media.cdroms.push(path);
-                } else if is_zip {
-                    let (zf, zh, zc) = classify_zip_archive(&path);
-                    if zh {
-                        media.zip_hdds.push(path);
-                    } else if zf {
-                        media.zip_floppies.push(path);
-                    } else if zc {
-                        media.zip_cdroms.push(path);
-                    }
                 }
             }
         }
@@ -1196,43 +1093,14 @@ pub fn scan_games_directory(root_dir: &Path, dos_hdd_path: &str) -> Result<Vec<P
     }
 
     let mut games = Vec::with_capacity(folder_map.len());
-    for (group_path, mut raw) in folder_map {
+    for (group_path, raw) in folder_map {
         if raw.is_empty() {
             continue;
         }
 
-        // Prefer extracted/loose disk images in the folder over .zip backups in the same folder.
-        let mut hdds = if !raw.hdds.is_empty() {
-            raw.hdds
-        } else {
-            raw.zip_hdds.sort_by(|a, b| {
-                natural_cmp(
-                    a.file_name().and_then(|n| n.to_str()).unwrap_or(""),
-                    b.file_name().and_then(|n| n.to_str()).unwrap_or(""),
-                )
-            });
-            raw.zip_hdds.into_iter().take(1).collect()
-        };
-
-        let mut floppies = if !raw.floppies.is_empty() {
-            raw.floppies
-        } else if hdds.is_empty() {
-            raw.zip_floppies.sort_by(|a, b| {
-                natural_cmp(
-                    a.file_name().and_then(|n| n.to_str()).unwrap_or(""),
-                    b.file_name().and_then(|n| n.to_str()).unwrap_or(""),
-                )
-            });
-            raw.zip_floppies.into_iter().take(1).collect()
-        } else {
-            Vec::new()
-        };
-
-        let mut cdroms = if !raw.cdroms.is_empty() {
-            raw.cdroms
-        } else {
-            raw.zip_cdroms
-        };
+        let mut hdds = raw.hdds;
+        let mut floppies = raw.floppies;
+        let mut cdroms = raw.cdroms;
 
         hdds.sort_by(|a, b| {
             natural_cmp(
@@ -1326,65 +1194,10 @@ pub fn scan_games_directory(root_dir: &Path, dos_hdd_path: &str) -> Result<Vec<P
     Ok(games)
 }
 
-/// Extracts all matching disk images from a `.zip` archive into `<saves_dir>/extracted/<zip_stem>/`
-/// and returns their ordered paths. If `path` is not a `.zip`, returns `vec![path.to_path_buf()]`.
-pub fn resolve_or_extract_all_floppies(path: &Path) -> Result<Vec<PathBuf>> {
-    let is_zip = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("zip"));
-    if !is_zip {
-        return Ok(vec![path.to_path_buf()]);
-    }
-
-    let first = resolve_or_extract_media_path(path, Pc98MediaSlot::Fdd1)?;
-    let Some(parent) = first.parent() else {
-        return Ok(vec![first]);
-    };
-
-    let mut extracted = Vec::new();
-    if let Ok(entries) = fs::read_dir(parent) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_file()
-                && p.extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(is_fdd_ext)
-            {
-                extracted.push(p);
-            }
-        }
-    }
-    if extracted.is_empty() {
-        let _ = saves_dir();
-        Ok(vec![first])
-    } else {
-        order_floppies_and_check_bootable(&mut extracted);
-        Ok(extracted)
-    }
-}
-
 /// Configures `config`'s `hdd1_path`, `hdd2_path`, `fdd1_path`, `fdd2_path`, and `cdrom_path`
 /// for the given `game` entry according to its detected `Pc98BootMode`.
 pub fn apply_game_to_config(game: &mut Pc98GameEntry, config: &mut Pc98Config) -> Result<()> {
-    // Expand a single .zip floppy entry into its extracted disk list on selection
-    if game.floppies.len() == 1
-        && game.floppies[0]
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
-    {
-        if let Ok(expanded) = resolve_or_extract_all_floppies(&game.floppies[0]) {
-            game.floppies = expanded;
-        }
-    }
-
-    let resolve_slot = |p: &Path, slot: Pc98MediaSlot| -> String {
-        resolve_or_extract_media_path(p, slot)
-            .unwrap_or_else(|_| p.to_path_buf())
-            .to_string_lossy()
-            .to_string()
-    };
+    let path_str = |p: &Path| -> String { p.to_string_lossy().to_string() };
 
     let effective_floppies: Vec<PathBuf> = if game.boot_mode == Pc98BootMode::SelfBootHdd {
         game.floppies
@@ -1405,16 +1218,16 @@ pub fn apply_game_to_config(game: &mut Pc98GameEntry, config: &mut Pc98Config) -
 
     let fdd1 = effective_floppies
         .first()
-        .map(|p| resolve_slot(p, Pc98MediaSlot::Fdd1))
+        .map(|p| path_str(p))
         .unwrap_or_default();
     let fdd2 = effective_floppies
         .get(1)
-        .map(|p| resolve_slot(p, Pc98MediaSlot::Fdd2))
+        .map(|p| path_str(p))
         .unwrap_or_default();
     let cdrom = game
         .cdroms
         .first()
-        .map(|p| resolve_slot(p, Pc98MediaSlot::CdRom))
+        .map(|p| path_str(p))
         .unwrap_or_default();
 
     match game.boot_mode {
@@ -1422,12 +1235,12 @@ pub fn apply_game_to_config(game: &mut Pc98GameEntry, config: &mut Pc98Config) -
             config.hdd1_path = game
                 .hdds
                 .first()
-                .map(|p| resolve_slot(p, Pc98MediaSlot::Hdd1))
+                .map(|p| path_str(p))
                 .unwrap_or_default();
             config.hdd2_path = game
                 .hdds
                 .get(1)
-                .map(|p| resolve_slot(p, Pc98MediaSlot::Hdd2))
+                .map(|p| path_str(p))
                 .unwrap_or_default();
             config.fdd1_path = fdd1;
             config.fdd2_path = fdd2;
@@ -1438,7 +1251,7 @@ pub fn apply_game_to_config(game: &mut Pc98GameEntry, config: &mut Pc98Config) -
             config.hdd2_path = game
                 .hdds
                 .first()
-                .map(|p| resolve_slot(p, Pc98MediaSlot::Hdd2))
+                .map(|p| path_str(p))
                 .unwrap_or_default();
             config.fdd1_path = fdd1;
             config.fdd2_path = fdd2;

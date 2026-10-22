@@ -979,13 +979,7 @@ impl AppState {
                     crate::config::save_config(self);
                     handled = true;
                 } else {
-                    let path = match crate::pc98::core_sync::resolve_or_extract_media_path(&raw_path, slot) {
-                        Ok(resolved) => resolved,
-                        Err(e) => {
-                            self.error(format!("Failed to load PC-98 disk archive: {e}"));
-                            raw_path
-                        }
-                    };
+                    let path = raw_path;
                     let path_str = path.to_string_lossy().to_string();
                     match slot {
                         crate::pc98::Pc98MediaSlot::Fdd1 => {
@@ -1101,10 +1095,10 @@ impl AppState {
                     crate::pc98::Pc98MediaSlot::Fdd1 | crate::pc98::Pc98MediaSlot::Fdd2 => {
                         rfd::FileDialog::new()
                             .add_filter(
-                                "PC-98 Floppy Disk Images (.d88/.fdi/.hdm/.nfd/.zip)",
+                                "PC-98 Floppy Disk Images (.d88/.fdi/.hdm/.nfd)",
                                 &[
                                     "d88", "88d", "fdi", "hdm", "xdf", "dup", "2hd", "tfd", "nfd",
-                                    "flp", "fdd", "fim", "bin", "zip",
+                                    "flp", "fdd", "fim", "bin",
                                 ],
                             )
                             .add_filter("All files", &["*"])
@@ -1121,8 +1115,8 @@ impl AppState {
                         };
                         rfd::FileDialog::new()
                             .add_filter(
-                                "PC-98 Hard Disk Images (.hdi/.nhd/.thd/.zip)",
-                                &["hdi", "thd", "nhd", "vhd", "slh", "hdn", "zip"],
+                                "PC-98 Hard Disk Images (.hdi/.nhd/.thd)",
+                                &["hdi", "thd", "nhd", "vhd", "slh", "hdn"],
                             )
                             .add_filter("All files", &["*"])
                             .set_title(title)
@@ -1130,8 +1124,8 @@ impl AppState {
                     }
                     crate::pc98::Pc98MediaSlot::CdRom => rfd::FileDialog::new()
                         .add_filter(
-                            "CD-ROM Images (.cue/.ccd/.iso/.zip)",
-                            &["cue", "ccd", "cdm", "mds", "nrg", "iso", "zip"],
+                            "CD-ROM Images (.cue/.ccd/.iso)",
+                            &["cue", "ccd", "cdm", "mds", "nrg", "iso"],
                         )
                         .add_filter("All files", &["*"])
                         .set_title("Select PC-98 CD-ROM Image")

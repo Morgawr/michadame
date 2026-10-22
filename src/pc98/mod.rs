@@ -50,10 +50,16 @@ pub struct Pc98Config {
     pub beep_volume: u32,
     #[serde(default = "default_pc98_mouse_sensitivity")]
     pub mouse_sensitivity: f32,
+    #[serde(default = "default_pc98_numpad_arrow_keys")]
+    pub numpad_arrow_keys: bool,
 }
 
 pub fn default_pc98_mouse_sensitivity() -> f32 {
     0.5
+}
+
+pub fn default_pc98_numpad_arrow_keys() -> bool {
+    true
 }
 
 impl Default for Pc98Config {
@@ -80,6 +86,7 @@ impl Default for Pc98Config {
             floppy_seek_volume: 80,
             beep_volume: 3,
             mouse_sensitivity: default_pc98_mouse_sensitivity(),
+            numpad_arrow_keys: default_pc98_numpad_arrow_keys(),
         }
     }
 }

@@ -15,6 +15,17 @@ pub const RETRO_DEVICE_ID_MOUSE_WHEELUP: u32 = 4;
 pub const RETRO_DEVICE_ID_MOUSE_WHEELDOWN: u32 = 5;
 pub const RETRO_DEVICE_ID_MOUSE_MIDDLE: u32 = 6;
 
+pub const RETRO_DEVICE_ID_JOYPAD_B: u32 = 0;
+pub const RETRO_DEVICE_ID_JOYPAD_Y: u32 = 1;
+pub const RETRO_DEVICE_ID_JOYPAD_SELECT: u32 = 2;
+pub const RETRO_DEVICE_ID_JOYPAD_START: u32 = 3;
+pub const RETRO_DEVICE_ID_JOYPAD_UP: u32 = 4;
+pub const RETRO_DEVICE_ID_JOYPAD_DOWN: u32 = 5;
+pub const RETRO_DEVICE_ID_JOYPAD_LEFT: u32 = 6;
+pub const RETRO_DEVICE_ID_JOYPAD_RIGHT: u32 = 7;
+pub const RETRO_DEVICE_ID_JOYPAD_A: u32 = 8;
+pub const RETRO_DEVICE_ID_JOYPAD_X: u32 = 9;
+
 pub const RETROK_BACKSPACE: u32 = 8;
 pub const RETROK_TAB: u32 = 9;
 pub const RETROK_RETURN: u32 = 13;
@@ -72,6 +83,24 @@ pub const RETROK_Y: u32 = 121;
 pub const RETROK_Z: u32 = 122;
 pub const RETROK_DELETE: u32 = 127;
 
+pub const RETROK_KP0: u32 = 256;
+pub const RETROK_KP1: u32 = 257;
+pub const RETROK_KP2: u32 = 258;
+pub const RETROK_KP3: u32 = 259;
+pub const RETROK_KP4: u32 = 260;
+pub const RETROK_KP5: u32 = 261;
+pub const RETROK_KP6: u32 = 262;
+pub const RETROK_KP7: u32 = 263;
+pub const RETROK_KP8: u32 = 264;
+pub const RETROK_KP9: u32 = 265;
+pub const RETROK_KP_PERIOD: u32 = 266;
+pub const RETROK_KP_DIVIDE: u32 = 267;
+pub const RETROK_KP_MULTIPLY: u32 = 268;
+pub const RETROK_KP_MINUS: u32 = 269;
+pub const RETROK_KP_PLUS: u32 = 270;
+pub const RETROK_KP_ENTER: u32 = 271;
+pub const RETROK_KP_EQUALS: u32 = 272;
+
 pub const RETROK_UP: u32 = 273;
 pub const RETROK_DOWN: u32 = 274;
 pub const RETROK_RIGHT: u32 = 275;
@@ -102,6 +131,40 @@ pub const RETROK_RALT: u32 = 307;
 pub const RETROK_LALT: u32 = 308;
 pub const RETROK_LSUPER: u32 = 311;
 
+pub fn numpad_digit_to_retrok(key: egui::Key) -> Option<u32> {
+    use egui::Key;
+    match key {
+        Key::Num0 => Some(RETROK_KP0),
+        Key::Num1 => Some(RETROK_KP1),
+        Key::Num2 => Some(RETROK_KP2),
+        Key::Num3 => Some(RETROK_KP3),
+        Key::Num4 => Some(RETROK_KP4),
+        Key::Num5 => Some(RETROK_KP5),
+        Key::Num6 => Some(RETROK_KP6),
+        Key::Num7 => Some(RETROK_KP7),
+        Key::Num8 => Some(RETROK_KP8),
+        Key::Num9 => Some(RETROK_KP9),
+        _ => None,
+    }
+}
+
+pub fn top_row_digit_to_retrok(key: egui::Key) -> Option<u32> {
+    use egui::Key;
+    match key {
+        Key::Num0 => Some(RETROK_0),
+        Key::Num1 => Some(RETROK_1),
+        Key::Num2 => Some(RETROK_2),
+        Key::Num3 => Some(RETROK_3),
+        Key::Num4 => Some(RETROK_4),
+        Key::Num5 => Some(RETROK_5),
+        Key::Num6 => Some(RETROK_6),
+        Key::Num7 => Some(RETROK_7),
+        Key::Num8 => Some(RETROK_8),
+        Key::Num9 => Some(RETROK_9),
+        _ => None,
+    }
+}
+
 pub fn egui_key_to_retrok(key: egui::Key) -> Option<u32> {
     use egui::Key;
     match key {
@@ -120,28 +183,28 @@ pub fn egui_key_to_retrok(key: egui::Key) -> Option<u32> {
         Key::End => Some(RETROK_END),
         Key::PageUp => Some(RETROK_PAGEUP),
         Key::PageDown => Some(RETROK_PAGEDOWN),
-        Key::Colon => Some(RETROK_COLON),
+        Key::Colon => Some(RETROK_QUOTE),
         Key::Comma => Some(RETROK_COMMA),
         Key::Backslash => Some(RETROK_BACKSLASH),
         Key::Slash => Some(RETROK_SLASH),
         Key::Minus => Some(RETROK_MINUS),
         Key::Period => Some(RETROK_PERIOD),
-        Key::Plus => Some(RETROK_PLUS),
+        Key::Plus => Some(RETROK_KP_PLUS),
         Key::Equals => Some(RETROK_EQUALS),
         Key::Semicolon => Some(RETROK_SEMICOLON),
         Key::OpenBracket => Some(RETROK_LEFTBRACKET),
         Key::CloseBracket => Some(RETROK_RIGHTBRACKET),
         Key::Backtick => Some(RETROK_BACKQUOTE),
-        Key::Num0 => Some(RETROK_0),
-        Key::Num1 => Some(RETROK_1),
-        Key::Num2 => Some(RETROK_2),
-        Key::Num3 => Some(RETROK_3),
-        Key::Num4 => Some(RETROK_4),
-        Key::Num5 => Some(RETROK_5),
-        Key::Num6 => Some(RETROK_6),
-        Key::Num7 => Some(RETROK_7),
-        Key::Num8 => Some(RETROK_8),
-        Key::Num9 => Some(RETROK_9),
+        Key::Num0 => Some(RETROK_KP0),
+        Key::Num1 => Some(RETROK_KP1),
+        Key::Num2 => Some(RETROK_KP2),
+        Key::Num3 => Some(RETROK_KP3),
+        Key::Num4 => Some(RETROK_KP4),
+        Key::Num5 => Some(RETROK_KP5),
+        Key::Num6 => Some(RETROK_KP6),
+        Key::Num7 => Some(RETROK_KP7),
+        Key::Num8 => Some(RETROK_KP8),
+        Key::Num9 => Some(RETROK_KP9),
         Key::A => Some(RETROK_A),
         Key::B => Some(RETROK_B),
         Key::C => Some(RETROK_C),
@@ -181,6 +244,120 @@ pub fn egui_key_to_retrok(key: egui::Key) -> Option<u32> {
         Key::F11 => Some(RETROK_F11),
         Key::F12 => Some(RETROK_F12),
         _ => None,
+    }
+}
+
+/// Applies an `egui::Event::Key` to the PC-98 key state array, translating:
+/// - Physical Numpad keys (even when host NumLock is OFF, where `physical_key` is `Num0..9`
+///   and `key` is `Arrow*`/`Home`/`End`/`PageUp`/`PageDown`/`Insert`) to `RETROK_KP0..9`.
+/// - Arrow keys (`ArrowUp`/`Down`/`Left`/`Right`) to PC-98 Numpad `8`/`2`/`4`/`6`
+///   (`RETROK_KP8`/`KP2`/`KP4`/`KP6`) when `numpad_arrow_keys` is enabled, or dedicated
+///   PC-98 cursor keys (`RETROK_UP`/`DOWN`/`LEFT`/`RIGHT`) when disabled.
+/// - Unshifted `Num0..9` to `RETROK_KP0..9` (so 8-way Numpad movement works in games while
+///   still producing ASCII `'0'..'9'` in DOS), and shifted `Num0..9` to `RETROK_0..9` for
+///   top-row punctuation (`! " # $ % & ' ( )`).
+pub fn apply_pc98_key_event(
+    keys: &mut [bool; 512],
+    key: egui::Key,
+    physical_key: Option<egui::Key>,
+    pressed: bool,
+    modifiers: egui::Modifiers,
+    numpad_arrow_keys: bool,
+) {
+    use egui::Key;
+
+    // 1. Physical Numpad with host NumLock OFF (`physical_key == Some(Key::Num0..9)` while
+    // logical `key` is a navigation key like `ArrowUp`, `Home`, `Insert`, etc.)
+    if let Some(phys) = physical_key {
+        if phys != key {
+            if let Some(kp_code) = numpad_digit_to_retrok(phys) {
+                keys[kp_code as usize] = pressed;
+                return;
+            }
+        }
+    }
+
+    // 2. Dedicated Arrow keys
+    match key {
+        Key::ArrowUp => {
+            if pressed {
+                if numpad_arrow_keys {
+                    keys[RETROK_KP8 as usize] = true;
+                } else {
+                    keys[RETROK_UP as usize] = true;
+                }
+            } else {
+                keys[RETROK_KP8 as usize] = false;
+                keys[RETROK_UP as usize] = false;
+            }
+            return;
+        }
+        Key::ArrowDown => {
+            if pressed {
+                if numpad_arrow_keys {
+                    keys[RETROK_KP2 as usize] = true;
+                } else {
+                    keys[RETROK_DOWN as usize] = true;
+                }
+            } else {
+                keys[RETROK_KP2 as usize] = false;
+                keys[RETROK_DOWN as usize] = false;
+            }
+            return;
+        }
+        Key::ArrowLeft => {
+            if pressed {
+                if numpad_arrow_keys {
+                    keys[RETROK_KP4 as usize] = true;
+                } else {
+                    keys[RETROK_LEFT as usize] = true;
+                }
+            } else {
+                keys[RETROK_KP4 as usize] = false;
+                keys[RETROK_LEFT as usize] = false;
+            }
+            return;
+        }
+        Key::ArrowRight => {
+            if pressed {
+                if numpad_arrow_keys {
+                    keys[RETROK_KP6 as usize] = true;
+                } else {
+                    keys[RETROK_RIGHT as usize] = true;
+                }
+            } else {
+                keys[RETROK_KP6 as usize] = false;
+                keys[RETROK_RIGHT as usize] = false;
+            }
+            return;
+        }
+        _ => {}
+    }
+
+    // 3. Number keys (`Num0..9`): use top-row `RETROK_0..9` when Shift is held (for `!`..`)`),
+    // and PC-98 Tenkey `RETROK_KP0..9` when unshifted.
+    if let (Some(kp_code), Some(top_code)) =
+        (numpad_digit_to_retrok(key), top_row_digit_to_retrok(key))
+    {
+        if pressed {
+            if modifiers.shift {
+                keys[top_code as usize] = true;
+            } else {
+                keys[kp_code as usize] = true;
+            }
+        } else {
+            keys[kp_code as usize] = false;
+            keys[top_code as usize] = false;
+        }
+        return;
+    }
+
+    // 4. All other keys (with fallback to `physical_key` if shifted symbol changed logical `key`)
+    if let Some(code) = egui_key_to_retrok(key).or_else(|| physical_key.and_then(egui_key_to_retrok))
+    {
+        if (code as usize) < keys.len() {
+            keys[code as usize] = pressed;
+        }
     }
 }
 
@@ -231,6 +408,7 @@ pub fn forward_pc98_inputs(
     pc98.prev_modifiers = mods;
 
     // 3. Discrete keyboard & mouse button events
+    let numpad_arrow_keys = pc98.config.numpad_arrow_keys;
     let events = ctx.input(|i| i.events.clone());
     for event in events {
         match event {
@@ -248,6 +426,7 @@ pub fn forward_pc98_inputs(
             }
             egui::Event::Key {
                 key,
+                physical_key,
                 pressed,
                 modifiers,
                 ..
@@ -256,11 +435,14 @@ pub fn forward_pc98_inputs(
                 if key == egui::Key::Tab && modifiers.shift {
                     continue;
                 }
-                if let Some(code) = egui_key_to_retrok(key) {
-                    if (code as usize) < state.keys.len() {
-                        state.keys[code as usize] = pressed;
-                    }
-                }
+                apply_pc98_key_event(
+                    &mut state.keys,
+                    key,
+                    physical_key,
+                    pressed,
+                    modifiers,
+                    numpad_arrow_keys,
+                );
             }
             _ => {}
         }
@@ -279,5 +461,95 @@ mod tests {
         assert_eq!(egui_key_to_retrok(egui::Key::Z), Some(RETROK_Z));
         assert_eq!(egui_key_to_retrok(egui::Key::X), Some(RETROK_X));
         assert_eq!(egui_key_to_retrok(egui::Key::ArrowUp), Some(RETROK_UP));
+        assert_eq!(egui_key_to_retrok(egui::Key::Num8), Some(RETROK_KP8));
+    }
+
+    #[test]
+    fn test_arrow_keys_map_to_numpad_by_default() {
+        let mut keys = [false; 512];
+        let mods = egui::Modifiers::default();
+
+        apply_pc98_key_event(
+            &mut keys,
+            egui::Key::ArrowUp,
+            Some(egui::Key::ArrowUp),
+            true,
+            mods,
+            true,
+        );
+        assert!(keys[RETROK_KP8 as usize]);
+        assert!(!keys[RETROK_UP as usize]);
+
+        apply_pc98_key_event(
+            &mut keys,
+            egui::Key::ArrowDown,
+            Some(egui::Key::ArrowDown),
+            true,
+            mods,
+            true,
+        );
+        assert!(keys[RETROK_KP2 as usize]);
+
+        apply_pc98_key_event(
+            &mut keys,
+            egui::Key::ArrowLeft,
+            Some(egui::Key::ArrowLeft),
+            true,
+            mods,
+            true,
+        );
+        assert!(keys[RETROK_KP4 as usize]);
+
+        apply_pc98_key_event(
+            &mut keys,
+            egui::Key::ArrowRight,
+            Some(egui::Key::ArrowRight),
+            true,
+            mods,
+            true,
+        );
+        assert!(keys[RETROK_KP6 as usize]);
+
+        // Releasing clears both KP and cursor arrow slots
+        apply_pc98_key_event(
+            &mut keys,
+            egui::Key::ArrowUp,
+            Some(egui::Key::ArrowUp),
+            false,
+            mods,
+            false,
+        );
+        assert!(!keys[RETROK_KP8 as usize]);
+        assert!(!keys[RETROK_UP as usize]);
+    }
+
+    #[test]
+    fn test_physical_numpad_with_numlock_off_maps_to_kp() {
+        let mut keys = [false; 512];
+        let mods = egui::Modifiers::default();
+
+        // Even when numpad_arrow_keys is false, physical Numpad 7 (Home when NumLock off)
+        // and Numpad 8 (ArrowUp when NumLock off) map to RETROK_KP7 and RETROK_KP8.
+        apply_pc98_key_event(
+            &mut keys,
+            egui::Key::Home,
+            Some(egui::Key::Num7),
+            true,
+            mods,
+            false,
+        );
+        assert!(keys[RETROK_KP7 as usize]);
+        assert!(!keys[RETROK_HOME as usize]);
+
+        apply_pc98_key_event(
+            &mut keys,
+            egui::Key::ArrowUp,
+            Some(egui::Key::Num8),
+            true,
+            mods,
+            false,
+        );
+        assert!(keys[RETROK_KP8 as usize]);
+        assert!(!keys[RETROK_UP as usize]);
     }
 }

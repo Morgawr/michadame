@@ -448,6 +448,19 @@ pub fn draw_pc98_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 changed = true;
             }
 
+            if col2
+                .checkbox(
+                    &mut state.pc98.config.numpad_arrow_keys,
+                    "Arrow Keys Send PC-98 Numpad (2/4/6/8)",
+                )
+                .on_hover_text("Sends PC-98 Tenkey 8/2/4/6 scan codes when pressing Arrow keys, required for directional movement in most PC-98 games (applies immediately)")
+                .changed()
+            {
+                state.pc98.release_all_inputs();
+                config::save_config(state);
+                changed = true;
+            }
+
             if slider_item(
                 col2,
                 "Mouse Sensitivity:",
