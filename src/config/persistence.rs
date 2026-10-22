@@ -704,6 +704,9 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
         .clone()
         .unwrap_or_else(super::models::default_pc98_profile);
     state.pc98.config = cfg.pc98.clone();
+    if !state.pc98.config.games_dir.trim().is_empty() {
+        let _ = state.pc98.refresh_games_list();
+    }
 
     state.hardware.audio_buffer_size = cfg.audio_buffer_size.unwrap_or(1024);
     state.hardware.audio_sample_rate = cfg.audio_sample_rate.unwrap_or(48000);

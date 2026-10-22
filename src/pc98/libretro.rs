@@ -785,6 +785,27 @@ unsafe fn mount_fdd_via_disk_control(drive: u8, path: Option<&Path>) -> bool {
     set_idx(0)
 }
 
+fn enqueue_dos_command(queue: &mut VecDeque<(u32, bool, u8, u8)>, cmd: &str) {
+    for ch in cmd.chars() {
+        let mapped: Option<(u32, bool, u8, u8)> = match ch {
+            'a'..='z' | 'A'..='Z' => Some((ch.to_ascii_lowercase() as u32, false, 2, 4)),
+            '0'..='9' => Some((ch as u32, false, 2, 4)),
+            ':' => Some((super::input::RETROK_QUOTE, false, 2, 4)),
+            ' ' => Some((super::input::RETROK_SPACE, false, 2, 4)),
+            '/' => Some((super::input::RETROK_SLASH, false, 2, 4)),
+            '-' => Some((super::input::RETROK_MINUS, false, 2, 4)),
+            '.' => Some((super::input::RETROK_PERIOD, false, 2, 4)),
+            '\\' => Some((super::input::RETROK_BACKSLASH, false, 2, 4)),
+            '_' => Some((2, true, 2, 4)),
+            '\n' => Some((super::input::RETROK_RETURN, false, 2, 12)),
+            _ => None,
+        };
+        if let Some(entry) = mapped {
+            queue.push_back(entry);
+        }
+    }
+}
+
 unsafe fn run_loaded_core(
     so_path: &Path,
     initial_config: &Pc98Config,
@@ -821,6 +842,9 @@ unsafe fn run_loaded_core(
     > = lib.get(b"retro_get_system_av_info\0")?;
     let retro_run: libloading::Symbol<unsafe extern "C" fn()> = lib.get(b"retro_run\0")?;
     let retro_reset: libloading::Symbol<unsafe extern "C" fn()> = lib.get(b"retro_reset\0")?;
+    let retro_get_memory_data: Option<
+        libloading::Symbol<unsafe extern "C" fn(c_uint) -> *mut c_void>,
+    > = lib.get(b"retro_get_memory_data\0").ok();
 
     retro_set_environment(retro_environment_cb);
     retro_set_video_refresh(retro_video_refresh_cb);
@@ -856,15 +880,32 @@ unsafe fn run_loaded_core(
     // Call 1 to retro_run() initializes pre_main(RPATH), update_variables(), and pccore_reset().
     retro_run();
 
-    let has_hdd1 = !initial_config.hdd1_path.trim().is_empty()
-        && Path::new(initial_config.hdd1_path.trim()).exists();
+    // Locate NP2kai's 1MB base RAM buffer (`mem`, symbol offset 0x1599260 relative to
+    // `retro_get_memory_data` at 0x16d7a0) and verify the x86 reset vector `JMP FAR` (0xEA) at 0xFFFF0.
+    let pc98_mem_base: Option<*const u8> = retro_get_memory_data.as_ref().and_then(|sym| {
+        let fn_addr = (**sym) as usize;
+        if fn_addr <= 0x16d7a0 {
+            return None;
+        }
+        let candidate = (fn_addr - 0x16d7a0 + 0x1599260) as *const u8;
+        if *candidate.add(0xFFFF0) == 0xEA {
+            Some(candidate)
+        } else {
+            None
+        }
+    });
+
+    let defer_fdd = super::library::should_defer_fdd_boot(initial_config);
     let mut current_fdd1: Option<PathBuf> = {
         let s = initial_config.fdd1_path.trim();
         if !s.is_empty() && Path::new(s).exists() {
-            Some(super::core_sync::resolve_or_extract_media_path(
-                Path::new(s),
-                super::Pc98MediaSlot::Fdd1,
-            ).unwrap_or_else(|_| PathBuf::from(s)))
+            Some(
+                super::core_sync::resolve_or_extract_media_path(
+                    Path::new(s),
+                    super::Pc98MediaSlot::Fdd1,
+                )
+                .unwrap_or_else(|_| PathBuf::from(s)),
+            )
         } else {
             None
         }
@@ -872,23 +913,30 @@ unsafe fn run_loaded_core(
     let mut current_fdd2: Option<PathBuf> = {
         let s = initial_config.fdd2_path.trim();
         if !s.is_empty() && Path::new(s).exists() {
-            Some(super::core_sync::resolve_or_extract_media_path(
-                Path::new(s),
-                super::Pc98MediaSlot::Fdd2,
-            ).unwrap_or_else(|_| PathBuf::from(s)))
+            Some(
+                super::core_sync::resolve_or_extract_media_path(
+                    Path::new(s),
+                    super::Pc98MediaSlot::Fdd2,
+                )
+                .unwrap_or_else(|_| PathBuf::from(s)),
+            )
         } else {
             None
         }
     };
 
-    // When HDD1 is present, mount FDD1/FDD2 after ~120 frames (~2s) so the PC-98 BIOS
-    // always boots from HDD1 (A:) first without being hijacked by a non-bootable floppy in FDD1.
-    let mut deferred_fdd_mount_frames: Option<u32> =
-        if has_hdd1 && (current_fdd1.is_some() || current_fdd2.is_some()) {
-            Some(120)
-        } else {
-            None
-        };
+    // When HDD1 is the boot drive, wait until the PC-98 BIOS finishes its RAM check and selects
+    // SASI HDD #0 (`mem[0x00584] == 0x80` + 20 frames, or 520 frames fallback) before inserting
+    // FDD1/FDD2 so a non-system floppy never hijacks the boot order.
+    let mut deferred_fdd_pending =
+        defer_fdd && (current_fdd1.is_some() || current_fdd2.is_some());
+    let mut hdd_boot_detected_frames: u32 = 0;
+    let mut frames_since_boot: u32 = 0;
+
+    let startup_cmd = super::library::detect_startup_command(initial_config);
+    let mut startup_cmd_sent = false;
+    let mut dos_prompt_frames: u32 = 0;
+    let mut auto_type_queue: VecDeque<(u32, bool, u8, u8)> = VecDeque::new();
 
     let mut av_info: RetroSystemAvInfo = std::mem::zeroed();
     retro_get_system_av_info(&mut av_info);
@@ -906,17 +954,55 @@ unsafe fn run_loaded_core(
     let mut next_frame_instant = Instant::now();
 
     while !stop_requested.load(Ordering::Relaxed) {
-        if let Some(rem) = deferred_fdd_mount_frames.as_mut() {
-            if *rem == 0 {
+        frames_since_boot = frames_since_boot.saturating_add(1);
+
+        if deferred_fdd_pending {
+            if let Some(base) = pc98_mem_base {
+                if *base.add(0x00584) == 0x80 {
+                    hdd_boot_detected_frames += 1;
+                }
+            }
+            if hdd_boot_detected_frames >= 20 || frames_since_boot >= 520 {
                 if let Some(ref p1) = current_fdd1 {
                     mount_fdd_via_disk_control(0, Some(p1));
                 }
                 if let Some(ref p2) = current_fdd2 {
                     mount_fdd_via_disk_control(1, Some(p2));
                 }
-                deferred_fdd_mount_frames = None;
+                deferred_fdd_pending = false;
+            }
+        } else if !startup_cmd_sent {
+            if let (Some(ref cmd_str), Some(base)) = (&startup_cmd, pc98_mem_base) {
+                let tvram = std::slice::from_raw_parts(base.add(0xA0000), 0x1E00);
+                let has_idle_prompt = tvram
+                    .windows(14)
+                    .any(|w| w == b"A\0:\0\\\0>\0 \0 \0 \0")
+                    || tvram.windows(10).any(|w| w == b"A\0>\0 \0 \0 \0");
+                if has_idle_prompt {
+                    dos_prompt_frames += 1;
+                } else {
+                    dos_prompt_frames = 0;
+                }
+                if dos_prompt_frames >= 25 {
+                    enqueue_dos_command(&mut auto_type_queue, cmd_str);
+                    startup_cmd_sent = true;
+                }
+            }
+        }
+
+        if let Some(front) = auto_type_queue.front_mut() {
+            if front.2 > 0 {
+                if let Ok(mut inp) = input_state.lock() {
+                    if front.1 {
+                        inp.pulse_key(super::input::RETROK_LSHIFT, 1);
+                    }
+                    inp.pulse_key(front.0, 1);
+                }
+                front.2 -= 1;
+            } else if front.3 > 0 {
+                front.3 -= 1;
             } else {
-                *rem -= 1;
+                auto_type_queue.pop_front();
             }
         }
 
@@ -926,11 +1012,16 @@ unsafe fn run_loaded_core(
                     stop_requested.store(true, Ordering::Relaxed);
                 }
                 Pc98Command::Reset => {
-                    if has_hdd1 && (current_fdd1.is_some() || current_fdd2.is_some()) {
+                    if defer_fdd && (current_fdd1.is_some() || current_fdd2.is_some()) {
                         mount_fdd_via_disk_control(0, None);
                         mount_fdd_via_disk_control(1, None);
-                        deferred_fdd_mount_frames = Some(120);
+                        deferred_fdd_pending = true;
                     }
+                    hdd_boot_detected_frames = 0;
+                    frames_since_boot = 0;
+                    startup_cmd_sent = false;
+                    dos_prompt_frames = 0;
+                    auto_type_queue.clear();
                     retro_reset();
                     let _ = event_tx.send(Pc98Event::Info("PC-98 system reset.".to_string()));
                 }

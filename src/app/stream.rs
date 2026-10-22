@@ -966,50 +966,79 @@ impl AppState {
         let mut handled = false;
         if let Some(rx) = &self.pc98.file_picker_rx {
             if let Ok((slot, raw_path)) = rx.try_recv() {
-                let path = match crate::pc98::core_sync::resolve_or_extract_media_path(&raw_path, slot) {
-                    Ok(resolved) => resolved,
-                    Err(e) => {
-                        self.error(format!("Failed to load PC-98 disk archive: {e}"));
-                        raw_path
-                    }
-                };
-                let path_str = path.to_string_lossy().to_string();
-                match slot {
-                    crate::pc98::Pc98MediaSlot::Fdd1 => {
-                        self.pc98.config.fdd1_path = path_str.clone();
-                        self.pc98.send_command(crate::pc98::Pc98Command::MountFdd {
-                            drive: 0,
-                            path: Some(path),
-                        });
-                    }
-                    crate::pc98::Pc98MediaSlot::Fdd2 => {
-                        self.pc98.config.fdd2_path = path_str.clone();
-                        self.pc98.send_command(crate::pc98::Pc98Command::MountFdd {
-                            drive: 1,
-                            path: Some(path),
-                        });
-                    }
-                    crate::pc98::Pc98MediaSlot::Hdd1 => {
-                        self.pc98.config.hdd1_path = path_str;
-                        if self.pc98.is_active {
-                            self.info("HDD1 updated. Reboot PC-98 mode to apply HDD changes.");
+                if slot == crate::pc98::Pc98MediaSlot::GamesDir {
+                    self.pc98.config.games_dir = raw_path.to_string_lossy().to_string();
+                    match self.pc98.refresh_games_list() {
+                        Ok(count) => {
+                            self.info(format!("Scanned PC-98 games folder: found {count} games."));
+                        }
+                        Err(e) => {
+                            self.error(format!("Failed to scan PC-98 games folder: {e}"));
                         }
                     }
-                    crate::pc98::Pc98MediaSlot::Hdd2 => {
-                        self.pc98.config.hdd2_path = path_str;
-                        if self.pc98.is_active {
-                            self.info("HDD2 updated. Reboot PC-98 mode to apply HDD changes.");
+                    crate::config::save_config(self);
+                    handled = true;
+                } else {
+                    let path = match crate::pc98::core_sync::resolve_or_extract_media_path(&raw_path, slot) {
+                        Ok(resolved) => resolved,
+                        Err(e) => {
+                            self.error(format!("Failed to load PC-98 disk archive: {e}"));
+                            raw_path
                         }
-                    }
-                    crate::pc98::Pc98MediaSlot::CdRom => {
-                        self.pc98.config.cdrom_path = path_str;
-                        if self.pc98.is_active {
-                            self.info("CD-ROM updated. Reboot PC-98 mode to apply CD-ROM changes.");
+                    };
+                    let path_str = path.to_string_lossy().to_string();
+                    match slot {
+                        crate::pc98::Pc98MediaSlot::Fdd1 => {
+                            self.pc98.config.fdd1_path = path_str.clone();
+                            self.pc98.send_command(crate::pc98::Pc98Command::MountFdd {
+                                drive: 0,
+                                path: Some(path),
+                            });
                         }
+                        crate::pc98::Pc98MediaSlot::Fdd2 => {
+                            self.pc98.config.fdd2_path = path_str.clone();
+                            self.pc98.send_command(crate::pc98::Pc98Command::MountFdd {
+                                drive: 1,
+                                path: Some(path),
+                            });
+                        }
+                        crate::pc98::Pc98MediaSlot::Hdd1 => {
+                            self.pc98.config.hdd1_path = path_str;
+                            if self.pc98.is_active {
+                                self.info("HDD1 updated. Reboot PC-98 mode to apply HDD changes.");
+                            }
+                        }
+                        crate::pc98::Pc98MediaSlot::Hdd2 => {
+                            self.pc98.config.hdd2_path = path_str;
+                            if self.pc98.is_active {
+                                self.info("HDD2 updated. Reboot PC-98 mode to apply HDD changes.");
+                            }
+                        }
+                        crate::pc98::Pc98MediaSlot::CdRom => {
+                            self.pc98.config.cdrom_path = path_str;
+                            if self.pc98.is_active {
+                                self.info("CD-ROM updated. Reboot PC-98 mode to apply CD-ROM changes.");
+                            }
+                        }
+                        crate::pc98::Pc98MediaSlot::DosHdd => {
+                            self.pc98.config.dos_hdd_path = path_str.clone();
+                            if let Some(sel_idx) = self
+                                .pc98
+                                .games_list
+                                .iter()
+                                .position(|g| g.id == self.pc98.config.selected_game)
+                            {
+                                if self.pc98.games_list[sel_idx].boot_mode.requires_dos_hdd() {
+                                    self.pc98.config.hdd1_path = path_str;
+                                }
+                            }
+                            self.info("Updated base bootable MS-DOS hard disk image.");
+                        }
+                        crate::pc98::Pc98MediaSlot::GamesDir => {}
                     }
+                    crate::config::save_config(self);
+                    handled = true;
                 }
-                crate::config::save_config(self);
-                handled = true;
             }
         }
 
@@ -1065,31 +1094,50 @@ impl AppState {
         let _ = std::thread::Builder::new()
             .name("pc98-media-picker".to_string())
             .spawn(move || {
-                let dialog = match slot {
+                let picked = match slot {
+                    crate::pc98::Pc98MediaSlot::GamesDir => rfd::FileDialog::new()
+                        .set_title("Select PC-98 Root Games Directory")
+                        .pick_folder(),
                     crate::pc98::Pc98MediaSlot::Fdd1 | crate::pc98::Pc98MediaSlot::Fdd2 => {
                         rfd::FileDialog::new()
                             .add_filter(
-                                "PC-98 Floppy Disk Images (.d88/.fdi/.hdm/.zip)",
-                                &["d88", "88d", "fdi", "hdm", "xdf", "dup", "2hd", "tfd", "nfd", "flp", "bin", "zip"],
+                                "PC-98 Floppy Disk Images (.d88/.fdi/.hdm/.nfd/.zip)",
+                                &[
+                                    "d88", "88d", "fdi", "hdm", "xdf", "dup", "2hd", "tfd", "nfd",
+                                    "flp", "fdd", "fim", "bin", "zip",
+                                ],
                             )
                             .add_filter("All files", &["*"])
                             .set_title("Select PC-98 Floppy Disk Image")
+                            .pick_file()
                     }
-                    crate::pc98::Pc98MediaSlot::Hdd1 | crate::pc98::Pc98MediaSlot::Hdd2 => {
+                    crate::pc98::Pc98MediaSlot::Hdd1
+                    | crate::pc98::Pc98MediaSlot::Hdd2
+                    | crate::pc98::Pc98MediaSlot::DosHdd => {
+                        let title = if slot == crate::pc98::Pc98MediaSlot::DosHdd {
+                            "Select Base Bootable MS-DOS Hard Disk Image"
+                        } else {
+                            "Select PC-98 Hard Disk Image"
+                        };
                         rfd::FileDialog::new()
                             .add_filter(
                                 "PC-98 Hard Disk Images (.hdi/.nhd/.thd/.zip)",
-                                &["hdi", "thd", "nhd", "vhd", "slh", "zip"],
+                                &["hdi", "thd", "nhd", "vhd", "slh", "hdn", "zip"],
                             )
                             .add_filter("All files", &["*"])
-                            .set_title("Select PC-98 Hard Disk Image")
+                            .set_title(title)
+                            .pick_file()
                     }
                     crate::pc98::Pc98MediaSlot::CdRom => rfd::FileDialog::new()
-                        .add_filter("CD-ROM Images (.cue/.ccd/.iso/.zip)", &["cue", "ccd", "cdm", "mds", "nrg", "iso", "zip"])
+                        .add_filter(
+                            "CD-ROM Images (.cue/.ccd/.iso/.zip)",
+                            &["cue", "ccd", "cdm", "mds", "nrg", "iso", "zip"],
+                        )
                         .add_filter("All files", &["*"])
-                        .set_title("Select PC-98 CD-ROM Image"),
+                        .set_title("Select PC-98 CD-ROM Image")
+                        .pick_file(),
                 };
-                if let Some(path) = dialog.pick_file() {
+                if let Some(path) = picked {
                     let _ = tx.send((slot, path));
                     ctx_clone.request_repaint();
                 }

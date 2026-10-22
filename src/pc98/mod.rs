@@ -1,6 +1,9 @@
 pub mod core_sync;
 pub mod input;
+pub mod kanji_table;
+pub mod library;
 pub mod libretro;
+pub mod search;
 
 use eframe::egui;
 use serde::{Deserialize, Serialize};
@@ -18,11 +21,16 @@ pub enum Pc98MediaSlot {
     Hdd1,
     Hdd2,
     CdRom,
+    GamesDir,
+    DosHdd,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Pc98Config {
+    pub games_dir: String,
+    pub dos_hdd_path: String,
+    pub selected_game: String,
     pub fdd1_path: String,
     pub fdd2_path: String,
     pub hdd1_path: String,
@@ -51,6 +59,9 @@ pub fn default_pc98_mouse_sensitivity() -> f32 {
 impl Default for Pc98Config {
     fn default() -> Self {
         Self {
+            games_dir: String::new(),
+            dos_hdd_path: String::new(),
+            selected_game: String::new(),
             fdd1_path: String::new(),
             fdd2_path: String::new(),
             hdd1_path: String::new(),
@@ -64,7 +75,7 @@ impl Default for Pc98Config {
             sound_board: "PC9801-26K + 86".to_string(),
             gdc_type: "uPD7220".to_string(),
             skipline_revisions: true,
-            fast_memcheck: false,
+            fast_memcheck: true,
             floppy_seek_sound: true,
             floppy_seek_volume: 80,
             beep_volume: 3,
@@ -157,6 +168,8 @@ pub struct Pc98State {
     pub status_message: Option<String>,
     pub passthrough_enabled: bool,
     pub config: Pc98Config,
+    pub games_list: Vec<library::Pc98GameEntry>,
+    pub game_filter: String,
     pub resolution: (u32, u32),
     pub input_state: Arc<Mutex<Pc98InputState>>,
     pub command_tx: Option<crossbeam_channel::Sender<Pc98Command>>,
@@ -175,6 +188,8 @@ impl Default for Pc98State {
             status_message: None,
             passthrough_enabled: true,
             config: Pc98Config::default(),
+            games_list: Vec::new(),
+            game_filter: String::new(),
             resolution: (640, 400),
             input_state: Arc::new(Mutex::new(Pc98InputState::default())),
             command_tx: None,
@@ -188,6 +203,54 @@ impl Default for Pc98State {
 }
 
 impl Pc98State {
+    pub fn refresh_games_list(&mut self) -> Result<usize, String> {
+        let dir_str = self.config.games_dir.trim().to_string();
+        if dir_str.is_empty() {
+            self.games_list.clear();
+            return Err("Please specify a PC-98 root games directory first.".to_string());
+        }
+        let root_path = PathBuf::from(&dir_str);
+        if self.config.dos_hdd_path.trim().is_empty() {
+            if let Some(detected_dos) = library::detect_default_dos_hdd(&root_path) {
+                self.config.dos_hdd_path = detected_dos.to_string_lossy().to_string();
+            }
+        }
+        match library::scan_games_directory(&root_path, &self.config.dos_hdd_path) {
+            Ok(list) => {
+                let count = list.len();
+                self.games_list = list;
+                Ok(count)
+            }
+            Err(e) => Err(format!("{e:#}")),
+        }
+    }
+
+    pub fn select_game_by_index(&mut self, index: usize) -> Result<String, String> {
+        let Some(mut game) = self.games_list.get(index).cloned() else {
+            return Err("Invalid game selection index.".to_string());
+        };
+        library::apply_game_to_config(&mut game, &mut self.config).map_err(|e| format!("{e:#}"))?;
+        let title = game.title.clone();
+        self.games_list[index] = game;
+
+        if self.is_active {
+            let f1 = if self.config.fdd1_path.trim().is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(self.config.fdd1_path.trim()))
+            };
+            let f2 = if self.config.fdd2_path.trim().is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(self.config.fdd2_path.trim()))
+            };
+            self.send_command(Pc98Command::MountFdd { drive: 0, path: f1 });
+            self.send_command(Pc98Command::MountFdd { drive: 1, path: f2 });
+        }
+
+        Ok(title)
+    }
+
     pub fn toggle_passthrough(&mut self) -> bool {
         self.passthrough_enabled = !self.passthrough_enabled;
         if !self.passthrough_enabled {

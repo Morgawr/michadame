@@ -64,7 +64,31 @@ pub fn ensure_system_dir() -> Result<PathBuf> {
         let _ = fs::write(&default_ttf, EMBEDDED_JP_FONT);
     }
 
-    // 2. Opportunistically seed FONT.ROM / font.bmp / BIOS ROMs if user has NekoProject2 or RetroArch files
+    // 2. Remove conflicting PC-9821 / IDE / SASI / SCSI expansion ROMs from np2_dir.
+    // When bios9821.rom, d8000.rom, or ide.rom is present in system/np2kai/, NP2kai maps them into
+    // the 0xD8000 expansion ROM window even on PC-9801VX, causing disk bootstrap to jump into an
+    // incompatible expansion ROM and hang on a black screen after the memory check.
+    for conflicting_rom in [
+        "bios9821.rom",
+        "BIOS9821.ROM",
+        "d8000.rom",
+        "D8000.ROM",
+        "ide.rom",
+        "IDE.ROM",
+        "pci.rom",
+        "PCI.ROM",
+        "sasi.rom",
+        "SASI.ROM",
+        "scsi.rom",
+        "SCSI.ROM",
+    ] {
+        let p = np2_dir.join(conflicting_rom);
+        if p.exists() {
+            let _ = fs::remove_file(&p);
+        }
+    }
+
+    // 3. Opportunistically seed FONT.ROM / font.bmp / sound.rom / BIOS ROMs if user has NekoProject2 or RetroArch files
     seed_optional_rom_files(&np2_dir);
 
     Ok(sys_dir)
@@ -92,7 +116,6 @@ fn seed_optional_rom_files(np2_dir: &Path) {
         ("SOUND.ROM", "sound.rom"),
         ("itf.rom", "itf.rom"),
         ("ITF.ROM", "itf.rom"),
-        ("bios9821.rom", "bios9821.rom"),
         ("2608_bd.wav", "2608_bd.wav"),
         ("2608_sd.wav", "2608_sd.wav"),
         ("2608_top.wav", "2608_top.wav"),
@@ -231,7 +254,7 @@ fn set_executable(path: &Path) {
 /// from HDD 1.
 pub fn prepare_boot_cmd(config: &Pc98Config) -> Result<Option<PathBuf>> {
     let mut args: Vec<String> = Vec::new();
-    let has_hdd1 = !config.hdd1_path.trim().is_empty() && Path::new(config.hdd1_path.trim()).exists();
+    let defer_fdd = super::library::should_defer_fdd_boot(config);
 
     for (slot, path_str) in [
         (Pc98MediaSlot::Hdd1, config.hdd1_path.trim()),
@@ -240,7 +263,7 @@ pub fn prepare_boot_cmd(config: &Pc98Config) -> Result<Option<PathBuf>> {
         (Pc98MediaSlot::Fdd1, config.fdd1_path.trim()),
         (Pc98MediaSlot::Fdd2, config.fdd2_path.trim()),
     ] {
-        if has_hdd1 && matches!(slot, Pc98MediaSlot::Fdd1 | Pc98MediaSlot::Fdd2) {
+        if defer_fdd && matches!(slot, Pc98MediaSlot::Fdd1 | Pc98MediaSlot::Fdd2) {
             continue;
         }
         if !path_str.is_empty() {
@@ -304,11 +327,12 @@ pub fn resolve_or_extract_media_path_into(
         .with_context(|| format!("Invalid zip archive {:?}", path))?;
 
     let allowed_exts: &[&str] = match slot {
-        Pc98MediaSlot::Fdd1 | Pc98MediaSlot::Fdd2 => &[
-            "d88", "88d", "fdi", "hdm", "xdf", "dup", "2hd", "tfd", "nfd", "flp",
-        ],
-        Pc98MediaSlot::Hdd1 | Pc98MediaSlot::Hdd2 => &["hdi", "thd", "nhd", "vhd", "slh"],
-        Pc98MediaSlot::CdRom => &["cue", "ccd", "cdm", "mds", "nrg", "iso"],
+        Pc98MediaSlot::Fdd1 | Pc98MediaSlot::Fdd2 => super::library::FDD_EXTS,
+        Pc98MediaSlot::Hdd1 | Pc98MediaSlot::Hdd2 | Pc98MediaSlot::DosHdd => {
+            super::library::HDD_EXTS
+        }
+        Pc98MediaSlot::CdRom => super::library::CDROM_EXTS,
+        Pc98MediaSlot::GamesDir => &[],
     };
 
     // For CD-ROM archives (.cue + .bin), also extract companion .bin/.img track files
