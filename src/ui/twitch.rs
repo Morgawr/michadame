@@ -805,7 +805,6 @@ fn draw_broadcast_group(ui: &mut egui::Ui, state: &mut AppState, save_now: &mut 
                                 "AAC (Default)",
                             );
                         });
-                    note(ui, "Clamped to 1080p max.");
                 });
             });
         });

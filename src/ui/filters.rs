@@ -820,7 +820,7 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                         let slider = percent_slider(&mut state.video.deinterlace_spatial_mix, 0.0..=1.0);
                         if slider_item(
                             c1,
-                            "Spatial Strength (Moving):",
+                            "Spatial Strength:",
                             slider,
                             Some("Strength of vertical FIR/median filter in moving areas to eliminate comb lines"),
                         )

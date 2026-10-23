@@ -373,14 +373,6 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     // Row 3: Mining Tag inline row
                     changed |= super::bank::draw_tag_setting(ui, state);
 
-                    ui.label(
-                        egui::RichText::new(
-                            "Newly mined words are tagged with this (e.g. the game being played). Leave empty for no tag.",
-                        )
-                        .size(10.5)
-                        .color(egui::Color32::from_rgb(119, 119, 119)),
-                    );
-
                     ui.add_space(5.0);
 
                     // Row 4: Master Volume horizontal slider
@@ -616,7 +608,7 @@ fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool
             }
         });
 
-        two_columns(ui, |col1, col2| {
+        two_columns(ui, |col1, _col2| {
             if col1
                 .checkbox(
                     &mut state.twitch.config.share_mined_words_to_chat,
@@ -630,13 +622,6 @@ fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool
                 crate::config::save_config(state);
                 *changed = true;
             }
-
-            col2.label(
-                egui::RichText::new("Space = capture OCR, Shift + Space = clear OCR boxes")
-                    .monospace()
-                    .size(11.0)
-                    .color(egui::Color32::from_rgb(102, 102, 102)),
-            );
         });
 
         if state.ocr.is_processing.load(Ordering::Relaxed) {

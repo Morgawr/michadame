@@ -120,15 +120,6 @@ pub fn draw_pc98_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         .id_source("pc98_advanced_manual_drives")
         .default_open(false)
         .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(
-                    "Floppy drives (FDD1 / FDD2) can be swapped live while the PC-98 is running. Hard disks (HDD1 / HDD2) are mounted on boot.",
-                )
-                .size(10.5)
-                .color(egui::Color32::from_rgb(136, 136, 136)),
-            );
-            ui.add_space(4.0);
-
             draw_media_row(
                 ui,
                 state,
