@@ -152,13 +152,17 @@ impl Default for AppState {
             video_profile: config::Profile::default(),
             gamescope_profile: config::Profile::default(),
             pc98_profile: config::models::default_pc98_profile(),
+            pc88_profile: config::models::default_pc88_profile(),
             previous_normal_profile: None,
             previous_gamescope_normal_profile: None,
             previous_pc98_normal_profile: None,
+            previous_pc88_normal_profile: None,
             previous_capture_resolution: (0, 0),
             previous_capture_framerate: 0,
             gamescope_hook: None,
+            retro_pc_system: crate::pc88::RetroPcSystem::default(),
             pc98: crate::pc98::Pc98State::default(),
+            pc88: crate::pc88::Pc88State::default(),
             fft_filter: None,
             fft_mask_data: Vec::new(),
             fft_mask_dirty: false,
@@ -321,6 +325,11 @@ impl AppState {
                 "Michadame Viewer | NEC PC-98 ({}x{}) | UI: {:.1} FPS | Video: {:.1} FPS | Audio Latency: {} ms",
                 self.pc98.resolution.0, self.pc98.resolution.1, self.gui_fps, self.video_fps, audio_latency
             )
+        } else if self.pc88.is_active {
+            format!(
+                "Michadame Viewer | NEC PC-88 ({}x{}) | UI: {:.1} FPS | Video: {:.1} FPS | Audio Latency: {} ms",
+                self.pc88.resolution.0, self.pc88.resolution.1, self.gui_fps, self.video_fps, audio_latency
+            )
         } else {
             format!(
                 "Michadame Viewer | UI: {:.1} FPS | Video: {:.1} FPS | Audio Latency: {} ms",
@@ -463,10 +472,13 @@ impl eframe::App for AppState {
         }
         self.ui.is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
 
-        // If Gamescope hook or PC-98 mode is active, ensure any widget focus captured by
+        // If Gamescope hook or PC-98/PC-88 mode is active, ensure any widget focus captured by
         // Shift+Tab tab-navigation is cleared so hotkeys and passthrough work cleanly,
         // unless a dialog, Twitch overlay input, or controls window is open for explicit user text input.
-        if self.gamescope_hook.as_ref().map_or(false, |h| h.is_active) || self.pc98.is_active {
+        if self.gamescope_hook.as_ref().map_or(false, |h| h.is_active)
+            || self.pc98.is_active
+            || self.pc88.is_active
+        {
             if !self.ui.control_window_open
                 && !self.ui.show_stop_stream_dialog
                 && !self.ui.show_quit_dialog
@@ -483,7 +495,8 @@ impl eframe::App for AppState {
             .gamescope_hook
             .as_ref()
             .map_or(false, |h| h.is_active && h.passthrough_enabled);
-        let pc98_passthrough = self.pc98.is_active && self.pc98.passthrough_enabled;
+        let pc98_passthrough = (self.pc98.is_active && self.pc98.passthrough_enabled)
+            || (self.pc88.is_active && self.pc88.passthrough_enabled);
 
         if !gamescope_passthrough && !pc98_passthrough {
             self.replay.shortcuts(ctx);
@@ -555,9 +568,13 @@ impl eframe::App for AppState {
             .gamescope_hook
             .as_ref()
             .map_or(false, |h| h.is_active && h.passthrough_enabled);
-        let pc98_passthrough = self.pc98.is_active && self.pc98.passthrough_enabled;
+        let pc98_passthrough = (self.pc98.is_active && self.pc98.passthrough_enabled)
+            || (self.pc88.is_active && self.pc88.passthrough_enabled);
 
-        if self.gamescope_hook.as_ref().map_or(false, |h| h.is_active) || self.pc98.is_active {
+        if self.gamescope_hook.as_ref().map_or(false, |h| h.is_active)
+            || self.pc98.is_active
+            || self.pc88.is_active
+        {
             if !self.ui.control_window_open
                 && !self.ui.show_stop_stream_dialog
                 && !self.ui.show_quit_dialog
@@ -709,6 +726,7 @@ impl eframe::App for AppState {
         repaint_requested |= self.handle_audio_thread_events(ctx);
         repaint_requested |= self.handle_video_file_player_events(ctx);
         repaint_requested |= self.handle_pc98_events(ctx);
+        repaint_requested |= self.handle_pc88_events(ctx);
 
         if let Some(ref mut p) = self.video_player {
             if !p.is_seeking {

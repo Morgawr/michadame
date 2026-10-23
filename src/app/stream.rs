@@ -258,6 +258,7 @@ impl AppState {
         self.stop_video_file();
         self.stop_gamescope_hook();
         self.stop_pc98_mode();
+        self.stop_pc88_mode();
 
         if audio_was_active {
             self.info("Stream stopped and audio stream dropped.");
@@ -832,6 +833,9 @@ impl AppState {
         if let Some(ref tx) = self.pc98.command_tx {
             let _ = tx.send(crate::pc98::Pc98Command::SetVolume(volume));
         }
+        if let Some(ref tx) = self.pc88.command_tx {
+            let _ = tx.send(crate::pc88::Pc88Command::SetVolume(volume));
+        }
         self.replay.set_game_volume(volume);
         self.twitch.set_master_volume(volume);
     }
@@ -1129,6 +1133,268 @@ impl AppState {
                         )
                         .add_filter("All files", &["*"])
                         .set_title("Select PC-98 CD-ROM Image")
+                        .pick_file(),
+                };
+                if let Some(path) = picked {
+                    let _ = tx.send((slot, path));
+                    ctx_clone.request_repaint();
+                }
+            });
+    }
+
+    pub fn start_pc88_mode(&mut self, ctx: &egui::Context) {
+        self.stop_stream_resources();
+
+        // Stash current normal profile and capture card parameters
+        let current_normal = crate::config::build_profile_from_state(self);
+        self.profiles
+            .insert(self.active_profile.clone(), current_normal);
+        self.previous_pc88_normal_profile = Some(self.active_profile.clone());
+        self.previous_capture_resolution = self.hardware.selected_resolution;
+        self.previous_capture_framerate = self.hardware.selected_framerate;
+
+        // Apply dedicated PC-88 profile (defaults to Halo CRT + Retro PC Bezel)
+        crate::config::apply_profile_to_state(self, &self.pc88_profile.clone());
+
+        self.hardware.selected_resolution = (640, 400);
+        self.hardware.selected_framerate = 56;
+        let new_size = egui::vec2(800.0, 600.0);
+        ctx.send_viewport_cmd_to(
+            egui::ViewportId::ROOT,
+            egui::ViewportCommand::InnerSize(new_size),
+        );
+
+        let (frame_tx, frame_rx) = crossbeam_channel::bounded(2);
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let input_state =
+            Arc::new(std::sync::Mutex::new(crate::pc98::Pc98InputState::default()));
+
+        self.latest_frame = None;
+        self.gui_fps = 0.0;
+        self.video_fps = 0.0;
+        self.frames_since_last_check = 0;
+        self.video_frames_since_last_check = 0;
+        self.last_fps_check = std::time::Instant::now();
+        self.last_video_fps_check = self.last_fps_check;
+
+        self.frame_receiver = Some(frame_rx);
+        self.pc88.event_rx = Some(event_rx);
+        self.pc88.command_tx = Some(cmd_tx);
+        self.pc88.stop_requested = Arc::clone(&stop_requested);
+        self.pc88.input_state = Arc::clone(&input_state);
+        self.pc88.is_active = true;
+        self.pc88.passthrough_enabled = true;
+        self.pc88.status_message = Some("Starting NEC PC-88 emulator...".to_string());
+        self.pc88.resolution = (640, 400);
+
+        let repaint_ctx = ctx.clone();
+        let request_repaint: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            repaint_ctx.request_repaint();
+        });
+
+        self.replay.set_game_volume(self.hardware.master_volume);
+        self.replay.sync_audio_filter();
+
+        let worker_params = crate::pc88::libretro::Pc88WorkerParams {
+            config: self.pc88.config.clone(),
+            active_game_floppies: self.pc88.active_game_floppies.clone(),
+            frame_tx,
+            event_tx: event_tx.clone(),
+            command_rx: cmd_rx,
+            input_state,
+            stop_requested,
+            request_repaint: request_repaint.clone(),
+            peak_amplitude: Arc::clone(&self.hardware.audio_peak_amplitude),
+            audio_latency_ms: Arc::clone(&self.hardware.audio_latency_ms),
+            replay_audio: self.replay.audio.clone(),
+            master_volume: self.hardware.master_volume,
+        };
+
+        let handle = thread::Builder::new()
+            .name("pc88-libretro-worker".to_string())
+            .spawn(move || {
+                match crate::pc88::libretro::run_pc88_worker(worker_params) {
+                    Ok(()) => {
+                        let _ = event_tx.send(crate::pc88::Pc88Event::Stopped);
+                    }
+                    Err(e) => {
+                        let _ = event_tx.send(crate::pc88::Pc88Event::Failed(format!("{e:#}")));
+                    }
+                }
+                request_repaint();
+            })
+            .ok();
+
+        self.pc88.worker_thread = handle;
+        self.ui.video_window_open = true;
+        self.ui.control_window_open = false;
+        ctx.request_repaint();
+    }
+
+    pub fn stop_pc88_mode(&mut self) {
+        if self.pc88.is_active {
+            // Save PC-88 profile changes while PC-88 mode is still active
+            self.pc88_profile = crate::config::build_profile_from_state(self);
+            crate::config::save_config(self);
+            crate::config::flush_pending_config(self);
+        }
+
+        self.pc88.request_stop();
+        if let Some(tx) = self.pc88.command_tx.take() {
+            let _ = tx.send(crate::pc88::Pc88Command::Stop);
+        }
+        if let Some(handle) = self.pc88.worker_thread.take() {
+            reap_video_thread(handle);
+        }
+
+        if self.pc88.is_active {
+            self.pc88.is_active = false;
+            self.pc88.status_message = None;
+
+            if self.previous_capture_resolution.0 > 0 {
+                self.hardware.selected_resolution = self.previous_capture_resolution;
+                self.hardware.selected_framerate = self.previous_capture_framerate;
+            }
+            if let Some(prev_name) = self.previous_pc88_normal_profile.take() {
+                self.active_profile = prev_name;
+            }
+            let profile_to_apply = self.profiles.get(&self.active_profile).cloned();
+            if let Some(profile) = profile_to_apply {
+                crate::config::apply_profile_to_state(self, &profile);
+            }
+        }
+
+        self.pc88.event_rx = None;
+        self.frame_receiver = None;
+        self.latest_frame = None;
+    }
+
+    pub fn handle_pc88_events(&mut self, ctx: &egui::Context) -> bool {
+        let mut handled = false;
+        if let Some(rx) = &self.pc88.file_picker_rx {
+            if let Ok((slot, raw_path)) = rx.try_recv() {
+                if slot == crate::pc88::Pc88MediaSlot::GamesDir {
+                    self.pc88.config.games_dir = raw_path.to_string_lossy().to_string();
+                    match self.pc88.refresh_games_list() {
+                        Ok(count) => {
+                            self.info(format!("Scanned PC-88 games folder: found {count} games."));
+                        }
+                        Err(e) => {
+                            self.error(format!("Failed to scan PC-88 games folder: {e}"));
+                        }
+                    }
+                    crate::config::save_config(self);
+                    handled = true;
+                } else {
+                    let path = raw_path;
+                    let path_str = path.to_string_lossy().to_string();
+                    match slot {
+                        crate::pc88::Pc88MediaSlot::Fdd1 => {
+                            self.pc88.config.fdd1_path = path_str.clone();
+                            self.pc88.send_command(crate::pc88::Pc88Command::MountFdd {
+                                drive: 0,
+                                path: Some(path),
+                            });
+                        }
+                        crate::pc88::Pc88MediaSlot::Fdd2 => {
+                            self.pc88.config.fdd2_path = path_str.clone();
+                            self.pc88.send_command(crate::pc88::Pc88Command::MountFdd {
+                                drive: 1,
+                                path: Some(path),
+                            });
+                        }
+                        crate::pc88::Pc88MediaSlot::Tape => {
+                            self.pc88.config.tape_path = path_str;
+                            if self.pc88.is_active {
+                                self.info("Tape image updated. Reboot PC-88 mode to apply tape changes.");
+                            }
+                        }
+                        crate::pc88::Pc88MediaSlot::GamesDir => {}
+                    }
+                    crate::config::save_config(self);
+                    handled = true;
+                }
+            }
+        }
+
+        while let Some(rx) = self.pc88.event_rx.as_ref() {
+            let event = match rx.try_recv() {
+                Ok(ev) => ev,
+                Err(crossbeam_channel::TryRecvError::Empty) => break,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => break,
+            };
+            handled = true;
+            match event {
+                crate::pc88::Pc88Event::SyncProgress(msg) => {
+                    self.pc88.status_message = Some(msg.clone());
+                    self.info(msg);
+                }
+                crate::pc88::Pc88Event::Started { width, height, fps } => {
+                    self.pc88.status_message = None;
+                    self.pc88.resolution = (width, height);
+                    self.hardware.selected_resolution = (width, height);
+                    self.hardware.selected_framerate = (fps.round() as u32).max(1);
+                    self.info(
+                        "NEC PC-88 booted! Keyboard/mouse passthrough active (Shift+Tab to release, F12 for Quasi88 menu).",
+                    );
+                }
+                crate::pc88::Pc88Event::ResolutionChanged { width, height } => {
+                    self.pc88.resolution = (width, height);
+                    self.hardware.selected_resolution = (width, height);
+                }
+                crate::pc88::Pc88Event::Info(msg) => {
+                    self.info(msg);
+                }
+                crate::pc88::Pc88Event::Failed(err) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(
+                        egui::CursorGrab::None,
+                    ));
+                    ctx.set_cursor_icon(egui::CursorIcon::Default);
+                    self.error(format!("PC-88 emulator error: {err}"));
+                    self.stop_pc88_mode();
+                    self.ui.video_window_open = false;
+                    self.ui.control_window_open = true;
+                }
+                crate::pc88::Pc88Event::Stopped => {}
+            }
+        }
+        if handled {
+            ctx.request_repaint();
+        }
+        handled
+    }
+
+    pub fn open_pc88_media_dialog(
+        &mut self,
+        slot: crate::pc88::Pc88MediaSlot,
+        ctx: &egui::Context,
+    ) {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.pc88.file_picker_rx = Some(rx);
+        let ctx_clone = ctx.clone();
+        let _ = std::thread::Builder::new()
+            .name("pc88-media-picker".to_string())
+            .spawn(move || {
+                let picked = match slot {
+                    crate::pc88::Pc88MediaSlot::GamesDir => rfd::FileDialog::new()
+                        .set_title("Select PC-88 Root Games Directory")
+                        .pick_folder(),
+                    crate::pc88::Pc88MediaSlot::Fdd1 | crate::pc88::Pc88MediaSlot::Fdd2 => {
+                        rfd::FileDialog::new()
+                            .add_filter(
+                                "PC-88 Floppy Disk Images (.d88/.88d)",
+                                &["d88", "88d", "d77", "2d"],
+                            )
+                            .add_filter("All files", &["*"])
+                            .set_title("Select PC-88 Floppy Disk Image")
+                            .pick_file()
+                    }
+                    crate::pc88::Pc88MediaSlot::Tape => rfd::FileDialog::new()
+                        .add_filter("PC-88 Tape Images (.t88/.cmt)", &["t88", "cmt"])
+                        .add_filter("All files", &["*"])
+                        .set_title("Select PC-88 Tape Image")
                         .pick_file(),
                 };
                 if let Some(path) = picked {

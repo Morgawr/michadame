@@ -76,6 +76,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
     let is_gamescope = state.gamescope_hook.as_ref().map_or(false, |h| h.is_active);
     let is_pc98 = state.pc98.is_active;
+    let is_pc88 = state.pc88.is_active;
     let mut passthrough_active = false;
     if is_gamescope {
         let toggle_passthrough = ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
@@ -105,6 +106,19 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             ctx.request_repaint();
         }
         passthrough_active = state.pc98.passthrough_enabled;
+    } else if is_pc88 {
+        let toggle_passthrough = ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
+        if toggle_passthrough {
+            let _now_enabled = state.pc88.toggle_passthrough();
+            ctx.memory_mut(|m| {
+                m.stop_text_input();
+                if let Some(id) = m.focused() {
+                    m.surrender_focus(id);
+                }
+            });
+            ctx.request_repaint();
+        }
+        passthrough_active = state.pc88.passthrough_enabled;
     }
 
     let mut new_dma_frame_received = false;
@@ -280,6 +294,30 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 i.events.retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
             });
         } else if is_pc98 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+        } else if is_pc88 && passthrough_active {
+            let has_system_dialog = state.ui.show_quit_dialog
+                || state.ui.show_stop_stream_dialog
+                || state.ui.show_first_run_dialog
+                || (state.config_load_error.is_some() && !state.ui.dismissed_config_error)
+                || state.video.fft_mask_window_open
+                || state.ui.debug_open;
+
+            if is_window_focused && !has_system_dialog {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::Locked));
+                ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+                let target_res = state.pc88.resolution;
+                crate::pc98::input::forward_pc88_inputs(&mut state.pc88, ctx, video_rect, target_res);
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+                state.pc88.release_all_inputs();
+            }
+            ctx.input_mut(|i| {
+                i.events.retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
+            });
+        } else if is_pc88 {
             ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
             ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
         }
@@ -1069,7 +1107,9 @@ pub fn is_software_mouse_active(state: &AppState, is_on_crt_surface: bool) -> bo
     if state.gamescope_hook.as_ref().map_or(false, |h| h.is_active && h.is_cursor_hidden()) {
         return false;
     }
-    if state.pc98.is_active && state.pc98.passthrough_enabled {
+    if (state.pc98.is_active && state.pc98.passthrough_enabled)
+        || (state.pc88.is_active && state.pc88.passthrough_enabled)
+    {
         return false;
     }
     let filter = CrtFilter::from_u8(state.crt_filter.load(Ordering::Relaxed));
@@ -1125,15 +1165,17 @@ pub fn is_passthrough_host_cursor_hidden(
     if state.twitch.preroll.is_some() {
         return false;
     }
+    let retro_pc_passthrough = (state.pc98.is_active && state.pc98.passthrough_enabled)
+        || (state.pc88.is_active && state.pc88.passthrough_enabled);
     let passthrough_on = state
         .gamescope_hook
         .as_ref()
         .map_or(false, |h| h.is_active && h.passthrough_enabled)
-        || (state.pc98.is_active && state.pc98.passthrough_enabled);
+        || retro_pc_passthrough;
     if !passthrough_on || is_hovering_controls {
         return false;
     }
-    if !(state.pc98.is_active && state.pc98.passthrough_enabled) {
+    if !retro_pc_passthrough {
         let Some(pos) = pointer_pos else {
             return false;
         };

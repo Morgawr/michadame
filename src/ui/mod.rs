@@ -105,7 +105,8 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
         .gamescope_hook
         .as_ref()
         .map_or(false, |h| h.is_active && h.passthrough_enabled);
-    let pc98_passthrough = state.pc98.is_active && state.pc98.passthrough_enabled;
+    let pc98_passthrough = (state.pc98.is_active && state.pc98.passthrough_enabled)
+        || (state.pc88.is_active && state.pc88.passthrough_enabled);
 
     let mut hotkey_repaint = false;
     if !gamescope_passthrough && !pc98_passthrough {

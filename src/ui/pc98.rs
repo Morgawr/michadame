@@ -1,5 +1,6 @@
 use crate::app::AppState;
 use crate::config;
+use crate::pc88::{Pc88Command, Pc88MediaSlot, RetroPcSystem};
 use crate::pc98::{Pc98Command, Pc98MediaSlot};
 use crate::ui::controls::{
     percent_slider_range, slider_item, sub_heading, technical_group, technical_separator,
@@ -8,6 +9,91 @@ use crate::ui::controls::{
 use eframe::egui;
 
 pub fn draw_pc98_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
+    let mut changed = false;
+
+    // Top-level Retro PC System Selector (PC-98 vs PC-88)
+    egui::Frame::none()
+        .fill(egui::Color32::from_rgb(22, 22, 22))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(53, 53, 53)))
+        .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+        .rounding(egui::Rounding::ZERO)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Retro PC System:")
+                        .monospace()
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(224, 224, 224)),
+                );
+                ui.add_space(6.0);
+
+                for (sys, label, tip) in [
+                    (
+                        RetroPcSystem::Pc98,
+                        "NEC PC-9801 / PC-9821 (NP2kai)",
+                        "Configure and launch 16-bit/32-bit NEC PC-98 games (Neko Project II Kai)",
+                    ),
+                    (
+                        RetroPcSystem::Pc88,
+                        "NEC PC-8801 (Quasi88)",
+                        "Configure and launch 8-bit NEC PC-8801 / PC-8801mkIISR games (Quasi88)",
+                    ),
+                ] {
+                    let is_selected = state.retro_pc_system == sys;
+                    let btn = egui::Button::new(
+                        egui::RichText::new(label)
+                            .monospace()
+                            .size(11.0)
+                            .strong()
+                            .color(if is_selected {
+                                egui::Color32::from_rgb(210, 255, 220)
+                            } else {
+                                egui::Color32::from_rgb(165, 165, 165)
+                            }),
+                    )
+                    .fill(if is_selected {
+                        egui::Color32::from_rgb(24, 72, 42)
+                    } else {
+                        egui::Color32::from_rgb(34, 34, 34)
+                    })
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        if is_selected {
+                            egui::Color32::from_rgb(42, 118, 68)
+                        } else {
+                            egui::Color32::from_rgb(60, 60, 60)
+                        },
+                    ))
+                    .rounding(egui::Rounding::ZERO);
+
+                    if ui.add_sized([240.0, 22.0], btn).on_hover_text(tip).clicked()
+                        && state.retro_pc_system != sys
+                    {
+                        state.retro_pc_system = sys;
+                        config::save_config(state);
+                        changed = true;
+                    }
+                }
+            });
+        });
+
+    ui.add_space(4.0);
+
+    match state.retro_pc_system {
+        RetroPcSystem::Pc98 => {
+            changed |= draw_pc98_system_section(ui, state);
+        }
+        RetroPcSystem::Pc88 => {
+            changed |= draw_pc88_system_section(ui, state);
+        }
+    }
+
+    changed
+}
+
+fn draw_pc98_system_section(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     let mut changed = false;
 
     technical_group(ui, "NEC PC-9801 / PC-9821 Emulator (Neko Project II Kai):", |ui| {
@@ -1014,4 +1100,906 @@ fn truncate_combo_label(s: &str, max_cols: usize) -> String {
         out.push(ch);
     }
     out
+}
+
+fn draw_pc88_system_section(ui: &mut egui::Ui, state: &mut AppState) -> bool {
+    let mut changed = false;
+
+    technical_group(ui, "NEC PC-8801 Emulator (Quasi88):", |ui| {
+        ui.horizontal(|ui| {
+            if state.pc88.is_active {
+                let stop_btn = egui::Button::new(
+                    egui::RichText::new("⏹ Power Off PC-88")
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(255, 204, 204)),
+                )
+                .fill(egui::Color32::from_rgb(90, 24, 24))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(122, 40, 40)))
+                .rounding(egui::Rounding::ZERO);
+                if ui.add(stop_btn).clicked() {
+                    state.stop_stream(ui.ctx());
+                    state.info("PC-88 emulator powered off.");
+                    changed = true;
+                }
+
+                let reset_btn = egui::Button::new(
+                    egui::RichText::new("🔄 Reset PC-88")
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(255, 235, 180)),
+                )
+                .fill(egui::Color32::from_rgb(70, 50, 18))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 88, 30)))
+                .rounding(egui::Rounding::ZERO);
+                if ui
+                    .add(reset_btn)
+                    .on_hover_text("Warm-reset the emulated PC-88 (use after swapping boot floppies)")
+                    .clicked()
+                {
+                    state.pc88.send_command(Pc88Command::Reset);
+                }
+
+                let (icon, label, color) = if state.pc88.passthrough_enabled {
+                    (
+                        "⌨",
+                        "Passthrough Active (Shift+Tab to pause)",
+                        egui::Color32::from_rgb(140, 240, 140),
+                    )
+                } else {
+                    (
+                        "🚫",
+                        "Input Paused (Shift+Tab to resume)",
+                        egui::Color32::from_rgb(255, 130, 130),
+                    )
+                };
+                ui.label(
+                    egui::RichText::new(format!("{} {}", icon, label))
+                        .monospace()
+                        .size(10.5)
+                        .color(color),
+                );
+            } else {
+                let boot_btn = egui::Button::new(
+                    egui::RichText::new("🖥 Boot PC-88 Monitor")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(210, 255, 220)),
+                )
+                .fill(egui::Color32::from_rgb(24, 72, 42))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 118, 68)))
+                .rounding(egui::Rounding::ZERO);
+                if ui
+                    .add(boot_btn)
+                    .on_hover_text("Boot the embedded NEC PC-88 computer directly inside Michadame's CRT monitor")
+                    .clicked()
+                {
+                    state.start_pc88_mode(ui.ctx());
+                    changed = true;
+                }
+            }
+        });
+
+        if let Some(ref status) = state.pc88.status_message {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(
+                    egui::RichText::new(status)
+                        .monospace()
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(251, 191, 36)),
+                );
+            });
+        }
+    });
+
+    ui.add_space(4.0);
+
+    technical_group(ui, "PC-88 Game Library & Disk Media:", |ui| {
+        draw_pc88_game_library_section(ui, state, &mut changed);
+
+        ui.add_space(4.0);
+        egui::CollapsingHeader::new(
+            egui::RichText::new("Advanced: Manual Disk & Tape Drives (FDD / CMT)")
+                .monospace()
+                .size(11.0)
+                .color(egui::Color32::from_rgb(170, 170, 170)),
+        )
+        .id_source("pc88_advanced_manual_drives")
+        .default_open(false)
+        .show(ui, |ui| {
+            draw_pc88_media_row(
+                ui,
+                state,
+                "FDD 1 (Drive 1:):",
+                Pc88MediaSlot::Fdd1,
+                ".d88, .88d, .2d",
+                true,
+                &mut changed,
+            );
+            draw_pc88_media_row(
+                ui,
+                state,
+                "FDD 2 (Drive 2:):",
+                Pc88MediaSlot::Fdd2,
+                ".d88, .88d, .2d",
+                true,
+                &mut changed,
+            );
+
+            technical_separator(ui);
+
+            draw_pc88_media_row(
+                ui,
+                state,
+                "Cassette Tape (CMT):",
+                Pc88MediaSlot::Tape,
+                ".t88, .cmt",
+                false,
+                &mut changed,
+            );
+        });
+    });
+
+    ui.add_space(4.0);
+
+    technical_group(ui, "PC-88 Hardware Configuration (Applies on Next Boot):", |ui| {
+        two_columns(ui, |col1, col2| {
+            sub_heading(col1, "System Architecture:");
+
+            col1.horizontal(|ui| {
+                ui.add_sized(
+                    [130.0, 18.0],
+                    egui::Label::new(
+                        egui::RichText::new("BASIC Mode:")
+                            .monospace()
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(153, 153, 153)),
+                    ),
+                );
+                let modes = [
+                    ("N88 V2", "N88-BASIC V2 (PC-8801mkIISR/FR/MR)"),
+                    ("N88 V1H", "N88-BASIC V1H (High-Speed V1)"),
+                    ("N88 V1S", "N88-BASIC V1S (Standard V1)"),
+                    ("N", "N-BASIC (PC-8001 Mode)"),
+                ];
+                let current_label = modes
+                    .iter()
+                    .find(|(v, _)| *v == state.pc88.config.basic_mode)
+                    .map(|(_, l)| *l)
+                    .unwrap_or(&state.pc88.config.basic_mode);
+                egui::ComboBox::from_id_source("pc88_basic_mode_combo")
+                    .selected_text(current_label)
+                    .width(210.0)
+                    .show_ui(ui, |ui| {
+                        for (val, label) in modes {
+                            if ui
+                                .selectable_value(
+                                    &mut state.pc88.config.basic_mode,
+                                    val.to_string(),
+                                    label,
+                                )
+                                .changed()
+                            {
+                                config::save_config(state);
+                                changed = true;
+                            }
+                        }
+                    });
+            });
+
+            col1.horizontal(|ui| {
+                ui.add_sized(
+                    [130.0, 18.0],
+                    egui::Label::new(
+                        egui::RichText::new("CPU Clock:")
+                            .monospace()
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(153, 153, 153)),
+                    ),
+                );
+                let clocks = [
+                    ("4", "4 MHz (Standard Z80A)"),
+                    ("8", "8 MHz (FE / FH / MH / MA)"),
+                    ("16", "16 MHz (Overclock)"),
+                    ("32", "32 MHz (Turbo)"),
+                    ("64", "64 MHz (Max Turbo)"),
+                    ("2", "2 MHz (Underclock)"),
+                    ("1", "1 MHz (Slow)"),
+                ];
+                let current_clock_label = clocks
+                    .iter()
+                    .find(|(v, _)| *v == state.pc88.config.cpu_clock)
+                    .map(|(_, l)| *l)
+                    .unwrap_or(&state.pc88.config.cpu_clock);
+                egui::ComboBox::from_id_source("pc88_cpu_clock")
+                    .selected_text(current_clock_label)
+                    .width(210.0)
+                    .show_ui(ui, |ui| {
+                        for (val, label) in clocks {
+                            if ui
+                                .selectable_value(
+                                    &mut state.pc88.config.cpu_clock,
+                                    val.to_string(),
+                                    label,
+                                )
+                                .changed()
+                            {
+                                config::save_config(state);
+                                changed = true;
+                            }
+                        }
+                    });
+            });
+
+            col1.horizontal(|ui| {
+                ui.add_sized(
+                    [130.0, 18.0],
+                    egui::Label::new(
+                        egui::RichText::new("Sub-CPU Mode:")
+                            .monospace()
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(153, 153, 153)),
+                    ),
+                );
+                let sub_modes: &[(u32, &str)] = &[
+                    (0, "0: Run During Disk Access"),
+                    (1, "1: Sync Both CPUs During Disk"),
+                    (2, "2: Always Run Both CPUs"),
+                ];
+                let current_sub_label = sub_modes
+                    .iter()
+                    .find(|(m, _)| *m == state.pc88.config.sub_cpu_mode)
+                    .map(|(_, l)| *l)
+                    .unwrap_or("0: Run During Disk Access");
+                egui::ComboBox::from_id_source("pc88_sub_cpu_mode")
+                    .selected_text(current_sub_label)
+                    .width(210.0)
+                    .show_ui(ui, |ui| {
+                        for (val, label) in sub_modes {
+                            if ui
+                                .selectable_value(&mut state.pc88.config.sub_cpu_mode, *val, *label)
+                                .changed()
+                            {
+                                config::save_config(state);
+                                changed = true;
+                            }
+                        }
+                    });
+            });
+
+            col1.horizontal(|ui| {
+                ui.add_sized(
+                    [130.0, 18.0],
+                    egui::Label::new(
+                        egui::RichText::new("Screen Size:")
+                            .monospace()
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(153, 153, 153)),
+                    ),
+                );
+                let sizes = [
+                    ("full", "Full (640x400 Standard)"),
+                    ("half", "Half (320x200 Low-Res)"),
+                ];
+                let current_size_label = sizes
+                    .iter()
+                    .find(|(s, _)| *s == state.pc88.config.screen_size)
+                    .map(|(_, l)| *l)
+                    .unwrap_or("Full (640x400 Standard)");
+                egui::ComboBox::from_id_source("pc88_screen_size")
+                    .selected_text(current_size_label)
+                    .width(210.0)
+                    .show_ui(ui, |ui| {
+                        for (val, label) in sizes {
+                            if ui
+                                .selectable_value(
+                                    &mut state.pc88.config.screen_size,
+                                    val.to_string(),
+                                    label,
+                                )
+                                .changed()
+                            {
+                                config::save_config(state);
+                                changed = true;
+                            }
+                        }
+                    });
+            });
+
+            sub_heading(col2, "Audio & Peripherals:");
+
+            col2.horizontal(|ui| {
+                ui.add_sized(
+                    [130.0, 18.0],
+                    egui::Label::new(
+                        egui::RichText::new("Sound Board:")
+                            .monospace()
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(153, 153, 153)),
+                    ),
+                );
+                let boards = [
+                    ("OPNA", "Sound Board II (YM2608 OPNA)"),
+                    ("OPN", "Sound Board (YM2203 OPN)"),
+                ];
+                let current_board_label = boards
+                    .iter()
+                    .find(|(b, _)| *b == state.pc88.config.sound_board)
+                    .map(|(_, l)| *l)
+                    .unwrap_or(&state.pc88.config.sound_board);
+                egui::ComboBox::from_id_source("pc88_sound_board")
+                    .selected_text(current_board_label)
+                    .width(220.0)
+                    .show_ui(ui, |ui| {
+                        for (val, label) in boards {
+                            if ui
+                                .selectable_value(
+                                    &mut state.pc88.config.sound_board,
+                                    val.to_string(),
+                                    label,
+                                )
+                                .changed()
+                            {
+                                config::save_config(state);
+                                changed = true;
+                            }
+                        }
+                    });
+            });
+
+            if col2
+                .checkbox(
+                    &mut state.pc88.config.fdc_wait,
+                    "Accurate Floppy Drive Timing (FDC Wait)",
+                )
+                .on_hover_text("Emulates realistic floppy disk controller timing required by timing-sensitive PC-88 games")
+                .changed()
+            {
+                config::save_config(state);
+                changed = true;
+            }
+
+            if col2
+                .checkbox(
+                    &mut state.pc88.config.pcg_8100,
+                    "PCG-8100 Programmable Character Generator",
+                )
+                .on_hover_text("Enables HAL Laboratory PCG-8100 sound/character hardware for early PC-8001/PC-8801 titles")
+                .changed()
+            {
+                config::save_config(state);
+                changed = true;
+            }
+
+            if col2
+                .checkbox(
+                    &mut state.pc88.config.save_to_disk_image,
+                    "Persist Floppy Disk Writes to Disk Image",
+                )
+                .on_hover_text("Writes in-game floppy saves back to the .d88 disk image file")
+                .changed()
+            {
+                config::save_config(state);
+                changed = true;
+            }
+
+            if col2
+                .checkbox(
+                    &mut state.pc88.config.numpad_arrow_keys,
+                    "Arrow Keys Send PC-88 Numpad (2/4/6/8)",
+                )
+                .on_hover_text("Sends PC-88 Tenkey 8/2/4/6 scan codes when pressing Arrow keys, required for directional movement in many PC-88 games (applies immediately)")
+                .changed()
+            {
+                state.pc88.release_all_inputs();
+                config::save_config(state);
+                changed = true;
+            }
+
+            if slider_item(
+                col2,
+                "Mouse Sensitivity:",
+                percent_slider_range(&mut state.pc88.config.mouse_sensitivity, 0.05..=2.0, 2.0),
+                Some("Scales PC-88 mouse speed (applies immediately while running)"),
+            )
+            .changed()
+            {
+                config::save_config(state);
+                changed = true;
+            }
+        });
+    });
+
+    changed
+}
+
+fn draw_pc88_game_library_section(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool) {
+    // 1. Root Games Folder row
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [140.0, 20.0],
+            egui::Label::new(
+                egui::RichText::new("Games Root Folder:")
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(170, 170, 170)),
+            ),
+        );
+
+        let avail = (ui.available_width() - 165.0).max(120.0);
+        if ui
+            .add_sized(
+                [avail, 20.0],
+                egui::TextEdit::singleline(&mut state.pc88.config.games_dir)
+                    .hint_text("/path/to/PC88/GameList"),
+            )
+            .changed()
+        {
+            config::save_config(state);
+            *changed = true;
+        }
+
+        if ui.button("Browse...").clicked() {
+            state.open_pc88_media_dialog(Pc88MediaSlot::GamesDir, ui.ctx());
+        }
+
+        let can_refresh = !state.pc88.config.games_dir.trim().is_empty();
+        if ui
+            .add_enabled(can_refresh, egui::Button::new("🔄 Refresh"))
+            .on_hover_text("Scan the root games directory and all subdirectories for PC-88 games")
+            .clicked()
+        {
+            match state.pc88.refresh_games_list() {
+                Ok(count) => {
+                    state.info(format!("Scanned PC-88 games folder: found {count} games."));
+                }
+                Err(e) => {
+                    state.error(format!("Failed to scan PC-88 games folder: {e}"));
+                }
+            }
+            config::save_config(state);
+            *changed = true;
+        }
+    });
+
+    technical_separator(ui);
+
+    // 2. Game selection dropdown + search filter + quick launch button
+    let total_games = state.pc88.games_list.len();
+    let has_active_filter = !state.pc88.game_filter.trim().is_empty();
+    let filtered_indices = if total_games > 0 {
+        crate::pc88::library::filter_and_rank_games(
+            &state.pc88.games_list,
+            &state.pc88.game_filter,
+        )
+    } else {
+        Vec::new()
+    };
+
+    let selected_idx = state
+        .pc88
+        .games_list
+        .iter()
+        .position(|g| g.id == state.pc88.config.selected_game);
+
+    let mut newly_picked_idx: Option<usize> = None;
+
+    ui.horizontal(|ui| {
+        let label_text = if total_games > 0 {
+            if has_active_filter {
+                format!("Select Game ({}/{total_games}):", filtered_indices.len())
+            } else {
+                format!("Select Game ({total_games}):")
+            }
+        } else {
+            "Select Game:".to_string()
+        };
+        ui.add_sized(
+            [140.0, 20.0],
+            egui::Label::new(
+                egui::RichText::new(label_text)
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(170, 170, 170)),
+            ),
+        );
+
+        if total_games == 0 {
+            ui.label(
+                egui::RichText::new(
+                    "No games scanned yet — set Games Root Folder above and click 🔄 Refresh.",
+                )
+                .monospace()
+                .size(11.0)
+                .color(egui::Color32::from_rgb(136, 136, 136)),
+            );
+        } else {
+            let filter_resp = ui
+                .add_sized(
+                    [155.0, 20.0],
+                    egui::TextEdit::singleline(&mut state.pc88.game_filter)
+                        .hint_text("🔎 Fuzzy / Romaji / JP..."),
+                )
+                .on_hover_text(
+                    "Search by Japanese (Kanji/Kana), Romaji (e.g. 'ys', 'snatcher', 'xanadu'), English, or fuzzy abbreviation. Press Enter to select top match.",
+                );
+            if filter_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                if let Some(&top_idx) = filtered_indices.first() {
+                    newly_picked_idx = Some(top_idx);
+                }
+            }
+            if !state.pc88.game_filter.is_empty() && ui.small_button("✕").clicked() {
+                state.pc88.game_filter.clear();
+            }
+
+            let full_selected_text = selected_idx
+                .map(|i| state.pc88.games_list[i].display_label())
+                .unwrap_or_else(|| "Choose a PC-88 game to load...".to_string());
+
+            let combo_width = (ui.available_width() - 140.0).clamp(120.0, 320.0);
+            let max_cols = ((combo_width / 8.5) as usize).clamp(14, 36);
+            let selected_text = truncate_combo_label(&full_selected_text, max_cols);
+
+            egui::ComboBox::from_id_source("pc88_game_selector_combo")
+                .selected_text(selected_text)
+                .width(combo_width)
+                .show_ui(ui, |ui| {
+                    if filtered_indices.is_empty() {
+                        ui.label(
+                            egui::RichText::new("No matching games found.")
+                                .monospace()
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(180, 120, 120)),
+                        );
+                    } else {
+                        for &idx in &filtered_indices {
+                            let game = &state.pc88.games_list[idx];
+                            let is_selected = selected_idx == Some(idx);
+                            if ui
+                                .selectable_label(is_selected, game.display_label())
+                                .clicked()
+                            {
+                                newly_picked_idx = Some(idx);
+                            }
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(&full_selected_text);
+
+            let launch_label = if state.pc88.is_active {
+                "🔄 Reboot Game"
+            } else {
+                "▶ Launch Game"
+            };
+            let launch_btn = egui::Button::new(
+                egui::RichText::new(launch_label)
+                    .size(11.0)
+                    .strong()
+                    .color(egui::Color32::from_rgb(210, 255, 220)),
+            )
+            .fill(egui::Color32::from_rgb(24, 72, 42))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 118, 68)))
+            .rounding(egui::Rounding::ZERO);
+
+            if ui
+                .add_enabled(selected_idx.is_some(), launch_btn)
+                .on_hover_text("Boot (or restart) the PC-88 emulator with the selected game")
+                .clicked()
+            {
+                if let Some(idx) = selected_idx {
+                    let _ = state.pc88.select_game_by_index(idx);
+                    config::save_config(state);
+                }
+                state.start_pc88_mode(ui.ctx());
+                *changed = true;
+            }
+        }
+    });
+
+    // Live top fuzzy matches bar when filter text is entered
+    if total_games > 0 && has_active_filter {
+        ui.add_space(2.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.add_sized(
+                [140.0, 18.0],
+                egui::Label::new(
+                    egui::RichText::new("Top Fuzzy Matches:")
+                        .monospace()
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(153, 153, 153)),
+                ),
+            );
+            if filtered_indices.is_empty() {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "No games match '{}'",
+                        state.pc88.game_filter.trim()
+                    ))
+                    .monospace()
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(220, 130, 130)),
+                );
+            } else {
+                for &idx in filtered_indices.iter().take(5) {
+                    let game = &state.pc88.games_list[idx];
+                    let is_sel = selected_idx == Some(idx);
+                    let short_title = truncate_combo_label(&game.title, 22);
+                    let btn = egui::Button::new(
+                        egui::RichText::new(short_title)
+                            .monospace()
+                            .size(10.5)
+                            .color(if is_sel {
+                                egui::Color32::from_rgb(220, 255, 220)
+                            } else {
+                                egui::Color32::from_rgb(200, 220, 245)
+                            }),
+                    )
+                    .fill(if is_sel {
+                        egui::Color32::from_rgb(28, 74, 44)
+                    } else {
+                        egui::Color32::from_rgb(30, 38, 52)
+                    })
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        if is_sel {
+                            egui::Color32::from_rgb(56, 138, 84)
+                        } else {
+                            egui::Color32::from_rgb(58, 76, 104)
+                        },
+                    ))
+                    .rounding(egui::Rounding::ZERO);
+
+                    if ui
+                        .add(btn)
+                        .on_hover_text(game.display_label())
+                        .clicked()
+                    {
+                        newly_picked_idx = Some(idx);
+                    }
+                }
+                if filtered_indices.len() > 5 {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "(+{} more in dropdown)",
+                            filtered_indices.len() - 5
+                        ))
+                        .monospace()
+                        .size(10.0)
+                        .color(egui::Color32::from_rgb(136, 136, 136)),
+                    );
+                }
+            }
+        });
+    }
+
+    if let Some(idx) = newly_picked_idx {
+        match state.pc88.select_game_by_index(idx) {
+            Ok(title) => {
+                state.info(format!("Loaded PC-88 game media for '{title}'."));
+            }
+            Err(e) => {
+                state.error(format!("Failed to configure PC-88 game media: {e}"));
+            }
+        }
+        config::save_config(state);
+        if state.pc88.is_active {
+            state.start_pc88_mode(ui.ctx());
+        }
+        *changed = true;
+    }
+
+    // 3. Active game drive status + multi-disk floppy quick swapper
+    if selected_idx.is_some() {
+        let mut mounted_parts = Vec::new();
+        for (slot_name, p_str) in [
+            ("FDD1", state.pc88.config.fdd1_path.trim()),
+            ("FDD2", state.pc88.config.fdd2_path.trim()),
+            ("Tape", state.pc88.config.tape_path.trim()),
+        ] {
+            if !p_str.is_empty() {
+                let label = state
+                    .pc88
+                    .active_game_floppies
+                    .iter()
+                    .position(|p| p.to_string_lossy() == p_str)
+                    .and_then(|i| state.pc88.active_game_disk_labels.get(i))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        std::path::Path::new(p_str)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(p_str)
+                            .to_string()
+                    });
+                mounted_parts.push(format!("{slot_name}: {label}"));
+            }
+        }
+        if !mounted_parts.is_empty() {
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "Mounted Media  ->  {}",
+                    mounted_parts.join("   |   ")
+                ))
+                .monospace()
+                .size(10.5)
+                .color(egui::Color32::from_rgb(130, 200, 150)),
+            );
+        }
+
+        if state.pc88.active_game_floppies.len() > 1 {
+            let disks: Vec<(std::path::PathBuf, String)> = state
+                .pc88
+                .active_game_floppies
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(i, p)| {
+                    let lbl = state
+                        .pc88
+                        .active_game_disk_labels
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            p.file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("Disk")
+                                .to_string()
+                        });
+                    (p, lbl)
+                })
+                .collect();
+
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [140.0, 20.0],
+                    egui::Label::new(
+                        egui::RichText::new("Quick Disk Swap:")
+                            .monospace()
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(170, 170, 170)),
+                    ),
+                );
+
+                for (drive_idx, slot_label) in [(0u8, "FDD 1:"), (1u8, "FDD 2:")] {
+                    ui.label(
+                        egui::RichText::new(slot_label)
+                            .monospace()
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(153, 153, 153)),
+                    );
+                    let cur_path = if drive_idx == 0 {
+                        state.pc88.config.fdd1_path.clone()
+                    } else {
+                        state.pc88.config.fdd2_path.clone()
+                    };
+                    let cur_name = disks
+                        .iter()
+                        .find(|(p, _)| p.to_string_lossy() == cur_path)
+                        .map(|(_, l)| l.as_str())
+                        .or_else(|| {
+                            std::path::Path::new(&cur_path)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                        })
+                        .unwrap_or("(Empty)");
+
+                    egui::ComboBox::from_id_source(format!("pc88_quick_fdd_swap_{drive_idx}"))
+                        .selected_text(truncate_combo_label(cur_name, 20))
+                        .width(175.0)
+                        .show_ui(ui, |ui| {
+                            for (disk_path, disk_label) in &disks {
+                                let disk_str = disk_path.to_string_lossy().to_string();
+                                if ui
+                                    .selectable_label(cur_path == disk_str, disk_label)
+                                    .clicked()
+                                {
+                                    if drive_idx == 0 {
+                                        state.pc88.config.fdd1_path = disk_str;
+                                    } else {
+                                        state.pc88.config.fdd2_path = disk_str;
+                                    }
+                                    if state.pc88.is_active {
+                                        state.pc88.send_command(Pc88Command::MountFdd {
+                                            drive: drive_idx,
+                                            path: Some(disk_path.clone()),
+                                        });
+                                    }
+                                    config::save_config(state);
+                                    *changed = true;
+                                }
+                            }
+                        });
+                    ui.add_space(8.0);
+                }
+            });
+        }
+    }
+}
+
+fn draw_pc88_media_row(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    label: &str,
+    slot: Pc88MediaSlot,
+    hint: &str,
+    live_swappable: bool,
+    changed: &mut bool,
+) {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [140.0, 20.0],
+            egui::Label::new(
+                egui::RichText::new(label)
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(170, 170, 170)),
+            ),
+        );
+
+        let path_ref = match slot {
+            Pc88MediaSlot::Fdd1 => &mut state.pc88.config.fdd1_path,
+            Pc88MediaSlot::Fdd2 => &mut state.pc88.config.fdd2_path,
+            Pc88MediaSlot::Tape => &mut state.pc88.config.tape_path,
+            Pc88MediaSlot::GamesDir => &mut state.pc88.config.games_dir,
+        };
+
+        let avail = (ui.available_width() - 135.0).max(120.0);
+        let text_resp = ui.add_sized(
+            [avail, 20.0],
+            egui::TextEdit::singleline(path_ref).hint_text(hint),
+        );
+        if text_resp.changed() {
+            if live_swappable && state.pc88.is_active {
+                let drive = if slot == Pc88MediaSlot::Fdd1 { 0 } else { 1 };
+                let p = if path_ref.trim().is_empty() {
+                    None
+                } else {
+                    Some(std::path::PathBuf::from(path_ref.trim()))
+                };
+                state.pc88.send_command(Pc88Command::MountFdd { drive, path: p });
+            }
+            config::save_config(state);
+            *changed = true;
+        }
+
+        if ui.button("Browse...").clicked() {
+            state.open_pc88_media_dialog(slot, ui.ctx());
+        }
+
+        let has_media = match slot {
+            Pc88MediaSlot::Fdd1 => !state.pc88.config.fdd1_path.is_empty(),
+            Pc88MediaSlot::Fdd2 => !state.pc88.config.fdd2_path.is_empty(),
+            Pc88MediaSlot::Tape => !state.pc88.config.tape_path.is_empty(),
+            Pc88MediaSlot::GamesDir => !state.pc88.config.games_dir.is_empty(),
+        };
+
+        if ui
+            .add_enabled(has_media, egui::Button::new("Eject"))
+            .clicked()
+        {
+            match slot {
+                Pc88MediaSlot::Fdd1 => {
+                    state.pc88.config.fdd1_path.clear();
+                    state.pc88.send_command(Pc88Command::MountFdd {
+                        drive: 0,
+                        path: None,
+                    });
+                }
+                Pc88MediaSlot::Fdd2 => {
+                    state.pc88.config.fdd2_path.clear();
+                    state.pc88.send_command(Pc88Command::MountFdd {
+                        drive: 1,
+                        path: None,
+                    });
+                }
+                Pc88MediaSlot::Tape => state.pc88.config.tape_path.clear(),
+                Pc88MediaSlot::GamesDir => state.pc88.config.games_dir.clear(),
+            }
+            config::save_config(state);
+            *changed = true;
+        }
+    });
 }

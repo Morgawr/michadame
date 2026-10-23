@@ -124,13 +124,17 @@ pub fn filter_and_rank_games(games: &[Pc98GameEntry], query: &str) -> Vec<usize>
 
 /// Computes a fuzzy match score (`Some(score > 0)`) if `game` matches `query`, or `None` if it does not.
 pub fn match_game_score(game: &Pc98GameEntry, query: &str) -> Option<i32> {
+    match_search_index_score(&game.search_index, query)
+}
+
+/// Computes a fuzzy match score (`Some(score > 0)`) if `idx` matches `query`, or `None` if it does not.
+pub fn match_search_index_score(idx: &Pc98SearchIndex, query: &str) -> Option<i32> {
     let norm_query = normalize_text(query);
     let tokens: Vec<&str> = norm_query.split_whitespace().filter(|t| !t.is_empty()).collect();
     if tokens.is_empty() {
         return Some(0);
     }
 
-    let idx = &game.search_index;
     let mut total_score: i32 = 0;
 
     for &raw_tok in &tokens {

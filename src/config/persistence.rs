@@ -274,6 +274,8 @@ pub fn sync_active_profile_in_state(state: &mut AppState) {
         state.gamescope_profile = current_profile_data;
     } else if state.pc98.is_active {
         state.pc98_profile = current_profile_data;
+    } else if state.pc88.is_active {
+        state.pc88_profile = current_profile_data;
     } else {
         state
             .profiles
@@ -339,7 +341,11 @@ pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(
     cfg. replay = state.replay.config.clone();
     cfg.video_device = Some(state.hardware.selected_video_device.clone());
     cfg.usb_device = state.hardware.selected_usb_device.clone();
-    if state.video_player.is_none() && state.gamescope_hook.is_none() && !state.pc98.is_active {
+    if state.video_player.is_none()
+        && state.gamescope_hook.is_none()
+        && !state.pc98.is_active
+        && !state.pc88.is_active
+    {
         cfg.video_resolution = if state.hardware.selected_resolution.0 > 0 {
             Some(state.hardware.selected_resolution)
         } else {
@@ -366,24 +372,34 @@ pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(
     cfg.default_halo = Some(state.halo_defaults.clone());
     cfg.default_cathode_interference = Some(state.cathode_interference_defaults.clone());
     cfg.popup_under_crt = Some(state.dict.popup_under_crt);
+    cfg.retro_pc_system = state.retro_pc_system;
     cfg.twitch = state.twitch.config.clone();
     cfg.mic = state.mic.config.clone();
     cfg.webcam = state.webcam.config.clone();
     cfg.pc98 = state.pc98.config.clone();
+    cfg.pc88 = state.pc88.config.clone();
 
     let current_profile_data = build_profile_from_state(state);
     if state.video_player.is_some() {
         cfg.video_profile = Some(current_profile_data);
         cfg.gamescope_profile = Some(state.gamescope_profile.clone());
         cfg.pc98_profile = Some(state.pc98_profile.clone());
+        cfg.pc88_profile = Some(state.pc88_profile.clone());
     } else if state.gamescope_hook.as_ref().map_or(false, |g| g.is_active) {
         cfg.gamescope_profile = Some(current_profile_data);
         cfg.video_profile = Some(state.video_profile.clone());
         cfg.pc98_profile = Some(state.pc98_profile.clone());
+        cfg.pc88_profile = Some(state.pc88_profile.clone());
     } else if state.pc98.is_active {
         cfg.pc98_profile = Some(current_profile_data);
         cfg.video_profile = Some(state.video_profile.clone());
         cfg.gamescope_profile = Some(state.gamescope_profile.clone());
+        cfg.pc88_profile = Some(state.pc88_profile.clone());
+    } else if state.pc88.is_active {
+        cfg.pc88_profile = Some(current_profile_data);
+        cfg.video_profile = Some(state.video_profile.clone());
+        cfg.gamescope_profile = Some(state.gamescope_profile.clone());
+        cfg.pc98_profile = Some(state.pc98_profile.clone());
     } else {
         let mut profiles = state.profiles.clone();
         profiles.insert(state.active_profile.clone(), current_profile_data);
@@ -392,6 +408,7 @@ pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(
         cfg.video_profile = Some(state.video_profile.clone());
         cfg.gamescope_profile = Some(state.gamescope_profile.clone());
         cfg.pc98_profile = Some(state.pc98_profile.clone());
+        cfg.pc88_profile = Some(state.pc88_profile.clone());
     }
 
     store_config_atomic_at(path, &cfg)
@@ -703,9 +720,19 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
         .pc98_profile
         .clone()
         .unwrap_or_else(super::models::default_pc98_profile);
+    state.pc88_profile = cfg
+        .pc88_profile
+        .clone()
+        .or_else(|| cfg.pc98_profile.clone())
+        .unwrap_or_else(super::models::default_pc88_profile);
+    state.retro_pc_system = cfg.retro_pc_system;
     state.pc98.config = cfg.pc98.clone();
     if !state.pc98.config.games_dir.trim().is_empty() {
         let _ = state.pc98.refresh_games_list();
+    }
+    state.pc88.config = cfg.pc88.clone();
+    if !state.pc88.config.games_dir.trim().is_empty() {
+        let _ = state.pc88.refresh_games_list();
     }
 
     state.hardware.audio_buffer_size = cfg.audio_buffer_size.unwrap_or(1024);

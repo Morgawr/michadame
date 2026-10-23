@@ -403,6 +403,7 @@ pub fn forward_pc98_inputs(
     let mods = ctx.input(|i| i.modifiers);
     state.keys[RETROK_LSHIFT as usize] = mods.shift;
     state.keys[RETROK_LCTRL as usize] = mods.ctrl;
+    state.keys[RETROK_RCTRL as usize] = mods.ctrl;
     state.keys[RETROK_LALT as usize] = mods.alt;
     state.keys[RETROK_LSUPER as usize] = mods.mac_cmd;
     pc98.prev_modifiers = mods;
@@ -432,6 +433,87 @@ pub fn forward_pc98_inputs(
                 ..
             } => {
                 // Shift+Tab is reserved for toggling Michadame passthrough
+                if key == egui::Key::Tab && modifiers.shift {
+                    continue;
+                }
+                apply_pc98_key_event(
+                    &mut state.keys,
+                    key,
+                    physical_key,
+                    pressed,
+                    modifiers,
+                    numpad_arrow_keys,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Forwards keyboard, modifier, and relative mouse inputs to the active PC-88 emulator instance.
+pub fn forward_pc88_inputs(
+    pc88: &mut crate::pc88::Pc88State,
+    ctx: &egui::Context,
+    _video_rect: egui::Rect,
+    _target_res: (u32, u32),
+) {
+    if !pc88.is_active || !pc88.passthrough_enabled {
+        return;
+    }
+
+    let Ok(mut state) = pc88.input_state.lock() else {
+        return;
+    };
+
+    let raw_motion = ctx.input(|i| {
+        if let Some(m) = i.pointer.motion() {
+            if m.x != 0.0 || m.y != 0.0 {
+                return m;
+            }
+        }
+        i.pointer.delta()
+    });
+
+    if raw_motion.x != 0.0 || raw_motion.y != 0.0 {
+        let sens = pc88.config.mouse_sensitivity.clamp(0.05, 5.0);
+        state.mouse_rem_x += raw_motion.x * sens;
+        state.mouse_rem_y += raw_motion.y * sens;
+        let dx = state.mouse_rem_x.trunc() as i32;
+        let dy = state.mouse_rem_y.trunc() as i32;
+        state.mouse_rem_x -= dx as f32;
+        state.mouse_rem_y -= dy as f32;
+        state.mouse_dx = state.mouse_dx.saturating_add(dx);
+        state.mouse_dy = state.mouse_dy.saturating_add(dy);
+    }
+
+    let mods = ctx.input(|i| i.modifiers);
+    state.keys[RETROK_LSHIFT as usize] = mods.shift;
+    state.keys[RETROK_LCTRL as usize] = mods.ctrl;
+    state.keys[RETROK_RCTRL as usize] = mods.ctrl;
+    state.keys[RETROK_LALT as usize] = mods.alt;
+    state.keys[RETROK_LSUPER as usize] = mods.mac_cmd;
+
+    let numpad_arrow_keys = pc88.config.numpad_arrow_keys;
+    let events = ctx.input(|i| i.events.clone());
+    for event in events {
+        match event {
+            egui::Event::PointerButton {
+                button,
+                pressed,
+                ..
+            } => match button {
+                egui::PointerButton::Primary => state.mouse_left = pressed,
+                egui::PointerButton::Secondary => state.mouse_right = pressed,
+                egui::PointerButton::Middle => state.mouse_middle = pressed,
+                _ => {}
+            },
+            egui::Event::Key {
+                key,
+                physical_key,
+                pressed,
+                modifiers,
+                ..
+            } => {
                 if key == egui::Key::Tab && modifiers.shift {
                     continue;
                 }

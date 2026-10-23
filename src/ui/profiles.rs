@@ -49,6 +49,29 @@ pub fn draw_profile_management(ui: &mut egui::Ui, state: &mut AppState) -> bool 
         });
         return changed;
     }
+    if state.pc88.is_active {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Profile:")
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(150, 150, 150)),
+            );
+            ui.label(
+                egui::RichText::new("PC-88 Profile (Dedicated)")
+                    .monospace()
+                    .size(11.0)
+                    .strong()
+                    .color(egui::Color32::from_rgb(140, 240, 160)),
+            );
+            if ui.button("Save Config").clicked() {
+                config::save_config(state);
+                state.info("Saved configuration to dedicated PC-88 profile");
+                changed = true;
+            }
+        });
+        return changed;
+    }
     if state.video_player.is_some() {
         ui.horizontal(|ui| {
             ui.label(

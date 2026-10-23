@@ -167,11 +167,14 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         if state.ui.video_window_open {
                             let is_gamescope = state.gamescope_hook.as_ref().map_or(false, |h| h.is_active);
                             let is_pc98 = state.pc98.is_active;
+                            let is_pc88 = state.pc88.is_active;
                             let is_file_mode = state.video_player.is_some();
                             let label = if is_gamescope {
                                 "Stop Gamescope"
                             } else if is_pc98 {
                                 "Stop PC-98"
+                            } else if is_pc88 {
+                                "Stop PC-88"
                             } else if is_file_mode {
                                 "Stop Video"
                             } else {
@@ -191,6 +194,8 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                     "Gamescope hook stopped."
                                 } else if is_pc98 {
                                     "PC-98 emulator stopped."
+                                } else if is_pc88 {
+                                    "PC-88 emulator stopped."
                                 } else if is_file_mode {
                                     "Video playback stopped."
                                 } else {
@@ -229,6 +234,24 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                 }
                                 if ui.small_button("NP2 Menu").on_hover_text("Toggle Neko Project II OSD menu (F12)").clicked() {
                                     state.pc98.send_command(crate::pc98::Pc98Command::TriggerMenu);
+                                }
+                            } else if is_pc88 {
+                                let (icon, input_label, color) = if state.pc88.passthrough_enabled {
+                                    ("⌨", "Passthrough", egui::Color32::from_rgb(140, 240, 140))
+                                } else {
+                                    ("🚫", "Input Paused", egui::Color32::from_rgb(255, 120, 120))
+                                };
+                                ui.label(
+                                    egui::RichText::new(format!("{} {}", icon, input_label))
+                                        .monospace()
+                                        .size(10.5)
+                                        .color(color),
+                                );
+                                if ui.small_button("Reset").on_hover_text("Warm-reset PC-88").clicked() {
+                                    state.pc88.send_command(crate::pc88::Pc88Command::Reset);
+                                }
+                                if ui.small_button("Quasi88 Menu").on_hover_text("Toggle Quasi88 OSD menu (F12)").clicked() {
+                                    state.pc88.send_command(crate::pc88::Pc88Command::TriggerMenu);
                                 }
                             }
                         } else {
@@ -285,12 +308,30 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                 .on_hover_text("Boot embedded NEC PC-98 emulator (Neko Project II Kai) inside CRT monitor")
                                 .clicked()
                             {
+                                state.retro_pc_system = crate::pc88::RetroPcSystem::Pc98;
                                 state.start_pc98_mode(ui.ctx());
+                            }
+
+                            let pc88_btn = egui::Button::new(
+                                egui::RichText::new("PC88 Game")
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(210, 255, 220)),
+                            )
+                            .fill(egui::Color32::from_rgb(24, 72, 42))
+                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 118, 68)))
+                            .rounding(egui::Rounding::ZERO);
+                            if ui
+                                .add(pc88_btn)
+                                .on_hover_text("Boot embedded NEC PC-88 emulator (Quasi88) inside CRT monitor")
+                                .clicked()
+                            {
+                                state.retro_pc_system = crate::pc88::RetroPcSystem::Pc88;
+                                state.start_pc88_mode(ui.ctx());
                             }
 
                             if !can_stream {
                                 ui.label(
-                                    egui::RichText::new("Select format for capture card, open local video, hook Gamescope, or boot PC-98.")
+                                    egui::RichText::new("Select format for capture card, open local video, hook Gamescope, or boot PC-98/PC-88.")
                                         .weak()
                                         .small(),
                                 );
@@ -424,7 +465,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     (SettingsTab::GeometryBezel, "Geometry & Bezel"),
                     (SettingsTab::CaptureReplay, "Capture & Replay"),
                     (SettingsTab::AudioMic, "Audio & Mic"),
-                    (SettingsTab::Pc98, "PC-98"),
+                    (SettingsTab::Pc98, "PC-98 / PC-88"),
                     (SettingsTab::OcrDict, "OCR & Dict"),
                     (SettingsTab::Twitch, "Twitch"),
                     (SettingsTab::Hotkeys, "Hotkeys"),
@@ -800,8 +841,8 @@ fn draw_hotkeys_tab(ui: &mut egui::Ui) {
             ("← / →", "Seek -5s / +5s (Video Player)"),
             ("Space", "Capture OCR (Google Lens)"),
             ("Shift + Space", "Clear OCR Bounding Boxes"),
-            ("Shift + Tab", "Toggle Gamescope / PC-98 Input"),
-            ("F12", "Open / Close NP2 Menu (PC-98 Mode)"),
+            ("Shift + Tab", "Toggle Gamescope / PC-98 / PC-88 Input"),
+            ("F12", "Open / Close NP2 / Quasi88 Menu"),
             ("Ctrl + C", "Export 15s Replay Clip to Clipboard"),
             ("Ctrl + Shift + C", "Export 7s Audio Clip to Clipboard"),
             ("F1 – F12", "Save Replay Buffer (Capture & Replay tab)"),
