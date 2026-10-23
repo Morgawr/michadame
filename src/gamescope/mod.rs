@@ -2,6 +2,7 @@ pub mod audio;
 pub mod egl;
 pub mod input;
 pub mod pipewire_dma;
+pub mod steam;
 pub mod video;
 pub mod x11_cursor;
 

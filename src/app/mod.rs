@@ -160,6 +160,10 @@ impl Default for AppState {
             previous_capture_resolution: (0, 0),
             previous_capture_framerate: 0,
             gamescope_hook: None,
+            gamescope_launcher_script: String::new(),
+            steam_games: Vec::new(),
+            selected_steam_game: None,
+            gamescope_script_dialog_receiver: None,
             retro_pc_system: crate::pc88::RetroPcSystem::default(),
             pc98: crate::pc98::Pc98State::default(),
             pc88: crate::pc88::Pc88State::default(),
@@ -552,10 +556,6 @@ impl eframe::App for AppState {
                 }
                 1 => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
-                    self.fullscreen_toggle_frame_count = Some(2);
-                }
-                2 => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
                     self.fullscreen_toggle_frame_count = None;
                 }
                 _ => self.fullscreen_toggle_frame_count = None,
@@ -699,6 +699,15 @@ impl eframe::App for AppState {
         if let Some(rx) = &self.video_file_dialog_receiver {
             if let Ok(path) = rx.try_recv() {
                 self.start_video_file(&path, ctx);
+                repaint_requested = true;
+            }
+        }
+
+        if let Some(rx) = &self.gamescope_script_dialog_receiver {
+            if let Ok(path) = rx.try_recv() {
+                self.gamescope_launcher_script = path.to_string_lossy().to_string();
+                crate::config::save_config(self);
+                crate::config::save_global_hardware_config(self);
                 repaint_requested = true;
             }
         }

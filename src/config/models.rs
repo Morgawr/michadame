@@ -490,6 +490,8 @@ pub struct LegacyConfig {
     pub popup_under_crt: Option<bool>,
     #[serde(default)]
     pub retro_pc_system: crate::pc88::RetroPcSystem,
+    pub gamescope_launcher_script: Option<String>,
+    pub selected_steam_game: Option<String>,
     #[serde(default)]
     pub video_profile: Option<Profile>,
     #[serde(default)]
@@ -610,6 +612,8 @@ impl Default for LegacyConfig {
             bank_compact_mode: None,
             popup_under_crt: None,
             retro_pc_system: crate::pc88::RetroPcSystem::default(),
+            gamescope_launcher_script: None,
+            selected_steam_game: None,
             video_profile: None,
             gamescope_profile: None,
             pc98_profile: None,
@@ -652,6 +656,8 @@ pub struct MichadameConfig {
     pub popup_under_crt: Option<bool>,
     #[serde(default)]
     pub retro_pc_system: crate::pc88::RetroPcSystem,
+    pub gamescope_launcher_script: Option<String>,
+    pub selected_steam_game: Option<String>,
     pub default_halo: Option<crate::app::models::HaloSettings>,
     pub default_cathode_interference: Option<crate::app::models::CathodeInterferenceSettings>,
     pub twitch: TwitchConfig,
@@ -706,6 +712,8 @@ impl Default for MichadameConfig {
             bank_compact_mode: None,
             popup_under_crt: Some(false),
             retro_pc_system: crate::pc88::RetroPcSystem::default(),
+            gamescope_launcher_script: None,
+            selected_steam_game: None,
             video_profile: None,
             gamescope_profile: None,
             pc98_profile: None,

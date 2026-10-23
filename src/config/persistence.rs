@@ -373,6 +373,8 @@ pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(
     cfg.default_cathode_interference = Some(state.cathode_interference_defaults.clone());
     cfg.popup_under_crt = Some(state.dict.popup_under_crt);
     cfg.retro_pc_system = state.retro_pc_system;
+    cfg.gamescope_launcher_script = Some(state.gamescope_launcher_script.clone());
+    cfg.selected_steam_game = state.selected_steam_game.clone();
     cfg.twitch = state.twitch.config.clone();
     cfg.mic = state.mic.config.clone();
     cfg.webcam = state.webcam.config.clone();
@@ -726,6 +728,11 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
         .or_else(|| cfg.pc98_profile.clone())
         .unwrap_or_else(super::models::default_pc88_profile);
     state.retro_pc_system = cfg.retro_pc_system;
+    state.gamescope_launcher_script = cfg
+        .gamescope_launcher_script
+        .clone()
+        .unwrap_or_else(crate::gamescope::steam::default_launcher_script_path);
+    state.selected_steam_game = cfg.selected_steam_game.clone();
     state.pc98.config = cfg.pc98.clone();
     if !state.pc98.config.games_dir.trim().is_empty() {
         let _ = state.pc98.refresh_games_list();
@@ -1960,6 +1967,38 @@ crt_brightboost = 1.6
         assert_eq!(fresh_state.webcam.config.cutout.right, 14);
         assert_eq!(fresh_state.webcam.config.cutout.top, 16);
         assert_eq!(fresh_state.webcam.config.cutout.bottom, 18);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("toml.bak"));
+    }
+
+    #[test]
+    fn test_gamescope_launcher_script_persistence_roundtrip() {
+        let path = std::env::temp_dir().join(format!(
+            "michadame_gs_launcher_test_{}_{}.toml",
+            std::process::id(),
+            crate::replay::now_us()
+        ));
+        let mut state = AppState::default();
+        state.gamescope_launcher_script = "/custom/path/michadame-gamescope-steam.sh".to_string();
+        state.selected_steam_game = Some("3259780".to_string());
+
+        save_global_hardware_config_at(&path, &state).unwrap();
+
+        let loaded: MichadameConfig = confy::load_path(&path).unwrap();
+        assert_eq!(
+            loaded.gamescope_launcher_script.as_deref(),
+            Some("/custom/path/michadame-gamescope-steam.sh")
+        );
+        assert_eq!(loaded.selected_steam_game.as_deref(), Some("3259780"));
+
+        let mut fresh_state = AppState::default();
+        apply_config(&mut fresh_state, &loaded);
+        assert_eq!(
+            fresh_state.gamescope_launcher_script,
+            "/custom/path/michadame-gamescope-steam.sh"
+        );
+        assert_eq!(fresh_state.selected_steam_game.as_deref(), Some("3259780"));
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("toml.bak"));

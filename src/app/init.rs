@@ -43,6 +43,16 @@ pub fn init_app_state(cc: &eframe::CreationContext) -> AppState {
         }
     }
 
+    let default_cfg_applied = state.config_load_error.is_some();
+    let _ = default_cfg_applied;
+    crate::gamescope::steam::restore_steam_launch_wrappers();
+    state.steam_games = crate::gamescope::steam::scan_steam_games();
+    if let Some(ref selected) = state.selected_steam_game {
+        if !state.steam_games.iter().any(|g| &g.appid == selected) {
+            state.selected_steam_game = None;
+        }
+    }
+
     let egui_ctx = cc.egui_ctx.clone();
     state.ocr.start_worker(Some(egui_ctx.clone()));
     let (tx, rx) = crossbeam_channel::unbounded();

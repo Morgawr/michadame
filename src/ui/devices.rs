@@ -259,6 +259,46 @@ pub fn draw_capture_and_webcam_selectors(ui: &mut egui::Ui, state: &mut AppState
 
     ui.add_space(4.0);
 
+    // --- Local Game Launcher ---
+    technical_group(ui, "Local Game Launcher:", |ui| {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Launcher Script:")
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(170, 170, 170)),
+            );
+            let avail = (ui.available_width() - 135.0).max(120.0);
+            if ui
+                .add_sized(
+                    [avail, 20.0],
+                    egui::TextEdit::singleline(&mut state.gamescope_launcher_script)
+                        .hint_text("/path/to/michadame-gamescope-steam.sh"),
+                )
+                .changed()
+            {
+                crate::config::save_config(state);
+                crate::config::save_global_hardware_config(state);
+                changed = true;
+            }
+            if ui.button("Browse...").clicked() {
+                state.open_gamescope_script_dialog(ui.ctx());
+            }
+            let has_path = !state.gamescope_launcher_script.is_empty();
+            if ui
+                .add_enabled(has_path, egui::Button::new("Clear"))
+                .clicked()
+            {
+                state.gamescope_launcher_script.clear();
+                crate::config::save_config(state);
+                crate::config::save_global_hardware_config(state);
+                changed = true;
+            }
+        });
+    });
+
+    ui.add_space(4.0);
+
     // --- Webcam Overlay ---
     technical_group(ui, "Webcam Overlay:", |ui| {
         ui.horizontal_wrapped(|ui| {

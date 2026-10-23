@@ -292,7 +292,6 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             .rounding(egui::Rounding::ZERO);
                             if ui.add(gamescope_btn).clicked() {
                                 state.start_gamescope_hook(ui.ctx());
-                                state.info("Gamescope hook starting...");
                             }
 
                             let pc98_btn = egui::Button::new(
@@ -434,6 +433,57 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             state.set_master_volume(vol);
                             crate::config::save_config(state);
                             crate::config::save_global_hardware_config(state);
+                            changed = true;
+                        }
+                    });
+
+                    ui.add_space(5.0);
+
+                    // Row 5: Steam Game selector
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Steam Game:")
+                                .monospace()
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(150, 150, 150)),
+                        );
+                        let selected_game_text = state
+                            .selected_steam_game
+                            .as_ref()
+                            .and_then(|appid| {
+                                state
+                                    .steam_games
+                                    .iter()
+                                    .find(|g| &g.appid == appid)
+                                    .map(|g| g.name.as_str())
+                            })
+                            .unwrap_or("None");
+
+                        egui::ComboBox::from_id_source("steam_game_selector")
+                            .selected_text(selected_game_text)
+                            .width(240.0)
+                            .show_ui(ui, |ui| {
+                                let mut game_changed = ui
+                                    .selectable_value(&mut state.selected_steam_game, None, "None")
+                                    .changed();
+                                for game in &state.steam_games {
+                                    game_changed |= ui
+                                        .selectable_value(
+                                            &mut state.selected_steam_game,
+                                            Some(game.appid.clone()),
+                                            &game.name,
+                                        )
+                                        .changed();
+                                }
+                                if game_changed {
+                                    crate::config::save_config(state);
+                                    crate::config::save_global_hardware_config(state);
+                                    changed = true;
+                                }
+                            });
+
+                        if ui.button("Refresh").clicked() {
+                            state.refresh_steam_games();
                             changed = true;
                         }
                     });

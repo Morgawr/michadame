@@ -339,14 +339,63 @@ impl AppState {
             if let Some(profile) = profile_to_apply {
                 crate::config::apply_profile_to_state(self, &profile);
             }
+            crate::gamescope::steam::restore_steam_launch_wrappers();
         }
         self.frame_receiver = None;
         self.latest_frame = None;
         self.ui.video_window_open = false;
     }
 
+    pub fn refresh_steam_games(&mut self) {
+        self.steam_games = crate::gamescope::steam::scan_steam_games();
+        if let Some(ref selected) = self.selected_steam_game {
+            if !self.steam_games.iter().any(|g| &g.appid == selected) {
+                self.selected_steam_game = None;
+            }
+        }
+        self.info(format!(
+            "Found {} installed Steam games.",
+            self.steam_games.len()
+        ));
+    }
+
+    pub fn open_gamescope_script_dialog(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.gamescope_script_dialog_receiver = Some(rx);
+        let ctx_clone = ctx.clone();
+        let _ = std::thread::Builder::new()
+            .name("gamescope-script-picker".to_string())
+            .spawn(move || {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Shell scripts", &["sh"])
+                    .add_filter("All files", &["*"])
+                    .set_title("Select Gamescope Launcher Script")
+                    .pick_file()
+                {
+                    let _ = tx.send(path);
+                    ctx_clone.request_repaint();
+                }
+            });
+    }
+
     pub fn start_gamescope_hook(&mut self, ctx: &egui::Context) {
         self.stop_stream_resources();
+
+        if let Some(selected_appid) = self.selected_steam_game.clone() {
+            if let Some(game) = self
+                .steam_games
+                .iter()
+                .find(|g| g.appid == selected_appid)
+                .cloned()
+            {
+                let script = self.gamescope_launcher_script.clone();
+                if let Err(e) = crate::gamescope::steam::launch_steam_game(&game, &script) {
+                    self.error(format!("Failed to launch Steam game '{}': {e}", game.name));
+                    return;
+                }
+                self.info(format!("Launching '{}' via Steam...", game.name));
+            }
+        }
 
         // Stash current normal profile and capture card parameters
         let current_normal = crate::config::build_profile_from_state(self);
@@ -367,6 +416,7 @@ impl AppState {
         self.last_video_fps_check = self.last_fps_check;
         self.ui.video_window_open = true;
         self.ui.control_window_open = false;
+        self.fullscreen_toggle_frame_count = Some(0);
 
         let repaint_ctx = ctx.clone();
         let request_repaint = Arc::new(move || {
@@ -740,6 +790,7 @@ impl AppState {
         self.replay.sync_audio_filter();
         self.ui.video_window_open = true;
         self.ui.control_window_open = false;
+        self.fullscreen_toggle_frame_count = Some(0);
     }
 
     pub fn open_video_file_dialog(&mut self, ctx: &egui::Context) {
@@ -799,11 +850,15 @@ impl AppState {
                             egui::ViewportCommand::InnerSize(new_size),
                         );
                     }
+                    self.fullscreen_toggle_frame_count = Some(0);
                     self.info("Video file playback started.");
                 }
                 crate::video::player::PlayerEvent::Failed(err) => {
                     self.error(format!("Video file playback failed: {err}"));
                     self.stop_video_file();
+                    self.fullscreen_toggle_frame_count = None;
+                    self.ui.is_fullscreen = false;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
                     self.ui.video_window_open = false;
                     self.ui.control_window_open = true;
                 }
@@ -925,6 +980,7 @@ impl AppState {
         self.pc98.worker_thread = handle;
         self.ui.video_window_open = true;
         self.ui.control_window_open = false;
+        self.fullscreen_toggle_frame_count = Some(0);
         ctx.request_repaint();
     }
 
@@ -1071,6 +1127,9 @@ impl AppState {
                 crate::pc98::Pc98Event::Failed(err) => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
                     ctx.set_cursor_icon(egui::CursorIcon::Default);
+                    self.fullscreen_toggle_frame_count = None;
+                    self.ui.is_fullscreen = false;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
                     self.error(format!("PC-98 emulator error: {err}"));
                     self.stop_pc98_mode();
                     self.ui.video_window_open = false;
@@ -1230,6 +1289,7 @@ impl AppState {
         self.pc88.worker_thread = handle;
         self.ui.video_window_open = true;
         self.ui.control_window_open = false;
+        self.fullscreen_toggle_frame_count = Some(0);
         ctx.request_repaint();
     }
 
@@ -1352,6 +1412,9 @@ impl AppState {
                         egui::CursorGrab::None,
                     ));
                     ctx.set_cursor_icon(egui::CursorIcon::Default);
+                    self.fullscreen_toggle_frame_count = None;
+                    self.ui.is_fullscreen = false;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
                     self.error(format!("PC-88 emulator error: {err}"));
                     self.stop_pc88_mode();
                     self.ui.video_window_open = false;
