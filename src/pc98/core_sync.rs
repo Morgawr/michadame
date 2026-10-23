@@ -10,6 +10,8 @@ pub const NP2KAI_CORE_URL: &str =
     "https://buildbot.libretro.com/nightly/linux/x86_64/latest/np2kai_libretro.so.zip";
 
 const EMBEDDED_JP_FONT: &[u8] = include_bytes!("../../assets/NotoSansJP-Regular.ttf");
+pub const EMBEDDED_FDDSEEK_WAV: &[u8] = include_bytes!("../../assets/fddseek.wav");
+pub const EMBEDDED_FDDSEEK1_WAV: &[u8] = include_bytes!("../../assets/fddseek1.wav");
 
 pub fn pc98_base_dir() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
@@ -91,6 +93,16 @@ pub fn ensure_system_dir() -> Result<PathBuf> {
     // 3. Opportunistically seed FONT.ROM / font.bmp / sound.rom / BIOS ROMs if user has NekoProject2 or RetroArch files
     seed_optional_rom_files(&np2_dir);
 
+    // 4. Seed authentic NP2 floppy stepper motor seek WAV samples (fddseek.wav / fddseek1.wav)
+    let fddseek_wav = np2_dir.join("fddseek.wav");
+    if !fddseek_wav.exists() {
+        let _ = fs::write(&fddseek_wav, EMBEDDED_FDDSEEK_WAV);
+    }
+    let fddseek1_wav = np2_dir.join("fddseek1.wav");
+    if !fddseek1_wav.exists() {
+        let _ = fs::write(&fddseek1_wav, EMBEDDED_FDDSEEK1_WAV);
+    }
+
     Ok(sys_dir)
 }
 
@@ -116,6 +128,10 @@ fn seed_optional_rom_files(np2_dir: &Path) {
         ("SOUND.ROM", "sound.rom"),
         ("itf.rom", "itf.rom"),
         ("ITF.ROM", "itf.rom"),
+        ("fddseek.wav", "fddseek.wav"),
+        ("FDDSEEK.WAV", "fddseek.wav"),
+        ("fddseek1.wav", "fddseek1.wav"),
+        ("FDDSEEK1.WAV", "fddseek1.wav"),
         ("2608_bd.wav", "2608_bd.wav"),
         ("2608_sd.wav", "2608_sd.wav"),
         ("2608_top.wav", "2608_top.wav"),

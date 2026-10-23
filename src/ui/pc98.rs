@@ -506,9 +506,14 @@ fn draw_pc98_system_section(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     &mut state.pc98.config.floppy_seek_sound,
                     "Mechanical Floppy Drive Seek Sound",
                 )
-                .on_hover_text("Emulates the authentic mechanical stepper motor sounds of the PC-98 5.25\" / 3.5\" floppy drives")
+                .on_hover_text("Emulates the authentic mechanical stepper motor sounds of the PC-98 5.25\" / 3.5\" floppy drives (applies immediately)")
                 .changed()
             {
+                if state.pc98.is_active {
+                    state
+                        .pc98
+                        .send_command(Pc98Command::UpdateOptions(state.pc98.config.clone()));
+                }
                 config::save_config(state);
                 changed = true;
             }
@@ -1455,6 +1460,23 @@ fn draw_pc88_system_section(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 .on_hover_text("Emulates realistic floppy disk controller timing required by timing-sensitive PC-88 games")
                 .changed()
             {
+                config::save_config(state);
+                changed = true;
+            }
+
+            if col2
+                .checkbox(
+                    &mut state.pc88.config.floppy_seek_sound,
+                    "Mechanical Floppy Drive Seek Sound",
+                )
+                .on_hover_text("Emulates the authentic mechanical stepper motor sounds of the PC-88 5.25\" floppy drives (applies immediately)")
+                .changed()
+            {
+                if state.pc88.is_active {
+                    state
+                        .pc88
+                        .send_command(Pc88Command::UpdateOptions(state.pc88.config.clone()));
+                }
                 config::save_config(state);
                 changed = true;
             }

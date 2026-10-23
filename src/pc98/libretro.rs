@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender};
 use rodio::{Sink, Source};
 use std::collections::{BTreeMap, VecDeque};
-use std::ffi::{c_char, c_uint, c_void, CStr, CString};
+use std::ffi::{c_char, c_int, c_uint, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -150,6 +150,294 @@ impl Source for Pc98AudioSource {
     }
 }
 
+pub fn parse_wav_mono_f32(wav_bytes: &[u8]) -> Option<Vec<f32>> {
+    if wav_bytes.len() < 44 || &wav_bytes[0..4] != b"RIFF" || &wav_bytes[8..12] != b"WAVE" {
+        return None;
+    }
+
+    let mut pos = 12usize;
+    let mut audio_format = 1u16;
+    let mut channels = 1u16;
+    let mut bits_per_sample = 16u16;
+    let mut data_slice: Option<&[u8]> = None;
+
+    while pos + 8 <= wav_bytes.len() {
+        let chunk_id = &wav_bytes[pos..pos + 4];
+        let chunk_size = u32::from_le_bytes([
+            wav_bytes[pos + 4],
+            wav_bytes[pos + 5],
+            wav_bytes[pos + 6],
+            wav_bytes[pos + 7],
+        ]) as usize;
+        pos += 8;
+        let end = pos.saturating_add(chunk_size).min(wav_bytes.len());
+
+        if chunk_id == b"fmt " && end - pos >= 16 {
+            let fmt = &wav_bytes[pos..end];
+            audio_format = u16::from_le_bytes([fmt[0], fmt[1]]);
+            channels = u16::from_le_bytes([fmt[2], fmt[3]]).max(1);
+            bits_per_sample = u16::from_le_bytes([fmt[14], fmt[15]]);
+        } else if chunk_id == b"data" {
+            data_slice = Some(&wav_bytes[pos..end]);
+            break;
+        }
+
+        // RIFF chunks are word-aligned
+        pos = end + (chunk_size & 1);
+    }
+
+    if audio_format != 1 {
+        return None;
+    }
+    let raw = data_slice?;
+    let ch = channels as usize;
+
+    let mut out = Vec::new();
+    match bits_per_sample {
+        16 => {
+            let frame_bytes = 2 * ch;
+            if frame_bytes == 0 {
+                return None;
+            }
+            for frame in raw.chunks_exact(frame_bytes) {
+                let mut sum = 0.0f32;
+                for c in 0..ch {
+                    let s = i16::from_le_bytes([frame[c * 2], frame[c * 2 + 1]]);
+                    sum += (s as f32) / 32768.0;
+                }
+                out.push(sum / (ch as f32));
+            }
+        }
+        8 => {
+            if ch == 0 {
+                return None;
+            }
+            for frame in raw.chunks_exact(ch) {
+                let mut sum = 0.0f32;
+                for &b in frame {
+                    sum += ((b as f32) - 128.0) / 128.0;
+                }
+                out.push(sum / (ch as f32));
+            }
+        }
+        _ => return None,
+    }
+
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+pub struct SeekPcmChannel {
+    pub samples: Arc<[f32]>,
+    pub pos: usize,
+    pub playing: bool,
+    pub looping: bool,
+    pub volume: f32,
+}
+
+/// Mixes authentic NEC PC-98 / PC-88 mechanical floppy drive stepper motor seek sounds
+/// (`fddseek.wav` for multi-track seeks and `fddseek1.wav` for single-track head steps)
+/// directly into the 44.1 kHz stereo Libretro audio stream.
+pub struct FloppySeekMixer {
+    pub enabled: bool,
+    pub volume: f32,
+    pub channels: [SeekPcmChannel; 2],
+}
+
+impl FloppySeekMixer {
+    pub fn new(enabled: bool, volume_pct: u32) -> Self {
+        let np2_dir = super::core_sync::np2kai_system_subdir();
+
+        let mut seek_multi = std::fs::read(np2_dir.join("fddseek.wav"))
+            .ok()
+            .and_then(|b| parse_wav_mono_f32(&b))
+            .or_else(|| parse_wav_mono_f32(super::core_sync::EMBEDDED_FDDSEEK_WAV))
+            .unwrap_or_default();
+
+        // If `fddseek.wav` is the single-period 773-sample X11 loop (~17.5ms), expand it 17x
+        // (13,141 samples = ~298ms, matching win9x/resources/fddseek.wav) so non-looping calls
+        // from NP2kai's `fdc.c` (`soundmng_pcmplay(SOUND_PCMSEEK, FALSE)`) play the full
+        // multi-track stepper burst while looping calls from `fdd_mtr.c` loop seamlessly.
+        if !seek_multi.is_empty() && seek_multi.len() < 4000 {
+            let period = seek_multi.clone();
+            seek_multi.reserve(period.len() * 16);
+            for _ in 0..16 {
+                seek_multi.extend_from_slice(&period);
+            }
+        }
+
+        let seek_step = std::fs::read(np2_dir.join("fddseek1.wav"))
+            .ok()
+            .and_then(|b| parse_wav_mono_f32(&b))
+            .or_else(|| parse_wav_mono_f32(super::core_sync::EMBEDDED_FDDSEEK1_WAV))
+            .unwrap_or_default();
+
+        let vol = (volume_pct.clamp(0, 100) as f32) / 100.0;
+
+        Self {
+            enabled,
+            volume: vol,
+            channels: [
+                SeekPcmChannel {
+                    samples: Arc::from(seek_multi),
+                    pos: 0,
+                    playing: false,
+                    looping: false,
+                    volume: 1.0,
+                },
+                SeekPcmChannel {
+                    samples: Arc::from(seek_step),
+                    pos: 0,
+                    playing: false,
+                    looping: false,
+                    volume: 1.0,
+                },
+            ],
+        }
+    }
+
+    pub fn set_config(&mut self, enabled: bool, volume_pct: u32) {
+        self.enabled = enabled;
+        self.volume = (volume_pct.clamp(0, 100) as f32) / 100.0;
+        if !enabled {
+            for ch in &mut self.channels {
+                ch.playing = false;
+                ch.pos = 0;
+            }
+        }
+    }
+
+    pub fn play(&mut self, ch_idx: usize, looping: bool) {
+        if !self.enabled || ch_idx >= self.channels.len() {
+            return;
+        }
+        let ch = &mut self.channels[ch_idx];
+        if ch.samples.is_empty() {
+            return;
+        }
+        ch.looping = looping;
+        // Matches DirectSound `CSoundDeviceDSound3::PlayPCM` in NP21W:
+        // only reset `pos` to 0 when the channel is not already playing (or after `stop()`).
+        if !ch.playing {
+            ch.pos = 0;
+            ch.playing = true;
+        }
+    }
+
+    pub fn stop(&mut self, ch_idx: usize) {
+        if ch_idx < self.channels.len() {
+            let ch = &mut self.channels[ch_idx];
+            ch.playing = false;
+            ch.pos = 0;
+        }
+    }
+
+    pub fn set_channel_volume(&mut self, ch_idx: usize, vol_pct: i32) {
+        if ch_idx < self.channels.len() {
+            self.channels[ch_idx].volume = (vol_pct.clamp(0, 100) as f32) / 100.0;
+        }
+    }
+
+    pub fn mix_into_stereo(&mut self, stereo_samples: &mut [f32]) {
+        if !self.enabled || self.volume <= 0.0 {
+            for ch in &mut self.channels {
+                ch.playing = false;
+                ch.pos = 0;
+            }
+            return;
+        }
+        if !self.channels[0].playing && !self.channels[1].playing {
+            return;
+        }
+
+        let master_vol = self.volume;
+        for frame in stereo_samples.chunks_exact_mut(2) {
+            let mut seek_mono = 0.0f32;
+            for ch in &mut self.channels {
+                if ch.playing {
+                    if let Some(&s) = ch.samples.get(ch.pos) {
+                        seek_mono += s * ch.volume * master_vol;
+                    }
+                    ch.pos += 1;
+                    if ch.pos >= ch.samples.len() {
+                        if ch.looping && !ch.samples.is_empty() {
+                            ch.pos = 0;
+                        } else {
+                            ch.playing = false;
+                            ch.pos = 0;
+                        }
+                    }
+                }
+            }
+            if seek_mono != 0.0 {
+                frame[0] = (frame[0] + seek_mono).clamp(-1.0, 1.0);
+                frame[1] = (frame[1] + seek_mono).clamp(-1.0, 1.0);
+            }
+        }
+    }
+}
+
+/// Matches `pcm_channel_t` in NP2kai's `x11/soundmng.c`.
+#[repr(C)]
+struct Np2PcmChannel {
+    cookie: *mut c_void,
+    path: *mut c_char,
+    volume: c_int,
+}
+
+static mut NP2_PCM_CHANNELS: [Np2PcmChannel; 3] = [
+    Np2PcmChannel {
+        cookie: 1usize as *mut c_void,
+        path: std::ptr::null_mut(),
+        volume: 80,
+    },
+    Np2PcmChannel {
+        cookie: 2usize as *mut c_void,
+        path: std::ptr::null_mut(),
+        volume: 80,
+    },
+    Np2PcmChannel {
+        cookie: 3usize as *mut c_void,
+        path: std::ptr::null_mut(),
+        volume: 80,
+    },
+];
+
+unsafe extern "C" fn np2_snddrv_pcmplay(
+    _cookie: *mut c_void,
+    num: c_uint,
+    loop_flag: c_int,
+) {
+    if let Ok(mut guard) = ACTIVE_BRIDGE.lock() {
+        if let Some(ctx) = guard.as_mut() {
+            ctx.seek_mixer.play(num as usize, loop_flag != 0);
+        }
+    }
+}
+
+unsafe extern "C" fn np2_snddrv_pcmstop(_cookie: *mut c_void, num: c_uint) {
+    if let Ok(mut guard) = ACTIVE_BRIDGE.lock() {
+        if let Some(ctx) = guard.as_mut() {
+            ctx.seek_mixer.stop(num as usize);
+        }
+    }
+}
+
+unsafe extern "C" fn np2_snddrv_pcmvolume(
+    _cookie: *mut c_void,
+    num: c_uint,
+    volume: c_int,
+) {
+    if let Ok(mut guard) = ACTIVE_BRIDGE.lock() {
+        if let Some(ctx) = guard.as_mut() {
+            ctx.seek_mixer.set_channel_volume(num as usize, volume);
+        }
+    }
+}
+
 struct BridgeContext {
     sys_dir_cstr: CString,
     save_dir_cstr: CString,
@@ -172,6 +460,7 @@ struct BridgeContext {
     peak_amplitude: Arc<AtomicU64>,
     audio_latency_ms: Arc<AtomicU64>,
     replay_audio: Arc<crate::replay::AudioTap>,
+    seek_mixer: FloppySeekMixer,
 }
 
 static ACTIVE_BRIDGE: Mutex<Option<Box<BridgeContext>>> = Mutex::new(None);
@@ -489,13 +778,19 @@ unsafe extern "C" fn retro_audio_sample_batch_cb(data: *const i16, frames: usize
     let sample_count = frames.saturating_mul(2);
     let raw_samples = std::slice::from_raw_parts(data, sample_count);
 
+    let mut f32_samples = Vec::with_capacity(sample_count);
+    for &s in raw_samples {
+        f32_samples.push((s as f32) / 32768.0);
+    }
+
     let (audio_queue, peak_amplitude, audio_latency_ms, replay_audio) = {
-        let Ok(guard) = ACTIVE_BRIDGE.lock() else {
+        let Ok(mut guard) = ACTIVE_BRIDGE.lock() else {
             return frames;
         };
-        let Some(ctx) = guard.as_ref() else {
+        let Some(ctx) = guard.as_mut() else {
             return frames;
         };
+        ctx.seek_mixer.mix_into_stereo(&mut f32_samples);
         (
             ctx.audio_queue.clone(),
             ctx.peak_amplitude.clone(),
@@ -504,15 +799,12 @@ unsafe extern "C" fn retro_audio_sample_batch_cb(data: *const i16, frames: usize
         )
     };
 
-    let mut f32_samples = Vec::with_capacity(sample_count);
     let mut max_abs = 0.0f32;
-    for &s in raw_samples {
-        let val = (s as f32) / 32768.0;
+    for &val in &f32_samples {
         let abs = val.abs();
         if abs > max_abs {
             max_abs = abs;
         }
-        f32_samples.push(val);
     }
 
     let peak_bits = (max_abs * 1000.0) as u64;
@@ -717,6 +1009,10 @@ pub fn run_pc98_worker(params: Pc98WorkerParams) -> Result<()> {
             peak_amplitude: params.peak_amplitude,
             audio_latency_ms: params.audio_latency_ms,
             replay_audio: params.replay_audio,
+            seek_mixer: FloppySeekMixer::new(
+                params.config.floppy_seek_sound,
+                params.config.floppy_seek_volume,
+            ),
         }));
     }
 
@@ -882,14 +1178,42 @@ unsafe fn run_loaded_core(
 
     // Locate NP2kai's 1MB base RAM buffer (`mem`, symbol offset 0x1599260 relative to
     // `retro_get_memory_data` at 0x16d7a0) and verify the x86 reset vector `JMP FAR` (0xEA) at 0xFFFF0.
-    let pc98_mem_base: Option<*const u8> = retro_get_memory_data.as_ref().and_then(|sym| {
+    let np2_elf_base: Option<usize> = retro_get_memory_data.as_ref().and_then(|sym| {
         let fn_addr = (**sym) as usize;
         if fn_addr <= 0x16d7a0 {
             return None;
         }
-        let candidate = (fn_addr - 0x16d7a0 + 0x1599260) as *const u8;
+        let elf_base = fn_addr - 0x16d7a0;
+        let candidate = (elf_base + 0x1599260) as *const u8;
         if *candidate.add(0xFFFF0) == 0xEA {
-            Some(candidate)
+            Some(elf_base)
+        } else {
+            None
+        }
+    });
+    let pc98_mem_base: Option<*const u8> =
+        np2_elf_base.map(|elf_base| (elf_base + 0x1599260) as *const u8);
+
+    // Hook NP2kai's `x11/soundmng.c` PCM driver (`snddrv` at 0x4f12c0 and `pcm_channel` at 0x4f1280).
+    // Upstream `np2kai_libretro.so` compiles `soundmng.c` with `nosound_setup()`, leaving
+    // `snddrv.pcmplay` (0x4f1300 -> 0xc28d0) and `snddrv.pcmstop` (0x4f1308 -> 0xc28f0) as no-op
+    // stubs and `pcm_channel[0..2]` as NULL, which previously silenced FDC/FDD seek sounds.
+    let pcm_channel_table: Option<*mut *mut Np2PcmChannel> = np2_elf_base.and_then(|elf_base| {
+        let pcmplay_slot = (elf_base + 0x4f1300) as *mut usize;
+        let pcmstop_slot = (elf_base + 0x4f1308) as *mut usize;
+        let pcmvol_slot = (elf_base + 0x4f1310) as *mut usize;
+        if *pcmplay_slot == elf_base + 0xc28d0 && *pcmstop_slot == elf_base + 0xc28f0 {
+            let chan_table = (elf_base + 0x4f1280) as *mut *mut Np2PcmChannel;
+            let vol = initial_config.floppy_seek_volume.clamp(0, 100) as c_int;
+            for i in 0..3 {
+                let chan_ptr = std::ptr::addr_of_mut!(NP2_PCM_CHANNELS[i]);
+                (*chan_ptr).volume = vol;
+                *chan_table.add(i) = chan_ptr;
+            }
+            *pcmplay_slot = np2_snddrv_pcmplay as *const () as usize;
+            *pcmstop_slot = np2_snddrv_pcmstop as *const () as usize;
+            *pcmvol_slot = np2_snddrv_pcmvolume as *const () as usize;
+            Some(chan_table)
         } else {
             None
         }
@@ -1049,8 +1373,16 @@ unsafe fn run_loaded_core(
                 Pc98Command::UpdateOptions(new_cfg) => {
                     if let Ok(mut guard) = ACTIVE_BRIDGE.lock() {
                         if let Some(ctx) = guard.as_mut() {
+                            let prev_drive = ctx.variables.get("np2kai_drive").cloned();
                             ctx.variables = build_core_variables(&new_cfg);
+                            if let Some(drv) = prev_drive {
+                                ctx.variables.insert("np2kai_drive".to_string(), drv);
+                            }
                             ctx.variables_dirty = true;
+                            ctx.seek_mixer.set_config(
+                                new_cfg.floppy_seek_sound,
+                                new_cfg.floppy_seek_volume,
+                            );
                         }
                     }
                 }
@@ -1069,6 +1401,12 @@ unsafe fn run_loaded_core(
             std::thread::sleep(next_frame_instant - now);
         } else if now - next_frame_instant > frame_duration * 3 {
             next_frame_instant = now;
+        }
+    }
+
+    if let Some(chan_table) = pcm_channel_table {
+        for i in 0..3 {
+            *chan_table.add(i) = std::ptr::null_mut();
         }
     }
 
@@ -1113,6 +1451,32 @@ mod tests {
         assert_eq!(
             vars.get("np2kai_inputmouse").unwrap().to_str().unwrap(),
             "ON"
+        );
+    }
+
+    #[test]
+    fn test_embedded_floppy_seek_wavs_parse_and_mix() {
+        let seek0 = parse_wav_mono_f32(super::super::core_sync::EMBEDDED_FDDSEEK_WAV)
+            .expect("embedded fddseek.wav should parse");
+        let seek1 = parse_wav_mono_f32(super::super::core_sync::EMBEDDED_FDDSEEK1_WAV)
+            .expect("embedded fddseek1.wav should parse");
+        assert_eq!(seek0.len(), 773);
+        assert_eq!(seek1.len(), 3439);
+
+        let mut mixer = FloppySeekMixer::new(true, 80);
+        // Channel 0 (SOUND_PCMSEEK) expands 773 * 17 = 13,141 samples
+        assert_eq!(mixer.channels[0].samples.len(), 773 * 17);
+        assert_eq!(mixer.channels[1].samples.len(), 3439);
+
+        // Trigger single-track step (channel 1) and verify non-zero audio is mixed into silence
+        mixer.play(1, false);
+        assert!(mixer.channels[1].playing);
+        let mut stereo_buf = vec![0.0f32; 512];
+        mixer.mix_into_stereo(&mut stereo_buf);
+        let max_mixed = stereo_buf.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        assert!(
+            max_mixed > 0.05,
+            "Expected audible seek step waveform, got max_abs={max_mixed}"
         );
     }
 }

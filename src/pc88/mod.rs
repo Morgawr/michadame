@@ -73,6 +73,12 @@ pub struct Pc88Config {
     /// Also send Numpad 8/2/4/6 when pressing Arrow keys (many PC-88 games only read numpad for movement).
     #[serde(default = "default_true")]
     pub numpad_arrow_keys: bool,
+    /// Emulate mechanical floppy drive stepper motor seek sounds on FDC access.
+    #[serde(default = "default_true")]
+    pub floppy_seek_sound: bool,
+    /// Volume (0..=100) for mechanical floppy drive seek sounds.
+    #[serde(default = "default_pc88_floppy_seek_volume")]
+    pub floppy_seek_volume: u32,
     /// Mouse speed multiplier when passthrough is active (`0.05..=2.0`, default `0.40`).
     #[serde(default = "default_pc88_mouse_sensitivity")]
     pub mouse_sensitivity: f32,
@@ -102,6 +108,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_pc88_floppy_seek_volume() -> u32 {
+    80
+}
+
 fn default_pc88_mouse_sensitivity() -> f32 {
     0.40
 }
@@ -123,6 +133,8 @@ impl Default for Pc88Config {
             screen_size: default_pc88_screen_size(),
             save_to_disk_image: true,
             numpad_arrow_keys: true,
+            floppy_seek_sound: true,
+            floppy_seek_volume: default_pc88_floppy_seek_volume(),
             mouse_sensitivity: default_pc88_mouse_sensitivity(),
         }
     }

@@ -2,7 +2,7 @@ use super::core_sync::{ensure_pc88_system_dir, ensure_quasi88_core, pc88_base_di
 use super::{Pc88Command, Pc88Config, Pc88Event};
 use crate::pc98::input::RETROK_F12;
 use crate::pc98::libretro::{
-    convert_rgb1555_to_rgba, convert_rgb565_to_rgba, convert_xrgb8888_to_rgba,
+    convert_rgb1555_to_rgba, convert_rgb565_to_rgba, convert_xrgb8888_to_rgba, FloppySeekMixer,
 };
 use crate::pc98::Pc98InputState;
 use crate::video::types::{ColorRange, RawFrame};
@@ -137,10 +137,29 @@ type RetroInputStateFn =
 
 unsafe extern "C" fn dummy_rumble_set(
     _port: c_uint,
-    _effect: c_uint,
-    _strength: u16,
+    effect: c_uint,
+    strength: u16,
 ) -> bool {
-    false
+    if effect == 0 {
+        with_bridge_ctx(|ctx| {
+            if strength > 0 {
+                if ctx.rumble_seek_frames == 0 {
+                    ctx.seek_mixer.stop(1);
+                    ctx.seek_mixer.play(1, false);
+                    ctx.rumble_seek_frames = 1;
+                } else {
+                    ctx.rumble_seek_frames = ctx.rumble_seek_frames.saturating_add(1);
+                    if ctx.rumble_seek_frames >= 2 {
+                        ctx.seek_mixer.play(0, true);
+                    }
+                }
+            } else if ctx.rumble_seek_frames > 0 {
+                ctx.seek_mixer.stop(0);
+                ctx.rumble_seek_frames = 0;
+            }
+        });
+    }
+    true
 }
 
 unsafe extern "C" fn dummy_env_cb(_cmd: c_uint, _data: *mut c_void) -> bool {
@@ -216,6 +235,8 @@ struct LibretroBridgeContext {
     latched_mouse_left: bool,
     latched_mouse_right: bool,
     latched_mouse_middle: bool,
+    seek_mixer: FloppySeekMixer,
+    rumble_seek_frames: u32,
 }
 
 static ACTIVE_PC88_BRIDGE: Mutex<Option<Box<LibretroBridgeContext>>> = Mutex::new(None);
@@ -260,7 +281,14 @@ pub fn populate_quasi88_variables(
             "disabled"
         },
     );
-    set_var("q88_rumble", "disabled");
+    set_var(
+        "q88_rumble",
+        if config.floppy_seek_sound {
+            "enabled"
+        } else {
+            "disabled"
+        },
+    );
 }
 
 unsafe extern "C" fn bridge_environment_cb(cmd: c_uint, data: *mut c_void) -> bool {
@@ -543,13 +571,19 @@ unsafe extern "C" fn bridge_audio_sample_batch_cb(data: *const i16, frames: usiz
     let sample_count = frames.saturating_mul(2);
     let raw_samples = std::slice::from_raw_parts(data, sample_count);
 
+    let mut f32_samples = Vec::with_capacity(sample_count);
+    for &s in raw_samples {
+        f32_samples.push((s as f32) / 32768.0);
+    }
+
     let (audio_queue, peak_amplitude, audio_latency_ms, replay_audio) = {
-        let Ok(guard) = ACTIVE_PC88_BRIDGE.lock() else {
+        let Ok(mut guard) = ACTIVE_PC88_BRIDGE.lock() else {
             return frames;
         };
-        let Some(ctx) = guard.as_ref() else {
+        let Some(ctx) = guard.as_mut() else {
             return frames;
         };
+        ctx.seek_mixer.mix_into_stereo(&mut f32_samples);
         (
             ctx.audio_queue.clone(),
             ctx.peak_amplitude.clone(),
@@ -558,15 +592,12 @@ unsafe extern "C" fn bridge_audio_sample_batch_cb(data: *const i16, frames: usiz
         )
     };
 
-    let mut f32_samples = Vec::with_capacity(sample_count);
     let mut max_abs = 0.0f32;
-    for &s in raw_samples {
-        let val = (s as f32) / 32768.0;
+    for &val in &f32_samples {
         let abs = val.abs();
         if abs > max_abs {
             max_abs = abs;
         }
-        f32_samples.push(val);
     }
 
     let peak_bits = (max_abs * 1000.0) as u64;
@@ -857,6 +888,11 @@ pub fn run_pc88_worker(params: Pc88WorkerParams) -> Result<()> {
             latched_mouse_left: false,
             latched_mouse_right: false,
             latched_mouse_middle: false,
+            seek_mixer: FloppySeekMixer::new(
+                params.config.floppy_seek_sound,
+                params.config.floppy_seek_volume,
+            ),
+            rumble_seek_frames: 0,
         }));
     }
 
@@ -1105,6 +1141,10 @@ unsafe fn run_loaded_core(
                     with_bridge_ctx(|ctx| {
                         populate_quasi88_variables(&mut ctx.variables, &new_cfg);
                         ctx.variables_dirty = true;
+                        ctx.seek_mixer.set_config(
+                            new_cfg.floppy_seek_sound,
+                            new_cfg.floppy_seek_volume,
+                        );
                     });
                 }
             }
