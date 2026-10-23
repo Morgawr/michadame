@@ -645,4 +645,71 @@ mod tests {
         assert_eq!(halo_working_resolution((3840, 2160), true), (3840, 2160));
         assert_eq!(halo_working_resolution((640, 400), false), (640, 400));
     }
+
+    #[test]
+    fn test_halo_4k_scanline_profile_has_no_corner_banding() {
+        fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+            let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        }
+
+        let source_y: f32 = 2160.0;
+        let out_y: f32 = 2160.0;
+        let sy = if source_y > 1080.0 {
+            source_y / 540.0
+        } else if source_y >= 360.0 {
+            2.0
+        } else {
+            1.0
+        };
+        let scan_source_y = source_y / sy;
+        assert_eq!(scan_source_y, 540.0);
+
+        let scanline_rate = scan_source_y / out_y;
+        let moire_factor = smoothstep(0.18, 0.45, scanline_rate);
+        let bandlimit_mix = smoothstep(0.12, 0.22, scanline_rate);
+
+        let mc: f32 = 0.18;
+        let beam_min: f32 = 1.80;
+        let beam_max: f32 = 1.65;
+        let beam_size: f32 = 1.25;
+        let b1 = mc.powf(1.8 + (0.4 - 1.8) * (beam_size / 2.0));
+        let tmp = beam_min + (beam_max / beam_size.sqrt() - beam_min) * b1;
+
+        let mid_scale = 7.0 / (1.0 + 0.6 * moire_factor);
+        let trough = (2.0 * (-mid_scale * 0.25 * tmp * tmp).exp2()).clamp(0.10, 1.0);
+        let trough_gamma = trough.powf(1.0 / 2.4) * (1.0 - moire_factor) + moire_factor;
+
+        // Sweep sub-scanline phase f0 across [0, 1) as Warp() does from center to corners
+        let mut min_cycle_avg = f32::MAX;
+        let mut max_cycle_avg = f32::MIN;
+        for step in 0..100 {
+            let f0 = step as f32 / 100.0;
+            let mut sum_gamma = 0.0f32;
+            for row in 0..4 {
+                let f = (f0 + row as f32 * scanline_rate).fract();
+                let eff_scale1 = (6.0 + 2.0 * f) / (1.0 + 0.6 * moire_factor);
+                let eff_scale2 = (6.0 + 2.0 * (1.0 - f)) / (1.0 + 0.6 * moire_factor);
+                let w1 = (-eff_scale1 * (f * tmp).powi(2)).exp2();
+                let w2 = (-eff_scale2 * ((1.0 - f) * tmp).powi(2)).exp2();
+                let w_sum = w1 + w2;
+                let w_raw = w_sum.min(1.0);
+                let cos_wave = 0.5 + 0.5 * (std::f32::consts::TAU * f).cos();
+                let w_cos = (trough_gamma + (1.0 - trough_gamma) * cos_wave).powf(2.4);
+                let w_raw_atten = w_raw * (1.0 - moire_factor) + moire_factor;
+                let target_sum = w_raw_atten * (1.0 - bandlimit_mix) + w_cos * bandlimit_mix;
+                let display_val = (mc * target_sum).powf(1.0 / 2.4);
+                sum_gamma += display_val;
+            }
+            let avg = sum_gamma / 4.0;
+            min_cycle_avg = min_cycle_avg.min(avg);
+            max_cycle_avg = max_cycle_avg.max(avg);
+        }
+
+        assert!(
+            (max_cycle_avg - min_cycle_avg) < 1e-5,
+            "4K scanline phase sweep should have zero macroscopic brightness banding, got diff {}",
+            max_cycle_avg - min_cycle_avg
+        );
+    }
 }

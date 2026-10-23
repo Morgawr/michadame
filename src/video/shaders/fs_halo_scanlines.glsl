@@ -86,8 +86,9 @@ void main() {
     // When capturing retro 240p consoles (Saturn, PS1, SNES, Genesis, etc.), capture cards output
     // 480i or 480p (SourceSize.y around 480-576). Drawing 480 scanlines on a window (<960p)
     // cuts sprite pixels in half and severely violates Nyquist sampling rate (causing moiré).
-    // Halving sy for SourceSize.y >= 360 restores the authentic 240-scanline CRT raster.
-    float sy = SourceSize.y >= 360.0 ? 2.0 : 1.0;
+    // Halving sy for SourceSize.y >= 360 restores the authentic 240-scanline CRT raster, while
+    // capping >1080p sources (e.g. 1440p/4K) at 540 scanlines avoids Nyquist aliasing on 4K displays.
+    float sy = SourceSize.y > 1080.0 ? (SourceSize.y / 540.0) : (SourceSize.y >= 360.0 ? 2.0 : 1.0);
     vec2 scan_source_size = vec2(SourceSize.x, SourceSize.y / sy);
 
     vec2 ps = 1.0 / SourceSize;
@@ -139,14 +140,14 @@ void main() {
     vec3 edge_detail2 = 0.5 * (l1_2 + r1_2) - 0.25 * (l2_2 + r2_2 + l1_2 + r1_2);
     color2 = clamp(color2 + edge_detail2 * peak_str, 0.0, 1.0);
 
-    // Anti-moiré band-limiting using screen-space derivatives:
-    // scanline_rate is the vertical rate of change of scanline coordinate per display pixel.
-    float scanline_rate = length(vec2(dFdx(OGL2Pos.y), dFdy(OGL2Pos.y)));
+    // Anti-moiré band-limiting:
+    // scanline_rate is the vertical scanline frequency in cycles per display pixel.
+    float active_out_h = max(outputResolution.y * scale.y * zoom_scale.y, 1.0);
+    float scanline_rate = scan_source_size.y / active_out_h;
 
     // In windowed mode or low resolutions where display pixels per scanline is small (< 3.0),
-    // smoothly raise the beam floor and soften beam exponent to completely prevent Nyquist moiré rings.
+    // smoothly attenuate scanline depth and band-limit harmonics to prevent Nyquist moiré rings.
     float moire_factor = smoothstep(0.18, 0.45, scanline_rate);
-    float min_floor = mix(0.10, 0.70, moire_factor);
 
     // Beam profiles
     const float scanline1 = 6.0;
@@ -169,18 +170,23 @@ void main() {
     vec3 w1 = exp2(-eff_scale1 * ex1 * ex1 * vec3(1.0));
     vec3 w2 = exp2(-eff_scale2 * ex2 * ex2 * vec3(1.0));
 
-    // Clamp trough floor based on anti-moiré factor:
+    // Band-limit higher scanline harmonics into a fundamental raised-cosine profile in gamma space
+    // and smoothly attenuate toward 1.0 near Nyquist instead of hard-clipping a trough floor:
     float w_sum = w1.r + w2.r;
-    float target_sum = max(w_sum, min_floor);
+    float w_raw = min(w_sum, 1.0);
+    float mid_scale = 7.0 / (1.0 + 0.6 * moire_factor);
+    float trough = clamp(
+        exp2(-mid_scale * 0.25 * tmp1 * tmp1) + exp2(-mid_scale * 0.25 * tmp2 * tmp2),
+        0.10,
+        1.0
+    );
+    float cos_wave = 0.5 + 0.5 * cos(6.2831853 * f);
+    float trough_gamma = mix(pow(trough, 1.0 / 2.4), 1.0, moire_factor);
+    float w_cos = pow(mix(trough_gamma, 1.0, cos_wave), 2.4);
+    float bandlimit_mix = smoothstep(0.12, 0.22, scanline_rate);
+    float target_sum = mix(mix(w_raw, 1.0, moire_factor), w_cos, bandlimit_mix);
     w1 = w1 / max(w_sum, 0.001) * target_sum;
     w2 = w2 / max(w_sum, 0.001) * target_sum;
-
-    vec3 w12 = w1 + w2;
-    float wf1 = max(max(w12.r, w12.g), w12.b);
-    if (wf1 > 1.0) {
-        w1 /= wf1;
-        w2 /= wf1;
-    }
 
     vec3 color = color1 * w1 + color2 * w2;
     out_color = vec4(color * cval, cval);
