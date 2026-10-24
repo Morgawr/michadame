@@ -66,6 +66,11 @@ pub struct TwitchConfig {
     pub preroll_enabled: bool,
     /// Absolute or relative path to the pre-roll video file on disk.
     pub preroll_video_path: String,
+
+    /// Play an outro video when ending a Twitch stream.
+    pub outro_enabled: bool,
+    /// Absolute or relative path to the outro video file on disk.
+    pub outro_video_path: String,
 }
 
 impl Default for TwitchConfig {
@@ -104,6 +109,9 @@ impl Default for TwitchConfig {
 
             preroll_enabled: false,
             preroll_video_path: String::new(),
+
+            outro_enabled: false,
+            outro_video_path: String::new(),
         }
     }
 }

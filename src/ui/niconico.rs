@@ -17,7 +17,7 @@ enum Piece {
 
 /// Lay out comments for this frame and pass them to the renderer.
 pub fn update(state: &mut AppState, ctx: &egui::Context, video_rect: Rect) {
-    if state.twitch.preroll.is_some() {
+    if state.twitch.is_roll_active() {
         if let Some(r) = &state.crt_renderer {
             r.lock().unwrap().comment_primitives = Vec::new();
         }

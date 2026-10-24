@@ -142,9 +142,11 @@ pub struct TwitchState {
     pub audio_tap: Option<Arc<crate::replay::AudioTap>>,
     pub clips: clips::ClipManager,
 
-    // Pre-roll video player
+    // Pre-roll & outro video players
     pub preroll: Option<PrerollPlayer>,
     pub preroll_file_dialog_receiver: Option<Receiver<std::path::PathBuf>>,
+    pub outro: Option<PrerollPlayer>,
+    pub outro_file_dialog_receiver: Option<Receiver<std::path::PathBuf>>,
     stream_key_receiver: Option<Receiver<Result<String, String>>>,
 
     self_display_name: Option<String>,
@@ -193,6 +195,8 @@ impl Default for TwitchState {
             clips: clips::ClipManager::default(),
             preroll: None,
             preroll_file_dialog_receiver: None,
+            outro: None,
+            outro_file_dialog_receiver: None,
             stream_key_receiver: None,
             self_display_name: None,
             self_color: None,
@@ -269,7 +273,17 @@ impl TwitchState {
     }
 
     pub fn is_broadcasting(&self) -> bool {
-        self.broadcast.as_ref().map_or(false, |b| b.is_live()) || self.preroll.is_some()
+        self.broadcast.as_ref().map_or(false, |b| b.is_live())
+            || self.preroll.is_some()
+            || self.outro.is_some()
+    }
+
+    pub fn is_roll_active(&self) -> bool {
+        self.preroll.is_some() || self.outro.is_some()
+    }
+
+    pub fn can_end_with_outro(&self) -> bool {
+        self.preroll.is_none() && self.outro.is_none()
     }
 
     /// Returns true if Michadame is broadcasting or Twitch reports the channel as Live.
@@ -373,6 +387,32 @@ impl TwitchState {
         self.preroll.as_ref().and_then(|p| p.latest_frame.clone())
     }
 
+    pub fn outro_remaining_secs(&self) -> Option<f64> {
+        self.outro.as_ref().map(|p| p.remaining_secs())
+    }
+
+    pub fn outro_fade_alpha(&self) -> f32 {
+        self.outro.as_ref().map(|p| p.fade_alpha()).unwrap_or(0.0)
+    }
+
+    pub fn roll_fade_alpha(&self) -> f32 {
+        if self.preroll.is_some() {
+            self.preroll_fade_alpha()
+        } else if self.outro.is_some() {
+            self.outro_fade_alpha()
+        } else {
+            0.0
+        }
+    }
+
+    pub fn is_outro_in_fade_out(&self) -> bool {
+        self.outro.as_ref().map(|p| p.is_in_fade_out_phase()).unwrap_or(false)
+    }
+
+    pub fn outro_frame(&self) -> Option<Arc<crate::video::types::RawFrame>> {
+        self.outro.as_ref().and_then(|p| p.latest_frame.clone())
+    }
+
     pub fn viewer_count(&self) -> Option<u32> {
         match self.stream_status {
             StreamStatus::Live { viewer_count, .. } => viewer_count,
@@ -414,6 +454,11 @@ impl TwitchState {
             None
         };
 
+        if let Some(mut player) = self.outro.take() {
+            player.stop();
+        }
+        self.audio_tap = Some(audio_tap.clone());
+
         let config = broadcast::BroadcastConfig {
             video_bitrate_kbps: self.config.video_bitrate_kbps,
             audio_bitrate_kbps: self.config.audio_bitrate_kbps,
@@ -453,13 +498,70 @@ impl TwitchState {
     }
 
     pub fn stop_broadcast(&mut self) {
-        if let Some(mut player) = self.preroll.take() {
-            player.stop();
-        }
         if let Some(mut handle) = self.broadcast.take() {
             handle.stop();
             self.broadcast_last_status = None;
             self.notify_info("Twitch broadcast stopped");
+        }
+        if let Some(mut player) = self.preroll.take() {
+            player.stop();
+        }
+        if let Some(mut player) = self.outro.take() {
+            player.stop();
+        }
+        if let Some(tap) = &self.audio_tap {
+            tap.set_broadcast_preroll_active(false);
+        }
+    }
+
+    /// Ends the broadcast normally: if an outro video is enabled and selected, transitions
+    /// to playing the outro video until it finishes, then stops the Twitch connection.
+    /// Does nothing if the pre-roll (intro) or outro is currently playing.
+    pub fn stop_broadcast_with_outro(&mut self, ctx: &egui::Context) {
+        if !self.can_end_with_outro() {
+            return;
+        }
+        if self.broadcast.is_none() {
+            return;
+        }
+
+        let outro_path = if self.config.outro_enabled {
+            let trimmed = self.config.outro_video_path.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(std::path::PathBuf::from(trimmed))
+            }
+        } else {
+            None
+        };
+
+        if let Some(path) = outro_path {
+            if !path.exists() {
+                let err = format!("Outro video file not found: {:?}", path);
+                self.notify_error(&err);
+                self.stop_broadcast();
+                return;
+            }
+            let audio_tap = self
+                .audio_tap
+                .clone()
+                .unwrap_or_else(|| Arc::new(crate::replay::AudioTap::default()));
+            let ctx_clone = ctx.clone();
+            let repaint = Arc::new(move || ctx_clone.request_repaint());
+            match PrerollPlayer::start_outro(path, audio_tap, repaint) {
+                Ok(player) => {
+                    self.outro = Some(player);
+                    self.notify_info("Playing outro video before stopping stream…");
+                }
+                Err(e) => {
+                    let msg = format!("Failed to start outro video: {e:#}");
+                    self.notify_error(&msg);
+                    self.stop_broadcast();
+                }
+            }
+        } else {
+            self.stop_broadcast();
         }
     }
 
@@ -480,6 +582,31 @@ impl TwitchState {
                     )
                     .add_filter("All files", &["*"])
                     .set_title("Select Pre-Roll Video File")
+                    .pick_file()
+                {
+                    let _ = tx.send(path);
+                    ctx_clone.request_repaint();
+                }
+            });
+    }
+
+    pub fn open_outro_file_dialog(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.outro_file_dialog_receiver = Some(rx);
+        let ctx_clone = ctx.clone();
+        let _ = std::thread::Builder::new()
+            .name("outro-file-picker".to_string())
+            .spawn(move || {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter(
+                        "Video files",
+                        &[
+                            "mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "m4v", "ts", "mpg",
+                            "mpeg", "vob", "ogv", "3gp",
+                        ],
+                    )
+                    .add_filter("All files", &["*"])
+                    .set_title("Select Outro Video File")
                     .pick_file()
                 {
                     let _ = tx.send(path);
@@ -580,6 +707,9 @@ impl TwitchState {
                 if let Some(mut player) = self.preroll.take() {
                     player.stop();
                 }
+                if let Some(mut player) = self.outro.take() {
+                    player.stop();
+                }
                 changed = true;
             } else if self.broadcast_last_status.as_ref() != Some(&status) {
                 self.broadcast_last_status = Some(status);
@@ -590,6 +720,14 @@ impl TwitchState {
         if let Some(rx) = &self.preroll_file_dialog_receiver {
             if let Ok(path) = rx.try_recv() {
                 self.config.preroll_video_path = path.to_string_lossy().to_string();
+                self.config_dirty = true;
+                changed = true;
+            }
+        }
+
+        if let Some(rx) = &self.outro_file_dialog_receiver {
+            if let Ok(path) = rx.try_recv() {
+                self.config.outro_video_path = path.to_string_lossy().to_string();
                 self.config_dirty = true;
                 changed = true;
             }
@@ -626,8 +764,23 @@ impl TwitchState {
             changed = true;
         }
 
-        if self.broadcast.is_none() && self.preroll.is_some() {
+        let mut outro_finished = false;
+        if let Some(player) = &mut self.outro {
+            let _ = player.poll_frame();
+            if player.is_completed() {
+                outro_finished = true;
+            }
+            changed = true;
+        }
+        if outro_finished {
+            self.stop_broadcast();
+        }
+
+        if self.broadcast.is_none() && (self.preroll.is_some() || self.outro.is_some()) {
             if let Some(mut player) = self.preroll.take() {
+                player.stop();
+            }
+            if let Some(mut player) = self.outro.take() {
                 player.stop();
             }
             changed = true;
@@ -729,7 +882,7 @@ impl TwitchState {
             ctx.request_repaint();
             changed = true;
         }
-        if self.config.alerts_enabled && self.alerts.take_just_activated() {
+        if self.config.alerts_enabled && self.alerts.take_just_activated() && !self.is_roll_active() {
             self.play_alert_sound();
         }
 
@@ -1837,5 +1990,93 @@ mod tests {
         assert!(!state.is_own_live_stream());
         assert!(!state.was_stream_live);
         assert!(state.warmup_clip_deadline.is_none());
+    }
+
+    fn make_mock_roll_player(mode: preroll::RollMode, audio_tap: Arc<crate::replay::AudioTap>) -> PrerollPlayer {
+        audio_tap.set_broadcast_preroll_active(true);
+        PrerollPlayer {
+            mode,
+            duration_secs: 10.0,
+            position_us: Arc::new( std::sync::atomic::AtomicI64::new(0)),
+            is_finished: Arc::new(AtomicBool::new(false)),
+            stop_requested: Arc::new(AtomicBool::new(false)),
+            frame_rx: crossbeam_channel::unbounded().1,
+            latest_frame: None,
+            thread_handle: None,
+            audio_tap,
+            transition_duration_secs: 1.0,
+        }
+    }
+
+    #[test]
+    fn test_outro_ending_not_clickable_during_intro_and_abrupt_ending_stops_immediately() {
+        let ctx = egui::Context::default();
+        let mut state = TwitchState::default();
+        state.token_loaded = true;
+        let tap = Arc::new(crate::replay::AudioTap::default());
+        state.audio_tap = Some(tap.clone());
+        state.broadcast = Some(BroadcastHandle::mock_live(tap.clone()));
+
+        // While pre-roll (intro) is playing, ending with outro is not clickable / ignored
+        state.preroll = Some(make_mock_roll_player(preroll::RollMode::Preroll, tap.clone()));
+        assert!(!state.can_end_with_outro());
+        state.stop_broadcast_with_outro(&ctx);
+        assert!(state.broadcast.is_some());
+        assert!(state.preroll.is_some());
+        assert!(state.outro.is_none());
+
+        // Abrupt ending stops the stream on the spot even during pre-roll
+        state.stop_broadcast();
+        assert!(state.broadcast.is_none());
+        assert!(state.preroll.is_none());
+        assert!(state.outro.is_none());
+        assert!(!tap.is_broadcast_preroll_active());
+    }
+
+    #[test]
+    fn test_outro_ending_without_video_stops_immediately() {
+        let ctx = egui::Context::default();
+        let mut state = TwitchState::default();
+        state.token_loaded = true;
+        let tap = Arc::new(crate::replay::AudioTap::default());
+        state.audio_tap = Some(tap.clone());
+        state.broadcast = Some(BroadcastHandle::mock_live(tap.clone()));
+
+        // No outro video configured -> stop_broadcast_with_outro ends stream immediately
+        assert!(state.can_end_with_outro());
+        state.stop_broadcast_with_outro(&ctx);
+        assert!(state.broadcast.is_none());
+        assert!(state.outro.is_none());
+    }
+
+    #[test]
+    fn test_outro_lifecycle_mutes_audio_and_stops_broadcast_on_completion() {
+        let ctx = egui::Context::default();
+        let mut state = TwitchState::default();
+        state.token_loaded = true;
+        let tap = Arc::new(crate::replay::AudioTap::default());
+        state.audio_tap = Some(tap.clone());
+        state.broadcast = Some(BroadcastHandle::mock_live(tap.clone()));
+
+        // Simulate starting outro playback
+        state.outro = Some(make_mock_roll_player(preroll::RollMode::Outro, tap.clone()));
+        assert!(state.is_roll_active());
+        assert!(!state.can_end_with_outro());
+        assert!(tap.is_broadcast_preroll_active(), "game and mic audio must be muted during outro");
+
+        // While outro is not finished, polling keeps broadcast alive
+        state.poll(&ctx);
+        assert!(state.broadcast.is_some());
+        assert!(state.outro.is_some());
+
+        // Once outro reaches the end, polling stops the Twitch broadcast connection
+        if let Some(ref outro) = state.outro {
+            outro.position_us.store(10_000_000, Ordering::Relaxed);
+            outro.is_finished.store(true, Ordering::Release);
+        }
+        state.poll(&ctx);
+        assert!(state.outro.is_none());
+        assert!(state.broadcast.is_none(), "Twitch connection must stop when outro finishes");
+        assert!(!tap.is_broadcast_preroll_active());
     }
 }

@@ -224,14 +224,16 @@ impl AudioTap {
                 let end = (offset + chunk_size).min(samples.len());
                 let chunk = &samples[offset..end];
                 submit_to_route(&self.route, &self.discontinuity, chunk, 48000, 2, at);
-                submit_to_route(
-                    &self.broadcast_route,
-                    &self.broadcast_discontinuity,
-                    chunk,
-                    48000,
-                    2,
-                    at,
-                );
+                if !self.broadcast_preroll_active.load(Ordering::Relaxed) {
+                    submit_to_route(
+                        &self.broadcast_route,
+                        &self.broadcast_discontinuity,
+                        chunk,
+                        48000,
+                        2,
+                        at,
+                    );
+                }
                 at += (chunk.len() as i64 / 2) * 1_000_000 / 48000;
                 offset = end;
             }
@@ -344,6 +346,9 @@ impl AudioTap {
             self.broadcast_discontinuity.store(true, Ordering::Relaxed);
             self.broadcast_mic_discontinuity.store(true, Ordering::Relaxed);
         }
+    }
+    pub fn is_broadcast_preroll_active(&self) -> bool {
+        self.broadcast_preroll_active.load(Ordering::Relaxed)
     }
     fn disable(&self) {
         *self.route.lock().unwrap() = None;

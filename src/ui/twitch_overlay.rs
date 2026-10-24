@@ -22,7 +22,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
         return;
     }
     let tw = &mut state.twitch;
-    if tw.preroll.is_some() {
+    if tw.is_roll_active() {
         tw.overlay_rect = None;
         return;
     }

@@ -738,40 +738,99 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
 
     ui.add_space(2.0);
 
-    // 1. Giant "GO LIVE ON TWITCH" / "STOP STREAMING" button (no channel name)
+    // 1. Giant "GO LIVE ON TWITCH" / dual "END WITH OUTRO" + "END ABRUPTLY" buttons
     let status = state.twitch.broadcast_status();
     let is_live = matches!(status, BroadcastStatus::Live { .. });
     let is_connecting = matches!(status, BroadcastStatus::Connecting);
     let active = is_live || is_connecting;
 
-    let preroll_rem = state.twitch.preroll_remaining_secs();
-    let (btn_text, btn_fill) = if let Some(rem) = preroll_rem {
-        let mins = (rem / 60.0).floor() as u32;
-        let secs = (rem % 60.0).floor() as u32;
-        (format!("■ STOP (PRE-ROLL {mins:02}:{secs:02})"), egui::Color32::from_rgb(204, 51, 51))
-    } else if is_live {
-        ("■ STOP STREAMING".to_string(), egui::Color32::from_rgb(204, 51, 51))
-    } else if is_connecting {
-        ("CONNECTING TO TWITCH...".to_string(), egui::Color32::from_rgb(212, 136, 0))
+    if active {
+        let avail_w = ui.available_width();
+        let gap = 8.0;
+        let half_w = ((avail_w - gap) / 2.0).max(100.0);
+        let preroll_rem = state.twitch.preroll_remaining_secs();
+        let outro_rem = state.twitch.outro_remaining_secs();
+        let can_end_outro = state.twitch.can_end_with_outro();
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+
+            let outro_text = if let Some(rem) = outro_rem {
+                let mins = (rem / 60.0).floor() as u32;
+                let secs = (rem % 60.0).floor() as u32;
+                format!("■ OUTRO {mins:02}:{secs:02}")
+            } else {
+                "■ END WITH OUTRO".to_string()
+            };
+
+            let outro_btn = egui::Button::new(
+                egui::RichText::new(&outro_text)
+                    .monospace()
+                    .strong()
+                    .size(13.0)
+                    .color(if can_end_outro {
+                        egui::Color32::WHITE
+                    } else {
+                        MUTED_COLOR
+                    }),
+            )
+            .fill(if can_end_outro {
+                egui::Color32::from_rgb(180, 95, 30)
+            } else {
+                egui::Color32::from_rgb(45, 45, 48)
+            })
+            .rounding(egui::Rounding::same(6.0));
+
+            let outro_resp = ui
+                .add_enabled_ui(can_end_outro, |ui| {
+                    ui.add_sized([half_w, 46.0], outro_btn)
+                })
+                .inner
+                .on_hover_text("Play the outro video (if configured) and then end the stream");
+            if outro_resp.clicked() {
+                state.twitch.stop_broadcast_with_outro(ui.ctx());
+                changed = true;
+            }
+
+            let abrupt_text = if let Some(rem) = preroll_rem {
+                let mins = (rem / 60.0).floor() as u32;
+                let secs = (rem % 60.0).floor() as u32;
+                format!("■ STOP (PRE-ROLL {mins:02}:{secs:02})")
+            } else {
+                "■ END ABRUPTLY".to_string()
+            };
+
+            let abrupt_btn = egui::Button::new(
+                egui::RichText::new(&abrupt_text)
+                    .monospace()
+                    .strong()
+                    .size(13.0)
+                    .color(egui::Color32::WHITE),
+            )
+            .fill(egui::Color32::from_rgb(204, 51, 51))
+            .rounding(egui::Rounding::same(6.0));
+
+            if ui
+                .add_sized([half_w, 46.0], abrupt_btn)
+                .on_hover_text("Stop the Twitch broadcast immediately without playing the outro")
+                .clicked()
+            {
+                state.twitch.stop_broadcast();
+                changed = true;
+            }
+        });
     } else {
-        ("● GO LIVE ON TWITCH".to_string(), egui::Color32::from_rgb(145, 70, 255))
-    };
+        let giant_btn = egui::Button::new(
+            egui::RichText::new("● GO LIVE ON TWITCH")
+                .monospace()
+                .strong()
+                .size(15.0)
+                .color(egui::Color32::WHITE),
+        )
+        .fill(egui::Color32::from_rgb(145, 70, 255))
+        .rounding(egui::Rounding::same(6.0));
 
-    let giant_btn = egui::Button::new(
-        egui::RichText::new(&btn_text)
-            .monospace()
-            .strong()
-            .size(15.0)
-            .color(egui::Color32::WHITE),
-    )
-    .fill(btn_fill)
-    .rounding(egui::Rounding::same(6.0));
-
-    if ui.add_sized([ui.available_width(), 46.0], giant_btn).clicked() {
-        if active {
-            state.twitch.stop_broadcast();
-            changed = true;
-        } else {
+        if ui.add_sized([ui.available_width(), 46.0], giant_btn).clicked() {
             let audio_tap = state.replay.audio.clone();
             audio_tap.set_game_volume(state.hardware.master_volume);
             let render_dev = state.replay.config.render_device.clone();

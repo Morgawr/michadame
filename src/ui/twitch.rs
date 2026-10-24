@@ -446,15 +446,44 @@ fn draw_broadcast_group(ui: &mut egui::Ui, state: &mut AppState, save_now: &mut 
 
         ui.horizontal(|ui| {
             if is_broadcasting {
-                let btn = egui::Button::new(
-                    egui::RichText::new("■ Stop Streaming")
+                let can_end_outro = state.twitch.can_end_with_outro();
+                let outro_btn = egui::Button::new(
+                    egui::RichText::new("■ End with Outro")
                         .monospace()
                         .strong()
-                        .size(12.0)
+                        .size(11.5)
+                        .color(if can_end_outro {
+                            egui::Color32::WHITE
+                        } else {
+                            MUTED
+                        }),
+                )
+                .fill(if can_end_outro {
+                    egui::Color32::from_rgb(180, 95, 30)
+                } else {
+                    egui::Color32::from_rgb(45, 45, 48)
+                });
+                let outro_resp = ui
+                    .add_enabled(can_end_outro, outro_btn)
+                    .on_hover_text("Play the outro video (if configured) and then end the stream");
+                if outro_resp.clicked() {
+                    state.twitch.stop_broadcast_with_outro(ui.ctx());
+                    changed = true;
+                }
+
+                let abrupt_btn = egui::Button::new(
+                    egui::RichText::new("■ End Abruptly")
+                        .monospace()
+                        .strong()
+                        .size(11.5)
                         .color(egui::Color32::WHITE),
                 )
                 .fill(egui::Color32::from_rgb(204, 51, 51));
-                if ui.add_sized([160.0, 26.0], btn).clicked() {
+                if ui
+                    .add_sized([140.0, 26.0], abrupt_btn)
+                    .on_hover_text("Stop the Twitch broadcast immediately without playing the outro")
+                    .clicked()
+                {
                     state.twitch.stop_broadcast();
                     changed = true;
                 }
@@ -511,6 +540,10 @@ fn draw_broadcast_group(ui: &mut egui::Ui, state: &mut AppState, save_now: &mut 
                         let rem_m = (rem / 60.0).floor() as u32;
                         let rem_s = (rem % 60.0).floor() as u32;
                         format!("● PRE-ROLL {rem_m:02}:{rem_s:02}  |  {fps:.1} FPS  |  {kbps} kbps")
+                    } else if let Some(rem) = state.twitch.outro_remaining_secs() {
+                        let rem_m = (rem / 60.0).floor() as u32;
+                        let rem_s = (rem % 60.0).floor() as u32;
+                        format!("● OUTRO {rem_m:02}:{rem_s:02}  |  {fps:.1} FPS  |  {kbps} kbps")
                     } else {
                         format!(
                             "● LIVE {hours:02}:{mins:02}:{secs:02}  |  {fps:.1} FPS  |  {kbps} kbps  |  Drops: V {vdrop} / A {adrop}"
@@ -520,7 +553,7 @@ fn draw_broadcast_group(ui: &mut egui::Ui, state: &mut AppState, save_now: &mut 
                         egui::RichText::new(live_label)
                         .monospace()
                         .size(11.0)
-                        .color(if state.twitch.preroll.is_some() {
+                        .color(if state.twitch.is_roll_active() {
                             egui::Color32::from_rgb(230, 190, 60)
                         } else {
                             egui::Color32::from_rgb(80, 220, 120)
@@ -722,6 +755,72 @@ fn draw_broadcast_group(ui: &mut egui::Ui, state: &mut AppState, save_now: &mut 
                                 .clicked()
                             {
                                 state.twitch.config.preroll_video_path.clear();
+                                *save_now = true;
+                                changed = true;
+                            }
+                        }
+                    });
+                }
+
+                col1.horizontal(|ui| {
+                    label(ui, "Outro Video:");
+                    if ui
+                        .checkbox(
+                            &mut state.twitch.config.outro_enabled,
+                            "Enable outro video",
+                        )
+                        .on_hover_text("Play a preset video file with audio when ending the stream, seamlessly fading from the live stream and stopping the broadcast when it ends")
+                        .changed()
+                    {
+                        *save_now = true;
+                        changed = true;
+                    }
+                });
+
+                if state.twitch.config.outro_enabled {
+                    col1.horizontal(|ui| {
+                        label(ui, "Video File:");
+                        let path_display = if state.twitch.config.outro_video_path.is_empty() {
+                            "(No video file selected)".to_string()
+                        } else {
+                            let p = std::path::Path::new(&state.twitch.config.outro_video_path);
+                            p.file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| state.twitch.config.outro_video_path.clone())
+                        };
+
+                        let path_lbl = ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(&path_display)
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(if state.twitch.config.outro_video_path.is_empty() {
+                                        MUTED
+                                    } else {
+                                        egui::Color32::WHITE
+                                    }),
+                            )
+                            .truncate(true),
+                        );
+                        if !state.twitch.config.outro_video_path.is_empty() {
+                            path_lbl.on_hover_text(&state.twitch.config.outro_video_path);
+                        }
+
+                        if ui
+                            .small_button("Browse…")
+                            .on_hover_text("Pick an outro video file from disk (e.g. .mp4, .webm, .mkv)")
+                            .clicked()
+                        {
+                            state.twitch.open_outro_file_dialog(ui.ctx());
+                        }
+
+                        if !state.twitch.config.outro_video_path.is_empty() {
+                            if ui
+                                .small_button("Clear")
+                                .on_hover_text("Remove outro video file selection")
+                                .clicked()
+                            {
+                                state.twitch.config.outro_video_path.clear();
                                 *save_now = true;
                                 changed = true;
                             }

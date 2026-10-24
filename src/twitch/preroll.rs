@@ -21,7 +21,14 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_TRANSITION_SECS: f64 = 1.0;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RollMode {
+    Preroll,
+    Outro,
+}
+
 pub struct PrerollPlayer {
+    pub mode: RollMode,
     pub duration_secs: f64,
     pub position_us: Arc<AtomicI64>,
     pub is_finished: Arc<AtomicBool>,
@@ -39,8 +46,29 @@ impl PrerollPlayer {
         audio_tap: Arc<AudioTap>,
         repaint: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Self> {
+        Self::start_with_mode(file_path, audio_tap, repaint, RollMode::Preroll)
+    }
+
+    pub fn start_outro(
+        file_path: PathBuf,
+        audio_tap: Arc<AudioTap>,
+        repaint: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<Self> {
+        Self::start_with_mode(file_path, audio_tap, repaint, RollMode::Outro)
+    }
+
+    pub fn start_with_mode(
+        file_path: PathBuf,
+        audio_tap: Arc<AudioTap>,
+        repaint: Arc<dyn Fn() + Send + Sync>,
+        mode: RollMode,
+    ) -> Result<Self> {
+        let label = match mode {
+            RollMode::Preroll => "pre-roll",
+            RollMode::Outro => "outro",
+        };
         let probe = probe_video_file(&file_path)
-            .with_context(|| format!("Failed to probe pre-roll video file {:?}", file_path))?;
+            .with_context(|| format!("Failed to probe {label} video file {:?}", file_path))?;
         let duration_secs = probe.duration_secs.max(0.5);
         let transition_duration_secs = if duration_secs < 2.0 {
             (duration_secs * 0.4).max(0.2)
@@ -63,9 +91,13 @@ impl PrerollPlayer {
         let thread_dur_secs = duration_secs;
         let thread_trans_secs = transition_duration_secs;
         let thread_repaint = repaint.clone();
+        let thread_name = match mode {
+            RollMode::Preroll => "preroll-player",
+            RollMode::Outro => "outro-player",
+        };
 
         let handle = thread::Builder::new()
-            .name("preroll-player".into())
+            .name(thread_name.into())
             .spawn(move || {
                 let res = run_preroll_worker(
                     thread_path,
@@ -76,17 +108,21 @@ impl PrerollPlayer {
                     thread_stop.clone(),
                     thread_dur_secs,
                     thread_trans_secs,
+                    mode,
                     thread_repaint.clone(),
                 );
                 if let Err(e) = res {
-                    tracing::warn!("Pre-roll video player stopped with error: {e:#}");
+                    tracing::warn!("Roll video player ({mode:?}) stopped with error: {e:#}");
                 }
-                thread_audio_tap.set_broadcast_preroll_active(false);
+                if mode == RollMode::Preroll || thread_stop.load(Ordering::Relaxed) {
+                    thread_audio_tap.set_broadcast_preroll_active(false);
+                }
                 thread_finished.store(true, Ordering::Release);
                 thread_repaint();
             })?;
 
         Ok(Self {
+            mode,
             duration_secs,
             position_us,
             is_finished,
@@ -109,33 +145,54 @@ impl PrerollPlayer {
 
     /// Computes the black fade overlay alpha (0.0 = completely transparent, 1.0 = completely black).
     ///
-    /// The transition is split into two halves:
+    /// For `RollMode::Preroll` (at the end of the pre-roll video):
     /// - First half: pre-roll fades to black (0.0 -> 1.0)
     /// - Midpoint: completely black (1.0), live feed takes over
     /// - Second half: live feed fades in from black (1.0 -> 0.0)
+    ///
+    /// For `RollMode::Outro` (at the beginning of the outro video):
+    /// - First half: live feed fades to black (0.0 -> 1.0)
+    /// - Midpoint: completely black (1.0), outro video takes over
+    /// - Second half: outro video fades in from black (1.0 -> 0.0)
     pub fn fade_alpha(&self) -> f32 {
         let d = self.duration_secs;
         let t = self.elapsed_secs();
         let trans = self.transition_duration_secs;
-        let t_start = (d - trans).max(0.0);
-        let t_mid = t_start + trans / 2.0;
+        let half = (trans / 2.0).max(0.001);
 
-        if t < t_start {
-            0.0
-        } else if t < t_mid {
-            // Fade out phase
-            let half = (trans / 2.0).max(0.001);
-            ((t - t_start) / half).clamp(0.0, 1.0) as f32
-        } else if t < d {
-            // Fade in phase
-            let half = (trans / 2.0).max(0.001);
-            ((d - t) / half).clamp(0.0, 1.0) as f32
-        } else {
-            0.0
+        match self.mode {
+            RollMode::Preroll => {
+                let t_start = (d - trans).max(0.0);
+                let t_mid = t_start + trans / 2.0;
+
+                if t < t_start {
+                    0.0
+                } else if t < t_mid {
+                    ((t - t_start) / half).clamp(0.0, 1.0) as f32
+                } else if t < d {
+                    ((d - t) / half).clamp(0.0, 1.0) as f32
+                } else {
+                    0.0
+                }
+            }
+            RollMode::Outro => {
+                let t_mid = trans / 2.0;
+                let t_end = trans.min(d);
+
+                if t <= 0.0 {
+                    0.0
+                } else if t < t_mid {
+                    (t / half).clamp(0.0, 1.0) as f32
+                } else if t < t_end {
+                    ((t_end - t) / half).clamp(0.0, 1.0) as f32
+                } else {
+                    0.0
+                }
+            }
         }
     }
 
-    /// True if the transition has reached or passed the midpoint where the live capture
+    /// True if the pre-roll transition has reached or passed the midpoint where the live capture
     /// feed should replace the pre-roll video under the black overlay.
     pub fn is_in_fade_in_phase(&self) -> bool {
         let d = self.duration_secs;
@@ -143,11 +200,21 @@ impl PrerollPlayer {
         let trans = self.transition_duration_secs;
         let t_mid = (d - trans).max(0.0) + trans / 2.0;
         if t >= t_mid {
-            self.audio_tap.set_broadcast_preroll_active(false);
+            if self.mode == RollMode::Preroll {
+                self.audio_tap.set_broadcast_preroll_active(false);
+            }
             true
         } else {
             false
         }
+    }
+
+    /// For `RollMode::Outro`, returns true during the first half of the entry transition
+    /// while the live capture feed is fading out to black before the outro video takes over.
+    pub fn is_in_fade_out_phase(&self) -> bool {
+        let t = self.elapsed_secs();
+        let t_mid = self.transition_duration_secs / 2.0;
+        t < t_mid
     }
 
     /// Polls new decoded frames from the worker thread.
@@ -187,17 +254,18 @@ fn run_preroll_worker(
     stop_requested: Arc<AtomicBool>,
     duration_secs: f64,
     transition_secs: f64,
+    mode: RollMode,
     repaint: Arc<dyn Fn() + Send + Sync>,
 ) -> Result<()> {
     ffmpeg_next::init().context("Failed to init FFmpeg")?;
     let mut ictx = ffmpeg_next::format::input(&path)
-        .with_context(|| format!("Failed to open pre-roll video file {:?}", path))?;
+        .with_context(|| format!("Failed to open roll video file {:?}", path))?;
 
     let video_info = ictx
         .streams()
         .best(ffmpeg_next::media::Type::Video)
         .map(|s| (s.index(), s.time_base(), s.parameters()))
-        .context("No video stream found in pre-roll file")?;
+        .context("No video stream found in roll file")?;
     let (video_idx, video_time_base, video_params) = video_info;
 
     let mut video_decoder = ffmpeg_next::codec::context::Context::from_parameters(video_params)?
@@ -238,7 +306,7 @@ fn run_preroll_worker(
                     (Some(dec), Some(idx), Some(tb), rsm)
                 }
                 Err(e) => {
-                    tracing::warn!("Could not open pre-roll audio stream: {e}");
+                    tracing::warn!("Could not open roll audio stream: {e}");
                     (None, None, None, None)
                 }
             }
@@ -246,7 +314,7 @@ fn run_preroll_worker(
             (None, None, None, None)
         };
 
-    // Initialize local rodio output so streamer can hear the pre-roll audio
+    // Initialize local rodio output so streamer can hear the pre-roll / outro audio
     let (_rodio_guard, local_sink) = match crate::devices::audio::initialize_rodio_playback() {
         Ok((guard, handle)) => (Some(guard), Sink::try_new(&handle).ok()),
         Err(_) => (None, None),
@@ -258,6 +326,10 @@ fn run_preroll_worker(
     let t_start = (duration_secs - transition_secs).max(0.0);
     let t_mid = t_start + transition_secs / 2.0;
     let t_mid_us = (t_mid * 1_000_000.0) as i64;
+    let audio_cutoff_us = match mode {
+        RollMode::Preroll => t_mid_us,
+        RollMode::Outro => total_us,
+    };
 
     let mut preroll_audio_active = true;
     let mut audio_frames_emitted: u64 = 0;
@@ -314,7 +386,7 @@ fn run_preroll_worker(
                     }
 
                     if audio_idx.is_none() && preroll_audio_active {
-                        let target_silent_us = frame_pts_us.max(0).min(t_mid_us);
+                        let target_silent_us = frame_pts_us.max(0).min(audio_cutoff_us);
                         while silent_audio_emitted_us + SILENT_CHUNK_US <= target_silent_us {
                             audio_tap.submit_preroll_audio(
                                 &silent_chunk,
@@ -326,7 +398,7 @@ fn run_preroll_worker(
                         }
                     }
 
-                    if preroll_audio_active && frame_pts_us >= t_mid_us {
+                    if mode == RollMode::Preroll && preroll_audio_active && frame_pts_us >= t_mid_us {
                         preroll_audio_active = false;
                         audio_tap.set_broadcast_preroll_active(false);
                     }
@@ -392,7 +464,7 @@ fn run_preroll_worker(
                                     break;
                                 }
 
-                                if pts_sec >= t_mid {
+                                if mode == RollMode::Preroll && pts_sec >= t_mid {
                                     if preroll_audio_active {
                                         preroll_audio_active = false;
                                         audio_tap.set_broadcast_preroll_active(false);
@@ -403,12 +475,25 @@ fn run_preroll_worker(
                                 let plane = resampled.plane::<f32>(0);
                                 let mut samples = plane[..samples_count.min(plane.len())].to_vec();
 
-                                // Fade pre-roll audio volume out during transition first half
-                                let vol = if pts_sec > t_start {
-                                    ((t_mid - pts_sec) / (t_mid - t_start).max(0.001))
-                                        .clamp(0.0, 1.0) as f32
-                                } else {
-                                    1.0f32
+                                let vol = match mode {
+                                    RollMode::Preroll => {
+                                        // Fade pre-roll audio volume out during transition first half
+                                        if pts_sec > t_start {
+                                            ((t_mid - pts_sec) / (t_mid - t_start).max(0.001))
+                                                .clamp(0.0, 1.0) as f32
+                                        } else {
+                                            1.0f32
+                                        }
+                                    }
+                                    RollMode::Outro => {
+                                        // Fade outro audio volume in during entry transition
+                                        let t_end = transition_secs.min(duration_secs);
+                                        if pts_sec < t_end {
+                                            (pts_sec / t_end.max(0.001)).clamp(0.0, 1.0) as f32
+                                        } else {
+                                            1.0f32
+                                        }
+                                    }
                                 };
 
                                 if vol < 0.999 {
@@ -444,7 +529,7 @@ fn run_preroll_worker(
     while !stop_requested.load(Ordering::Relaxed) {
         let elapsed = start_time.elapsed().as_micros() as i64;
         if audio_idx.is_none() && preroll_audio_active {
-            let target_silent_us = elapsed.max(0).min(t_mid_us);
+            let target_silent_us = elapsed.max(0).min(audio_cutoff_us);
             while silent_audio_emitted_us + SILENT_CHUNK_US <= target_silent_us {
                 audio_tap.submit_preroll_audio(
                     &silent_chunk,
@@ -455,7 +540,7 @@ fn run_preroll_worker(
                 silent_audio_emitted_us += SILENT_CHUNK_US;
             }
         }
-        if preroll_audio_active && elapsed >= t_mid_us {
+        if mode == RollMode::Preroll && preroll_audio_active && elapsed >= t_mid_us {
             preroll_audio_active = false;
             audio_tap.set_broadcast_preroll_active(false);
         }
@@ -481,6 +566,7 @@ mod tests {
     #[test]
     fn test_fade_alpha_calculations() {
         let player = PrerollPlayer {
+            mode: RollMode::Preroll,
             duration_secs: 10.0,
             position_us: Arc::new(AtomicI64::new(0)),
             is_finished: Arc::new(AtomicBool::new(false)),
@@ -530,8 +616,62 @@ mod tests {
     }
 
     #[test]
+    fn test_outro_fade_alpha_calculations() {
+        let player = PrerollPlayer {
+            mode: RollMode::Outro,
+            duration_secs: 10.0,
+            position_us: Arc::new(AtomicI64::new(0)),
+            is_finished: Arc::new(AtomicBool::new(false)),
+            stop_requested: Arc::new(AtomicBool::new(false)),
+            frame_rx: crossbeam_channel::unbounded().1,
+            latest_frame: None,
+            thread_handle: None,
+            audio_tap: Arc::new(AudioTap::default()),
+            transition_duration_secs: 1.0,
+        };
+
+        // At t = 0 (start of outro transition), alpha is 0.0, in fade-out phase (live stream visible)
+        assert_eq!(player.fade_alpha(), 0.0);
+        assert!(player.is_in_fade_out_phase());
+
+        // At t = 0.25 (halfway through fade-out of live stream), alpha is ~0.5
+        player.position_us.store(250_000, Ordering::Relaxed);
+        let alpha = player.fade_alpha();
+        assert!((alpha - 0.5).abs() < 0.01);
+        assert!(player.is_in_fade_out_phase());
+
+        // At t = 0.5 (midpoint, completely black, outro video takes over), alpha is 1.0
+        player.position_us.store(500_000, Ordering::Relaxed);
+        assert_eq!(player.fade_alpha(), 1.0);
+        assert!(!player.is_in_fade_out_phase());
+
+        // At t = 0.75 (halfway through fade-in of outro video), alpha is ~0.5
+        player.position_us.store(750_000, Ordering::Relaxed);
+        let alpha = player.fade_alpha();
+        assert!((alpha - 0.5).abs() < 0.01);
+        assert!(!player.is_in_fade_out_phase());
+
+        // At t = 1.0 (end of entry transition), alpha is 0.0
+        player.position_us.store(1_000_000, Ordering::Relaxed);
+        assert_eq!(player.fade_alpha(), 0.0);
+        assert!(!player.is_in_fade_out_phase());
+        assert!(!player.is_completed());
+
+        // At t = 5.0 (middle of outro playback), alpha is 0.0
+        player.position_us.store(5_000_000, Ordering::Relaxed);
+        assert_eq!(player.fade_alpha(), 0.0);
+        assert!(!player.is_in_fade_out_phase());
+
+        // At t = 10.0 (end of outro video), completed is true
+        player.position_us.store(10_000_000, Ordering::Relaxed);
+        assert_eq!(player.fade_alpha(), 0.0);
+        assert!(player.is_completed());
+    }
+
+    #[test]
     fn test_remaining_secs() {
         let player = PrerollPlayer {
+            mode: RollMode::Preroll,
             duration_secs: 15.0,
             position_us: Arc::new(AtomicI64::new(5_000_000)),
             is_finished: Arc::new(AtomicBool::new(false)),

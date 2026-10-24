@@ -498,6 +498,23 @@ impl BroadcastHandle {
             }
         }
     }
+
+    #[cfg(test)]
+    pub fn mock_live(audio_tap: Arc<crate::replay::AudioTap>) -> Self {
+        let (video_tx, _video_rx) = crossbeam_channel::unbounded();
+        let (_free_tx, video_free_rx) = crossbeam_channel::unbounded();
+        Self {
+            status: Arc::new(Mutex::new(BroadcastStatus::Live {
+                started_at: Instant::now(),
+            })),
+            metrics: Arc::new(BroadcastMetrics::default()),
+            stop: Arc::new(AtomicBool::new(false)),
+            video_tx,
+            video_free_rx,
+            audio_tap,
+            thread: None,
+        }
+    }
 }
 
 impl Drop for BroadcastHandle {
