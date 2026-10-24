@@ -9,7 +9,7 @@ use std::time::Duration;
 
 const LABEL_COLOR: egui::Color32 = egui::Color32::from_rgb(153, 153, 153);
 const MUTED_COLOR: egui::Color32 = egui::Color32::from_rgb(119, 119, 119);
-pub const STUDIO_WINDOW_SIZE: [f32; 2] = [480.0, 410.0];
+pub const STUDIO_WINDOW_SIZE: [f32; 2] = [488.0, 424.0];
 
 /// Calculates the percentage of dropped frames/blocks out of total stream units.
 pub fn compute_drop_percentage(frames_sent: u64, video_drops: u64, audio_drops: u64) -> f64 {
@@ -736,7 +736,7 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
     // Smooth 60 FPS repaints to animate live VU meters while Studio is active
     ui.ctx().request_repaint_after(Duration::from_millis(16));
 
-    ui.add_space(2.0);
+    ui.add_space(1.0);
 
     // 1. Giant "GO LIVE ON TWITCH" / dual "END WITH OUTRO" + "END ABRUPTLY" buttons
     let status = state.twitch.broadcast_status();
@@ -788,6 +788,8 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
                 .inner
                 .on_hover_text("Play the outro video (if configured) and then end the stream");
             if outro_resp.clicked() {
+                state.replay.set_game_volume(state.hardware.master_volume);
+                state.twitch.set_master_volume(state.hardware.master_volume);
                 state.twitch.stop_broadcast_with_outro(ui.ctx());
                 changed = true;
             }
@@ -841,7 +843,7 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
         }
     }
 
-    ui.add_space(6.0);
+    ui.add_space(5.0);
 
     // 2. Stream Title Label (non-editable, shows stream title regardless if live or not)
     let stream_title = if !state.twitch.stream_info.title_input.trim().is_empty() {
@@ -864,7 +866,7 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
         } else {
             (stream_title.to_string(), egui::Color32::from_rgb(220, 220, 220))
         };
-        let avail_w = ui.available_width().min(STUDIO_WINDOW_SIZE[0] - 65.0);
+        let avail_w = ui.available_width().max(100.0);
         ui.add_sized(
             [avail_w, 16.0],
             egui::Label::new(
@@ -883,7 +885,7 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
         });
     });
 
-    ui.add_space(10.0);
+    ui.add_space(8.0);
 
     // 3. Mini-grid of 6 Stream Deck square buttons in a 3x2 grid
     // Row 1: Replay buffer | Microphone | Webcam
@@ -995,7 +997,7 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
         }
     });
 
-    ui.add_space(8.0);
+    ui.add_space(7.0);
 
     // Row 2: Stream interactions & overlay features (Chat, Alerts, Vocab)
     ui.horizontal(|ui| {
@@ -1067,7 +1069,7 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
         }
     });
 
-    ui.add_space(12.0);
+    ui.add_space(10.0);
 
     // 4. Two horizontal bars with volume sliders (as implemented with embedded VU meters)
     let label_width = 115.0;
@@ -1084,8 +1086,8 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
                     .color(LABEL_COLOR),
             ),
         );
-        let avail_w = ui.available_width().min(STUDIO_WINDOW_SIZE[0] - 16.0 - label_width);
-        let slider_width = (avail_w - readout_width - 8.0).max(100.0);
+        let item_gap = ui.spacing().item_spacing.x;
+        let slider_width = (ui.available_width() - readout_width - item_gap).max(100.0);
         let mut vol = state.hardware.master_volume;
         let peak = state.hardware.live_audio_peak;
         let resp = studio_mixer_slider(ui, &mut vol, 0.0..=1.0, peak, true, slider_width);
@@ -1107,7 +1109,7 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
         );
     });
 
-    ui.add_space(6.0);
+    ui.add_space(5.0);
 
     // Microphone Volume Slider
     ui.horizontal(|ui| {
@@ -1121,8 +1123,8 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
             ),
         );
 
-        let avail_w = ui.available_width().min(STUDIO_WINDOW_SIZE[0] - 16.0 - label_width);
-        let slider_width = (avail_w - readout_width - 8.0).max(100.0);
+        let item_gap = ui.spacing().item_spacing.x;
+        let slider_width = (ui.available_width() - readout_width - item_gap).max(100.0);
         let mut mic_vol = state.mic.config.volume;
         let mic_peak = state.hardware.live_mic_peak;
         let mic_active = state.mic.config.enabled;
@@ -1162,7 +1164,7 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
         );
     });
 
-    ui.add_space(14.0);
+    ui.add_space(10.0);
 
     // 5. Stream Diagnostic Data at the bottom
     let (fps, kbps, vdrop, adrop, frames_sent) = if let Some(m) = state.twitch.broadcast_metrics() {
@@ -1180,13 +1182,21 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
     let drop_pct = compute_drop_percentage(frames_sent, vdrop, adrop);
     let viewer_count = state.twitch.viewer_count();
 
+    let frame_margin_x = 10.0;
+    let frame_stroke_w = 1.0;
+    let frame_inner_w = (ui.available_width() - 2.0 * (frame_margin_x + frame_stroke_w)).max(100.0);
+
     egui::Frame::none()
         .fill(egui::Color32::from_rgb(18, 18, 20))
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 42, 46)))
-        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+        .stroke(egui::Stroke::new(
+            frame_stroke_w,
+            egui::Color32::from_rgb(42, 42, 46),
+        ))
+        .inner_margin(egui::Margin::symmetric(frame_margin_x, 7.0))
         .rounding(egui::Rounding::same(4.0))
         .show(ui, |ui| {
-            ui.set_width(ui.available_width().min(STUDIO_WINDOW_SIZE[0] - 16.0));
+            ui.set_width(frame_inner_w);
+            ui.set_max_width(frame_inner_w);
 
             match &status {
                 BroadcastStatus::Live { started_at } => {
@@ -1197,18 +1207,19 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
                     };
 
                     ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
                         ui.label(
-                            egui::RichText::new(format!("● LIVE {duration_str}  |  {fps:.1} FPS  |  "))
+                            egui::RichText::new(format!("● LIVE {duration_str} | {fps:.1} FPS | "))
                                 .monospace()
                                 .strong()
-                                .size(11.0)
+                                .size(10.5)
                                 .color(egui::Color32::from_rgb(80, 220, 120)),
                         );
                         ui.label(
                             egui::RichText::new(format!("Health: {health_str}"))
                                 .monospace()
                                 .strong()
-                                .size(11.0)
+                                .size(10.5)
                                 .color(health_color),
                         )
                         .on_hover_text(format!(
@@ -1216,10 +1227,10 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
                             frames_sent.saturating_add(vdrop)
                         ));
                         ui.label(
-                            egui::RichText::new(format!("  |  Viewers: {viewers_str}"))
+                            egui::RichText::new(format!(" | Viewers: {viewers_str}"))
                                 .monospace()
                                 .strong()
-                                .size(11.0)
+                                .size(10.5)
                                 .color(egui::Color32::from_rgb(80, 220, 120)),
                         );
                     });
@@ -1233,7 +1244,7 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
                         };
                         ui.label(
                             egui::RichText::new(format!(
-                                "Bitrate: {kbps} kbps  |  Dropped: V {vdrop} / A {adrop} ({drop_pct_str})"
+                                "Bitrate: {kbps} kbps | Dropped: V {vdrop} / A {adrop} ({drop_pct_str})"
                             ))
                             .monospace()
                             .size(10.5)
@@ -1247,17 +1258,20 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
                         ui.label(
                             egui::RichText::new("Connecting to Twitch ingest…")
                                 .monospace()
-                                .size(11.0)
+                                .size(10.5)
                                 .color(egui::Color32::from_rgb(230, 190, 60)),
                         );
                     });
                 }
                 BroadcastStatus::Error(err) => {
-                    ui.label(
-                        egui::RichText::new(format!("Stream Error: {err}"))
-                            .monospace()
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(240, 70, 70)),
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(format!("Stream Error: {err}"))
+                                .monospace()
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(240, 70, 70)),
+                        )
+                        .truncate(true),
                     );
                 }
                 BroadcastStatus::Offline => {
@@ -1268,17 +1282,17 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
                     ui.horizontal(|ui| {
                         ui.label(
                             egui::RichText::new(format!(
-                                "○ Stream Offline  |  FPS: --  |  Health: Offline  |  Viewers: {viewers_str}"
+                                "○ Stream Offline | FPS: -- | Health: Offline | Viewers: {viewers_str}"
                             ))
                             .monospace()
-                            .size(11.0)
+                            .size(10.5)
                             .color(MUTED_COLOR),
                         );
                     });
                     ui.add_space(2.0);
                     ui.horizontal(|ui| {
                         ui.label(
-                            egui::RichText::new("Bitrate: 0 kbps  |  Dropped Frames: V 0 / A 0")
+                            egui::RichText::new("Bitrate: 0 kbps | Dropped Frames: V 0 / A 0")
                                 .monospace()
                                 .size(10.5)
                                 .color(MUTED_COLOR),
@@ -1438,5 +1452,49 @@ mod tests {
         assert!(!state.twitch.config.share_mined_words_to_chat);
         state.twitch.config.share_mined_words_to_chat = true;
         assert!(state.twitch.config.share_mined_words_to_chat);
+    }
+
+    #[test]
+    fn test_studio_contents_fits_within_window_bounds_offline_and_live() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::default();
+
+        for is_live in [false, true] {
+            if is_live {
+                let tap = std::sync::Arc::new(crate::replay::AudioTap::default());
+                state.twitch.broadcast = Some(crate::twitch::broadcast::BroadcastHandle::mock_live(tap));
+            } else {
+                state.twitch.broadcast = None;
+            }
+
+            let raw_input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(STUDIO_WINDOW_SIZE[0], STUDIO_WINDOW_SIZE[1]),
+                )),
+                ..Default::default()
+            };
+
+            let mut used_rect = egui::Rect::NOTHING;
+            let _ = ctx.run(raw_input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    draw_studio_contents(&mut state, ui);
+                    used_rect = ui.min_rect();
+                });
+            });
+
+            assert!(
+                used_rect.max.x <= STUDIO_WINDOW_SIZE[0],
+                "Studio horizontal overflow (is_live={is_live}): max.x={} > {}",
+                used_rect.max.x,
+                STUDIO_WINDOW_SIZE[0]
+            );
+            assert!(
+                used_rect.max.y <= STUDIO_WINDOW_SIZE[1],
+                "Studio vertical overflow (is_live={is_live}): max.y={} > {}",
+                used_rect.max.y,
+                STUDIO_WINDOW_SIZE[1]
+            );
+        }
     }
 }

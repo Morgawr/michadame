@@ -316,7 +316,13 @@ fn run_preroll_worker(
 
     // Initialize local rodio output so streamer can hear the pre-roll / outro audio
     let (_rodio_guard, local_sink) = match crate::devices::audio::initialize_rodio_playback() {
-        Ok((guard, handle)) => (Some(guard), Sink::try_new(&handle).ok()),
+        Ok((guard, handle)) => {
+            let sink = Sink::try_new(&handle).ok();
+            if let Some(ref s) = sink {
+                s.set_volume(audio_tap.game_volume().clamp(0.0, 1.0));
+            }
+            (Some(guard), sink)
+        }
         Err(_) => (None, None),
     };
 
@@ -383,6 +389,10 @@ fn run_preroll_worker(
 
                     if stop_requested.load(Ordering::Relaxed) {
                         break;
+                    }
+
+                    if let Some(ref sink) = local_sink {
+                        sink.set_volume(audio_tap.game_volume().clamp(0.0, 1.0));
                     }
 
                     if audio_idx.is_none() && preroll_audio_active {
@@ -513,6 +523,7 @@ fn run_preroll_worker(
 
                                 // Play locally through streamer's audio device
                                 if let Some(ref sink) = local_sink {
+                                    sink.set_volume(audio_tap.game_volume().clamp(0.0, 1.0));
                                     if vol > 0.001 {
                                         sink.append(SamplesBuffer::new(2, 48000, samples));
                                     }
@@ -527,6 +538,9 @@ fn run_preroll_worker(
 
     // After demux EOF, wait until full duration / transition has elapsed
     while !stop_requested.load(Ordering::Relaxed) {
+        if let Some(ref sink) = local_sink {
+            sink.set_volume(audio_tap.game_volume().clamp(0.0, 1.0));
+        }
         let elapsed = start_time.elapsed().as_micros() as i64;
         if audio_idx.is_none() && preroll_audio_active {
             let target_silent_us = elapsed.max(0).min(audio_cutoff_us);

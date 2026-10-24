@@ -342,10 +342,8 @@ impl AudioTap {
     }
     pub fn set_broadcast_preroll_active(&self, active: bool) {
         self.broadcast_preroll_active.store(active, Ordering::SeqCst);
-        if !active {
-            self.broadcast_discontinuity.store(true, Ordering::Relaxed);
-            self.broadcast_mic_discontinuity.store(true, Ordering::Relaxed);
-        }
+        self.broadcast_discontinuity.store(true, Ordering::Relaxed);
+        self.broadcast_mic_discontinuity.store(true, Ordering::Relaxed);
     }
     pub fn is_broadcast_preroll_active(&self) -> bool {
         self.broadcast_preroll_active.load(Ordering::Relaxed)

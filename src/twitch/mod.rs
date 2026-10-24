@@ -215,9 +215,12 @@ impl Default for TwitchState {
 }
 
 impl TwitchState {
-    /// Updates the local alert sound playback volume to follow the stream master volume.
+    /// Updates the local alert sound and broadcast audio tap volume to follow the stream master volume.
     pub fn set_master_volume(&self, volume: f32) {
         self.alert_player.set_volume(volume);
+        if let Some(ref tap) = self.audio_tap {
+            tap.set_game_volume(volume.clamp(0.0, 1.0));
+        }
     }
 
     /// Plays the retro alert chime both locally on PC and into the broadcast / replay audio stream.

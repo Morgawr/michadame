@@ -467,6 +467,8 @@ fn draw_broadcast_group(ui: &mut egui::Ui, state: &mut AppState, save_now: &mut 
                     .add_enabled(can_end_outro, outro_btn)
                     .on_hover_text("Play the outro video (if configured) and then end the stream");
                 if outro_resp.clicked() {
+                    state.replay.set_game_volume(state.hardware.master_volume);
+                    state.twitch.set_master_volume(state.hardware.master_volume);
                     state.twitch.stop_broadcast_with_outro(ui.ctx());
                     changed = true;
                 }

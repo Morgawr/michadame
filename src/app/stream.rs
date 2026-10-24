@@ -470,6 +470,8 @@ impl AppState {
             self.replay.audio.clone(),
         ) {
             Ok(handle) => {
+                handle.stream.set_volume(self.hardware.master_volume);
+                self.replay.set_game_volume(self.hardware.master_volume);
                 self.info("Gamescope audio hooked successfully.");
                 Some(handle)
             }
@@ -879,6 +881,11 @@ impl AppState {
         self.hardware.master_volume = volume;
         if let Some(ref audio_stream) = self.hardware.active_audio_stream {
             audio_stream.set_volume(volume);
+        }
+        if let Some(ref gs) = self.gamescope_hook {
+            if let Some(ref ah) = gs.audio_handle {
+                ah.stream.set_volume(volume);
+            }
         }
         if let Some(ref player) = self.video_player {
             let _ = player
