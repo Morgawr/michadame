@@ -1113,13 +1113,40 @@ impl AppState {
                     self.pc98.resolution = (width, height);
                     self.hardware.selected_resolution = (width, height);
                     self.hardware.selected_framerate = (fps.round() as u32).max(1);
-                    self.info(
-                        "NEC PC-98 booted! Keyboard/mouse passthrough active (Shift+Tab to release, F12 for NP2 menu).",
-                    );
+                    if let Some(slot) = self.pc98.pending_boot_load_slot.take() {
+                        self.pc98
+                            .send_command(crate::pc98::Pc98Command::LoadState { slot });
+                    } else {
+                        self.info(
+                            "NEC PC-98 booted! Keyboard/mouse passthrough active (Shift+Tab to release, F12 for NP2 menu).",
+                        );
+                    }
                 }
                 crate::pc98::Pc98Event::ResolutionChanged { width, height } => {
                     self.pc98.resolution = (width, height);
                     self.hardware.selected_resolution = (width, height);
+                }
+                crate::pc98::Pc98Event::StateSaved { slot, meta } => {
+                    self.pc98
+                        .slot_textures
+                        .remove(&(meta.game_key.clone(), slot));
+                    self.pc98.refresh_slots_cache();
+                    self.info(format!(
+                        "💾 Saved PC-98 state to Slot {slot} ({})",
+                        meta.game_title
+                    ));
+                }
+                crate::pc98::Pc98Event::StateLoaded { slot, meta } => {
+                    if !meta.fdd1_path.is_empty() {
+                        self.pc98.config.fdd1_path = meta.fdd1_path.clone();
+                    }
+                    if !meta.fdd2_path.is_empty() {
+                        self.pc98.config.fdd2_path = meta.fdd2_path.clone();
+                    }
+                    self.info(format!(
+                        "📂 Loaded PC-98 state from Slot {slot} ({})",
+                        meta.game_title
+                    ));
                 }
                 crate::pc98::Pc98Event::Info(msg) => {
                     self.info(msg);
@@ -1396,13 +1423,40 @@ impl AppState {
                     self.pc88.resolution = (width, height);
                     self.hardware.selected_resolution = (width, height);
                     self.hardware.selected_framerate = (fps.round() as u32).max(1);
-                    self.info(
-                        "NEC PC-88 booted! Keyboard/mouse passthrough active (Shift+Tab to release, F12 for Quasi88 menu).",
-                    );
+                    if let Some(slot) = self.pc88.pending_boot_load_slot.take() {
+                        self.pc88
+                            .send_command(crate::pc88::Pc88Command::LoadState { slot });
+                    } else {
+                        self.info(
+                            "NEC PC-88 booted! Keyboard/mouse passthrough active (Shift+Tab to release, F12 for Quasi88 menu).",
+                        );
+                    }
                 }
                 crate::pc88::Pc88Event::ResolutionChanged { width, height } => {
                     self.pc88.resolution = (width, height);
                     self.hardware.selected_resolution = (width, height);
+                }
+                crate::pc88::Pc88Event::StateSaved { slot, meta } => {
+                    self.pc88
+                        .slot_textures
+                        .remove(&(meta.game_key.clone(), slot));
+                    self.pc88.refresh_slots_cache();
+                    self.info(format!(
+                        "💾 Saved PC-88 state to Slot {slot} ({})",
+                        meta.game_title
+                    ));
+                }
+                crate::pc88::Pc88Event::StateLoaded { slot, meta } => {
+                    if !meta.fdd1_path.is_empty() {
+                        self.pc88.config.fdd1_path = meta.fdd1_path.clone();
+                    }
+                    if !meta.fdd2_path.is_empty() {
+                        self.pc88.config.fdd2_path = meta.fdd2_path.clone();
+                    }
+                    self.info(format!(
+                        "📂 Loaded PC-88 state from Slot {slot} ({})",
+                        meta.game_title
+                    ));
                 }
                 crate::pc88::Pc88Event::Info(msg) => {
                     self.info(msg);

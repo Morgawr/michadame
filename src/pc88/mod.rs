@@ -2,10 +2,12 @@ pub mod core_sync;
 pub mod library;
 pub mod libretro;
 
-use crate::pc98::Pc98InputState;
+use crate::pc98::{savestate, Pc98InputState};
 use crossbeam_channel::{Receiver, Sender};
+use eframe::egui;
 use library::Pc88GameEntry;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -158,6 +160,10 @@ pub enum Pc88Command {
     },
     /// Push updated core options to Quasi88.
     UpdateOptions(Pc88Config),
+    /// Save the current emulator state + visual thumbnail into slot (`1..=8`).
+    SaveState { slot: u8 },
+    /// Load a previously saved emulator state from slot (`1..=8`).
+    LoadState { slot: u8 },
 }
 
 /// Status and lifecycle events emitted by the PC-88 worker thread back to the UI.
@@ -175,6 +181,16 @@ pub enum Pc88Event {
     ResolutionChanged {
         width: u32,
         height: u32,
+    },
+    /// Save state was written to disk along with its thumbnail and metadata.
+    StateSaved {
+        slot: u8,
+        meta: savestate::SaveStateMeta,
+    },
+    /// Save state was restored from disk.
+    StateLoaded {
+        slot: u8,
+        meta: savestate::SaveStateMeta,
     },
     /// Informational toast message.
     Info(String),
@@ -207,6 +223,11 @@ pub struct Pc88State {
     pub resolution: (u32, u32),
     /// Receiver for async native file dialog selections (`(slot, path)`).
     pub file_picker_rx: Option<Receiver<(Pc88MediaSlot, PathBuf)>>,
+    pub active_slot: u8,
+    pub slots_cache: [Option<savestate::SaveStateMeta>; savestate::SAVE_SLOT_COUNT],
+    pub slots_cache_game_key: String,
+    pub slot_textures: HashMap<(String, u8), egui::TextureHandle>,
+    pub pending_boot_load_slot: Option<u8>,
 }
 
 impl Default for Pc88State {
@@ -227,6 +248,11 @@ impl Default for Pc88State {
             input_state: Arc::new(Mutex::new(Pc98InputState::default())),
             resolution: (640, 400),
             file_picker_rx: None,
+            active_slot: 1,
+            slots_cache: Default::default(),
+            slots_cache_game_key: String::new(),
+            slot_textures: HashMap::new(),
+            pending_boot_load_slot: None,
         }
     }
 }
@@ -346,5 +372,33 @@ impl Pc88State {
         if let Some(ref tx) = self.command_tx {
             let _ = tx.send(Pc88Command::Stop);
         }
+    }
+
+    pub fn current_game_key(&self) -> (String, String) {
+        savestate::derive_pc88_game_key(&self.config)
+    }
+
+    pub fn ensure_slots_cache(&mut self) -> (String, String) {
+        let (key, title) = self.current_game_key();
+        if self.slots_cache_game_key != key {
+            self.slots_cache =
+                savestate::list_game_slots(&savestate::pc88_states_root(), &key);
+            self.slots_cache_game_key = key.clone();
+        }
+        (key, title)
+    }
+
+    pub fn refresh_slots_cache(&mut self) {
+        let (key, _) = self.current_game_key();
+        self.slots_cache = savestate::list_game_slots(&savestate::pc88_states_root(), &key);
+        self.slots_cache_game_key = key;
+    }
+
+    pub fn cycle_slot(&mut self, delta: i8) -> u8 {
+        let count = savestate::SAVE_SLOT_COUNT as i8;
+        let zero_based = (self.active_slot.saturating_sub(1) as i8).clamp(0, count - 1);
+        let next = (zero_based + delta).rem_euclid(count);
+        self.active_slot = (next + 1) as u8;
+        self.active_slot
     }
 }

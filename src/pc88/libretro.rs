@@ -221,6 +221,7 @@ struct LibretroBridgeContext {
     pixel_format: c_uint,
     av_info: RetroSystemAvInfo,
     last_resolution: (u32, u32),
+    last_frame: Option<Arc<RawFrame>>,
     frame_tx: Sender<Arc<RawFrame>>,
     event_tx: Sender<Pc88Event>,
     request_repaint: Arc<dyn Fn() + Send + Sync>,
@@ -554,6 +555,12 @@ unsafe extern "C" fn bridge_video_refresh_cb(
         },
     });
 
+    if let Ok(mut guard) = ACTIVE_PC88_BRIDGE.lock() {
+        if let Some(ctx) = guard.as_mut() {
+            ctx.last_frame = Some(raw_frame.clone());
+        }
+    }
+
     if frame_tx.try_send(raw_frame).is_ok() {
         repaint();
     }
@@ -874,6 +881,7 @@ pub fn run_pc88_worker(params: Pc88WorkerParams) -> Result<()> {
                 },
             },
             last_resolution: (640, 400),
+            last_frame: None,
             frame_tx: params.frame_tx.clone(),
             event_tx: params.event_tx.clone(),
             request_repaint: params.request_repaint.clone(),
@@ -949,6 +957,12 @@ unsafe fn run_loaded_core(
     let retro_unload_game: Symbol<unsafe extern "C" fn()> = lib.get(b"retro_unload_game\0")?;
     let retro_run: Symbol<unsafe extern "C" fn()> = lib.get(b"retro_run\0")?;
     let retro_reset: Symbol<unsafe extern "C" fn()> = lib.get(b"retro_reset\0")?;
+    let retro_serialize_size: Symbol<unsafe extern "C" fn() -> usize> =
+        lib.get(b"retro_serialize_size\0")?;
+    let retro_serialize: Symbol<unsafe extern "C" fn(*mut c_void, usize) -> bool> =
+        lib.get(b"retro_serialize\0")?;
+    let retro_unserialize: Symbol<unsafe extern "C" fn(*const c_void, usize) -> bool> =
+        lib.get(b"retro_unserialize\0")?;
 
     let retro_get_memory_data: Option<Symbol<unsafe extern "C" fn(c_uint) -> *mut c_void>> =
         lib.get(b"retro_get_memory_data\0").ok();
@@ -1072,11 +1086,33 @@ unsafe fn run_loaded_core(
         }
     }
 
+    let mut active_config = initial_config.clone();
+    let mut current_fdd1: Option<PathBuf> = {
+        let s = initial_config.fdd1_path.trim();
+        if !s.is_empty() && Path::new(s).is_file() {
+            Some(PathBuf::from(s))
+        } else {
+            None
+        }
+    };
+    let mut current_fdd2: Option<PathBuf> = {
+        let s = initial_config.fdd2_path.trim();
+        if !s.is_empty() && Path::new(s).is_file() {
+            Some(PathBuf::from(s))
+        } else {
+            None
+        }
+    };
+
     let mut av_info = RetroSystemAvInfo::default();
     retro_get_system_av_info(&mut av_info);
     with_bridge_ctx(|ctx| {
         ctx.av_info = av_info;
     });
+
+    // Execute one frame before emitting Started so the core is fully stepped and ready
+    // for immediate save/load state commands on boot.
+    retro_run();
 
     let fps = if av_info.timing.fps > 10.0 && av_info.timing.fps < 240.0 {
         av_info.timing.fps
@@ -1115,6 +1151,11 @@ unsafe fn run_loaded_core(
                 }
                 Pc88Command::MountFdd { drive, path } => {
                     super::library::sync_back_multi_d88_files(&boot_plan.disk_list);
+                    if drive == 0 {
+                        current_fdd1 = path.clone();
+                    } else if drive == 1 {
+                        current_fdd2 = path.clone();
+                    }
                     if mount_fdd_live(drive as usize, path.as_deref(), &mut boot_plan.disk_list) {
                         if let Some(p) = path {
                             let name = p
@@ -1146,6 +1187,120 @@ unsafe fn run_loaded_core(
                             new_cfg.floppy_seek_volume,
                         );
                     });
+                    active_config = new_cfg;
+                }
+                Pc88Command::SaveState { slot } => {
+                    let slot = slot.clamp(1, crate::pc98::savestate::SAVE_SLOT_COUNT as u8);
+                    super::library::sync_back_multi_d88_files(&boot_plan.disk_list);
+                    let state_size = retro_serialize_size();
+                    if state_size == 0 {
+                        let _ = event_tx.send(Pc88Event::Info(
+                            "PC-88 save state failed (serialize size is 0).".to_string(),
+                        ));
+                    } else {
+                        let mut state_buf = vec![0u8; state_size];
+                        if retro_serialize(state_buf.as_mut_ptr() as *mut c_void, state_size) {
+                            let (last_frame, last_res) = with_bridge_ctx(|ctx| {
+                                (ctx.last_frame.clone(), ctx.last_resolution)
+                            })
+                            .unwrap_or((None, (width, height)));
+                            let (game_key, game_title) =
+                                crate::pc98::savestate::derive_pc88_game_key(&active_config);
+                            let meta = crate::pc98::savestate::SaveStateMeta {
+                                slot,
+                                created_at: crate::pc98::savestate::current_unix_timestamp(),
+                                system: "PC-88".to_string(),
+                                game_key: game_key.clone(),
+                                game_title,
+                                fdd1_path: current_fdd1
+                                    .as_ref()
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or_default(),
+                                fdd2_path: current_fdd2
+                                    .as_ref()
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or_default(),
+                                hdd1_path: String::new(),
+                                tape_path: active_config.tape_path.trim().to_string(),
+                                resolution: last_res,
+                                size_bytes: state_buf.len(),
+                            };
+                            match crate::pc98::savestate::write_slot_files(
+                                &crate::pc98::savestate::pc88_states_root(),
+                                &game_key,
+                                &meta,
+                                &state_buf,
+                                last_frame.as_deref(),
+                            ) {
+                                Ok(()) => {
+                                    let _ = event_tx.send(Pc88Event::StateSaved { slot, meta });
+                                }
+                                Err(e) => {
+                                    let _ = event_tx.send(Pc88Event::Info(format!(
+                                        "Failed to write PC-88 slot {}: {e}",
+                                        slot
+                                    )));
+                                }
+                            }
+                        } else {
+                            let _ = event_tx.send(Pc88Event::Info(format!(
+                                "PC-88 core failed to serialize state into slot {}.",
+                                slot
+                            )));
+                        }
+                    }
+                }
+                Pc88Command::LoadState { slot } => {
+                    let slot = slot.clamp(1, crate::pc98::savestate::SAVE_SLOT_COUNT as u8);
+                    let (game_key, _) =
+                        crate::pc98::savestate::derive_pc88_game_key(&active_config);
+                    match crate::pc98::savestate::read_slot_state(
+                        &crate::pc98::savestate::pc88_states_root(),
+                        &game_key,
+                        slot,
+                    ) {
+                        Ok((meta, state_bytes)) => {
+                            if !meta.fdd1_path.is_empty() && Path::new(&meta.fdd1_path).is_file() {
+                                let p1 = PathBuf::from(&meta.fdd1_path);
+                                if current_fdd1.as_ref() != Some(&p1) {
+                                    mount_fdd_live(0, Some(&p1), &mut boot_plan.disk_list);
+                                    current_fdd1 = Some(p1);
+                                }
+                            }
+                            if !meta.fdd2_path.is_empty() && Path::new(&meta.fdd2_path).is_file() {
+                                let p2 = PathBuf::from(&meta.fdd2_path);
+                                if current_fdd2.as_ref() != Some(&p2) {
+                                    mount_fdd_live(1, Some(&p2), &mut boot_plan.disk_list);
+                                    current_fdd2 = Some(p2);
+                                }
+                            }
+                            if retro_unserialize(
+                                state_bytes.as_ptr() as *const c_void,
+                                state_bytes.len(),
+                            ) {
+                                with_bridge_ctx(|ctx| {
+                                    ctx.rumble_seek_frames = 0;
+                                    ctx.seek_mixer.stop(0);
+                                    ctx.seek_mixer.stop(1);
+                                    if let Ok(mut inp) = ctx.input_state.lock() {
+                                        inp.release_all();
+                                    }
+                                    if let Ok(mut q) = ctx.audio_queue.lock() {
+                                        q.samples.clear();
+                                    }
+                                });
+                                let _ = event_tx.send(Pc88Event::StateLoaded { slot, meta });
+                            } else {
+                                let _ = event_tx.send(Pc88Event::Info(format!(
+                                    "PC-88 core rejected state data in slot {}.",
+                                    slot
+                                )));
+                            }
+                        }
+                        Err(e) => {
+                            let _ = event_tx.send(Pc88Event::Info(format!("{e}")));
+                        }
+                    }
                 }
             }
         }

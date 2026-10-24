@@ -259,6 +259,12 @@ fn draw_pc98_system_section(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
     ui.add_space(4.0);
 
+    technical_group(ui, "", |ui| {
+        draw_save_states_section(ui, state, RetroPcSystem::Pc98, &mut changed);
+    });
+
+    ui.add_space(4.0);
+
     technical_group(ui, "PC-98 Hardware Configuration (Applies on Next Boot):", |ui| {
         two_columns(ui, |col1, col2| {
             sub_heading(col1, "System Architecture:");
@@ -1247,6 +1253,12 @@ fn draw_pc88_system_section(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
     ui.add_space(4.0);
 
+    technical_group(ui, "", |ui| {
+        draw_save_states_section(ui, state, RetroPcSystem::Pc88, &mut changed);
+    });
+
+    ui.add_space(4.0);
+
     technical_group(ui, "PC-88 Hardware Configuration (Applies on Next Boot):", |ui| {
         two_columns(ui, |col1, col2| {
             sub_heading(col1, "System Architecture:");
@@ -2024,4 +2036,457 @@ fn draw_pc88_media_row(
             *changed = true;
         }
     });
+}
+
+enum SlotCardAction {
+    Select(u8),
+    Save(u8),
+    Load(u8),
+    Delete(u8),
+}
+
+fn draw_save_states_section(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    system: RetroPcSystem,
+    changed: &mut bool,
+) {
+    use crate::pc98::savestate::{self, SAVE_SLOT_COUNT};
+
+    let (game_key, game_title, is_active, active_slot, slots_meta, states_root, id_src) =
+        match system {
+            RetroPcSystem::Pc98 => {
+                let (k, t) = state.pc98.ensure_slots_cache();
+                (
+                    k,
+                    t,
+                    state.pc98.is_active,
+                    state.pc98.active_slot,
+                    state.pc98.slots_cache.clone(),
+                    savestate::pc98_states_root(),
+                    "pc98_save_states_collapsible",
+                )
+            }
+            RetroPcSystem::Pc88 => {
+                let (k, t) = state.pc88.ensure_slots_cache();
+                (
+                    k,
+                    t,
+                    state.pc88.is_active,
+                    state.pc88.active_slot,
+                    state.pc88.slots_cache.clone(),
+                    savestate::pc88_states_root(),
+                    "pc88_save_states_collapsible",
+                )
+            }
+        };
+
+    let saved_count = slots_meta.iter().filter(|s| s.is_some()).count();
+    let header_title = format!(
+        "Save States — {} ({}/{} saved)",
+        truncate_combo_label(&game_title, 36),
+        saved_count,
+        SAVE_SLOT_COUNT
+    );
+
+    let mut pending_action: Option<SlotCardAction> = None;
+
+    egui::CollapsingHeader::new(
+        egui::RichText::new(header_title)
+            .monospace()
+            .size(11.0)
+            .strong()
+            .color(egui::Color32::from_rgb(210, 224, 214)),
+    )
+    .id_source(id_src)
+    .default_open(false)
+    .show(ui, |ui| {
+        ui.add_space(4.0);
+
+        // Ensure thumbnail textures are loaded for occupied slots when expanded
+        for idx in 0..SAVE_SLOT_COUNT {
+            let slot = (idx + 1) as u8;
+            if slots_meta[idx].is_some() {
+                let cache_key = (game_key.clone(), slot);
+                let already_loaded = match system {
+                    RetroPcSystem::Pc98 => state.pc98.slot_textures.contains_key(&cache_key),
+                    RetroPcSystem::Pc88 => state.pc88.slot_textures.contains_key(&cache_key),
+                };
+                if !already_loaded {
+                    if let Some((w, h, rgba)) =
+                        savestate::load_slot_thumbnail_rgba(&states_root, &game_key, slot)
+                    {
+                        let color_img = egui::ColorImage::from_rgba_unmultiplied(
+                            [w as usize, h as usize],
+                            &rgba,
+                        );
+                        let tex = ui.ctx().load_texture(
+                            format!("savestate_thumb_{:?}_{}_{}", system, game_key, slot),
+                            color_img,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        match system {
+                            RetroPcSystem::Pc98 => {
+                                state.pc98.slot_textures.insert(cache_key, tex);
+                            }
+                            RetroPcSystem::Pc88 => {
+                                state.pc88.slot_textures.insert(cache_key, tex);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2 rows x 4 columns of visual CRT snapshot cards fitted strictly inside available width
+        let avail_w = ui.available_width();
+        let spacing = 6.0;
+        let cols = 4usize;
+        let frame_margin = 4.0;
+        // Total horizontal overhead per card frame = 2 * frame_margin (8px) + 2 * stroke (2px) = 10px
+        let card_outer_w =
+            ((avail_w - spacing * ((cols - 1) as f32)) / (cols as f32)).floor().max(90.0);
+        let thumb_w = (card_outer_w - (frame_margin * 2.0 + 2.0)).max(76.0);
+        let thumb_h = (thumb_w * (200.0 / 320.0)).round();
+
+        for row in 0..2 {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = spacing;
+                for col in 0..cols {
+                    let idx = row * cols + col;
+                    let slot = (idx + 1) as u8;
+                    let is_sel = active_slot == slot;
+                    let meta_opt = &slots_meta[idx];
+                    let tex_id = {
+                        let key_pair = (game_key.clone(), slot);
+                        match system {
+                            RetroPcSystem::Pc98 => {
+                                state.pc98.slot_textures.get(&key_pair).map(|t| t.id())
+                            }
+                            RetroPcSystem::Pc88 => {
+                                state.pc88.slot_textures.get(&key_pair).map(|t| t.id())
+                            }
+                        }
+                    };
+
+                    let frame_fill = if is_sel {
+                        egui::Color32::from_rgb(20, 30, 24)
+                    } else {
+                        egui::Color32::from_rgb(18, 18, 18)
+                    };
+                    let frame_stroke = if is_sel {
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(56, 152, 88))
+                    } else if meta_opt.is_some() {
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(52, 66, 56))
+                    } else {
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 42, 42))
+                    };
+
+                    egui::Frame::none()
+                        .fill(frame_fill)
+                        .stroke(frame_stroke)
+                        .inner_margin(egui::Margin::same(frame_margin))
+                        .rounding(egui::Rounding::ZERO)
+                        .show(ui, |ui| {
+                            ui.set_width(thumb_w);
+                            ui.set_max_width(thumb_w);
+                            ui.vertical(|ui| {
+                                // Card header: Slot number + size/empty badge
+                                ui.horizontal(|ui| {
+                                    let badge_text = if is_sel {
+                                        format!("▶ SLOT {}", slot)
+                                    } else {
+                                        format!("SLOT {}", slot)
+                                    };
+                                    if ui
+                                        .selectable_label(
+                                            is_sel,
+                                            egui::RichText::new(badge_text)
+                                                .monospace()
+                                                .size(10.0)
+                                                .strong()
+                                                .color(if is_sel {
+                                                    egui::Color32::from_rgb(160, 255, 185)
+                                                } else {
+                                                    egui::Color32::from_rgb(210, 210, 210)
+                                                }),
+                                        )
+                                        .clicked()
+                                    {
+                                        pending_action = Some(SlotCardAction::Select(slot));
+                                    }
+
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let right_text = meta_opt
+                                                .as_ref()
+                                                .map(|m| m.formatted_size())
+                                                .unwrap_or_else(|| "EMPTY".to_string());
+                                            ui.label(
+                                                egui::RichText::new(right_text)
+                                                    .monospace()
+                                                    .size(9.0)
+                                                    .color(if meta_opt.is_some() {
+                                                        egui::Color32::from_rgb(135, 195, 155)
+                                                    } else {
+                                                        egui::Color32::from_rgb(100, 100, 100)
+                                                    }),
+                                            );
+                                        },
+                                    );
+                                });
+
+                                ui.add_space(2.0);
+
+                                // 16:10 CRT Preview Screen
+                                let (rect, resp) = ui.allocate_exact_size(
+                                    egui::vec2(thumb_w, thumb_h),
+                                    egui::Sense::click(),
+                                );
+                                let painter = ui.painter_at(rect);
+                                painter.rect_filled(
+                                    rect,
+                                    egui::Rounding::same(2.0),
+                                    egui::Color32::from_rgb(10, 12, 11),
+                                );
+
+                                if let Some(tid) = tex_id {
+                                    painter.image(
+                                        tid,
+                                        rect.shrink(1.0),
+                                        egui::Rect::from_min_max(
+                                            egui::pos2(0.0, 0.0),
+                                            egui::pos2(1.0, 1.0),
+                                        ),
+                                        egui::Color32::WHITE,
+                                    );
+                                    // Subtle CRT scanline overlay across thumbnail
+                                    let mut y = rect.top() + 2.0;
+                                    while y < rect.bottom() {
+                                        painter.line_segment(
+                                            [
+                                                egui::pos2(rect.left(), y),
+                                                egui::pos2(rect.right(), y),
+                                            ],
+                                            egui::Stroke::new(
+                                                1.0,
+                                                egui::Color32::from_rgba_unmultiplied(0, 0, 0, 42),
+                                            ),
+                                        );
+                                        y += 3.0;
+                                    }
+                                } else {
+                                    let label = if meta_opt.is_some() {
+                                        "SAVED STATE"
+                                    } else {
+                                        "NO SNAPSHOT"
+                                    };
+                                    painter.text(
+                                        rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        label,
+                                        egui::FontId::monospace(9.5),
+                                        egui::Color32::from_rgb(78, 86, 80),
+                                    );
+                                }
+
+                                painter.rect_stroke(
+                                    rect,
+                                    egui::Rounding::same(2.0),
+                                    egui::Stroke::new(
+                                        1.0,
+                                        if is_sel {
+                                            egui::Color32::from_rgb(68, 168, 100)
+                                        } else {
+                                            egui::Color32::from_rgb(38, 44, 40)
+                                        },
+                                    ),
+                                );
+
+                                if resp.double_clicked() && meta_opt.is_some() {
+                                    pending_action = Some(SlotCardAction::Load(slot));
+                                } else if resp.clicked() {
+                                    pending_action = Some(SlotCardAction::Select(slot));
+                                }
+                                if let Some(m) = meta_opt {
+                                    let hover = match m.media_label() {
+                                        Some(disk) => format!(
+                                            "Slot {} — {}\nSaved: {}\nMedia: {}\nDouble-click to load",
+                                            slot,
+                                            m.game_title,
+                                            m.formatted_timestamp(),
+                                            disk
+                                        ),
+                                        None => format!(
+                                            "Slot {} — {}\nSaved: {}\nDouble-click to load",
+                                            slot,
+                                            m.game_title,
+                                            m.formatted_timestamp()
+                                        ),
+                                    };
+                                    resp.on_hover_text(hover);
+                                } else {
+                                    resp.on_hover_text(format!(
+                                        "Slot {} is empty. Click Save while playing to capture a snapshot.",
+                                        slot
+                                    ));
+                                }
+
+                                ui.add_space(2.0);
+
+                                // Timestamp & disk subtitle
+                                let ts_text = meta_opt
+                                    .as_ref()
+                                    .map(|m| m.formatted_timestamp())
+                                    .unwrap_or_else(|| "Empty slot".to_string());
+                                ui.label(
+                                    egui::RichText::new(ts_text)
+                                        .monospace()
+                                        .size(9.0)
+                                        .color(if meta_opt.is_some() {
+                                            egui::Color32::from_rgb(175, 175, 175)
+                                        } else {
+                                            egui::Color32::from_rgb(95, 95, 95)
+                                        }),
+                                );
+
+                                let max_sub_cols = ((thumb_w / 6.2) as usize).clamp(12, 24);
+                                let media_sub = meta_opt
+                                    .as_ref()
+                                    .and_then(|m| m.media_label())
+                                    .map(|d| truncate_combo_label(&d, max_sub_cols))
+                                    .unwrap_or_else(|| "—".to_string());
+                                ui.label(
+                                    egui::RichText::new(media_sub)
+                                        .monospace()
+                                        .size(8.5)
+                                        .color(egui::Color32::from_rgb(120, 155, 130)),
+                                );
+
+                                ui.add_space(2.0);
+
+                                // Action buttons fitted strictly within thumb_w
+                                let btn_gap = 3.0;
+                                let del_w = 24.0;
+                                let main_btn_w = ((thumb_w - del_w - btn_gap * 2.0) * 0.5)
+                                    .floor()
+                                    .max(24.0);
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = btn_gap;
+                                    if ui
+                                        .add_enabled(
+                                            is_active,
+                                            egui::Button::new(
+                                                egui::RichText::new("Save").size(10.0),
+                                            )
+                                            .min_size(egui::vec2(main_btn_w, 18.0)),
+                                        )
+                                        .on_hover_text(format!("Save state to Slot {}", slot))
+                                        .clicked()
+                                    {
+                                        pending_action = Some(SlotCardAction::Save(slot));
+                                    }
+
+                                    let load_text = if is_active { "Load" } else { "Boot" };
+                                    if ui
+                                        .add_enabled(
+                                            meta_opt.is_some(),
+                                            egui::Button::new(
+                                                egui::RichText::new(load_text).size(10.0),
+                                            )
+                                            .min_size(egui::vec2(main_btn_w, 18.0)),
+                                        )
+                                        .on_hover_text(if is_active {
+                                            format!("Load state from Slot {}", slot)
+                                        } else {
+                                            format!(
+                                                "Boot emulator and automatically load Slot {}",
+                                                slot
+                                            )
+                                        })
+                                        .clicked()
+                                    {
+                                        pending_action = Some(SlotCardAction::Load(slot));
+                                    }
+
+                                    if ui
+                                        .add_enabled(
+                                            meta_opt.is_some(),
+                                            egui::Button::new(egui::RichText::new("🗑").size(10.0))
+                                                .min_size(egui::vec2(del_w, 18.0)),
+                                        )
+                                        .on_hover_text(format!("Delete Slot {}", slot))
+                                        .clicked()
+                                    {
+                                        pending_action = Some(SlotCardAction::Delete(slot));
+                                    }
+                                });
+                            });
+                        });
+                }
+            });
+            if row == 0 {
+                ui.add_space(spacing);
+            }
+        }
+    });
+
+    if let Some(action) = pending_action {
+        match action {
+            SlotCardAction::Select(slot) => match system {
+                RetroPcSystem::Pc98 => state.pc98.active_slot = slot,
+                RetroPcSystem::Pc88 => state.pc88.active_slot = slot,
+            },
+            SlotCardAction::Save(slot) => match system {
+                RetroPcSystem::Pc98 => {
+                    state.pc98.active_slot = slot;
+                    state.pc98.send_command(Pc98Command::SaveState { slot });
+                }
+                RetroPcSystem::Pc88 => {
+                    state.pc88.active_slot = slot;
+                    state.pc88.send_command(Pc88Command::SaveState { slot });
+                }
+            },
+            SlotCardAction::Load(slot) => match system {
+                RetroPcSystem::Pc98 => {
+                    state.pc98.active_slot = slot;
+                    if state.pc98.is_active {
+                        state.pc98.send_command(Pc98Command::LoadState { slot });
+                    } else {
+                        state.pc98.pending_boot_load_slot = Some(slot);
+                        state.start_pc98_mode(ui.ctx());
+                        *changed = true;
+                    }
+                }
+                RetroPcSystem::Pc88 => {
+                    state.pc88.active_slot = slot;
+                    if state.pc88.is_active {
+                        state.pc88.send_command(Pc88Command::LoadState { slot });
+                    } else {
+                        state.pc88.pending_boot_load_slot = Some(slot);
+                        state.start_pc88_mode(ui.ctx());
+                        *changed = true;
+                    }
+                }
+            },
+            SlotCardAction::Delete(slot) => {
+                if let Err(e) = savestate::delete_slot(&states_root, &game_key, slot) {
+                    state.error(format!("Failed to delete slot {}: {e}", slot));
+                } else {
+                    match system {
+                        RetroPcSystem::Pc98 => {
+                            state.pc98.slot_textures.remove(&(game_key.clone(), slot));
+                            state.pc98.refresh_slots_cache();
+                        }
+                        RetroPcSystem::Pc88 => {
+                            state.pc88.slot_textures.remove(&(game_key.clone(), slot));
+                            state.pc88.refresh_slots_cache();
+                        }
+                    }
+                    state.info(format!("Deleted Save Slot {} for '{}'.", slot, game_title));
+                }
+            }
+        }
+    }
 }

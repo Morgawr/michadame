@@ -105,6 +105,26 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             });
             ctx.request_repaint();
         }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::F5)) {
+            let slot = state.pc98.active_slot;
+            state.pc98.send_command(crate::pc98::Pc98Command::SaveState { slot });
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::F9)) {
+            let slot = state.pc98.active_slot;
+            state.pc98.send_command(crate::pc98::Pc98Command::LoadState { slot });
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::F6)) {
+            let slot = state.pc98.cycle_slot(-1);
+            state.info(format!(
+                "Selected PC-98 Save Slot {slot} (Shift+F5 Save / Shift+F9 Load)"
+            ));
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::F7)) {
+            let slot = state.pc98.cycle_slot(1);
+            state.info(format!(
+                "Selected PC-98 Save Slot {slot} (Shift+F5 Save / Shift+F9 Load)"
+            ));
+        }
         passthrough_active = state.pc98.passthrough_enabled;
     } else if is_pc88 {
         let toggle_passthrough = ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
@@ -117,6 +137,26 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 }
             });
             ctx.request_repaint();
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::F5)) {
+            let slot = state.pc88.active_slot;
+            state.pc88.send_command(crate::pc88::Pc88Command::SaveState { slot });
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::F9)) {
+            let slot = state.pc88.active_slot;
+            state.pc88.send_command(crate::pc88::Pc88Command::LoadState { slot });
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::F6)) {
+            let slot = state.pc88.cycle_slot(-1);
+            state.info(format!(
+                "Selected PC-88 Save Slot {slot} (Shift+F5 Save / Shift+F9 Load)"
+            ));
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::F7)) {
+            let slot = state.pc88.cycle_slot(1);
+            state.info(format!(
+                "Selected PC-88 Save Slot {slot} (Shift+F5 Save / Shift+F9 Load)"
+            ));
         }
         passthrough_active = state.pc88.passthrough_enabled;
     }

@@ -449,6 +449,7 @@ struct BridgeContext {
     event_tx: Sender<Pc98Event>,
     request_repaint: Arc<dyn Fn() + Send + Sync>,
     last_resolution: (u32, u32),
+    last_frame: Option<Arc<RawFrame>>,
     input_state: Arc<Mutex<Pc98InputState>>,
     latched_keys: [bool; 512],
     latched_mouse_dx: i16,
@@ -763,6 +764,12 @@ unsafe extern "C" fn retro_video_refresh_cb(
         rate: crate::replay::config::Rate { num: 5642, den: 100 },
     });
 
+    if let Ok(mut guard) = ACTIVE_BRIDGE.lock() {
+        if let Some(ctx) = guard.as_mut() {
+            ctx.last_frame = Some(raw_frame.clone());
+        }
+    }
+
     if frame_tx.try_send(raw_frame).is_ok() {
         (request_repaint)();
     }
@@ -998,6 +1005,7 @@ pub fn run_pc98_worker(params: Pc98WorkerParams) -> Result<()> {
             event_tx: params.event_tx.clone(),
             request_repaint: params.request_repaint.clone(),
             last_resolution: (640, 400),
+            last_frame: None,
             input_state: params.input_state.clone(),
             latched_keys: [false; 512],
             latched_mouse_dx: 0,
@@ -1138,6 +1146,14 @@ unsafe fn run_loaded_core(
     > = lib.get(b"retro_get_system_av_info\0")?;
     let retro_run: libloading::Symbol<unsafe extern "C" fn()> = lib.get(b"retro_run\0")?;
     let retro_reset: libloading::Symbol<unsafe extern "C" fn()> = lib.get(b"retro_reset\0")?;
+    let retro_serialize_size: libloading::Symbol<unsafe extern "C" fn() -> usize> =
+        lib.get(b"retro_serialize_size\0")?;
+    let retro_serialize: libloading::Symbol<
+        unsafe extern "C" fn(*mut c_void, usize) -> bool,
+    > = lib.get(b"retro_serialize\0")?;
+    let retro_unserialize: libloading::Symbol<
+        unsafe extern "C" fn(*const c_void, usize) -> bool,
+    > = lib.get(b"retro_unserialize\0")?;
     let retro_get_memory_data: Option<
         libloading::Symbol<unsafe extern "C" fn(c_uint) -> *mut c_void>,
     > = lib.get(b"retro_get_memory_data\0").ok();
@@ -1220,6 +1236,7 @@ unsafe fn run_loaded_core(
     });
 
     let defer_fdd = super::library::should_defer_fdd_boot(initial_config);
+    let mut active_config = initial_config.clone();
     let mut current_fdd1: Option<PathBuf> = {
         let s = initial_config.fdd1_path.trim();
         if !s.is_empty() && Path::new(s).exists() {
@@ -1383,6 +1400,127 @@ unsafe fn run_loaded_core(
                                 new_cfg.floppy_seek_sound,
                                 new_cfg.floppy_seek_volume,
                             );
+                        }
+                    }
+                    active_config = new_cfg;
+                }
+                Pc98Command::SaveState { slot } => {
+                    let slot = slot.clamp(1, super::savestate::SAVE_SLOT_COUNT as u8);
+                    let state_size = retro_serialize_size();
+                    if state_size == 0 {
+                        let _ = event_tx.send(Pc98Event::Info(
+                            "PC-98 save state failed (serialize size is 0).".to_string(),
+                        ));
+                    } else {
+                        let mut state_buf = vec![0u8; state_size];
+                        if retro_serialize(state_buf.as_mut_ptr() as *mut c_void, state_size) {
+                            let (last_frame, last_res) = ACTIVE_BRIDGE
+                                .lock()
+                                .ok()
+                                .and_then(|g| {
+                                    g.as_ref().map(|ctx| {
+                                        (ctx.last_frame.clone(), ctx.last_resolution)
+                                    })
+                                })
+                                .unwrap_or((None, (width, height)));
+                            let (game_key, game_title) =
+                                super::savestate::derive_pc98_game_key(&active_config);
+                            let meta = super::savestate::SaveStateMeta {
+                                slot,
+                                created_at: super::savestate::current_unix_timestamp(),
+                                system: "PC-98".to_string(),
+                                game_key: game_key.clone(),
+                                game_title,
+                                fdd1_path: current_fdd1
+                                    .as_ref()
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or_default(),
+                                fdd2_path: current_fdd2
+                                    .as_ref()
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or_default(),
+                                hdd1_path: active_config.hdd1_path.trim().to_string(),
+                                tape_path: String::new(),
+                                resolution: last_res,
+                                size_bytes: state_buf.len(),
+                            };
+                            match super::savestate::write_slot_files(
+                                &super::savestate::pc98_states_root(),
+                                &game_key,
+                                &meta,
+                                &state_buf,
+                                last_frame.as_deref(),
+                            ) {
+                                Ok(()) => {
+                                    let _ = event_tx.send(Pc98Event::StateSaved { slot, meta });
+                                }
+                                Err(e) => {
+                                    let _ = event_tx.send(Pc98Event::Info(format!(
+                                        "Failed to write PC-98 slot {}: {e}",
+                                        slot
+                                    )));
+                                }
+                            }
+                        } else {
+                            let _ = event_tx.send(Pc98Event::Info(format!(
+                                "PC-98 core failed to serialize state into slot {}.",
+                                slot
+                            )));
+                        }
+                    }
+                }
+                Pc98Command::LoadState { slot } => {
+                    let slot = slot.clamp(1, super::savestate::SAVE_SLOT_COUNT as u8);
+                    let (game_key, _) = super::savestate::derive_pc98_game_key(&active_config);
+                    match super::savestate::read_slot_state(
+                        &super::savestate::pc98_states_root(),
+                        &game_key,
+                        slot,
+                    ) {
+                        Ok((meta, state_bytes)) => {
+                            if !meta.fdd1_path.is_empty() && Path::new(&meta.fdd1_path).exists() {
+                                let p1 = PathBuf::from(&meta.fdd1_path);
+                                if current_fdd1.as_ref() != Some(&p1) || deferred_fdd_pending {
+                                    mount_fdd_via_disk_control(0, Some(&p1));
+                                    current_fdd1 = Some(p1);
+                                }
+                            }
+                            if !meta.fdd2_path.is_empty() && Path::new(&meta.fdd2_path).exists() {
+                                let p2 = PathBuf::from(&meta.fdd2_path);
+                                if current_fdd2.as_ref() != Some(&p2) || deferred_fdd_pending {
+                                    mount_fdd_via_disk_control(1, Some(&p2));
+                                    current_fdd2 = Some(p2);
+                                }
+                            }
+                            deferred_fdd_pending = false;
+                            startup_cmd_sent = true;
+                            auto_type_queue.clear();
+                            if let Ok(mut inp) = input_state.lock() {
+                                inp.release_all();
+                            }
+                            if retro_unserialize(
+                                state_bytes.as_ptr() as *const c_void,
+                                state_bytes.len(),
+                            ) {
+                                if let Ok(mut guard) = ACTIVE_BRIDGE.lock() {
+                                    if let Some(ctx) = guard.as_mut() {
+                                        ctx.seek_mixer.stop(0);
+                                        ctx.seek_mixer.stop(1);
+                                        if let Ok(mut q) = ctx.audio_queue.lock() {
+                                            q.samples.clear();
+                                        }
+                                    }
+                                }
+                                let _ = event_tx.send(Pc98Event::StateLoaded { slot, meta });
+                            } else {
+                                let _ = event_tx.send(Pc98Event::Info(format!(
+                                    "PC-98 core rejected state data in slot {}.",
+                                    slot
+                                )));
+                            }
+                        }
+                        Err(e) => {
+                            let _ = event_tx.send(Pc98Event::Info(format!("{e}")));
                         }
                     }
                 }

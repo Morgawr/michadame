@@ -176,10 +176,12 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
                 ui.add_space(6.0);
             }
 
+            let max_panel_w = ui.available_width();
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
+                    ui.set_max_width(max_panel_w);
+                    ui.set_width(max_panel_w);
                     repaint_requested |= controls::layout_top_ui(ui, state);
                 });
 

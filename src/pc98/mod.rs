@@ -3,10 +3,12 @@ pub mod input;
 pub mod kanji_table;
 pub mod library;
 pub mod libretro;
+pub mod savestate;
 pub mod search;
 
 use eframe::egui;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -99,6 +101,8 @@ pub enum Pc98Command {
     MountFdd { drive: u8, path: Option<PathBuf> },
     TriggerMenu,
     UpdateOptions(Pc98Config),
+    SaveState { slot: u8 },
+    LoadState { slot: u8 },
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +116,14 @@ pub enum Pc98Event {
     ResolutionChanged {
         width: u32,
         height: u32,
+    },
+    StateSaved {
+        slot: u8,
+        meta: savestate::SaveStateMeta,
+    },
+    StateLoaded {
+        slot: u8,
+        meta: savestate::SaveStateMeta,
     },
     Info(String),
     Failed(String),
@@ -185,6 +197,11 @@ pub struct Pc98State {
     pub worker_thread: Option<JoinHandle<()>>,
     pub prev_modifiers: egui::Modifiers,
     pub file_picker_rx: Option<crossbeam_channel::Receiver<(Pc98MediaSlot, PathBuf)>>,
+    pub active_slot: u8,
+    pub slots_cache: [Option<savestate::SaveStateMeta>; savestate::SAVE_SLOT_COUNT],
+    pub slots_cache_game_key: String,
+    pub slot_textures: HashMap<(String, u8), egui::TextureHandle>,
+    pub pending_boot_load_slot: Option<u8>,
 }
 
 impl Default for Pc98State {
@@ -205,6 +222,11 @@ impl Default for Pc98State {
             worker_thread: None,
             prev_modifiers: egui::Modifiers::default(),
             file_picker_rx: None,
+            active_slot: 1,
+            slots_cache: Default::default(),
+            slots_cache_game_key: String::new(),
+            slot_textures: HashMap::new(),
+            pending_boot_load_slot: None,
         }
     }
 }
@@ -281,5 +303,33 @@ impl Pc98State {
 
     pub fn request_stop(&self) {
         self.stop_requested.store(true, Ordering::Relaxed);
+    }
+
+    pub fn current_game_key(&self) -> (String, String) {
+        savestate::derive_pc98_game_key(&self.config)
+    }
+
+    pub fn ensure_slots_cache(&mut self) -> (String, String) {
+        let (key, title) = self.current_game_key();
+        if self.slots_cache_game_key != key {
+            self.slots_cache =
+                savestate::list_game_slots(&savestate::pc98_states_root(), &key);
+            self.slots_cache_game_key = key.clone();
+        }
+        (key, title)
+    }
+
+    pub fn refresh_slots_cache(&mut self) {
+        let (key, _) = self.current_game_key();
+        self.slots_cache = savestate::list_game_slots(&savestate::pc98_states_root(), &key);
+        self.slots_cache_game_key = key;
+    }
+
+    pub fn cycle_slot(&mut self, delta: i8) -> u8 {
+        let count = savestate::SAVE_SLOT_COUNT as i8;
+        let zero_based = (self.active_slot.saturating_sub(1) as i8).clamp(0, count - 1);
+        let next = (zero_based + delta).rem_euclid(count);
+        self.active_slot = (next + 1) as u8;
+        self.active_slot
     }
 }

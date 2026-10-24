@@ -432,8 +432,17 @@ pub fn forward_pc98_inputs(
                 modifiers,
                 ..
             } => {
-                // Shift+Tab is reserved for toggling Michadame passthrough
-                if key == egui::Key::Tab && modifiers.shift {
+                // Shift+Tab (passthrough toggle) and Shift+F5/F6/F7/F9 (Quick Save/Load/Slot) are reserved
+                if modifiers.shift
+                    && matches!(
+                        key,
+                        egui::Key::Tab
+                            | egui::Key::F5
+                            | egui::Key::F6
+                            | egui::Key::F7
+                            | egui::Key::F9
+                    )
+                {
                     continue;
                 }
                 apply_pc98_key_event(
@@ -514,7 +523,16 @@ pub fn forward_pc88_inputs(
                 modifiers,
                 ..
             } => {
-                if key == egui::Key::Tab && modifiers.shift {
+                if modifiers.shift
+                    && matches!(
+                        key,
+                        egui::Key::Tab
+                            | egui::Key::F5
+                            | egui::Key::F6
+                            | egui::Key::F7
+                            | egui::Key::F9
+                    )
+                {
                     continue;
                 }
                 apply_pc98_key_event(
