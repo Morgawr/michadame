@@ -621,6 +621,8 @@ unsafe extern "C" fn bridge_audio_sample_batch_cb(data: *const i16, frames: usiz
         q.samples.extend(&f32_samples);
     }
 
+    replay_audio.observe_reactive(&f32_samples, PC88_AUDIO_SAMPLE_RATE, PC88_AUDIO_CHANNELS);
+
     if replay_audio.is_enabled() {
         let resampled = resample_stereo_44100_to_48000(&f32_samples);
         replay_audio.submit(

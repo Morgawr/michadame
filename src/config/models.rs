@@ -518,6 +518,8 @@ pub struct LegacyConfig {
     pub mic: MicConfig,
     #[serde(default)]
     pub webcam: WebcamConfig,
+    #[serde(default)]
+    pub audio_reactive: crate::app::models::AudioReactiveConfig,
 }
 
 impl Default for LegacyConfig {
@@ -631,6 +633,7 @@ impl Default for LegacyConfig {
             twitch: TwitchConfig::default(),
             mic: MicConfig::default(),
             webcam: WebcamConfig::default(),
+            audio_reactive: crate::app::models::AudioReactiveConfig::default(),
         }
     }
 }
@@ -685,6 +688,8 @@ pub struct MichadameConfig {
     pub pc98_profile: Option<Profile>,
     #[serde(default)]
     pub pc88_profile: Option<Profile>,
+    #[serde(default)]
+    pub audio_reactive: crate::app::models::AudioReactiveConfig,
     pub profiles: BTreeMap<String, Profile>,
 }
 
@@ -726,6 +731,7 @@ impl Default for MichadameConfig {
             gamescope_profile: None,
             pc98_profile: None,
             pc88_profile: None,
+            audio_reactive: crate::app::models::AudioReactiveConfig::default(),
             profiles,
         }
     }

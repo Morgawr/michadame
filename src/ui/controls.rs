@@ -513,6 +513,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 let tabs = [
                     (SettingsTab::Shaders, "Shaders"),
                     (SettingsTab::GeometryBezel, "Geometry & Bezel"),
+                    (SettingsTab::SpecialFx, "Special FX"),
                     (SettingsTab::CaptureReplay, "Capture & Replay"),
                     (SettingsTab::AudioMic, "Audio & Mic"),
                     (SettingsTab::Pc98, "PC-98 / PC-88"),
@@ -522,8 +523,8 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 ];
 
                 // Measure natural text widths so we can distribute remaining horizontal space evenly
-                // across all 8 tabs, filling the single row edge-to-edge with balanced padding.
-                let font_id = egui::FontId::monospace(11.0);
+                // across all tabs, filling the single row edge-to-edge with balanced padding.
+                let font_id = egui::FontId::monospace(10.5);
                 let text_widths: Vec<f32> = ui.fonts(|f| {
                     tabs.iter()
                         .map(|(_, label)| {
@@ -535,7 +536,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 });
                 let total_text_w: f32 = text_widths.iter().sum();
                 let total_spacing = spacing * (tabs.len().saturating_sub(1) as f32);
-                let extra_per_tab = ((avail_w - total_text_w - total_spacing) / (tabs.len() as f32)).max(8.0);
+                let extra_per_tab = ((avail_w - total_text_w - total_spacing) / (tabs.len() as f32)).max(6.0);
 
                 for ((tab, label), text_w) in tabs.into_iter().zip(text_widths.into_iter()) {
                     let is_active = state.ui.active_settings_tab == tab;
@@ -544,7 +545,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         egui::Button::new(
                             egui::RichText::new(label)
                                 .monospace()
-                                .size(11.0)
+                                .size(10.5)
                                 .strong()
                                 .color(egui::Color32::WHITE),
                         )
@@ -555,7 +556,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         egui::Button::new(
                             egui::RichText::new(label)
                                 .monospace()
-                                .size(11.0)
+                                .size(10.5)
                                 .color(egui::Color32::from_rgb(148, 148, 148)),
                         )
                         .fill(egui::Color32::from_rgb(34, 34, 34)) // #222222
@@ -584,6 +585,9 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 }
                 SettingsTab::GeometryBezel => {
                     changed |= filters::draw_geometry_bezel_tab(ui, state);
+                }
+                SettingsTab::SpecialFx => {
+                    changed |= filters::draw_special_fx_tab(ui, state);
                 }
                 SettingsTab::CaptureReplay => {
                     changed |= devices::draw_capture_and_webcam_selectors(ui, state);
@@ -885,6 +889,7 @@ fn draw_hotkeys_tab(ui: &mut egui::Ui) {
             ("Ctrl + Z", "Undo Drawing (Whiteboard)"),
             ("Ctrl + Y", "Redo Drawing (Whiteboard)"),
             ("C", "Cycle CRT Filter (Off / Lottes / Halo)"),
+            ("J", "Toggle Audio-Reactive CRT Interference"),
             ("K", "Toggle Lights Off Night Mode"),
             ("G", "Toggle 480p Pixelate Filter"),
             ("Q", "Stop Stream Confirmation Dialog"),

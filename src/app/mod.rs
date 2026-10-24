@@ -75,6 +75,8 @@ impl Default for AppState {
             halo_defaults: crate::app::models::HaloSettings::default(),
             cathode_interference: crate::app::models::CathodeInterferenceSettings::default(),
             cathode_interference_defaults: crate::app::models::CathodeInterferenceSettings::default(),
+            audio_reactive: crate::app::models::AudioReactiveConfig::default(),
+            audio_reactive_runtime: crate::app::models::AudioReactiveRuntime::default(),
             selected_crt_filter: CrtFilter::Lottes,
             video: VideoSettings {
                 pixelate_filter_enabled: false,
@@ -232,6 +234,22 @@ impl AppState {
     pub fn clear_ocr(&mut self) {
         self.ocr.clear();
         self.dict.popup = None;
+    }
+
+    pub fn toggle_audio_reactive(&mut self) {
+        self.audio_reactive.enabled = !self.audio_reactive.enabled;
+        self.replay
+            .audio
+            .set_reactive_listening(self.audio_reactive.enabled);
+        config::save_global_hardware_config(self);
+        if self.audio_reactive.enabled {
+            self.info(format!(
+                "Audio-Reactive CRT Interference enabled (Preset: {}).",
+                self.audio_reactive.active_preset
+            ));
+        } else {
+            self.info("Audio-Reactive CRT Interference disabled.");
+        }
     }
 
     /// If live and configured, shares newly mined vocabulary to Twitch chat as two messages:
@@ -485,6 +503,18 @@ impl eframe::App for AppState {
             / 1000.0;
         self.hardware.live_audio_peak = raw_audio_peak.max(self.hardware.live_audio_peak * 0.88);
 
+        let reactive_listen = self.audio_reactive.enabled
+            || (self.ui.control_window_open
+                && self.ui.active_settings_tab == crate::app::models::SettingsTab::SpecialFx);
+        self.replay.audio.set_reactive_listening(reactive_listen);
+        let raw_reactive = self.replay.audio.take_reactive_raw();
+        self.audio_reactive_runtime.step(
+            raw_reactive,
+            self.hardware.live_audio_peak,
+            &self.audio_reactive.current,
+            reactive_listen,
+        );
+
         let mic_db = f32::from_bits(self.mic.current_level_db.load(Ordering::Relaxed));
         let raw_mic = if self.mic.config.enabled && self.mic.active_stream.is_some() && mic_db > -80.0 {
             ((mic_db + 60.0) / 60.0).clamp(0.0, 1.0)
@@ -676,6 +706,10 @@ impl eframe::App for AppState {
             }
             if crate::ui::check_toggle_key(ctx, egui::Key::H) {
                 self.whiteboard.toggle();
+                repaint_requested = true;
+            }
+            if crate::ui::check_toggle_key(ctx, egui::Key::J) {
+                self.toggle_audio_reactive();
                 repaint_requested = true;
             }
             if !ctx.wants_keyboard_input()

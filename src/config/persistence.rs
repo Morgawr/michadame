@@ -380,6 +380,7 @@ pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(
     cfg.webcam = state.webcam.config.clone();
     cfg.pc98 = state.pc98.config.clone();
     cfg.pc88 = state.pc88.config.clone();
+    cfg.audio_reactive = state.audio_reactive.clone();
 
     let current_profile_data = build_profile_from_state(state);
     if state.video_player.is_some() {
@@ -773,6 +774,12 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
         state.cathode_interference_defaults = defaults.clone();
         state.cathode_interference = defaults.clone();
     }
+    state.audio_reactive = cfg.audio_reactive.clone();
+    state.audio_reactive.ensure_builtin_presets();
+    state
+        .replay
+        .audio
+        .set_reactive_listening(state.audio_reactive.enabled);
 
     state.webcam.config = cfg.webcam.clone();
     apply_hardware_devices_from_config(state, cfg);

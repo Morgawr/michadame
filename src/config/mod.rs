@@ -140,6 +140,11 @@ impl From<LegacyConfig> for MichadameConfig {
             gamescope_profile: legacy.gamescope_profile,
             pc98_profile: legacy.pc98_profile,
             pc88_profile: legacy.pc88_profile,
+            audio_reactive: {
+                let mut ar = legacy.audio_reactive;
+                ar.ensure_builtin_presets();
+                ar
+            },
             profiles,
         }
     }
@@ -261,6 +266,7 @@ mod tests {
             twitch: Default::default(),
             mic: Default::default(),
             webcam: Default::default(),
+            audio_reactive: Default::default(),
         };
 
         let config: MichadameConfig = MichadameConfig::from(legacy);
@@ -405,6 +411,7 @@ mod tests {
             twitch: Default::default(),
             mic: Default::default(),
             webcam: Default::default(),
+            audio_reactive: Default::default(),
         };
 
         let config: MichadameConfig = MichadameConfig::from(legacy);
@@ -414,5 +421,38 @@ mod tests {
             config.profiles.get("Custom").unwrap().crt_hard_scan,
             Some(-10.0)
         );
+    }
+
+    #[test]
+    fn test_audio_reactive_config_toml_roundtrip_and_presets() {
+        let mut cfg = MichadameConfig::default();
+        cfg.audio_reactive.enabled = true;
+        cfg.audio_reactive.active_preset = "Custom Cyber Bass".to_string();
+        let mut custom = crate::app::models::AudioReactiveParams::preset_max_cyber_overload();
+        custom.deflection_shake = 1.42;
+        cfg.audio_reactive.current = custom.clone();
+        cfg.audio_reactive
+            .presets
+            .insert("Custom Cyber Bass".to_string(), custom.clone());
+
+        let path = std::env::temp_dir().join(format!(
+            "michadame-ar-roundtrip-{}-{}.toml",
+            std::process::id(),
+            crate::replay::now_us()
+        ));
+        store_config_atomic_at(&path, &cfg).expect("Failed to store config with audio_reactive");
+        let loaded: MichadameConfig =
+            confy::load_path(&path).expect("Failed to load config with audio_reactive");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("toml.bak"));
+
+        assert!(loaded.audio_reactive.enabled);
+        assert_eq!(loaded.audio_reactive.active_preset, "Custom Cyber Bass");
+        assert_eq!(loaded.audio_reactive.current.deflection_shake, 1.42);
+        assert!(loaded.audio_reactive.presets.contains_key("Custom Cyber Bass"));
+        assert!(loaded
+            .audio_reactive
+            .presets
+            .contains_key("Arcade Woofer Punch"));
     }
 }

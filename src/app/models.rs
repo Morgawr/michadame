@@ -39,6 +39,7 @@ pub enum SettingsTab {
     #[default]
     Shaders,
     GeometryBezel,
+    SpecialFx,
     CaptureReplay,
     AudioMic,
     Pc98,
@@ -156,6 +157,375 @@ impl Default for CathodeInterferenceSettings {
             interference: 0.3,
             lightbulb_effect: 0.35,
         }
+    }
+}
+
+pub const AUDIO_REACTIVE_DEFAULT_PRESET: &str = "Arcade Woofer Punch";
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioReactiveParams {
+    pub master_intensity: f32,
+    pub input_gain: f32,
+    pub gate_threshold: f32,
+    pub attack_ms: f32,
+    pub release_ms: f32,
+    pub low_weight: f32,
+    pub mid_weight: f32,
+    pub high_weight: f32,
+    pub deflection_shake: f32,
+    pub stereo_tug: f32,
+    pub flyback_pump: f32,
+    pub rgb_deconvergence: f32,
+    pub scanline_wave: f32,
+    pub phosphor_surge: f32,
+    pub sync_tear: f32,
+}
+
+impl Default for AudioReactiveParams {
+    fn default() -> Self {
+        Self::preset_arcade_woofer_punch()
+    }
+}
+
+impl AudioReactiveParams {
+    pub fn preset_subtle_speaker_hum() -> Self {
+        Self {
+            master_intensity: 0.55,
+            input_gain: 1.15,
+            gate_threshold: 0.04,
+            attack_ms: 14.0,
+            release_ms: 180.0,
+            low_weight: 1.00,
+            mid_weight: 0.70,
+            high_weight: 0.50,
+            deflection_shake: 0.25,
+            stereo_tug: 0.22,
+            flyback_pump: 0.20,
+            rgb_deconvergence: 0.22,
+            scanline_wave: 0.18,
+            phosphor_surge: 0.18,
+            sync_tear: 0.05,
+        }
+    }
+
+    pub fn preset_arcade_woofer_punch() -> Self {
+        Self {
+            master_intensity: 1.00,
+            input_gain: 1.35,
+            gate_threshold: 0.03,
+            attack_ms: 8.0,
+            release_ms: 140.0,
+            low_weight: 1.35,
+            mid_weight: 0.90,
+            high_weight: 0.80,
+            deflection_shake: 0.65,
+            stereo_tug: 0.50,
+            flyback_pump: 0.55,
+            rgb_deconvergence: 0.45,
+            scanline_wave: 0.35,
+            phosphor_surge: 0.42,
+            sync_tear: 0.22,
+        }
+    }
+
+    pub fn preset_fm_chiptune_oscilloscope() -> Self {
+        Self {
+            master_intensity: 1.05,
+            input_gain: 1.40,
+            gate_threshold: 0.02,
+            attack_ms: 5.0,
+            release_ms: 110.0,
+            low_weight: 0.85,
+            mid_weight: 1.45,
+            high_weight: 1.30,
+            deflection_shake: 0.35,
+            stereo_tug: 0.55,
+            flyback_pump: 0.25,
+            rgb_deconvergence: 0.60,
+            scanline_wave: 0.85,
+            phosphor_surge: 0.48,
+            sync_tear: 0.28,
+        }
+    }
+
+    pub fn preset_overdriven_flyback() -> Self {
+        Self {
+            master_intensity: 1.35,
+            input_gain: 1.60,
+            gate_threshold: 0.02,
+            attack_ms: 5.0,
+            release_ms: 165.0,
+            low_weight: 1.50,
+            mid_weight: 1.10,
+            high_weight: 1.20,
+            deflection_shake: 0.90,
+            stereo_tug: 0.70,
+            flyback_pump: 0.95,
+            rgb_deconvergence: 0.80,
+            scanline_wave: 0.65,
+            phosphor_surge: 0.85,
+            sync_tear: 0.60,
+        }
+    }
+
+    pub fn preset_max_cyber_overload() -> Self {
+        Self {
+            master_intensity: 1.75,
+            input_gain: 1.85,
+            gate_threshold: 0.015,
+            attack_ms: 3.5,
+            release_ms: 190.0,
+            low_weight: 1.65,
+            mid_weight: 1.45,
+            high_weight: 1.60,
+            deflection_shake: 1.30,
+            stereo_tug: 1.00,
+            flyback_pump: 1.20,
+            rgb_deconvergence: 1.25,
+            scanline_wave: 1.15,
+            phosphor_surge: 1.15,
+            sync_tear: 1.05,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioReactiveConfig {
+    // Scalar fields before nested tables for TOML compatibility
+    pub enabled: bool,
+    pub active_preset: String,
+    pub current: AudioReactiveParams,
+    pub presets: BTreeMap<String, AudioReactiveParams>,
+}
+
+impl Default for AudioReactiveConfig {
+    fn default() -> Self {
+        let presets = Self::builtin_presets();
+        let active_preset = AUDIO_REACTIVE_DEFAULT_PRESET.to_string();
+        let current = presets
+            .get(&active_preset)
+            .cloned()
+            .unwrap_or_default();
+        Self {
+            enabled: false,
+            active_preset,
+            current,
+            presets,
+        }
+    }
+}
+
+impl AudioReactiveConfig {
+    pub fn builtin_presets() -> BTreeMap<String, AudioReactiveParams> {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "Subtle Speaker Hum".to_string(),
+            AudioReactiveParams::preset_subtle_speaker_hum(),
+        );
+        map.insert(
+            "Arcade Woofer Punch".to_string(),
+            AudioReactiveParams::preset_arcade_woofer_punch(),
+        );
+        map.insert(
+            "FM Chiptune Oscilloscope".to_string(),
+            AudioReactiveParams::preset_fm_chiptune_oscilloscope(),
+        );
+        map.insert(
+            "Overdriven Flyback (Juiced)".to_string(),
+            AudioReactiveParams::preset_overdriven_flyback(),
+        );
+        map.insert(
+            "Max Cyber-Overload".to_string(),
+            AudioReactiveParams::preset_max_cyber_overload(),
+        );
+        map
+    }
+
+    pub fn builtin_preset(name: &str) -> Option<AudioReactiveParams> {
+        Self::builtin_presets().remove(name)
+    }
+
+    pub fn is_builtin_preset(name: &str) -> bool {
+        matches!(
+            name,
+            "Subtle Speaker Hum"
+                | "Arcade Woofer Punch"
+                | "FM Chiptune Oscilloscope"
+                | "Overdriven Flyback (Juiced)"
+                | "Max Cyber-Overload"
+        )
+    }
+
+    pub fn ensure_builtin_presets(&mut self) {
+        for (name, preset) in Self::builtin_presets() {
+            self.presets.entry(name).or_insert(preset);
+        }
+        if self.active_preset.trim().is_empty() || !self.presets.contains_key(&self.active_preset) {
+            self.active_preset = AUDIO_REACTIVE_DEFAULT_PRESET.to_string();
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct AudioReactiveRuntime {
+    pub low_env: f32,
+    pub mid_env: f32,
+    pub high_env: f32,
+    pub transient_env: f32,
+    pub slow_energy: f32,
+    pub stereo_balance: f32,
+    pub spring_pos_x: f32,
+    pub spring_vel_x: f32,
+    pub spring_pos_y: f32,
+    pub spring_vel_y: f32,
+    pub phase_accum: f32,
+    pub last_step: Instant,
+    pub new_preset_name: String,
+}
+
+impl Default for AudioReactiveRuntime {
+    fn default() -> Self {
+        Self {
+            low_env: 0.0,
+            mid_env: 0.0,
+            high_env: 0.0,
+            transient_env: 0.0,
+            slow_energy: 0.0,
+            stereo_balance: 0.0,
+            spring_pos_x: 0.0,
+            spring_vel_x: 0.0,
+            spring_pos_y: 0.0,
+            spring_vel_y: 0.0,
+            phase_accum: 0.0,
+            last_step: Instant::now(),
+            new_preset_name: String::new(),
+        }
+    }
+}
+
+impl AudioReactiveRuntime {
+    pub fn step(
+        &mut self,
+        raw: (f32, f32, f32, f32, f32),
+        fallback_peak: f32,
+        params: &AudioReactiveParams,
+        active: bool,
+    ) {
+        let now = Instant::now();
+        let dt = now
+            .duration_since(self.last_step)
+            .as_secs_f32()
+            .clamp(0.001, 0.08);
+        self.last_step = now;
+
+        if !active {
+            let decay = (-dt * 12.0).exp();
+            self.low_env *= decay;
+            self.mid_env *= decay;
+            self.high_env *= decay;
+            self.transient_env *= decay;
+            self.slow_energy *= decay;
+            self.stereo_balance *= decay;
+            self.spring_pos_x *= decay;
+            self.spring_vel_x *= decay;
+            self.spring_pos_y *= decay;
+            self.spring_vel_y *= decay;
+            return;
+        }
+
+        let (mut r_low, mut r_mid, mut r_high, r_left, r_right) = raw;
+        if (r_low + r_mid + r_high) < 0.0005 && fallback_peak > 0.002 {
+            let p = fallback_peak.powf(0.65) * 1.35;
+            r_low = p * 0.95;
+            r_mid = p * 0.80;
+            r_high = p * 0.60;
+        }
+
+        let gate_thresh = (params.gate_threshold * 0.65).clamp(0.0, 0.5);
+        let gain = params.input_gain.max(0.0);
+        let gate_map = |val: f32, weight: f32| -> f32 {
+            let v = val * gain;
+            if v <= gate_thresh {
+                0.0
+            } else {
+                let norm = (v - gate_thresh) / (1.0 - gate_thresh * 0.5).max(0.1);
+                (norm * weight.max(0.0)).clamp(0.0, 3.0)
+            }
+        };
+
+        let target_low = gate_map(r_low, params.low_weight);
+        let target_mid = gate_map(r_mid, params.mid_weight);
+        let target_high = gate_map(r_high, params.high_weight);
+
+        let attack_tau = (params.attack_ms.max(1.0)) * 0.001;
+        let release_tau = (params.release_ms.max(15.0)) * 0.001;
+        let alpha_atk = 1.0 - (-dt / attack_tau).exp();
+        let alpha_rel = 1.0 - (-dt / release_tau).exp();
+
+        let smooth_step = |cur: f32, target: f32| -> f32 {
+            let a = if target > cur { alpha_atk } else { alpha_rel };
+            (cur + (target - cur) * a).clamp(0.0, 3.0)
+        };
+
+        let prev_low = self.low_env;
+        self.low_env = smooth_step(self.low_env, target_low);
+        self.mid_env = smooth_step(self.mid_env, target_mid);
+        self.high_env = smooth_step(self.high_env, target_high);
+
+        // Fast-minus-slow transient impulse detector
+        let inst_energy = target_low * 0.55 + target_mid * 0.35 + target_high * 0.40;
+        let slow_alpha = 1.0 - (-dt / 0.18).exp();
+        self.slow_energy += (inst_energy - self.slow_energy) * slow_alpha;
+        let raw_impulse = (inst_energy - self.slow_energy * 0.78).max(0.0) * 2.35;
+        let trans_alpha = if raw_impulse > self.transient_env {
+            1.0 - (-dt / 0.003).exp()
+        } else {
+            1.0 - (-dt / 0.085).exp()
+        };
+        self.transient_env =
+            (self.transient_env + (raw_impulse - self.transient_env) * trans_alpha).clamp(0.0, 3.0);
+
+        // Stereo balance [-1.0 (left), +1.0 (right)]
+        let lr_sum = r_left + r_right;
+        let target_stereo = if lr_sum > 0.004 {
+            ((r_right - r_left) / (lr_sum + 0.012)).clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+        let stereo_alpha = 1.0 - (-dt / 0.030).exp();
+        self.stereo_balance =
+            (self.stereo_balance + (target_stereo - self.stereo_balance) * stereo_alpha)
+                .clamp(-1.0, 1.0);
+
+        // Underdamped 2D harmonic spring oscillator for magnetic deflection yoke shake
+        let bass_kick = (self.low_env - prev_low).max(0.0) * 32.0
+            + self.transient_env * 11.5
+            + self.low_env * 3.2;
+        let sign_x = (self.phase_accum * 3.7).sin() + self.stereo_balance * 0.75;
+        let sign_y = (self.phase_accum * 2.3 + 1.1).cos();
+        self.spring_vel_x += bass_kick * sign_x;
+        self.spring_vel_y += bass_kick * sign_y;
+
+        // Sub-step spring physics for unconditional stability across frame rates
+        let substeps = 4;
+        let sub_dt = dt / (substeps as f32);
+        let omega_x = 46.0f32;
+        let omega_y = 38.0f32;
+        let damping = 12.0f32;
+        for _ in 0..substeps {
+            let acc_x = -omega_x * omega_x * self.spring_pos_x - damping * self.spring_vel_x;
+            let acc_y = -omega_y * omega_y * self.spring_pos_y - damping * self.spring_vel_y;
+            self.spring_vel_x = (self.spring_vel_x + acc_x * sub_dt).clamp(-30.0, 30.0);
+            self.spring_vel_y = (self.spring_vel_y + acc_y * sub_dt).clamp(-30.0, 30.0);
+            self.spring_pos_x = (self.spring_pos_x + self.spring_vel_x * sub_dt).clamp(-2.2, 2.2);
+            self.spring_pos_y = (self.spring_pos_y + self.spring_vel_y * sub_dt).clamp(-2.2, 2.2);
+        }
+
+        // Advance continuous phase for scanline voice-coil wave
+        let phase_speed = 6.0 + self.mid_env * 22.0 + self.low_env * 10.0;
+        self.phase_accum = (self.phase_accum + dt * phase_speed) % 1000.0;
     }
 }
 
@@ -315,6 +685,8 @@ pub struct AppState {
     pub halo_defaults: HaloSettings,
     pub cathode_interference: CathodeInterferenceSettings,
     pub cathode_interference_defaults: CathodeInterferenceSettings,
+    pub audio_reactive: AudioReactiveConfig,
+    pub audio_reactive_runtime: AudioReactiveRuntime,
     pub selected_crt_filter: crate::devices::filter_type::CrtFilter,
     pub video: VideoSettings,
     pub toasts: egui_toast::Toasts,
@@ -444,6 +816,49 @@ mod tests {
         assert_eq!(
             state.color_range.load(Ordering::Relaxed),
             crate::video::types::ColorRange::Full as u8
+        );
+    }
+
+    #[test]
+    fn test_audio_reactive_dsp_and_presets() {
+        let mut state = AppState::default();
+        assert!(!state.audio_reactive.enabled);
+        assert_eq!(
+            state.audio_reactive.active_preset,
+            AUDIO_REACTIVE_DEFAULT_PRESET
+        );
+        assert_eq!(state.audio_reactive.presets.len(), 5);
+
+        state.toggle_audio_reactive();
+        assert!(state.audio_reactive.enabled);
+        assert!(state.replay.audio.is_reactive_listening());
+
+        // Synthesize a 90 Hz bass tone on the right channel at 48 kHz
+        let mut samples = Vec::with_capacity(960 * 2);
+        for i in 0..960 {
+            let t = i as f32 / 48000.0;
+            let s = (std::f32::consts::TAU * 90.0 * t).sin() * 0.8;
+            samples.push(0.05); // Left quiet
+            samples.push(s); // Right loud
+        }
+        state.replay.audio.observe_reactive(&samples, 48000, 2);
+        let raw = state.replay.audio.take_reactive_raw();
+        assert!(raw.0 > 0.1, "Low band should detect 90Hz bass: got {}", raw.0);
+        assert!(raw.4 > raw.3, "Right channel should be louder than left");
+
+        state.audio_reactive_runtime.last_step =
+            Instant::now() - std::time::Duration::from_millis(16);
+        state.audio_reactive_runtime.step(
+            raw,
+            0.0,
+            &state.audio_reactive.current,
+            true,
+        );
+        assert!(state.audio_reactive_runtime.low_env > 0.0);
+        assert!(state.audio_reactive_runtime.stereo_balance > 0.0);
+        assert!(
+            state.audio_reactive_runtime.spring_pos_x.abs() > 0.0
+                || state.audio_reactive_runtime.spring_pos_y.abs() > 0.0
         );
     }
 }

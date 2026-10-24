@@ -186,6 +186,99 @@ impl Default for CathodeInterferenceShaderParams {
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct AudioReactiveShaderParams {
+    pub enabled: bool,
+    pub master_intensity: f32,
+    pub low_env: f32,
+    pub mid_env: f32,
+    pub high_env: f32,
+    pub transient_env: f32,
+    pub stereo_balance: f32,
+    pub spring_pos: [f32; 2],
+    pub phase_accum: f32,
+    pub deflection_shake: f32,
+    pub stereo_tug: f32,
+    pub flyback_pump: f32,
+    pub rgb_deconvergence: f32,
+    pub scanline_wave: f32,
+    pub phosphor_surge: f32,
+    pub sync_tear: f32,
+    pub warp: [f32; 2],
+    pub corner_size: f32,
+    pub filter_type: i32,
+    pub border_crop: [f32; 4],
+    pub horizontal_stretch: f32,
+}
+
+impl AudioReactiveShaderParams {
+    pub fn from_state(
+        state: &AppState,
+        warp: [f32; 2],
+        corner_size: f32,
+        filter_type: i32,
+    ) -> Self {
+        let cur = &state.audio_reactive.current;
+        let rt = &state.audio_reactive_runtime;
+        Self {
+            enabled: state.audio_reactive.enabled,
+            master_intensity: cur.master_intensity,
+            low_env: rt.low_env,
+            mid_env: rt.mid_env,
+            high_env: rt.high_env,
+            transient_env: rt.transient_env,
+            stereo_balance: rt.stereo_balance,
+            spring_pos: [rt.spring_pos_x, rt.spring_pos_y],
+            phase_accum: rt.phase_accum,
+            deflection_shake: cur.deflection_shake,
+            stereo_tug: cur.stereo_tug,
+            flyback_pump: cur.flyback_pump,
+            rgb_deconvergence: cur.rgb_deconvergence,
+            scanline_wave: cur.scanline_wave,
+            phosphor_surge: cur.phosphor_surge,
+            sync_tear: cur.sync_tear,
+            warp,
+            corner_size,
+            filter_type,
+            border_crop: [
+                state.video.border_crop_left,
+                state.video.border_crop_right,
+                state.video.border_crop_top,
+                state.video.border_crop_bottom,
+            ],
+            horizontal_stretch: state.video.horizontal_stretch,
+        }
+    }
+}
+
+impl Default for AudioReactiveShaderParams {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            master_intensity: 1.0,
+            low_env: 0.0,
+            mid_env: 0.0,
+            high_env: 0.0,
+            transient_env: 0.0,
+            stereo_balance: 0.0,
+            spring_pos: [0.0, 0.0],
+            phase_accum: 0.0,
+            deflection_shake: 0.65,
+            stereo_tug: 0.50,
+            flyback_pump: 0.55,
+            rgb_deconvergence: 0.45,
+            scanline_wave: 0.35,
+            phosphor_surge: 0.42,
+            sync_tear: 0.22,
+            warp: [0.0, 0.0],
+            corner_size: 0.0,
+            filter_type: 0,
+            border_crop: [0.0, 0.0, 0.0, 0.0],
+            horizontal_stretch: 1.0,
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct GlassShaderParams {
     pub enabled: bool,
     pub intensity: f32,
@@ -593,5 +686,25 @@ mod tests {
         assert_eq!(p_off.brightboost, 1.0);
         assert_eq!(hp_off.brightboost, 1.30);
         assert_eq!(hp_off.brightboost1, 1.65);
+    }
+
+    #[test]
+    fn test_audio_reactive_shader_params_from_state() {
+        let mut state = AppState::default();
+        state.audio_reactive.enabled = true;
+        state.audio_reactive.current.master_intensity = 1.45;
+        state.audio_reactive.current.flyback_pump = 0.88;
+        state.audio_reactive_runtime.low_env = 0.62;
+        state.audio_reactive_runtime.transient_env = 0.91;
+
+        let p = AudioReactiveShaderParams::from_state(&state, [0.031, 0.041], 0.02, 2);
+        assert!(p.enabled);
+        assert_eq!(p.master_intensity, 1.45);
+        assert_eq!(p.flyback_pump, 0.88);
+        assert_eq!(p.low_env, 0.62);
+        assert_eq!(p.transient_env, 0.91);
+        assert_eq!(p.warp, [0.031, 0.041]);
+        assert_eq!(p.corner_size, 0.02);
+        assert_eq!(p.filter_type, 2);
     }
 }

@@ -127,6 +127,10 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
             state.whiteboard.toggle();
             hotkey_repaint = true;
         }
+        if check_toggle_key(ctx, egui::Key::J) {
+            state.toggle_audio_reactive();
+            hotkey_repaint = true;
+        }
         // Ignore Space while typing in a text field (e.g. the mining tag).
         if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
             if ctx.input(|i| i.modifiers.shift) {

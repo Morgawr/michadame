@@ -829,6 +829,8 @@ unsafe extern "C" fn retro_audio_sample_batch_cb(data: *const i16, frames: usize
         q.samples.extend(&f32_samples);
     }
 
+    replay_audio.observe_reactive(&f32_samples, PC98_AUDIO_SAMPLE_RATE, PC98_AUDIO_CHANNELS);
+
     if replay_audio.is_enabled() {
         let resampled = resample_stereo_44100_to_48000(&f32_samples);
         replay_audio.submit(

@@ -3,7 +3,8 @@ use super::fft_filter::FftFilter;
 use super::geometry::RenderedArea;
 use super::halo::HaloRenderer;
 use super::params::{
-    CathodeInterferenceShaderParams, GlassShaderParams, HaloShaderParams, ShaderParams,
+    AudioReactiveShaderParams, CathodeInterferenceShaderParams, GlassShaderParams,
+    HaloShaderParams, ShaderParams,
 };
 use super::programs::*;
 use crate::video::types::{RawFrame, ScalerFilter};
@@ -158,6 +159,31 @@ pub struct CrtFilterRenderer {
     cathode_interference_loc: glow::UniformLocation,
     cathode_lightbulb_effect_loc: glow::UniformLocation,
     cathode_border_crop_loc: glow::UniformLocation,
+
+    audio_reactive_prog: glow::Program,
+    ar_output_res_loc: Option<glow::UniformLocation>,
+    ar_source_size_loc: Option<glow::UniformLocation>,
+    ar_horizontal_stretch_loc: Option<glow::UniformLocation>,
+    ar_border_crop_loc: Option<glow::UniformLocation>,
+    ar_warp_loc: Option<glow::UniformLocation>,
+    ar_corner_size_loc: Option<glow::UniformLocation>,
+    ar_filter_type_loc: Option<glow::UniformLocation>,
+    ar_time_loc: Option<glow::UniformLocation>,
+    ar_master_intensity_loc: Option<glow::UniformLocation>,
+    ar_low_env_loc: Option<glow::UniformLocation>,
+    ar_mid_env_loc: Option<glow::UniformLocation>,
+    ar_high_env_loc: Option<glow::UniformLocation>,
+    ar_transient_env_loc: Option<glow::UniformLocation>,
+    ar_stereo_balance_loc: Option<glow::UniformLocation>,
+    ar_spring_pos_loc: Option<glow::UniformLocation>,
+    ar_phase_accum_loc: Option<glow::UniformLocation>,
+    ar_deflection_shake_loc: Option<glow::UniformLocation>,
+    ar_stereo_tug_loc: Option<glow::UniformLocation>,
+    ar_flyback_pump_loc: Option<glow::UniformLocation>,
+    ar_rgb_deconvergence_loc: Option<glow::UniformLocation>,
+    ar_scanline_wave_loc: Option<glow::UniformLocation>,
+    ar_phosphor_surge_loc: Option<glow::UniformLocation>,
+    ar_sync_tear_loc: Option<glow::UniformLocation>,
 
     retro_frame_prog: glow::Program,
     bezel_texture: glow::Texture,
@@ -591,6 +617,45 @@ impl CrtFilterRenderer {
                 0,
             );
 
+            let audio_reactive_prog = compile_program(gl, VS_SRC, FS_AUDIO_REACTIVE);
+            let ar_output_res_loc =
+                gl.get_uniform_location(audio_reactive_prog, "outputResolution");
+            let ar_source_size_loc = gl.get_uniform_location(audio_reactive_prog, "source_size");
+            let ar_horizontal_stretch_loc =
+                gl.get_uniform_location(audio_reactive_prog, "horizontal_stretch");
+            let ar_border_crop_loc = gl.get_uniform_location(audio_reactive_prog, "border_crop");
+            let ar_warp_loc = gl.get_uniform_location(audio_reactive_prog, "warp");
+            let ar_corner_size_loc = gl.get_uniform_location(audio_reactive_prog, "corner_size");
+            let ar_filter_type_loc = gl.get_uniform_location(audio_reactive_prog, "filter_type");
+            let ar_time_loc = gl.get_uniform_location(audio_reactive_prog, "time");
+            let ar_master_intensity_loc =
+                gl.get_uniform_location(audio_reactive_prog, "master_intensity");
+            let ar_low_env_loc = gl.get_uniform_location(audio_reactive_prog, "low_env");
+            let ar_mid_env_loc = gl.get_uniform_location(audio_reactive_prog, "mid_env");
+            let ar_high_env_loc = gl.get_uniform_location(audio_reactive_prog, "high_env");
+            let ar_transient_env_loc =
+                gl.get_uniform_location(audio_reactive_prog, "transient_env");
+            let ar_stereo_balance_loc =
+                gl.get_uniform_location(audio_reactive_prog, "stereo_balance");
+            let ar_spring_pos_loc = gl.get_uniform_location(audio_reactive_prog, "spring_pos");
+            let ar_phase_accum_loc = gl.get_uniform_location(audio_reactive_prog, "phase_accum");
+            let ar_deflection_shake_loc =
+                gl.get_uniform_location(audio_reactive_prog, "deflection_shake");
+            let ar_stereo_tug_loc = gl.get_uniform_location(audio_reactive_prog, "stereo_tug");
+            let ar_flyback_pump_loc = gl.get_uniform_location(audio_reactive_prog, "flyback_pump");
+            let ar_rgb_deconvergence_loc =
+                gl.get_uniform_location(audio_reactive_prog, "rgb_deconvergence");
+            let ar_scanline_wave_loc =
+                gl.get_uniform_location(audio_reactive_prog, "scanline_wave");
+            let ar_phosphor_surge_loc =
+                gl.get_uniform_location(audio_reactive_prog, "phosphor_surge");
+            let ar_sync_tear_loc = gl.get_uniform_location(audio_reactive_prog, "sync_tear");
+
+            gl.use_program(Some(audio_reactive_prog));
+            if let Some(loc) = gl.get_uniform_location(audio_reactive_prog, "input_texture") {
+                gl.uniform_1_i32(Some(&loc), 0);
+            }
+
             gl.use_program(Some(passthrough_prog));
             gl.uniform_1_i32(
                 Some(
@@ -910,6 +975,30 @@ impl CrtFilterRenderer {
                 cathode_interference_loc,
                 cathode_lightbulb_effect_loc,
                 cathode_border_crop_loc,
+                audio_reactive_prog,
+                ar_output_res_loc,
+                ar_source_size_loc,
+                ar_horizontal_stretch_loc,
+                ar_border_crop_loc,
+                ar_warp_loc,
+                ar_corner_size_loc,
+                ar_filter_type_loc,
+                ar_time_loc,
+                ar_master_intensity_loc,
+                ar_low_env_loc,
+                ar_mid_env_loc,
+                ar_high_env_loc,
+                ar_transient_env_loc,
+                ar_stereo_balance_loc,
+                ar_spring_pos_loc,
+                ar_phase_accum_loc,
+                ar_deflection_shake_loc,
+                ar_stereo_tug_loc,
+                ar_flyback_pump_loc,
+                ar_rgb_deconvergence_loc,
+                ar_scanline_wave_loc,
+                ar_phosphor_surge_loc,
+                ar_sync_tear_loc,
                 crt_glass_prog,
                 glass_output_res_loc,
                 glass_source_size_loc,
@@ -1765,17 +1854,16 @@ impl CrtFilterRenderer {
         gl: &glow::Context,
         output_size: (f32, f32),
         cathode_params: Option<&CathodeInterferenceShaderParams>,
+        audio_reactive_params: Option<&AudioReactiveShaderParams>,
         glass_params: Option<&GlassShaderParams>,
         skip_popup: bool,
         software_mouse_pos: Option<(f32, f32)>,
-    ) -> (
-        Option<glow::Framebuffer>,
-        Option<glow::Framebuffer>,
-        Option<glow::Framebuffer>,
-        bool,
-    ) {
+    ) -> (Option<glow::Framebuffer>, bool) {
         let run_cathode = cathode_params
             .map(|c| c.enabled && c.intensity > 0.001)
+            .unwrap_or(false);
+        let run_audio_reactive = audio_reactive_params
+            .map(|a| a.enabled && a.master_intensity > 0.001)
             .unwrap_or(false);
         let run_glass = glass_params
             .map(|g| g.enabled && g.intensity > 0.001)
@@ -1785,34 +1873,17 @@ impl CrtFilterRenderer {
         let has_alerts = !self.alert_primitives.is_empty();
         let has_overlay = has_popup || has_comments || has_alerts;
         let has_mouse = software_mouse_pos.is_some();
-        let has_post = run_cathode || run_glass || has_overlay || has_mouse;
+        let has_post =
+            run_cathode || run_audio_reactive || run_glass || has_overlay || has_mouse;
 
-        let (upstream_target_fbo, cathode_target_fbo, glass_target_fbo) =
-            match (run_cathode, run_glass) {
-                (true, true) => {
-                    self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
-                    (Some(self.post_fbos[0]), Some(self.post_fbos[1]), None)
-                }
-                (true, false) | (false, true) => {
-                    self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
-                    (Some(self.post_fbos[0]), None, None)
-                }
-                (false, false) => {
-                    if has_overlay || has_mouse {
-                        self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
-                        (Some(self.post_fbos[0]), None, None)
-                    } else {
-                        (None, None, None)
-                    }
-                }
-            };
+        let upstream_target_fbo = if has_post {
+            self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
+            Some(self.post_fbos[0])
+        } else {
+            None
+        };
 
-        (
-            upstream_target_fbo,
-            cathode_target_fbo,
-            glass_target_fbo,
-            has_post,
-        )
+        (upstream_target_fbo, has_post)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1829,9 +1900,8 @@ impl CrtFilterRenderer {
         scan_str: f32,
         b_boost: f32,
         cathode_params: Option<&CathodeInterferenceShaderParams>,
+        audio_reactive_params: Option<&AudioReactiveShaderParams>,
         glass_params: Option<&GlassShaderParams>,
-        cathode_target_fbo: Option<glow::Framebuffer>,
-        glass_target_fbo: Option<glow::Framebuffer>,
         time: f32,
         skip_popup: bool,
         software_mouse_pos: Option<(f32, f32)>,
@@ -1842,6 +1912,9 @@ impl CrtFilterRenderer {
     ) {
         let run_cathode = cathode_params
             .map(|c| c.enabled && c.intensity > 0.001)
+            .unwrap_or(false);
+        let run_audio_reactive = audio_reactive_params
+            .map(|a| a.enabled && a.master_intensity > 0.001)
             .unwrap_or(false);
         let run_glass = glass_params
             .map(|g| g.enabled && g.intensity > 0.001)
@@ -1916,10 +1989,18 @@ impl CrtFilterRenderer {
             );
         }
 
+        let mut current_tex_idx: usize = 0;
+
         if run_cathode {
             let cp = cathode_params.unwrap();
-            let cathode_input = self.post_textures[0];
-            let scissor_cathode = scissor_enabled && !run_glass;
+            let cathode_input = self.post_textures[current_tex_idx];
+            let has_more_passes = run_audio_reactive || run_glass;
+            let target_fbo = if has_more_passes {
+                Some(self.post_fbos[1 - current_tex_idx])
+            } else {
+                None
+            };
+            let scissor_cathode = scissor_enabled && !has_more_passes;
             self.draw_cathode_pass(
                 gl,
                 cathode_input,
@@ -1928,18 +2009,42 @@ impl CrtFilterRenderer {
                 horizontal_stretch,
                 time,
                 cp,
-                cathode_target_fbo,
+                target_fbo,
                 scissor_cathode,
             );
+            if has_more_passes {
+                current_tex_idx = 1 - current_tex_idx;
+            }
+        }
+
+        if run_audio_reactive {
+            let arp = audio_reactive_params.unwrap();
+            let ar_input = self.post_textures[current_tex_idx];
+            let has_more_passes = run_glass;
+            let target_fbo = if has_more_passes {
+                Some(self.post_fbos[1 - current_tex_idx])
+            } else {
+                None
+            };
+            let scissor_ar = scissor_enabled && !has_more_passes;
+            self.draw_audio_reactive_pass(
+                gl,
+                ar_input,
+                output_size,
+                final_input_res,
+                arp,
+                time,
+                target_fbo,
+                scissor_ar,
+            );
+            if has_more_passes {
+                current_tex_idx = 1 - current_tex_idx;
+            }
         }
 
         if run_glass {
             let gp = glass_params.unwrap();
-            let glass_input = if run_cathode {
-                self.post_textures[1]
-            } else {
-                self.post_textures[0]
-            };
+            let glass_input = self.post_textures[current_tex_idx];
             let scissor_glass = scissor_enabled;
             self.draw_glass_pass(
                 gl,
@@ -1948,7 +2053,7 @@ impl CrtFilterRenderer {
                 final_input_res,
                 gp,
                 time,
-                glass_target_fbo,
+                None,
                 scissor_glass,
             );
         }
@@ -1957,7 +2062,7 @@ impl CrtFilterRenderer {
         self.mipmap_generated_this_frame
             .store(false, std::sync::atomic::Ordering::Relaxed);
 
-        if !run_cathode && !run_glass && (has_overlay || has_mouse) {
+        if !run_cathode && !run_audio_reactive && !run_glass && (has_overlay || has_mouse) {
             self.blit_texture(gl, self.post_textures[0], output_size, None, scissor_enabled);
         }
 
@@ -1995,6 +2100,7 @@ impl CrtFilterRenderer {
         params: &ShaderParams,
         halo_params: &HaloShaderParams,
         cathode_params: &CathodeInterferenceShaderParams,
+        audio_reactive_params: Option<&AudioReactiveShaderParams>,
         glass_params: Option<&GlassShaderParams>,
         time: f32,
         run_pixelate: bool,
@@ -2061,15 +2167,15 @@ impl CrtFilterRenderer {
             }
             self.last_video_texture = Some(final_input_texture);
 
-            let (upstream_target_fbo, cathode_target_fbo, glass_target_fbo, has_post) = self
-                .prepare_postprocess_targets(
-                    gl,
-                    output_size,
-                    Some(cathode_params),
-                    glass_params,
-                    skip_popup,
-                    software_mouse_pos,
-                );
+            let (upstream_target_fbo, has_post) = self.prepare_postprocess_targets(
+                gl,
+                output_size,
+                Some(cathode_params),
+                audio_reactive_params,
+                glass_params,
+                skip_popup,
+                software_mouse_pos,
+            );
 
             if run_lottes {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, upstream_target_fbo);
@@ -2211,9 +2317,8 @@ impl CrtFilterRenderer {
                 scan_str,
                 b_boost,
                 Some(cathode_params),
+                audio_reactive_params,
                 glass_params,
-                cathode_target_fbo,
-                glass_target_fbo,
                 time,
                 skip_popup,
                 software_mouse_pos,
@@ -2258,6 +2363,7 @@ impl CrtFilterRenderer {
         fft_mask_threshold: f32,
         fft_black_threshold: f32,
         cathode_params: Option<&CathodeInterferenceShaderParams>,
+        audio_reactive_params: Option<&AudioReactiveShaderParams>,
         glass_params: Option<&GlassShaderParams>,
         time: f32,
         software_mouse_pos: Option<(f32, f32)>,
@@ -2297,15 +2403,15 @@ impl CrtFilterRenderer {
             );
             self.last_video_texture = Some(current_video_texture);
 
-            let (upstream_target_fbo, cathode_target_fbo, glass_target_fbo, has_post) = self
-                .prepare_postprocess_targets(
-                    gl,
-                    output_size,
-                    cathode_params,
-                    glass_params,
-                    skip_popup,
-                    software_mouse_pos,
-                );
+            let (upstream_target_fbo, has_post) = self.prepare_postprocess_targets(
+                gl,
+                output_size,
+                cathode_params,
+                audio_reactive_params,
+                glass_params,
+                skip_popup,
+                software_mouse_pos,
+            );
 
             if scissor_enabled && !has_post {
                 gl.enable(glow::SCISSOR_TEST);
@@ -2336,9 +2442,8 @@ impl CrtFilterRenderer {
                 0.0,
                 1.0,
                 cathode_params,
+                audio_reactive_params,
                 glass_params,
-                cathode_target_fbo,
-                glass_target_fbo,
                 time,
                 skip_popup,
                 software_mouse_pos,
@@ -2426,6 +2531,7 @@ impl CrtFilterRenderer {
     ) {
         gl.bind_framebuffer(glow::FRAMEBUFFER, target_fbo);
         gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+        gl.bind_vertex_array(Some(self.vertex_array));
         gl.use_program(Some(self.cathode_prog));
         gl.active_texture(glow::TEXTURE0);
         gl.bind_texture(glow::TEXTURE_2D, Some(input_texture));
@@ -2469,6 +2575,83 @@ impl CrtFilterRenderer {
     }
 
     #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_audio_reactive_pass(
+        &self,
+        gl: &glow::Context,
+        input_texture: glow::Texture,
+        output_size: (f32, f32),
+        resolution: (u32, u32),
+        arp: &AudioReactiveShaderParams,
+        time: f32,
+        target_fbo: Option<glow::Framebuffer>,
+        scissor_enabled: bool,
+    ) {
+        gl.bind_framebuffer(glow::FRAMEBUFFER, target_fbo);
+        gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+        gl.bind_vertex_array(Some(self.vertex_array));
+        gl.use_program(Some(self.audio_reactive_prog));
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(glow::TEXTURE_2D, Some(input_texture));
+
+        gl.uniform_2_f32(
+            self.ar_output_res_loc.as_ref(),
+            output_size.0,
+            output_size.1,
+        );
+        gl.uniform_2_f32(
+            self.ar_source_size_loc.as_ref(),
+            resolution.0 as f32,
+            resolution.1 as f32,
+        );
+        gl.uniform_1_f32(
+            self.ar_horizontal_stretch_loc.as_ref(),
+            arp.horizontal_stretch,
+        );
+        gl.uniform_4_f32(
+            self.ar_border_crop_loc.as_ref(),
+            arp.border_crop[0],
+            arp.border_crop[1],
+            arp.border_crop[2],
+            arp.border_crop[3],
+        );
+        gl.uniform_2_f32(self.ar_warp_loc.as_ref(), arp.warp[0], arp.warp[1]);
+        gl.uniform_1_f32(self.ar_corner_size_loc.as_ref(), arp.corner_size);
+        gl.uniform_1_i32(self.ar_filter_type_loc.as_ref(), arp.filter_type);
+        gl.uniform_1_f32(self.ar_time_loc.as_ref(), time);
+
+        gl.uniform_1_f32(self.ar_master_intensity_loc.as_ref(), arp.master_intensity);
+        gl.uniform_1_f32(self.ar_low_env_loc.as_ref(), arp.low_env);
+        gl.uniform_1_f32(self.ar_mid_env_loc.as_ref(), arp.mid_env);
+        gl.uniform_1_f32(self.ar_high_env_loc.as_ref(), arp.high_env);
+        gl.uniform_1_f32(self.ar_transient_env_loc.as_ref(), arp.transient_env);
+        gl.uniform_1_f32(self.ar_stereo_balance_loc.as_ref(), arp.stereo_balance);
+        gl.uniform_2_f32(
+            self.ar_spring_pos_loc.as_ref(),
+            arp.spring_pos[0],
+            arp.spring_pos[1],
+        );
+        gl.uniform_1_f32(self.ar_phase_accum_loc.as_ref(), arp.phase_accum);
+
+        gl.uniform_1_f32(self.ar_deflection_shake_loc.as_ref(), arp.deflection_shake);
+        gl.uniform_1_f32(self.ar_stereo_tug_loc.as_ref(), arp.stereo_tug);
+        gl.uniform_1_f32(self.ar_flyback_pump_loc.as_ref(), arp.flyback_pump);
+        gl.uniform_1_f32(
+            self.ar_rgb_deconvergence_loc.as_ref(),
+            arp.rgb_deconvergence,
+        );
+        gl.uniform_1_f32(self.ar_scanline_wave_loc.as_ref(), arp.scanline_wave);
+        gl.uniform_1_f32(self.ar_phosphor_surge_loc.as_ref(), arp.phosphor_surge);
+        gl.uniform_1_f32(self.ar_sync_tear_loc.as_ref(), arp.sync_tear);
+
+        if scissor_enabled {
+            gl.enable(glow::SCISSOR_TEST);
+        }
+        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        gl.use_program(None);
+    }
+
+    #[allow(clippy::too_many_arguments)]
     unsafe fn draw_glass_pass(
         &self,
         gl: &glow::Context,
@@ -2482,6 +2665,7 @@ impl CrtFilterRenderer {
     ) {
         gl.bind_framebuffer(glow::FRAMEBUFFER, target_fbo);
         gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+        gl.bind_vertex_array(Some(self.vertex_array));
         gl.use_program(Some(self.crt_glass_prog));
         gl.active_texture(glow::TEXTURE0);
         gl.bind_texture(glow::TEXTURE_2D, Some(input_texture));
@@ -3137,6 +3321,7 @@ impl CrtFilterRenderer {
             gl.delete_program(self.yuv_planar_prog);
             gl.delete_program(self.yuyv_packed_prog);
             gl.delete_program(self.cathode_prog);
+            gl.delete_program(self.audio_reactive_prog);
             gl.delete_program(self.crt_glass_prog);
             gl.delete_program(self.night_glow_prog);
             gl.delete_program(self.popup_prog);
@@ -3478,5 +3663,41 @@ mod tests {
             double_gamma > 0.20,
             "Double gamma must elevate near-black: got {double_gamma}"
         );
+    }
+
+    #[test]
+    fn audio_reactive_shader_contains_all_renderer_uniforms() {
+        let required_uniforms = [
+            "input_texture",
+            "outputResolution",
+            "source_size",
+            "horizontal_stretch",
+            "border_crop",
+            "warp",
+            "corner_size",
+            "filter_type",
+            "time",
+            "master_intensity",
+            "low_env",
+            "mid_env",
+            "high_env",
+            "transient_env",
+            "stereo_balance",
+            "spring_pos",
+            "phase_accum",
+            "deflection_shake",
+            "stereo_tug",
+            "flyback_pump",
+            "rgb_deconvergence",
+            "scanline_wave",
+            "phosphor_surge",
+            "sync_tear",
+        ];
+        for name in required_uniforms {
+            assert!(
+                FS_AUDIO_REACTIVE.contains(name),
+                "FS_AUDIO_REACTIVE is missing uniform declaration or usage for `{name}`"
+            );
+        }
     }
 }

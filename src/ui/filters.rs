@@ -1110,21 +1110,6 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
 
             if c2
                 .checkbox(
-                    &mut state.cathode_interference.enabled,
-                    "Cathode Glow & Interference",
-                )
-                .on_hover_text(
-                    "Simulates CRT cathode ray flickering, electrical bloom, and subtle analog RF interference.",
-                )
-                .changed()
-            {
-                changed = true;
-            }
-        });
-
-        two_columns(ui, |c1, c2| {
-            if c1
-                .checkbox(
                     &mut state.video.retro_software_mouse,
                     "Retro Software Mouse Pointer",
                 )
@@ -1136,8 +1121,10 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                 crate::config::save_config(state);
                 changed = true;
             }
+        });
 
-            if c2
+        two_columns(ui, |c1, _c2| {
+            if c1
                 .checkbox(
                     &mut state.video.use_magenta_background,
                     "Magenta Background",
@@ -1350,130 +1337,597 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                 );
             }
         }
-
-        if state.cathode_interference.enabled {
-            technical_separator(ui);
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("Cathode Glow & Interference Parameters:")
-                        .monospace()
-                        .size(11.0)
-                        .strong()
-                        .color(egui::Color32::from_rgb(153, 153, 153)),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Save as Defaults").clicked() {
-                        state.cathode_interference_defaults = state.cathode_interference.clone();
-                        let current_profile_data = crate::config::build_profile_from_state(state);
-                        state
-                            .profiles
-                            .insert(state.active_profile.clone(), current_profile_data);
-                        crate::config::save_config(state);
-                        state.info("Saved current cathode settings as default");
-                        changed = true;
-                    }
-                    if ui.button("Reset Defaults").clicked() {
-                        state.cathode_interference = state.cathode_interference_defaults.clone();
-                        changed = true;
-                    }
-                });
-            });
-            ui.add_space(2.0);
-            two_columns(ui, |c1, c2| {
-                let slider = percent_slider(&mut state.cathode_interference.intensity, 0.0..=1.0);
-                if slider_item(
-                    c1,
-                    "Intensity:",
-                    slider,
-                    Some("Master intensity of cathode glow, flicker, and interference."),
-                )
-                .changed()
-                {
-                    changed = true;
-                }
-
-                let slider = mult_slider(&mut state.cathode_interference.frequency, 0.1..=5.0);
-                if slider_item(
-                    c2,
-                    "Frequency:",
-                    slider,
-                    Some("Speed of AC hum ripple, flicker rate, and glitch frequency."),
-                )
-                .changed()
-                {
-                    changed = true;
-                }
-            });
-
-            two_columns(ui, |c1, c2| {
-                let slider = percent_slider(&mut state.cathode_interference.randomization, 0.0..=1.0);
-                if slider_item(
-                    c1,
-                    "Randomization:",
-                    slider,
-                    Some("Unpredictability and jitteriness of flicker and micro-glitches."),
-                )
-                .changed()
-                {
-                    changed = true;
-                }
-
-                let slider = percent_slider(&mut state.cathode_interference.electricity_glow, 0.0..=1.0);
-                if slider_item(
-                    c2,
-                    "Electricity Glow:",
-                    slider,
-                    Some("Lightbulb/cathode bloom that selectively energizes highlights and dynamically modulates dark areas."),
-                )
-                .changed()
-                {
-                    changed = true;
-                }
-            });
-
-            two_columns(ui, |c1, c2| {
-                let slider = percent_slider(&mut state.cathode_interference.flicker_depth, 0.0..=1.0);
-                if slider_item(
-                    c1,
-                    "Flicker Depth:",
-                    slider,
-                    Some("Depth of rolling AC power hum and high-frequency cathode phosphor flutter."),
-                )
-                .changed()
-                {
-                    changed = true;
-                }
-
-                let slider = percent_slider(&mut state.cathode_interference.interference, 0.0..=1.0);
-                if slider_item(
-                    c2,
-                    "Interference / Noise:",
-                    slider,
-                    Some("Analog RF static noise and intermittent horizontal scanline micro-glitches."),
-                )
-                .changed()
-                {
-                    changed = true;
-                }
-            });
-
-            two_columns(ui, |c1, _| {
-                let slider = percent_slider(&mut state.cathode_interference.lightbulb_effect, 0.0..=1.0);
-                if slider_item(
-                    c1,
-                    "Lightbulb Effect:",
-                    slider,
-                    Some("Pulsating lightbulb breathing that makes the brightness of bright areas and darkness of dark areas glow up and down."),
-                )
-                .changed()
-                {
-                    changed = true;
-                }
-            });
-        }
     });
 
     if changed {
+        crate::config::save_config(state);
+    }
+
+    changed
+}
+
+fn draw_mini_level_bar(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: f32,
+    fill_color: egui::Color32,
+) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(
+            egui::RichText::new(label)
+                .monospace()
+                .size(10.0)
+                .color(egui::Color32::from_rgb(165, 165, 165)),
+        );
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(78.0, 10.0), egui::Sense::hover());
+        ui.painter()
+            .rect_filled(rect, egui::Rounding::ZERO, egui::Color32::from_rgb(15, 15, 15));
+        let frac = (value / 1.5).clamp(0.0, 1.0);
+        if frac > 0.002 {
+            let mut fill_rect = rect;
+            fill_rect.set_width(rect.width() * frac);
+            ui.painter()
+                .rect_filled(fill_rect, egui::Rounding::ZERO, fill_color);
+        }
+        ui.painter().rect_stroke(
+            rect,
+            egui::Rounding::ZERO,
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(58, 58, 58)),
+        );
+    });
+}
+
+pub fn draw_special_fx_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
+    let mut changed = false;
+    let mut ar_changed = false;
+
+    // Keep live meter bars refreshing smoothly while viewing Special FX
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(16));
+
+    state.audio_reactive.ensure_builtin_presets();
+
+    // Group 1: Audio-Reactive CRT Interference (Global Config + Presets)
+    technical_group(ui, "Audio-Reactive CRT Interference:", |ui| {
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .checkbox(
+                    &mut state.audio_reactive.enabled,
+                    egui::RichText::new("Enable Audio-Reactive CRT Interference (J)")
+                        .strong()
+                        .color(egui::Color32::from_rgb(230, 230, 230)),
+                )
+                .on_hover_text(
+                    "Modulates the CRT electron beam, deflection coils, high-voltage flyback transformer, and RGB convergence in real time using game/video audio (press 'J' to toggle).",
+                )
+                .changed()
+            {
+                state
+                    .replay
+                    .audio
+                    .set_reactive_listening(state.audio_reactive.enabled);
+                ar_changed = true;
+            }
+
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("Preset:")
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(170, 170, 170)),
+            );
+
+            let is_modified = state
+                .audio_reactive
+                .presets
+                .get(&state.audio_reactive.active_preset)
+                .map_or(true, |saved| *saved != state.audio_reactive.current);
+            let combo_label = if is_modified {
+                format!("{} *", state.audio_reactive.active_preset)
+            } else {
+                state.audio_reactive.active_preset.clone()
+            };
+
+            let preset_names: Vec<String> = state.audio_reactive.presets.keys().cloned().collect();
+            let mut selected_preset = state.audio_reactive.active_preset.clone();
+            egui::ComboBox::from_id_source("audio_reactive_preset_combo")
+                .width(195.0)
+                .selected_text(combo_label)
+                .show_ui(ui, |ui| {
+                    for name in &preset_names {
+                        if ui
+                            .selectable_value(&mut selected_preset, name.clone(), name)
+                            .clicked()
+                        {
+                            if let Some(p) = state.audio_reactive.presets.get(name).cloned() {
+                                state.audio_reactive.active_preset = name.clone();
+                                state.audio_reactive.current = p;
+                                ar_changed = true;
+                            }
+                        }
+                    }
+                });
+
+            if ui
+                .button("Save")
+                .on_hover_text("Overwrite the active preset with current slider values")
+                .clicked()
+            {
+                let active_name = state.audio_reactive.active_preset.clone();
+                state
+                    .audio_reactive
+                    .presets
+                    .insert(active_name.clone(), state.audio_reactive.current.clone());
+                ar_changed = true;
+                state.info(format!("Saved Audio-Reactive preset '{}'.", active_name));
+            }
+
+            let is_builtin = crate::app::models::AudioReactiveConfig::is_builtin_preset(
+                &state.audio_reactive.active_preset,
+            );
+            if ui
+                .button("Reset")
+                .on_hover_text(if is_builtin {
+                    "Reset this built-in preset to its factory defaults"
+                } else {
+                    "Revert unsaved changes back to the stored preset"
+                })
+                .clicked()
+            {
+                let active_name = state.audio_reactive.active_preset.clone();
+                if let Some(factory) =
+                    crate::app::models::AudioReactiveConfig::builtin_preset(&active_name)
+                {
+                    state
+                        .audio_reactive
+                        .presets
+                        .insert(active_name.clone(), factory.clone());
+                    state.audio_reactive.current = factory;
+                    ar_changed = true;
+                    state.info(format!(
+                        "Reset preset '{}' to factory defaults.",
+                        active_name
+                    ));
+                } else if let Some(saved) = state.audio_reactive.presets.get(&active_name).cloned()
+                {
+                    state.audio_reactive.current = saved;
+                    ar_changed = true;
+                }
+            }
+
+            if ui
+                .add_enabled(!is_builtin, egui::Button::new("Delete"))
+                .on_hover_text(if is_builtin {
+                    "Built-in presets cannot be deleted"
+                } else {
+                    "Delete this custom preset"
+                })
+                .clicked()
+            {
+                let removed = state.audio_reactive.active_preset.clone();
+                state.audio_reactive.presets.remove(&removed);
+                state.audio_reactive.ensure_builtin_presets();
+                let fallback = crate::app::models::AUDIO_REACTIVE_DEFAULT_PRESET.to_string();
+                state.audio_reactive.active_preset = fallback.clone();
+                if let Some(p) = state.audio_reactive.presets.get(&fallback).cloned() {
+                    state.audio_reactive.current = p;
+                }
+                ar_changed = true;
+                state.info(format!("Deleted custom preset '{}'.", removed));
+            }
+        });
+
+        ui.add_space(2.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                egui::RichText::new("Save New Preset:")
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(150, 150, 150)),
+            );
+            let name_resp = ui.add_sized(
+                [150.0, 20.0],
+                egui::TextEdit::singleline(&mut state.audio_reactive_runtime.new_preset_name)
+                    .hint_text("Custom preset name..."),
+            );
+            let trimmed_name = state
+                .audio_reactive_runtime
+                .new_preset_name
+                .trim()
+                .to_string();
+            let can_save_new = !trimmed_name.is_empty();
+            let enter_pressed =
+                can_save_new && name_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if ui
+                .add_enabled(can_save_new, egui::Button::new("Save As New"))
+                .clicked()
+                || enter_pressed
+            {
+                state
+                    .audio_reactive
+                    .presets
+                    .insert(trimmed_name.clone(), state.audio_reactive.current.clone());
+                state.audio_reactive.active_preset = trimmed_name.clone();
+                state.audio_reactive_runtime.new_preset_name.clear();
+                ar_changed = true;
+                state.info(format!("Created Audio-Reactive preset '{}'.", trimmed_name));
+            }
+
+            ui.separator();
+
+            draw_mini_level_bar(
+                ui,
+                "LOW",
+                state.audio_reactive_runtime.low_env,
+                egui::Color32::from_rgb(235, 85, 65),
+            );
+            draw_mini_level_bar(
+                ui,
+                "MID",
+                state.audio_reactive_runtime.mid_env,
+                egui::Color32::from_rgb(75, 210, 120),
+            );
+            draw_mini_level_bar(
+                ui,
+                "HIGH",
+                state.audio_reactive_runtime.high_env,
+                egui::Color32::from_rgb(80, 175, 245),
+            );
+            draw_mini_level_bar(
+                ui,
+                "IMPULSE",
+                state.audio_reactive_runtime.transient_env,
+                egui::Color32::from_rgb(245, 195, 60),
+            );
+        });
+
+        technical_separator(ui);
+        sub_heading(ui, "Audio Envelope & Band Weights:");
+
+        let cur = &mut state.audio_reactive.current;
+        two_columns(ui, |c1, c2| {
+            let slider = percent_slider_range(&mut cur.master_intensity, 0.0..=2.0, 2.0);
+            if slider_item(
+                c1,
+                "Master Intensity:",
+                slider,
+                Some("Global strength multiplier for all audio-reactive CRT distortions."),
+            )
+            .changed()
+            {
+                ar_changed = true;
+            }
+
+            let slider = mult_slider(&mut cur.input_gain, 0.1..=4.0);
+            if slider_item(
+                c2,
+                "Input Gain:",
+                slider,
+                Some("Pre-amplifies incoming audio before band splitting and envelope detection."),
+            )
+            .changed()
+            {
+                ar_changed = true;
+            }
+        });
+
+        two_columns(ui, |c1, c2| {
+            let slider = percent_slider(&mut cur.gate_threshold, 0.0..=0.25);
+            if slider_item(
+                c1,
+                "Noise Gate:",
+                slider,
+                Some("Audio levels below this threshold are ignored so quiet dialogue or background hiss leaves the CRT rock-solid."),
+            )
+            .changed()
+            {
+                ar_changed = true;
+            }
+
+            let slider = egui::Slider::new(&mut cur.attack_ms, 1.0..=50.0)
+                .step_by(0.5)
+                .suffix(" ms");
+            if slider_item(
+                c2,
+                "Envelope Attack:",
+                slider,
+                Some("How quickly the CRT reacts to sudden audio peaks (lower = sharper transient snap)."),
+            )
+            .changed()
+            {
+                ar_changed = true;
+            }
+        });
+
+        two_columns(ui, |c1, c2| {
+            let slider = egui::Slider::new(&mut cur.release_ms, 20.0..=500.0)
+                .step_by(5.0)
+                .suffix(" ms");
+            if slider_item(
+                c1,
+                "Envelope Release:",
+                slider,
+                Some("How smoothly the CRT recovers after a beat or explosion subsides."),
+            )
+            .changed()
+            {
+                ar_changed = true;
+            }
+
+            let slider = mult_slider(&mut cur.low_weight, 0.0..=2.5);
+            if slider_item(
+                c2,
+                "Bass Weight (<180Hz):",
+                slider,
+                Some("Sensitivity to bass drums, explosions, and low synth notes (drives Flyback Sag and Deflection Shake)."),
+            )
+            .changed()
+            {
+                ar_changed = true;
+            }
+        });
+
+        two_columns(ui, |c1, c2| {
+            let slider = mult_slider(&mut cur.mid_weight, 0.0..=2.5);
+            if slider_item(
+                c1,
+                "Mid Weight (180–2.4k):",
+                slider,
+                Some("Sensitivity to FM synth leads, guitars, and voices (drives Scanline Voice-Coil Wave)."),
+            )
+            .changed()
+            {
+                ar_changed = true;
+            }
+
+            let slider = mult_slider(&mut cur.high_weight, 0.0..=2.5);
+            if slider_item(
+                c2,
+                "Treble Weight (>2.4k):",
+                slider,
+                Some("Sensitivity to hi-hats, cymbals, sibilance, and sharp chiptune arpeggios (drives RGB Deconvergence and RF Sparks)."),
+            )
+            .changed()
+            {
+                ar_changed = true;
+            }
+        });
+
+        technical_separator(ui);
+        sub_heading(ui, "CRT Magnetic & High-Voltage Interference Effects:");
+
+        two_columns(ui, |c1, c2| {
+            let slider = percent_slider_range(&mut cur.deflection_shake, 0.0..=2.0, 2.0);
+            if slider_item(
+                c1,
+                "Deflection Yoke Shake:",
+                slider,
+                Some("Underdamped harmonic spring shake and S-wave horizontal shear caused by speaker magnet fields tugging on the deflection yoke."),
+            )
+            .changed()
+            {
+                ar_changed = true;
+            }
+
+            let slider = percent_slider_range(&mut cur.stereo_tug, 0.0..=2.0, 2.0);
+            if slider_item(
+                c2,
+                "Stereo Coil Tug (L/R):",
+                slider,
+                Some("Pulls the electron beam horizontally toward whichever stereo speaker channel is hitting harder."),
+            )
+            .changed()
+            {
+                ar_changed = true;
+            }
+        });
+
+        two_columns(ui, |c1, c2| {
+            let slider = percent_slider_range(&mut cur.flyback_pump, 0.0..=2.0, 2.0);
+            if slider_item(
+                c1,
+                "Flyback Voltage Sag:",
+                slider,
+                Some("Simulates unregulated high-voltage anode sag on heavy bass hits: the raster momentarily inflates/pumps outward and corners flex."),
+            )
+            .changed()
+            {
+                ar_changed = true;
+            }
+
+            let slider = percent_slider_range(&mut cur.rgb_deconvergence, 0.0..=2.0, 2.0);
+            if slider_item(
+                c2,
+                "RGB Deconvergence:",
+                slider,
+                Some("Splits the Red, Green, and Blue electron beams radially and horizontally on sharp treble and percussive transients."),
+            )
+            .changed()
+            {
+                ar_changed = true;
+            }
+        });
+
+        two_columns(ui, |c1, c2| {
+            let slider = percent_slider_range(&mut cur.scanline_wave, 0.0..=2.0, 2.0);
+            if slider_item(
+                c1,
+                "Scanline Voice-Coil Wave:",
+                slider,
+                Some("Modulates horizontal scanline phase like an oscilloscope trace driven by mid-frequency audio."),
+            )
+            .changed()
+            {
+                ar_changed = true;
+            }
+
+            let slider = percent_slider_range(&mut cur.phosphor_surge, 0.0..=2.0, 2.0);
+            if slider_item(
+                c2,
+                "Phosphor Overdrive Surge:",
+                slider,
+                Some("Surges beam current on loud beats, boosting halation bloom and phosphor highlight energy."),
+            )
+            .changed()
+            {
+                ar_changed = true;
+            }
+        });
+
+        two_columns(ui, |c1, _c2| {
+            let slider = percent_slider_range(&mut cur.sync_tear, 0.0..=2.0, 2.0);
+            if slider_item(
+                c1,
+                "H-Sync Tear & RF Spark:",
+                slider,
+                Some("Triggers localized horizontal sync-loss tear bands and bright analog RF spark dots on sharp volume impulses."),
+            )
+            .changed()
+            {
+                ar_changed = true;
+            }
+        });
+    });
+
+    ui.add_space(4.0);
+
+    // Group 2: Cathode Glow & Interference (Moved from Geometry & Bezel)
+    technical_group(ui, "Cathode Glow & Interference:", |ui| {
+        ui.horizontal(|ui| {
+            if ui
+                .checkbox(
+                    &mut state.cathode_interference.enabled,
+                    egui::RichText::new("Enable Cathode Glow & Interference")
+                        .strong()
+                        .color(egui::Color32::from_rgb(230, 230, 230)),
+                )
+                .on_hover_text(
+                    "Simulates CRT cathode ray flickering, electrical bloom, and subtle analog RF interference.",
+                )
+                .changed()
+            {
+                changed = true;
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Save as Defaults").clicked() {
+                    state.cathode_interference_defaults = state.cathode_interference.clone();
+                    let current_profile_data = crate::config::build_profile_from_state(state);
+                    state
+                        .profiles
+                        .insert(state.active_profile.clone(), current_profile_data);
+                    crate::config::save_config(state);
+                    state.info("Saved current cathode settings as default");
+                    changed = true;
+                }
+                if ui.button("Reset Defaults").clicked() {
+                    state.cathode_interference = state.cathode_interference_defaults.clone();
+                    changed = true;
+                }
+            });
+        });
+
+        technical_separator(ui);
+        two_columns(ui, |c1, c2| {
+            let slider = percent_slider(&mut state.cathode_interference.intensity, 0.0..=1.0);
+            if slider_item(
+                c1,
+                "Intensity:",
+                slider,
+                Some("Master intensity of cathode glow, flicker, and interference."),
+            )
+            .changed()
+            {
+                changed = true;
+            }
+
+            let slider = mult_slider(&mut state.cathode_interference.frequency, 0.1..=5.0);
+            if slider_item(
+                c2,
+                "Frequency:",
+                slider,
+                Some("Speed of AC hum ripple, flicker rate, and glitch frequency."),
+            )
+            .changed()
+            {
+                changed = true;
+            }
+        });
+
+        two_columns(ui, |c1, c2| {
+            let slider = percent_slider(&mut state.cathode_interference.randomization, 0.0..=1.0);
+            if slider_item(
+                c1,
+                "Randomization:",
+                slider,
+                Some("Unpredictability and jitteriness of flicker and micro-glitches."),
+            )
+            .changed()
+            {
+                changed = true;
+            }
+
+            let slider =
+                percent_slider(&mut state.cathode_interference.electricity_glow, 0.0..=1.0);
+            if slider_item(
+                c2,
+                "Electricity Glow:",
+                slider,
+                Some("Lightbulb/cathode bloom that selectively energizes highlights and dynamically modulates dark areas."),
+            )
+            .changed()
+            {
+                changed = true;
+            }
+        });
+
+        two_columns(ui, |c1, c2| {
+            let slider = percent_slider(&mut state.cathode_interference.flicker_depth, 0.0..=1.0);
+            if slider_item(
+                c1,
+                "Flicker Depth:",
+                slider,
+                Some("Depth of rolling AC power hum and high-frequency cathode phosphor flutter."),
+            )
+            .changed()
+            {
+                changed = true;
+            }
+
+            let slider = percent_slider(&mut state.cathode_interference.interference, 0.0..=1.0);
+            if slider_item(
+                c2,
+                "Interference / Noise:",
+                slider,
+                Some("Analog RF static noise and intermittent horizontal scanline micro-glitches."),
+            )
+            .changed()
+            {
+                changed = true;
+            }
+        });
+
+        two_columns(ui, |c1, _| {
+            let slider =
+                percent_slider(&mut state.cathode_interference.lightbulb_effect, 0.0..=1.0);
+            if slider_item(
+                c1,
+                "Lightbulb Effect:",
+                slider,
+                Some("Pulsating lightbulb breathing that makes the brightness of bright areas and darkness of dark areas glow up and down."),
+            )
+            .changed()
+            {
+                changed = true;
+            }
+        });
+    });
+
+    if ar_changed {
+        crate::config::save_global_hardware_config(state);
+        changed = true;
+    } else if changed {
         crate::config::save_config(state);
     }
 

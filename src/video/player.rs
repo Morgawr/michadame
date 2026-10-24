@@ -231,6 +231,12 @@ impl Iterator for VideoFileAudioSource {
             self.peak_amplitude.fetch_max(peak_bits, Ordering::Relaxed);
             self.audio_latency_ms.store(25, Ordering::Relaxed);
 
+            self.replay_audio.observe_reactive(
+                &self.local_batch,
+                AUDIO_OUTPUT_RATE,
+                AUDIO_OUTPUT_CHANNELS,
+            );
+
             if self.replay_audio.is_enabled() {
                 self.replay_audio.submit(
                     &self.local_batch,

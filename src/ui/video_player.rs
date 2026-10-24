@@ -494,6 +494,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         }
 
         if state.cathode_interference.enabled
+            || state.audio_reactive.enabled
             || retro_pc_frame
             || (night_mode_glow_intensity > 0.001)
             || is_roll_active
@@ -504,7 +505,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         if !is_showing_roll
             && (state.video.pixelate_filter_enabled
                 || filter != CrtFilter::Off
-                || state.cathode_interference.enabled)
+                || state.cathode_interference.enabled
+                || state.audio_reactive.enabled)
         {
             if let Some(renderer_arc) = &state.crt_renderer {
                 let renderer_clone = renderer_arc.clone();
@@ -529,6 +531,12 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 } else {
                     ([0.0, 0.0], 0.0, 0)
                 };
+                let audio_reactive_params = video::gpu::AudioReactiveShaderParams::from_state(
+                    state,
+                    warp,
+                    corner_size,
+                    filter_type,
+                );
                 let glass_params = video::gpu::GlassShaderParams::from_state(
                     state,
                     warp,
@@ -635,6 +643,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 &params,
                                 &halo_params,
                                 &cathode_params_cb,
+                                Some(&audio_reactive_params),
                                 Some(&glass_params),
                                 time,
                                 pixelate,
@@ -920,6 +929,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         fft_clone.as_ref(),
                         fft_threshold,
                         fft_black,
+                        None,
                         None,
                         glass_params.as_ref(),
                         0.0,

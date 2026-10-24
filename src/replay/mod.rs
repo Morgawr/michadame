@@ -148,6 +148,15 @@ pub struct AudioTap {
     game_volume: Arc<AtomicU32>,
     active_alert: Mutex<Option<ActiveAlertAudio>>,
     last_game_submit: AtomicI64,
+    reactive_listening: AtomicBool,
+    reactive_lp180_bits: AtomicU32,
+    reactive_lp2400_bits: AtomicU32,
+    reactive_low_bits: AtomicU32,
+    reactive_mid_bits: AtomicU32,
+    reactive_high_bits: AtomicU32,
+    reactive_left_bits: AtomicU32,
+    reactive_right_bits: AtomicU32,
+    reactive_last_us: AtomicI64,
 }
 
 impl Default for AudioTap {
@@ -167,6 +176,15 @@ impl Default for AudioTap {
             game_volume: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             active_alert: Mutex::new(None),
             last_game_submit: AtomicI64::new(0),
+            reactive_listening: AtomicBool::new(false),
+            reactive_lp180_bits: AtomicU32::new(0.0f32.to_bits()),
+            reactive_lp2400_bits: AtomicU32::new(0.0f32.to_bits()),
+            reactive_low_bits: AtomicU32::new(0.0f32.to_bits()),
+            reactive_mid_bits: AtomicU32::new(0.0f32.to_bits()),
+            reactive_high_bits: AtomicU32::new(0.0f32.to_bits()),
+            reactive_left_bits: AtomicU32::new(0.0f32.to_bits()),
+            reactive_right_bits: AtomicU32::new(0.0f32.to_bits()),
+            reactive_last_us: AtomicI64::new(0),
         }
     }
 }
@@ -174,6 +192,138 @@ impl Default for AudioTap {
 impl AudioTap {
     pub fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
+    }
+    pub fn set_reactive_listening(&self, active: bool) {
+        self.reactive_listening.store(active, Ordering::Relaxed);
+    }
+    pub fn is_reactive_listening(&self) -> bool {
+        self.reactive_listening.load(Ordering::Relaxed)
+    }
+    /// Lock-free 3-band + stereo energy observer for Audio-Reactive CRT Interference.
+    pub fn observe_reactive(&self, samples: &[f32], rate: u32, channels: u16) {
+        if !self.reactive_listening.load(Ordering::Relaxed)
+            || samples.is_empty()
+            || rate == 0
+            || channels == 0
+        {
+            return;
+        }
+        let ch = channels as usize;
+        let frames = samples.len() / ch;
+        if frames == 0 {
+            return;
+        }
+
+        let dt = 1.0 / (rate.max(8000) as f32);
+        let a180 = dt / (1.0 / (std::f32::consts::TAU * 180.0) + dt);
+        let a2400 = dt / (1.0 / (std::f32::consts::TAU * 2400.0) + dt);
+
+        let mut lp180 = f32::from_bits(self.reactive_lp180_bits.load(Ordering::Relaxed));
+        let mut lp2400 = f32::from_bits(self.reactive_lp2400_bits.load(Ordering::Relaxed));
+        if !lp180.is_finite() {
+            lp180 = 0.0;
+        }
+        if !lp2400.is_finite() {
+            lp2400 = 0.0;
+        }
+
+        let mut sum_low_sq = 0.0f32;
+        let mut sum_mid_sq = 0.0f32;
+        let mut sum_high_sq = 0.0f32;
+        let mut sum_l_sq = 0.0f32;
+        let mut sum_r_sq = 0.0f32;
+
+        let mut peak_low = 0.0f32;
+        let mut peak_mid = 0.0f32;
+        let mut peak_high = 0.0f32;
+
+        for frame in samples.chunks_exact(ch) {
+            let l = frame[0].clamp(-2.0, 2.0);
+            let r = if ch >= 2 {
+                frame[1].clamp(-2.0, 2.0)
+            } else {
+                l
+            };
+            let mono = (l + r) * 0.5;
+
+            lp180 += a180 * (mono - lp180);
+            lp2400 += a2400 * (mono - lp2400);
+
+            let low = lp180;
+            let mid = lp2400 - lp180;
+            let high = mono - lp2400;
+
+            sum_low_sq += low * low;
+            sum_mid_sq += mid * mid;
+            sum_high_sq += high * high;
+            sum_l_sq += l * l;
+            sum_r_sq += r * r;
+
+            peak_low = peak_low.max(low.abs());
+            peak_mid = peak_mid.max(mid.abs());
+            peak_high = peak_high.max(high.abs());
+        }
+
+        self.reactive_lp180_bits
+            .store(lp180.to_bits(), Ordering::Relaxed);
+        self.reactive_lp2400_bits
+            .store(lp2400.to_bits(), Ordering::Relaxed);
+
+        let inv_n = 1.0 / (frames as f32);
+        // Modern game audio typically sits around -24 dBFS to -12 dBFS (linear RMS 0.06..0.25).
+        // Combine RMS with peak response and a gentle perceptual curve (x^0.62) so normal
+        // gameplay audio drives the CRT reactive bands cleanly without requiring clipping levels.
+        let perceptual = |v: f32| -> f32 {
+            let clamped = v.max(0.0);
+            if clamped <= 0.0001 {
+                0.0
+            } else {
+                clamped.powf(0.62)
+            }
+        };
+        let low_raw = ((sum_low_sq * inv_n).sqrt() * 2.40).max(peak_low * 1.15);
+        let mid_raw = ((sum_mid_sq * inv_n).sqrt() * 2.85).max(peak_mid * 1.25);
+        let high_raw = ((sum_high_sq * inv_n).sqrt() * 3.60).max(peak_high * 1.45);
+        let low_val = perceptual(low_raw) * 1.25;
+        let mid_val = perceptual(mid_raw) * 1.25;
+        let high_val = perceptual(high_raw) * 1.30;
+        let left_val = perceptual((sum_l_sq * inv_n).sqrt() * 2.2);
+        let right_val = perceptual((sum_r_sq * inv_n).sqrt() * 2.2);
+
+        let blend_in = |atom: &AtomicU32, new_v: f32| {
+            let prev = f32::from_bits(atom.load(Ordering::Relaxed));
+            let prev_clean = if prev.is_finite() { prev } else { 0.0 };
+            let merged = new_v.max(prev_clean * 0.90).clamp(0.0, 4.0);
+            atom.store(merged.to_bits(), Ordering::Relaxed);
+        };
+
+        blend_in(&self.reactive_low_bits, low_val);
+        blend_in(&self.reactive_mid_bits, mid_val);
+        blend_in(&self.reactive_high_bits, high_val);
+        blend_in(&self.reactive_left_bits, left_val);
+        blend_in(&self.reactive_right_bits, right_val);
+        self.reactive_last_us.store(now_us(), Ordering::Relaxed);
+    }
+
+    /// Reads the latest 3-band + stereo energy snapshot for the UI/shader loop.
+    pub fn take_reactive_raw(&self) -> (f32, f32, f32, f32, f32) {
+        let last_us = self.reactive_last_us.load(Ordering::Relaxed);
+        if last_us == 0 || (now_us() - last_us) > 120_000 {
+            return (0.0, 0.0, 0.0, 0.0, 0.0);
+        }
+        let read_and_decay = |atom: &AtomicU32| -> f32 {
+            let v = f32::from_bits(atom.load(Ordering::Relaxed));
+            let clean = if v.is_finite() { v.clamp(0.0, 4.0) } else { 0.0 };
+            atom.store((clean * 0.88).to_bits(), Ordering::Relaxed);
+            clean
+        };
+        (
+            read_and_decay(&self.reactive_low_bits),
+            read_and_decay(&self.reactive_mid_bits),
+            read_and_decay(&self.reactive_high_bits),
+            read_and_decay(&self.reactive_left_bits),
+            read_and_decay(&self.reactive_right_bits),
+        )
     }
     pub fn set_filter_config(&self, config: crate::replay::config::AudioFilterConfig) {
         if let Ok(mut w) = self.filter.write() {

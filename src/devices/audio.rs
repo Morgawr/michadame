@@ -767,6 +767,7 @@ where
                     samples_captured,
                 );
                 // Playback receives samples first; disabled replay performs no extra ALSA query.
+                replay.observe_reactive(&converted_buf[..sample_count], rate, channels);
                 if replay.is_enabled() {
                     let delay = pcm.delay().unwrap_or(0).max(0);
                     let at =
