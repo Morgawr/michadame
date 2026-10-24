@@ -467,6 +467,7 @@ pub fn draw_whiteboard(state: &mut AppState, ctx: &egui::Context, screen_rect: R
         .is_some_and(|p| is_pointer_occluded_by_higher_ui(state, ctx, p, layer_id));
 
     let panel_rect = screen_rect;
+    let is_mining_capture = state.bank.has_pending();
 
     egui::Area::new(layer_id.id)
         .order(layer_id.order)
@@ -478,176 +479,304 @@ pub fn draw_whiteboard(state: &mut AppState, ctx: &egui::Context, screen_rect: R
             ui.set_min_size(panel_rect.size());
             ui.set_max_size(panel_rect.size());
 
-            // --- Top Toolbar ---
-            let toolbar_response = egui::Frame::none()
-                .fill(Color32::from_rgb(24, 24, 24))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(56, 56, 56)))
-                .inner_margin(egui::Margin::symmetric(8.0, 5.0))
-                .rounding(Rounding::ZERO)
-                .show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+            // --- Top Toolbar (hidden on the single frame when a mining screenshot is captured) ---
+            let toolbar_rect = if is_mining_capture {
+                Rect::from_min_size(
+                    panel_rect.min,
+                    Vec2::new(panel_rect.width(), state.whiteboard.last_toolbar_height),
+                )
+            } else {
+                let toolbar_response = egui::Frame::none()
+                    .fill(Color32::from_rgb(24, 24, 24))
+                    .stroke(Stroke::new(1.0, Color32::from_rgb(56, 56, 56)))
+                    .inner_margin(egui::Margin::symmetric(8.0, 5.0))
+                    .rounding(Rounding::ZERO)
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
 
-                        // Tool selector: Pen / Square / Eraser
-                        for (tool_variant, label, tip) in [
-                            (WhiteboardTool::Pen, "Pen", "Freehand pixel pen"),
-                            (
-                                WhiteboardTool::Square,
-                                "Square",
-                                "Drag to draw a solid filled rectangle (no border)",
-                            ),
-                            (WhiteboardTool::Eraser, "Eraser", "Erase pixels back to transparent"),
-                        ] {
-                            let active = state.whiteboard.tool == tool_variant;
-                            let btn = egui::Button::new(
-                                egui::RichText::new(label)
+                            // Tool selector: Pen / Square / Eraser
+                            for (tool_variant, label, tip) in [
+                                (WhiteboardTool::Pen, "Pen", "Freehand pixel pen"),
+                                (
+                                    WhiteboardTool::Square,
+                                    "Square",
+                                    "Drag to draw a solid filled rectangle (no border)",
+                                ),
+                                (WhiteboardTool::Eraser, "Eraser", "Erase pixels back to transparent"),
+                            ] {
+                                let active = state.whiteboard.tool == tool_variant;
+                                let btn = egui::Button::new(
+                                    egui::RichText::new(label)
+                                        .monospace()
+                                        .size(11.0)
+                                        .strong()
+                                        .color(if active {
+                                            Color32::WHITE
+                                        } else {
+                                            Color32::from_rgb(190, 190, 190)
+                                        }),
+                                )
+                                .fill(if active {
+                                    Color32::from_rgb(21, 60, 102)
+                                } else {
+                                    Color32::from_rgb(44, 44, 44)
+                                })
+                                .stroke(Stroke::new(
+                                    1.0,
+                                    if active {
+                                        Color32::from_rgb(66, 133, 244)
+                                    } else {
+                                        Color32::from_rgb(72, 72, 72)
+                                    },
+                                ))
+                                .rounding(Rounding::ZERO);
+                                if ui.add(btn).on_hover_text(tip).clicked() {
+                                    state.whiteboard.tool = tool_variant;
+                                }
+                            }
+
+                            ui.separator();
+
+                            // Color palette: Green, Red, Blue, Yellow, White, Black
+                            for palette_color in WhiteboardColor::ALL {
+                                let is_selected = state.whiteboard.color == palette_color
+                                    && state.whiteboard.tool != WhiteboardTool::Eraser;
+                                let (swatch_rect, swatch_resp) =
+                                    ui.allocate_exact_size(Vec2::new(18.0, 18.0), Sense::click());
+                                if swatch_resp.clicked() {
+                                    state.whiteboard.color = palette_color;
+                                    if state.whiteboard.tool == WhiteboardTool::Eraser {
+                                        state.whiteboard.tool = WhiteboardTool::Pen;
+                                    }
+                                }
+                                swatch_resp.on_hover_text(palette_color.label());
+
+                                let painter = ui.painter();
+                                painter.rect_filled(
+                                    swatch_rect,
+                                    Rounding::ZERO,
+                                    palette_color.to_color32(),
+                                );
+                                let border_stroke = if is_selected {
+                                    Stroke::new(2.0, Color32::from_rgb(80, 180, 255))
+                                } else if swatch_rect
+                                    .contains(pointer_pos.unwrap_or(Pos2::new(-999.0, -999.0)))
+                                {
+                                    Stroke::new(1.5, Color32::WHITE)
+                                } else {
+                                    Stroke::new(1.0, Color32::from_rgb(90, 90, 90))
+                                };
+                                painter.rect_stroke(swatch_rect, Rounding::ZERO, border_stroke);
+                            }
+
+                            ui.separator();
+
+                            // Size slider for Pen / Eraser
+                            ui.label(
+                                egui::RichText::new("Size:")
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(Color32::from_rgb(190, 190, 190)),
+                            );
+                            ui.scope(|ui| {
+                                ui.spacing_mut().slider_width = 80.0;
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut state.whiteboard.brush_size,
+                                        MIN_BRUSH_SIZE..=MAX_BRUSH_SIZE,
+                                    )
+                                    .suffix("px"),
+                                );
+                            });
+
+                            ui.separator();
+
+                            // Undo (Ctrl+Z) & Redo (Ctrl+Y) buttons
+                            let can_undo = !state.whiteboard.undo_stack.is_empty();
+                            let undo_btn = egui::Button::new(
+                                egui::RichText::new("Undo")
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(if can_undo {
+                                        Color32::from_rgb(208, 208, 208)
+                                    } else {
+                                        Color32::from_rgb(100, 100, 100)
+                                    }),
+                            )
+                            .rounding(Rounding::ZERO);
+                            if ui
+                                .add_enabled(can_undo, undo_btn)
+                                .on_hover_text("Undo (Ctrl+Z)")
+                                .clicked()
+                            {
+                                state.whiteboard.undo();
+                            }
+
+                            let can_redo = !state.whiteboard.redo_stack.is_empty();
+                            let redo_btn = egui::Button::new(
+                                egui::RichText::new("Redo")
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(if can_redo {
+                                        Color32::from_rgb(208, 208, 208)
+                                    } else {
+                                        Color32::from_rgb(100, 100, 100)
+                                    }),
+                            )
+                            .rounding(Rounding::ZERO);
+                            if ui
+                                .add_enabled(can_redo, redo_btn)
+                                .on_hover_text("Redo (Ctrl+Y)")
+                                .clicked()
+                            {
+                                state.whiteboard.redo();
+                            }
+
+                            // Clear canvas button
+                            let clear_btn = egui::Button::new(
+                                egui::RichText::new("Clear")
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(Color32::from_rgb(230, 200, 200)),
+                            )
+                            .fill(Color32::from_rgb(56, 28, 28))
+                            .stroke(Stroke::new(1.0, Color32::from_rgb(96, 48, 48)))
+                            .rounding(Rounding::ZERO);
+                            if ui
+                                .add(clear_btn)
+                                .on_hover_text("Clear all drawings from the whiteboard")
+                                .clicked()
+                            {
+                                state.whiteboard.clear_canvas();
+                            }
+
+                            ui.separator();
+
+                            // + and ++ mining buttons for the top-most entry in the open dictionary popup
+                            let popup_mine_info = crate::ocr::overlay::top_popup_entry_mine_info(state);
+                            let can_mine = matches!(
+                                popup_mine_info,
+                                Some((crate::bank::MineStatus::Available, _))
+                            );
+                            let is_already_mined = matches!(
+                                popup_mine_info,
+                                Some((crate::bank::MineStatus::Mined, _))
+                            );
+
+                            let (mine_hover, clip_hover) = match &popup_mine_info {
+                                Some((crate::bank::MineStatus::Available, term)) => (
+                                    format!("Add '{term}' to mining bank (+)"),
+                                    format!(
+                                        "Add '{term}' to mining bank and create 20s Twitch clip (++)"
+                                    ),
+                                ),
+                                Some((crate::bank::MineStatus::Pending, _)) => (
+                                    "Saving…".to_string(),
+                                    "Saving…".to_string(),
+                                ),
+                                Some((crate::bank::MineStatus::Mined, term)) => (
+                                    format!("'{term}' is already in the mining bank"),
+                                    format!("'{term}' is already in the mining bank"),
+                                ),
+                                None => (
+                                    "No OCR dictionary popup is currently open".to_string(),
+                                    "No OCR dictionary popup is currently open".to_string(),
+                                ),
+                            };
+
+                            let mine_btn = egui::Button::new(
+                                egui::RichText::new("+")
                                     .monospace()
                                     .size(11.0)
                                     .strong()
-                                    .color(if active {
-                                        Color32::WHITE
+                                    .color(if can_mine {
+                                        Color32::from_rgb(248, 250, 252)
+                                    } else if is_already_mined {
+                                        Color32::from_rgb(94, 234, 212)
                                     } else {
-                                        Color32::from_rgb(190, 190, 190)
+                                        Color32::from_rgb(100, 100, 100)
                                     }),
                             )
-                            .fill(if active {
-                                Color32::from_rgb(21, 60, 102)
+                            .fill(if can_mine {
+                                Color32::from_rgb(14, 116, 144)
+                            } else if is_already_mined {
+                                Color32::from_rgb(19, 78, 74)
                             } else {
-                                Color32::from_rgb(44, 44, 44)
+                                Color32::from_rgb(36, 36, 36)
                             })
                             .stroke(Stroke::new(
                                 1.0,
-                                if active {
-                                    Color32::from_rgb(66, 133, 244)
+                                if can_mine {
+                                    Color32::from_rgb(56, 189, 248)
+                                } else if is_already_mined {
+                                    Color32::from_rgb(20, 184, 166)
                                 } else {
-                                    Color32::from_rgb(72, 72, 72)
+                                    Color32::from_rgb(64, 64, 64)
                                 },
                             ))
                             .rounding(Rounding::ZERO);
-                            if ui.add(btn).on_hover_text(tip).clicked() {
-                                state.whiteboard.tool = tool_variant;
-                            }
-                        }
 
-                        ui.separator();
-
-                        // Color palette: Green, Red, Blue, Yellow, White, Black
-                        for palette_color in WhiteboardColor::ALL {
-                            let is_selected = state.whiteboard.color == palette_color
-                                && state.whiteboard.tool != WhiteboardTool::Eraser;
-                            let (swatch_rect, swatch_resp) =
-                                ui.allocate_exact_size(Vec2::new(18.0, 18.0), Sense::click());
-                            if swatch_resp.clicked() {
-                                state.whiteboard.color = palette_color;
-                                if state.whiteboard.tool == WhiteboardTool::Eraser {
-                                    state.whiteboard.tool = WhiteboardTool::Pen;
-                                }
-                            }
-                            swatch_resp.on_hover_text(palette_color.label());
-
-                            let painter = ui.painter();
-                            painter.rect_filled(
-                                swatch_rect,
-                                Rounding::ZERO,
-                                palette_color.to_color32(),
-                            );
-                            let border_stroke = if is_selected {
-                                Stroke::new(2.0, Color32::from_rgb(80, 180, 255))
-                            } else if swatch_rect
-                                .contains(pointer_pos.unwrap_or(Pos2::new(-999.0, -999.0)))
+                            if ui
+                                .add_enabled(can_mine, mine_btn)
+                                .on_hover_text(&mine_hover)
+                                .on_disabled_hover_text(&mine_hover)
+                                .clicked()
                             {
-                                Stroke::new(1.5, Color32::WHITE)
+                                crate::ocr::overlay::execute_popup_mine_action(
+                                    state, ctx, 0, false,
+                                );
+                            }
+
+                            let clip_btn = egui::Button::new(
+                                egui::RichText::new("++")
+                                    .monospace()
+                                    .size(11.0)
+                                    .strong()
+                                    .color(if can_mine {
+                                        Color32::from_rgb(248, 250, 252)
+                                    } else if is_already_mined {
+                                        Color32::from_rgb(94, 234, 212)
+                                    } else {
+                                        Color32::from_rgb(100, 100, 100)
+                                    }),
+                            )
+                            .fill(if can_mine {
+                                Color32::from_rgb(107, 33, 168)
+                            } else if is_already_mined {
+                                Color32::from_rgb(19, 78, 74)
                             } else {
-                                Stroke::new(1.0, Color32::from_rgb(90, 90, 90))
-                            };
-                            painter.rect_stroke(swatch_rect, Rounding::ZERO, border_stroke);
-                        }
+                                Color32::from_rgb(36, 36, 36)
+                            })
+                            .stroke(Stroke::new(
+                                1.0,
+                                if can_mine {
+                                    Color32::from_rgb(168, 85, 247)
+                                } else if is_already_mined {
+                                    Color32::from_rgb(20, 184, 166)
+                                } else {
+                                    Color32::from_rgb(64, 64, 64)
+                                },
+                            ))
+                            .rounding(Rounding::ZERO);
 
-                        ui.separator();
-
-                        // Size slider for Pen / Eraser
-                        ui.label(
-                            egui::RichText::new("Size:")
-                                .monospace()
-                                .size(11.0)
-                                .color(Color32::from_rgb(190, 190, 190)),
-                        );
-                        ui.scope(|ui| {
-                            ui.spacing_mut().slider_width = 80.0;
-                            ui.add(
-                                egui::Slider::new(
-                                    &mut state.whiteboard.brush_size,
-                                    MIN_BRUSH_SIZE..=MAX_BRUSH_SIZE,
-                                )
-                                .suffix("px"),
-                            );
+                            if ui
+                                .add_enabled(can_mine, clip_btn)
+                                .on_hover_text(&clip_hover)
+                                .on_disabled_hover_text(&clip_hover)
+                                .clicked()
+                            {
+                                crate::ocr::overlay::execute_popup_mine_action(
+                                    state, ctx, 0, true,
+                                );
+                            }
                         });
-
-                        ui.separator();
-
-                        // Undo (Ctrl+Z) & Redo (Ctrl+Y) buttons
-                        let can_undo = !state.whiteboard.undo_stack.is_empty();
-                        let undo_btn = egui::Button::new(
-                            egui::RichText::new("Undo")
-                                .monospace()
-                                .size(11.0)
-                                .color(if can_undo {
-                                    Color32::from_rgb(208, 208, 208)
-                                } else {
-                                    Color32::from_rgb(100, 100, 100)
-                                }),
-                        )
-                        .rounding(Rounding::ZERO);
-                        if ui
-                            .add_enabled(can_undo, undo_btn)
-                            .on_hover_text("Undo (Ctrl+Z)")
-                            .clicked()
-                        {
-                            state.whiteboard.undo();
-                        }
-
-                        let can_redo = !state.whiteboard.redo_stack.is_empty();
-                        let redo_btn = egui::Button::new(
-                            egui::RichText::new("Redo")
-                                .monospace()
-                                .size(11.0)
-                                .color(if can_redo {
-                                    Color32::from_rgb(208, 208, 208)
-                                } else {
-                                    Color32::from_rgb(100, 100, 100)
-                                }),
-                        )
-                        .rounding(Rounding::ZERO);
-                        if ui
-                            .add_enabled(can_redo, redo_btn)
-                            .on_hover_text("Redo (Ctrl+Y)")
-                            .clicked()
-                        {
-                            state.whiteboard.redo();
-                        }
-
-                        // Clear canvas button
-                        let clear_btn = egui::Button::new(
-                            egui::RichText::new("Clear")
-                                .monospace()
-                                .size(11.0)
-                                .color(Color32::from_rgb(230, 200, 200)),
-                        )
-                        .fill(Color32::from_rgb(56, 28, 28))
-                        .stroke(Stroke::new(1.0, Color32::from_rgb(96, 48, 48)))
-                        .rounding(Rounding::ZERO);
-                        if ui
-                            .add(clear_btn)
-                            .on_hover_text("Clear all drawings from the whiteboard")
-                            .clicked()
-                        {
-                            state.whiteboard.clear_canvas();
-                        }
                     });
-                });
 
-            let toolbar_rect = toolbar_response.response.rect;
-            state.whiteboard.last_toolbar_height = toolbar_rect.height();
+                let rect = toolbar_response.response.rect;
+                state.whiteboard.last_toolbar_height = rect.height();
+                rect
+            };
 
             let canvas_rect = Rect::from_min_max(
                 Pos2::new(panel_rect.min.x, toolbar_rect.max.y),
@@ -809,7 +938,10 @@ pub fn draw_whiteboard(state: &mut AppState, ctx: &egui::Context, screen_rect: R
             }
 
             // Draw brush size outline preview under cursor when hovering canvas in Pen/Eraser mode
-            if can_draw_in_canvas && state.whiteboard.tool != WhiteboardTool::Square {
+            if !is_mining_capture
+                && can_draw_in_canvas
+                && state.whiteboard.tool != WhiteboardTool::Square
+            {
                 if let Some(pos) = pointer_pos {
                     if canvas_rect.contains(pos) && !toolbar_rect.contains(pos) {
                         let radius = (state.whiteboard.brush_size as f32 * 0.5).max(1.0);
@@ -1000,5 +1132,67 @@ mod tests {
             &state.whiteboard.canvas_rgba[idx..idx + 4],
             &WhiteboardColor::Blue.to_rgba()
         );
+    }
+
+    #[test]
+    fn test_whiteboard_toolbar_mines_top_popup_entry() {
+        let mut state = AppState::default();
+        state.whiteboard.open = true;
+
+        // When no popup is open, top_popup_entry_mine_info returns None
+        assert!(crate::ocr::overlay::top_popup_entry_mine_info(&state).is_none());
+
+        let now = std::time::Instant::now();
+        let entry1 = crate::dict::models::TermEntry {
+            term: "魔法".to_string(),
+            reading: "まほう".to_string(),
+            definition_tags: None,
+            rules: String::new(),
+            score: 100.0,
+            glossary: Vec::new(),
+            sequence: 1,
+            term_tags: None,
+            inflection_reasons: Vec::new(),
+            frequency: None,
+            custom_name_id: None,
+            custom_tag: None,
+        };
+        let entry2 = crate::dict::models::TermEntry {
+            term: "魔".to_string(),
+            reading: "ま".to_string(),
+            ..entry1.clone()
+        };
+
+        state.dict.popup = Some(crate::dict::models::DictPopupState {
+            matched_term: "魔法".to_string(),
+            source_text: "これは魔法の力だ。".to_string(),
+            char_range: (3, 5),
+            word_rect: Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(40.0, 20.0)),
+            extra_word_rects: Vec::new(),
+            box_rect: Rect::from_min_size(Pos2::new(80.0, 90.0), Vec2::new(200.0, 40.0)),
+            entries: vec![entry1, entry2],
+            last_hover_time: now,
+            last_word_hover_time: now,
+            popup_rect: None,
+            is_popup_hovered: false,
+        });
+
+        let info = crate::ocr::overlay::top_popup_entry_mine_info(&state);
+        assert_eq!(
+            info,
+            Some((crate::bank::MineStatus::Available, "魔法".to_string()))
+        );
+
+        let ctx = egui::Context::default();
+        assert!(crate::ocr::overlay::execute_popup_mine_action(
+            &mut state, &ctx, 0, false
+        ));
+        assert!(state.bank.has_pending());
+        assert_eq!(
+            crate::ocr::overlay::top_popup_entry_mine_info(&state),
+            Some((crate::bank::MineStatus::Pending, "魔法".to_string()))
+        );
+        // Popup stays open in state
+        assert!(state.dict.popup.is_some());
     }
 }

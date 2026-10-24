@@ -223,7 +223,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
         let ocr_capture = state.ocr.capture_requested.clone();
         let ocr_req_sender = state.ocr.ocr_request_sender.clone();
-        if state.bank.has_pending() {
+        let mining_capture_this_frame = state.bank.has_pending();
+        if mining_capture_this_frame {
             ctx.request_repaint();
         }
         let bank_capture = state.bank.capture_handle();
@@ -1020,8 +1021,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         // OCR boxes, and dictionary popups; below Webcam overlay, Debug window, and Twitch chat).
         if !is_roll_active {
             crate::ui::whiteboard::draw_whiteboard(state, ctx, response.rect);
-            if state.whiteboard.is_visible() && state.bank.has_pending() {
+            if state.whiteboard.is_visible() && mining_capture_this_frame {
                 let bank_capture_cb = bank_capture.clone();
+                let repaint_ctx = ctx.clone();
                 let full_window_effects =
                     retro_pc_frame || night_mode_glow_intensity > 0.001;
                 let capture_area = if full_window_effects {
@@ -1036,6 +1038,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                             if let Some(request) = bank_capture_cb.take_pending() {
                                 let shot = capture_frame_pixels(painter.gl(), capture_area);
                                 bank_capture_cb.save(request, shot);
+                                repaint_ctx.request_repaint();
                             }
                         },
                     )),
@@ -1045,6 +1048,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     egui::Id::new("whiteboard_overlay"),
                 ))
                 .add(wb_capture_cb);
+            } else if state.whiteboard.is_visible() && state.bank.has_pending() {
+                ctx.request_repaint();
             }
         }
 

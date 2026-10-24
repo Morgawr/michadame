@@ -2,6 +2,73 @@ use crate::app::AppState;
 use eframe::egui;
 use std::time::Instant;
 
+/// Returns the mining status and headword of the top-most dictionary entry (`entries[0]`)
+/// in the currently open OCR dictionary popup, or `None` if no popup is open.
+pub fn top_popup_entry_mine_info(
+    state: &AppState,
+) -> Option<(crate::bank::MineStatus, String)> {
+    let popup = state.dict.popup.as_ref()?;
+    let first = popup.entries.first()?;
+    let (sentence, _) =
+        crate::bank::sentence::extract_sentence(&popup.source_text, popup.char_range);
+    let status = state.bank.status(&first.term, &first.reading, &sentence);
+    Some((status, first.term.clone()))
+}
+
+/// Triggers mining (`+`) or mining with a 20s Twitch clip (`++`) for the entry at `idx`
+/// in the currently open dictionary popup. Returns `true` if a mine request was queued.
+pub fn execute_popup_mine_action(
+    state: &mut AppState,
+    ctx: &egui::Context,
+    idx: usize,
+    with_clip: bool,
+) -> bool {
+    let tag = state.bank.mining_tag();
+    let entry_data = state.dict.popup.as_ref().and_then(|p| {
+        p.entries.get(idx).map(|e| {
+            (
+                crate::bank::MineRequest::from_lookup(
+                    e,
+                    &p.source_text,
+                    p.char_range,
+                    tag.clone(),
+                ),
+                e.term.clone(),
+                e.reading.clone(),
+            )
+        })
+    });
+    let Some((request, term, reading)) = entry_data else {
+        return false;
+    };
+
+    let created_at = request.created_at;
+    if !state.bank.request_mine(request) {
+        state.error("Another word is still being mined, try again.");
+        ctx.request_repaint();
+        return false;
+    }
+
+    if with_clip {
+        let clip_title = crate::twitch::clips::format_clip_title(
+            &term,
+            &reading,
+            tag.as_deref(),
+        );
+        if let Err(e) = state.twitch.request_clip(clip_title, Some(created_at), ctx) {
+            state.error(format!("Could not create Twitch clip: {e}"));
+        } else {
+            state.info(format!(
+                "Creating Twitch clip for '{term}' (buffering {}s)...",
+                crate::twitch::clips::PRE_CLIP_BUFFER.as_secs()
+            ));
+        }
+    }
+
+    ctx.request_repaint();
+    true
+}
+
 /// Draws the interactive OCR bounding boxes and floating controls on top of the video feed.
 pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egui::Rect) {
     if video_rect.width() <= 10.0 || video_rect.height() <= 10.0 || state.ocr.boxes.is_empty() {
@@ -379,51 +446,10 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
     if let Some(action) = popup_action {
         match action {
             crate::dict::popup::PopupAction::Mine(idx) => {
-                let tag = state.bank.mining_tag();
-                let request = state.dict.popup.as_ref().and_then(|p| {
-                    p.entries.get(idx).map(|e| {
-                        crate::bank::MineRequest::from_lookup(e, &p.source_text, p.char_range, tag)
-                    })
-                });
-                if let Some(request) = request {
-                    if !state.bank.request_mine(request) {
-                        state.error("Another word is still being mined, try again.");
-                    }
-                    ui.ctx().request_repaint();
-                }
+                execute_popup_mine_action(state, ui.ctx(), idx, false);
             }
             crate::dict::popup::PopupAction::MineAndClip(idx) => {
-                let tag = state.bank.mining_tag();
-                let entry_data = state.dict.popup.as_ref().and_then(|p| {
-                    p.entries.get(idx).map(|e| {
-                        (
-                            crate::bank::MineRequest::from_lookup(e, &p.source_text, p.char_range, tag.clone()),
-                            e.term.clone(),
-                            e.reading.clone(),
-                        )
-                    })
-                });
-                if let Some((request, term, reading)) = entry_data {
-                    let created_at = request.created_at;
-                    if !state.bank.request_mine(request) {
-                        state.error("Another word is still being mined, try again.");
-                    } else {
-                        let clip_title = crate::twitch::clips::format_clip_title(
-                            &term,
-                            &reading,
-                            tag.as_deref(),
-                        );
-                        if let Err(e) = state.twitch.request_clip(clip_title, Some(created_at), ui.ctx()) {
-                            state.error(format!("Could not create Twitch clip: {e}"));
-                        } else {
-                            state.info(format!(
-                                "Creating Twitch clip for '{term}' (buffering {}s)...",
-                                crate::twitch::clips::PRE_CLIP_BUFFER.as_secs()
-                            ));
-                        }
-                    }
-                    ui.ctx().request_repaint();
-                }
+                execute_popup_mine_action(state, ui.ctx(), idx, true);
             }
             crate::dict::popup::PopupAction::DeleteCustomName(id) => {
                 if let Err(e) = state.bank.delete_custom_name(id) {
