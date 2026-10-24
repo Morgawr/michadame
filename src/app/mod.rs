@@ -182,6 +182,7 @@ impl Default for AppState {
             twitch,
             mic: crate::app::models::MicState::default(),
             webcam: crate::app::models::WebcamState::default(),
+            whiteboard: crate::ui::whiteboard::WhiteboardState::default(),
             config_load_error: None,
             config_quarantine_path: None,
         }
@@ -256,13 +257,29 @@ impl AppState {
         self.twitch.send_chat_message(&msg2);
     }
 
-    /// Checks OCR timeout and clears expired scans when no dictionary popup is open.
+    /// Checks OCR timeout and clears expired scans when no dictionary popup or whiteboard is open.
     ///
-    /// If a dictionary popup is open (mouse hovering on a word or inside the popup),
-    /// the OCR expiration timer is paused so scans aren't cleared out from under the user.
-    /// Once the popup is dismissed, the expiration timer resumes/applies.
+    /// If a dictionary popup is open or the transparent whiteboard is open, the OCR expiration
+    /// timer is stopped so scans and popups aren't cleared out from under the user.
     pub fn handle_ocr_timeout(&mut self, ctx: &egui::Context) -> bool {
         let mut repaint_requested = false;
+        if self.whiteboard.open {
+            let now = Instant::now();
+            if let Some(prev_tick) = self.ocr.last_pause_tick {
+                let delta = now.saturating_duration_since(prev_tick);
+                if let Some(ref mut scan_time) = self.ocr.last_scan_time {
+                    *scan_time += delta;
+                }
+                if let Some(ref mut popup) = self.dict.popup {
+                    popup.last_hover_time = now;
+                    popup.last_word_hover_time = now;
+                }
+            }
+            self.ocr.last_pause_tick = Some(now);
+            return false;
+        }
+        self.ocr.last_pause_tick = None;
+
         if self.dict.popup.is_none() {
             if self.ocr.is_expired() {
                 self.clear_ocr();
@@ -646,6 +663,10 @@ impl eframe::App for AppState {
             }
             if crate::ui::check_toggle_key(ctx, egui::Key::L) {
                 self.ui.studio_window_open = !self.ui.studio_window_open;
+                repaint_requested = true;
+            }
+            if crate::ui::check_toggle_key(ctx, egui::Key::H) {
+                self.whiteboard.toggle();
                 repaint_requested = true;
             }
             if !ctx.wants_keyboard_input()
@@ -1094,6 +1115,30 @@ mod tests {
         let repainted = state.handle_ocr_timeout(&ctx);
         assert!(repainted);
         assert!(state.ocr.boxes.is_empty());
+    }
+
+    #[test]
+    fn test_handle_ocr_timeout_pauses_when_whiteboard_open() {
+        let mut state = AppState::default();
+        let ctx = egui::Context::default();
+
+        state.ocr.timeout_seconds = 45;
+        state.ocr.boxes.push(crate::ocr::models::OcrBox {
+            text: "日本語".to_string(),
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.1,
+            height: 0.1,
+            lines: Vec::new(),
+            writing_direction: crate::ocr::models::WritingDirection::LeftToRight,
+        });
+        state.ocr.last_scan_time = Some(Instant::now() - std::time::Duration::from_secs(50));
+        state.whiteboard.open = true;
+
+        // While the whiteboard is open, OCR timeout is stopped and boxes do not disappear
+        let repainted = state.handle_ocr_timeout(&ctx);
+        assert!(!repainted);
+        assert_eq!(state.ocr.boxes.len(), 1);
     }
 
     #[test]

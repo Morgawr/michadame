@@ -117,7 +117,7 @@ pub fn draw_dict_popup(
         )
     } else {
         egui::LayerId::new(
-            egui::Order::Foreground,
+            egui::Order::Background,
             egui::Id::new("jitendex_dict_popup"),
         )
     };
@@ -235,6 +235,9 @@ pub fn draw_dict_popup(
             ui.ctx().tessellate(clipped_shapes, ui.ctx().pixels_per_point())
         }
     } else {
+        // Keep the dictionary popup above CentralPanel within Order::Background,
+        // while staying beneath Order::PanelResizeLine (the drawing whiteboard).
+        ui.ctx().move_to_top(layer_id);
         Vec::new()
     };
 

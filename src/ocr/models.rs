@@ -83,6 +83,8 @@ pub struct OcrState {
     pub timeout_seconds: u32,
     /// Timestamp when the most recent OCR scan results were received.
     pub last_scan_time: Option<Instant>,
+    /// Timestamp of the last frame tick while the OCR timer is paused (e.g. whiteboard open).
+    pub last_pause_tick: Option<Instant>,
     /// Whether to hide the visual OCR overlay (boxes and replacement text) on the video feed.
     pub hide_overlay: bool,
     /// Index of the most recently clicked/copied box, for visual feedback.
@@ -190,6 +192,7 @@ impl OcrState {
         self.raw_lines.clear();
         self.last_copied_index = None;
         self.last_scan_time = None;
+        self.last_pause_tick = None;
     }
 
     /// Returns true if the OCR boxes have expired according to `timeout_seconds`.
@@ -226,6 +229,7 @@ impl Default for OcrState {
             sticky_distance: 0.6,
             timeout_seconds: 45,
             last_scan_time: None,
+            last_pause_tick: None,
             hide_overlay: false,
             last_copied_index: None,
             copy_feedback_time: None,

@@ -267,6 +267,7 @@ pub struct WebcamState {
     pub resize_start_pointer: Option<egui::Pos2>,
     pub resize_start_width_pct: Option<f32>,
     pub resize_start_pos: Option<[f32; 2]>,
+    pub last_outer_rect: Option<egui::Rect>,
 }
 
 impl Default for WebcamState {
@@ -287,6 +288,7 @@ impl Default for WebcamState {
             resize_start_pointer: None,
             resize_start_width_pct: None,
             resize_start_pos: None,
+            last_outer_rect: None,
         }
     }
 }
@@ -383,6 +385,7 @@ pub struct AppState {
     pub twitch: crate::twitch::TwitchState,
     pub mic: MicState,
     pub webcam: WebcamState,
+    pub whiteboard: crate::ui::whiteboard::WhiteboardState,
     pub config_load_error: Option<String>,
     pub config_quarantine_path: Option<std::path::PathBuf>,
 }

@@ -453,7 +453,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             })
         });
         let is_on_crt_surface = pointer_pos.map_or(false, |pos| {
-            crt_surface.contains(pos) && !state.twitch.overlay_contains(pos)
+            crt_surface.contains(pos)
+                && !state.twitch.overlay_contains(pos)
+                && !state.whiteboard.contains_pointer(Some(pos), response.rect)
         });
         let is_hovering_controls = is_hovering_video_controls(state, pointer_pos, response.rect);
         let software_mouse_active =
@@ -555,6 +557,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
                 let capture_overlays = state.replay.config.capture_overlays;
                 let webcam_enabled = state.webcam.config.enabled;
+                let whiteboard_visible = !is_roll_active && state.whiteboard.is_visible();
                 let stream_res = if let Some(hook) = &state.gamescope_hook {
                     if hook.is_active {
                         hook.resolution()
@@ -730,20 +733,22 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 rendered_area
                             };
 
-                            if let Some(request) = bank_capture_cb.take_pending() {
-                                let shot =
-                                    capture_frame_pixels(painter.gl(), full_or_rendered_area);
-                                bank_capture_cb.save(request, shot);
-                            }
+                            if !whiteboard_visible {
+                                if let Some(request) = bank_capture_cb.take_pending() {
+                                    let shot =
+                                        capture_frame_pixels(painter.gl(), full_or_rendered_area);
+                                    bank_capture_cb.save(request, shot);
+                                }
 
-                            if !capture_overlays && !webcam_enabled {
-                                replay_gpu.lock().unwrap().capture(
-                                    painter.gl(),
-                                    replay.as_ref(),
-                                    None,
-                                    full_or_rendered_area,
-                                    at,
-                                );
+                                if !capture_overlays && !webcam_enabled {
+                                    replay_gpu.lock().unwrap().capture(
+                                        painter.gl(),
+                                        replay.as_ref(),
+                                        None,
+                                        full_or_rendered_area,
+                                        at,
+                                    );
+                                }
                             }
                         },
                     )),
@@ -825,6 +830,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
             let capture_overlays = state.replay.config.capture_overlays;
             let webcam_enabled = state.webcam.config.enabled;
+            let whiteboard_visible = !is_roll_active && state.whiteboard.is_visible();
             let stream_res = if let Some(hook) = &state.gamescope_hook {
                 if hook.is_active {
                     hook.resolution()
@@ -964,20 +970,22 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         rendered_area
                     };
 
-                    if let Some(request) = bank_capture_cb.take_pending() {
-                        let shot =
-                            capture_frame_pixels(painter.gl(), full_or_rendered_area);
-                        bank_capture_cb.save(request, shot);
-                    }
+                    if !whiteboard_visible {
+                        if let Some(request) = bank_capture_cb.take_pending() {
+                            let shot =
+                                capture_frame_pixels(painter.gl(), full_or_rendered_area);
+                            bank_capture_cb.save(request, shot);
+                        }
 
-                    if !capture_overlays && !webcam_enabled {
-                        replay_gpu.lock().unwrap().capture(
-                            painter.gl(),
-                            replay.as_ref(),
-                            None,
-                            full_or_rendered_area,
-                            at,
-                        );
+                        if !capture_overlays && !webcam_enabled {
+                            replay_gpu.lock().unwrap().capture(
+                                painter.gl(),
+                                replay.as_ref(),
+                                None,
+                                full_or_rendered_area,
+                                at,
+                            );
+                        }
                     }
                 })),
             };
@@ -1006,6 +1014,38 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
         if (software_mouse_active || real_mouse_active || passthrough_hide_host_cursor) && !is_roll_active {
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+        }
+
+        // Draw resizable whiteboard on Order::PanelResizeLine (above CRT borders, Niconico comments,
+        // OCR boxes, and dictionary popups; below Webcam overlay, Debug window, and Twitch chat).
+        if !is_roll_active {
+            crate::ui::whiteboard::draw_whiteboard(state, ctx, response.rect);
+            if state.whiteboard.is_visible() && state.bank.has_pending() {
+                let bank_capture_cb = bank_capture.clone();
+                let full_window_effects =
+                    retro_pc_frame || night_mode_glow_intensity > 0.001;
+                let capture_area = if full_window_effects {
+                    crate::video::gpu::geometry::RenderedArea::full(output_size)
+                } else {
+                    rendered_area_geom
+                };
+                let wb_capture_cb = egui::PaintCallback {
+                    rect: response.rect,
+                    callback: std::sync::Arc::new(egui_glow::CallbackFn::new(
+                        move |_info, painter| {
+                            if let Some(request) = bank_capture_cb.take_pending() {
+                                let shot = capture_frame_pixels(painter.gl(), capture_area);
+                                bank_capture_cb.save(request, shot);
+                            }
+                        },
+                    )),
+                };
+                ctx.layer_painter(egui::LayerId::new(
+                    egui::Order::PanelResizeLine,
+                    egui::Id::new("whiteboard_overlay"),
+                ))
+                .add(wb_capture_cb);
+            }
         }
 
         // Draw webcam overlay on top of everything (suppressed during pre-roll and outro)
@@ -1081,10 +1121,13 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             );
         }
 
-        // When capturing overlays in the replay buffer, when webcam is enabled, or when broadcasting to Twitch,
-        // capture the frame after egui has rendered the interactive OCR boxes, dictionary popup, and webcam overlay.
+        // When capturing overlays in the replay buffer, when webcam or whiteboard is visible, or when broadcasting to Twitch,
+        // capture the frame after egui has rendered the interactive OCR boxes, dictionary popup, whiteboard, and webcam overlay.
         let is_broadcasting = state.twitch.is_broadcasting() || state.twitch.broadcast.is_some();
-        let capture_replay_here = state.replay.config.capture_overlays || state.webcam.config.enabled;
+        let whiteboard_visible = !is_roll_active && state.whiteboard.is_visible();
+        let capture_replay_here = state.replay.config.capture_overlays
+            || state.webcam.config.enabled
+            || whiteboard_visible;
         if capture_replay_here || is_broadcasting {
             let replay_gpu = state.replay.gpu.clone();
             let replay = if capture_replay_here {
@@ -1150,7 +1193,10 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             }
         }
 
-        if !passthrough_active && response.double_clicked() {
+        if !passthrough_active
+            && response.double_clicked()
+            && !state.whiteboard.contains_pointer(pointer_pos, response.rect)
+        {
             let is_fullscreen = !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(is_fullscreen));
         }
@@ -1192,6 +1238,7 @@ pub fn is_software_mouse_active(state: &AppState, is_on_crt_surface: bool) -> bo
         && !(popup_active && !popup_under_crt)
         && !(state.webcam.config.enabled
             && (state.webcam.is_dragging || state.webcam.resizing_corner.is_some()))
+        && !state.whiteboard.is_interacting()
 }
 
 /// Checks if the mouse cursor is hovering over or near the bottom video controls widget.
@@ -1264,6 +1311,12 @@ pub fn is_passthrough_host_cursor_hidden(
 
     if state.webcam.config.enabled
         && (state.webcam.is_dragging || state.webcam.resizing_corner.is_some())
+    {
+        return false;
+    }
+
+    if state.whiteboard.is_interacting()
+        || state.whiteboard.contains_pointer(pointer_pos, video_rect)
     {
         return false;
     }

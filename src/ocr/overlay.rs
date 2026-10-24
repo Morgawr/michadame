@@ -11,8 +11,12 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         return;
     }
 
-    // Expire copied feedback highlight after 1.5 seconds
-    if let Some(feedback_time) = state.ocr.copy_feedback_time {
+    // Expire copied feedback highlight after 1.5 seconds (paused while whiteboard is open)
+    if state.whiteboard.open {
+        if let Some(ref mut feedback_time) = state.ocr.copy_feedback_time {
+            *feedback_time = Instant::now();
+        }
+    } else if let Some(feedback_time) = state.ocr.copy_feedback_time {
         if feedback_time.elapsed().as_millis() > 1500 {
             state.ocr.last_copied_index = None;
             state.ocr.copy_feedback_time = None;
@@ -20,14 +24,17 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
     }
 
     let pointer_pos = ui.input(|i| i.pointer.hover_pos());
+    let whiteboard_open = state.whiteboard.open;
+    let hide_for_mining_capture = state.bank.has_pending() && state.whiteboard.is_visible();
     // The dictionary popup "eats" pointer events: if the cursor is currently over the
     // popup window (using its rect from the last drawn frame), words/boxes underneath it
     // must not react to hover or clicks. This is checked against the *current* pointer
     // position so there is no one-frame lag when entering the popup.
-    let pointer_in_popup = match (pointer_pos, state.dict.popup.as_ref().and_then(|p| p.popup_rect)) {
-        (Some(pos), Some(rect)) => rect.contains(pos),
-        _ => false,
-    };
+    let pointer_in_popup = !whiteboard_open
+        && match (pointer_pos, state.dict.popup.as_ref().and_then(|p| p.popup_rect)) {
+            (Some(pos), Some(rect)) => rect.contains(pos),
+            _ => false,
+        };
     let mut hovered_any_box = false;
     let mut copied_text: Option<String> = None;
     let mut copied_index: Option<usize> = None;
@@ -54,7 +61,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         let response = ui.interact(box_rect, box_id, ocr_sense);
 
         let is_recently_copied = state.ocr.last_copied_index == Some(idx);
-        let is_hovered = response.hovered() && !pointer_in_popup;
+        let is_hovered = response.hovered() && !pointer_in_popup && !whiteboard_open;
         let is_active_popup_box = state
             .dict
             .popup
@@ -72,7 +79,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         }
 
         // Right-click dismisses the OCR box from the UI
-        if response.secondary_clicked() && !pointer_in_popup {
+        if response.secondary_clicked() && !pointer_in_popup && !whiteboard_open {
             dismissed_box_idx = Some(idx);
         }
 
@@ -95,7 +102,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
             )
         };
 
-        if !state.ocr.hide_overlay {
+        if !state.ocr.hide_overlay && !hide_for_mining_capture {
             ui.painter().rect(box_rect, 4.0, fill, stroke);
 
             // When hovered or actively displaying a dictionary popup, render the OCR text inside the darkened box!
@@ -143,13 +150,13 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
             }
         }
 
-        if response.clicked() && !pointer_in_popup {
+        if response.clicked() && !pointer_in_popup && !whiteboard_open {
             copied_text = Some(ocr_box.text.clone());
             copied_index = Some(idx);
         }
 
         // Fallback tooltip only if no dictionary is installed
-        if state.dict.installed_metadata.is_none() {
+        if state.dict.installed_metadata.is_none() && !whiteboard_open {
             response.on_hover_ui(|ui| {
                 ui.label(egui::RichText::new(&ocr_box.text).size(16.0).strong());
                 ui.label(egui::RichText::new("📋 Click to copy | Right-click to dismiss").italics().weak());
@@ -217,19 +224,30 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         return;
     }
 
-    // Handle Dictionary Word Recognition and Popup with persistence grace period
-    let is_popup_currently_hovered = pointer_in_popup
-        || state
-            .dict
-            .popup
-            .as_ref()
-            .map(|p| p.is_popup_hovered)
-            .unwrap_or(false);
+    // Handle Dictionary Word Recognition and Popup with persistence grace period.
+    // While the transparent whiteboard is open, any open OCR dictionary popup stays open
+    // and its hover grace timer is frozen.
+    if whiteboard_open {
+        if let Some(ref mut popup) = state.dict.popup {
+            let now = Instant::now();
+            popup.last_hover_time = now;
+            popup.last_word_hover_time = now;
+        }
+    }
+
+    let is_popup_currently_hovered = !whiteboard_open
+        && (pointer_in_popup
+            || state
+                .dict
+                .popup
+                .as_ref()
+                .map(|p| p.is_popup_hovered)
+                .unwrap_or(false));
 
     let grace_period = std::time::Duration::from_millis(450);
 
-    // If mouse is inside the popup, keep it open!
-    if !is_popup_currently_hovered {
+    // If mouse is inside the popup or the whiteboard is open, keep it open!
+    if !is_popup_currently_hovered && !whiteboard_open {
         if let Some(pos) = pointer_pos {
             if hovered_any_box {
                 let has_db = state.dict.db.lock().map(|g| g.is_some()).unwrap_or(false);
@@ -338,16 +356,20 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         video_rect
     };
 
-    let (popup_action, popup_primitives) = crate::dict::popup::draw_dict_popup(
-        ui,
-        &mut state.dict.popup,
-        target_rect,
-        !state.ocr.hide_overlay,
-        state.dict.popup_under_crt,
-        |entry| bank.status(&entry.term, &entry.reading, &popup_sentence),
-        |entry| bank.is_entry_mined(&entry.term, &entry.reading, entry.sequence),
-        state.twitch.is_stream_live(),
-    );
+    let (popup_action, popup_primitives) = if hide_for_mining_capture {
+        (None, Vec::new())
+    } else {
+        crate::dict::popup::draw_dict_popup(
+            ui,
+            &mut state.dict.popup,
+            target_rect,
+            !state.ocr.hide_overlay,
+            state.dict.popup_under_crt,
+            |entry| bank.status(&entry.term, &entry.reading, &popup_sentence),
+            |entry| bank.is_entry_mined(&entry.term, &entry.reading, entry.sequence),
+            state.twitch.is_stream_live(),
+        )
+    };
 
     if let Some(ref r) = state.crt_renderer {
         r.lock().unwrap().popup_primitives = popup_primitives;

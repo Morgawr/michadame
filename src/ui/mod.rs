@@ -20,6 +20,7 @@ pub mod alerts;
 pub mod studio;
 pub mod video_player;
 pub mod webcam_overlay;
+pub mod whiteboard;
 
 pub use networking::send_ws_command;
 pub use video_player::draw_video_player;
@@ -120,6 +121,10 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
             if !state.bank.window_open {
                 state.bank.enlarged = None;
             }
+            hotkey_repaint = true;
+        }
+        if check_toggle_key(ctx, egui::Key::H) {
+            state.whiteboard.toggle();
             hotkey_repaint = true;
         }
         // Ignore Space while typing in a text field (e.g. the mining tag).

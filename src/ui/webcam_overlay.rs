@@ -138,6 +138,7 @@ pub fn draw_webcam_overlay(
     viewport_rect: Rect,
 ) {
     if !state.webcam.config.enabled {
+        state.webcam.last_outer_rect = None;
         return;
     }
 
@@ -194,11 +195,19 @@ pub fn draw_webcam_overlay(
 
     let outer_rect = Rect::from_min_size(egui::pos2(min_x, min_y), Vec2::new(total_w, total_h));
     let inner_rect = outer_rect.shrink(FRAME_PADDING);
+    state.webcam.last_outer_rect = Some(outer_rect);
 
     // 5. Hit testing and mouse interaction
     let pointer_pos = ui.input(|i| i.pointer.hover_pos());
     let primary_down = ui.input(|i| i.pointer.primary_down());
     let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
+    let pointer_occluded = pointer_pos.is_some_and(|pos| {
+        state.twitch.overlay_contains(pos)
+            || ctx.layer_id_at(pos).is_some_and(|l| {
+                l.order > egui::Order::Middle
+                    || (l.order == egui::Order::Middle && l.id != egui::Id::new("webcam_overlay"))
+            })
+    });
 
     let nw_rect = Rect::from_min_size(outer_rect.left_top(), Vec2::splat(CORNER_HIT_SIZE));
     let ne_rect = Rect::from_min_size(
@@ -215,19 +224,22 @@ pub fn draw_webcam_overlay(
     );
 
     let mut hovered_corner = None;
-    if let Some(pos) = pointer_pos {
-        if nw_rect.contains(pos) {
-            hovered_corner = Some(WebcamResizeCorner::TopLeft);
-        } else if ne_rect.contains(pos) {
-            hovered_corner = Some(WebcamResizeCorner::TopRight);
-        } else if sw_rect.contains(pos) {
-            hovered_corner = Some(WebcamResizeCorner::BottomLeft);
-        } else if se_rect.contains(pos) {
-            hovered_corner = Some(WebcamResizeCorner::BottomRight);
+    if !pointer_occluded {
+        if let Some(pos) = pointer_pos {
+            if nw_rect.contains(pos) {
+                hovered_corner = Some(WebcamResizeCorner::TopLeft);
+            } else if ne_rect.contains(pos) {
+                hovered_corner = Some(WebcamResizeCorner::TopRight);
+            } else if sw_rect.contains(pos) {
+                hovered_corner = Some(WebcamResizeCorner::BottomLeft);
+            } else if se_rect.contains(pos) {
+                hovered_corner = Some(WebcamResizeCorner::BottomRight);
+            }
         }
     }
 
-    let is_body_hovered = pointer_pos.is_some_and(|pos| outer_rect.contains(pos))
+    let is_body_hovered = !pointer_occluded
+        && pointer_pos.is_some_and(|pos| outer_rect.contains(pos))
         && hovered_corner.is_none()
         && state.webcam.resizing_corner.is_none();
 
@@ -322,8 +334,14 @@ pub fn draw_webcam_overlay(
         ctx.request_repaint();
     }
 
-    // 6. Draw PC-98 somber visual novel border
-    let painter = ui.painter();
+    // 6. Draw PC-98 somber visual novel border on Order::Middle (above the whiteboard, below Debug/Chat)
+    let layer_painter = ctx
+        .layer_painter(egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("webcam_overlay"),
+        ))
+        .with_clip_rect(viewport_rect);
+    let painter = &layer_painter;
 
     // Base chassis matte background
     painter.rect_filled(outer_rect, egui::Rounding::ZERO, PC98_BEZEL_BG);
