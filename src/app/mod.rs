@@ -190,7 +190,16 @@ impl Default for AppState {
 }
 
 impl AppState {
+    #[cfg(test)]
     pub fn handle_device_scan_result(&mut self, result: devices::DeviceScanResult) -> bool {
+        self.handle_device_scan_result_with_ctx(result, None)
+    }
+
+    pub fn handle_device_scan_result_with_ctx(
+        &mut self,
+        result: devices::DeviceScanResult,
+        ctx: Option<&egui::Context>,
+    ) -> bool {
         let scan_successful = match result {
             Ok((video_devices, audio_sources, usb_devices)) => {
                 self.hardware.video_devices = video_devices;
@@ -207,7 +216,7 @@ impl AppState {
                     config::apply_hardware_devices_from_config(self, &cfg);
                 }
                 self.sync_mic_stream();
-                self.sync_webcam_stream(None);
+                self.sync_webcam_stream(ctx);
                 self.info("Devices loaded successfully.");
                 true
             }
@@ -746,7 +755,7 @@ impl eframe::App for AppState {
 
         if let Some(rx) = &self.device_scan_receiver {
             if let Ok(scan_result) = rx.try_recv() {
-                repaint_requested |= self.handle_device_scan_result(scan_result);
+                repaint_requested |= self.handle_device_scan_result_with_ctx(scan_result, Some(ctx));
             } else {
                 repaint_requested = true;
             }

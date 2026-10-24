@@ -694,6 +694,7 @@ pub fn apply_hardware_devices_from_config(state: &mut AppState, cfg: &MichadameC
 
     if let Some(dev) = &state.webcam.config.device {
         if state.hardware.video_devices.contains(dev) {
+            state.webcam.formats_probed_for_device = Some(dev.clone());
             if let Ok(formats) = crate::devices::video::find_video_formats(dev) {
                 state.webcam.supported_formats = formats;
                 if let Some(saved_fourcc) = &state.webcam.config.format_fourcc {

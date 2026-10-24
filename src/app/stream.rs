@@ -617,12 +617,29 @@ impl AppState {
             }
         };
 
+        if let Some(ref saved_fourcc) = self.webcam.config.format_fourcc {
+            if let Some(idx) = self
+                .webcam
+                .supported_formats
+                .iter()
+                .position(|f| &f.fourcc == saved_fourcc)
+            {
+                self.webcam.selected_format_index = idx;
+            }
+        }
+
         let format = if let Some(fmt) = self
             .webcam
             .supported_formats
             .get(self.webcam.selected_format_index)
         {
             fmt.clone()
+        } else if let Some(ref saved_fourcc) = self.webcam.config.format_fourcc {
+            crate::video::types::VideoFormat {
+                fourcc: saved_fourcc.clone(),
+                description: saved_fourcc.clone(),
+                resolutions: Vec::new(),
+            }
         } else {
             crate::video::types::VideoFormat::default()
         };
@@ -640,6 +657,11 @@ impl AppState {
             }
         }
 
+        let prev_thread = self
+            .webcam
+            .active_stream
+            .as_mut()
+            .and_then(|s| s.take_stop_handle());
         self.webcam.active_stream = None;
         self.webcam.frame_receiver = None;
         self.webcam.latest_frame = None;
@@ -661,6 +683,7 @@ impl AppState {
             framerate,
             tx,
             request_repaint,
+            prev_thread,
         ) {
             Ok(handle) => {
                 self.info(format!("Webcam capture started for {device_name}."));
