@@ -157,6 +157,7 @@ pub struct TwitchState {
     auth_rx: Option<Receiver<DeviceFlowEvent>>,
     auth_cancel: Option<Arc<AtomicBool>>,
     token_loaded: bool,
+    last_token_check: Option<Instant>,
     notifications: Vec<(bool, String)>,
     pub ready_mined_clips: Vec<(i64, String)>,
     was_stream_live: bool,
@@ -206,6 +207,7 @@ impl Default for TwitchState {
             auth_rx: None,
             auth_cancel: None,
             token_loaded: false,
+            last_token_check: None,
             notifications: Vec::new(),
             ready_mined_clips: Vec::new(),
             was_stream_live: false,
@@ -684,19 +686,82 @@ impl TwitchState {
         self.notifications.push((false, msg.into()));
     }
 
+    fn apply_refreshed_token(&mut self, token: StoredToken, ctx: &egui::Context) {
+        if let Some(es) = &mut self.eventsub {
+            es.access_token = token.access_token.clone();
+        }
+        if let Some(poller) = &mut self.live_poller {
+            poller.access_token = token.access_token.clone();
+        }
+        let need_stream_info_retry = !self.stream_info_loaded
+            || self
+                .stream_info
+                .status_message
+                .as_ref()
+                .is_some_and(|(is_err, _)| *is_err);
+        self.token = Some(token.clone());
+        self.last_token_check = Some(Instant::now());
+        if need_stream_info_retry && !self.stream_info.is_loading {
+            self.stream_info_loaded = true;
+            self.stream_info.fetch_channel(&token, ctx);
+        }
+    }
+
+    fn handle_token_invalid(&mut self, reason: &str, ctx: &egui::Context) {
+        if let Some(latest) = auth::latest_token() {
+            self.apply_refreshed_token(latest, ctx);
+            return;
+        }
+        self.token = None;
+        self.eventsub = None;
+        self.last_token_check = None;
+        auth::delete_token();
+        self.notify_error(format!(
+            "Twitch login expired ({reason}). Log in again."
+        ));
+    }
+
     /// Per-frame update. Returns true if a repaint is useful.
     pub fn poll(&mut self, ctx: &egui::Context) -> bool {
         let mut changed = false;
+        let now = Instant::now();
         if !self.token_loaded {
             self.token_loaded = true;
             self.token = auth::load_token();
+            if self.token.is_some() {
+                self.last_token_check = Some(now);
+            }
+        }
+        if let Some(refreshed) = auth::take_refreshed_token() {
+            self.apply_refreshed_token(refreshed, ctx);
+            changed = true;
+        }
+        if let Some(reason) = auth::take_invalidated_reason() {
+            self.handle_token_invalid(&reason, ctx);
+            changed = true;
+        }
+        if let Some(token) = &self.token {
+            match self.last_token_check {
+                None => {
+                    self.last_token_check = Some(now);
+                }
+                Some(last) if now.saturating_duration_since(last) >= Duration::from_secs(3600) => {
+                    self.last_token_check = Some(now);
+                    if !cfg!(test) {
+                        auth::revalidate_in_background(token.clone(), ctx.clone());
+                    }
+                }
+                _ => {}
+            }
         }
         changed |= self.poll_auth_flow(ctx);
         self.sync_connection(ctx);
         if self.token.is_some() && !self.stream_info_loaded {
             self.stream_info_loaded = true;
-            if let Some(token) = &self.token {
-                self.stream_info.fetch_channel(token, ctx);
+            if !cfg!(test) {
+                if let Some(token) = &self.token {
+                    self.stream_info.fetch_channel(token, ctx);
+                }
             }
         }
         changed |= self.stream_info.poll(ctx);
@@ -794,22 +859,16 @@ impl TwitchState {
             .as_ref()
             .map(|w| w.events.try_iter().collect())
             .unwrap_or_default();
-        let now = Instant::now();
         for event in events {
             changed = true;
             match event {
                 IrcEvent::Status(status) => self.status = status,
                 IrcEvent::Message(msg) => self.handle_irc(&msg, now),
                 IrcEvent::TokenRefreshed(token) => {
-                    if let Err(e) = auth::save_token(&token) {
-                        tracing::error!("Failed to save refreshed Twitch token: {e}");
-                    }
-                    self.token = Some(token);
+                    self.apply_refreshed_token(token, ctx);
                 }
                 IrcEvent::TokenInvalid(reason) => {
-                    self.token = None;
-                    auth::delete_token();
-                    self.notify_error(format!("Twitch login expired ({reason}). Log in again to chat."));
+                    self.handle_token_invalid(&reason, ctx);
                 }
             }
         }
@@ -859,24 +918,17 @@ impl TwitchState {
                 match msg {
                     eventsub::EventSubMsg::Alert(ev) => self.enqueue_alert(ev),
                     eventsub::EventSubMsg::TokenRefreshed(token) => {
-                        if let Err(e) = auth::save_token(&token) {
-                            tracing::error!("Failed to save refreshed Twitch token: {e}");
-                        }
-                        if let Some(es) = &mut self.eventsub {
-                            es.access_token = token.access_token.clone();
-                        }
-                        self.token = Some(token);
+                        self.apply_refreshed_token(token, ctx);
                     }
                     eventsub::EventSubMsg::TokenInvalid(reason) => {
-                        self.token = None;
-                        self.eventsub = None;
-                        auth::delete_token();
-                        self.notify_error(format!(
-                            "Twitch login expired ({reason}). Log in again."
-                        ));
+                        self.handle_token_invalid(&reason, ctx);
                     }
                 }
             }
+            changed = true;
+        }
+        if let Some(refreshed) = auth::take_refreshed_token() {
+            self.apply_refreshed_token(refreshed, ctx);
             changed = true;
         }
         let default_alert_duration =
@@ -1436,6 +1488,7 @@ impl TwitchState {
             auth::revoke_in_background(token);
         }
         auth::delete_token();
+        self.last_token_check = None;
         self.self_display_name = None;
         self.self_color = None;
         self.stream_info = StreamInfoState::default();
@@ -1468,6 +1521,7 @@ impl TwitchState {
                     }
                     self.notify_info(format!("Logged in to Twitch as {}.", token.login));
                     self.token = Some(token);
+                    self.last_token_check = Some(Instant::now());
                     self.stream_info_loaded = false;
                     self.auth_rx = None;
                     self.auth_cancel = None;

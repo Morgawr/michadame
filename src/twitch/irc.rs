@@ -234,7 +234,7 @@ impl Worker {
         let mut backoff = 1u64;
         let mut auth_failures = 0;
         while !self.stopped() {
-            self.check_token();
+            self.check_token(auth_failures > 0);
             self.emit(IrcEvent::Status(ConnectionStatus::Connecting));
             let (end, joined) = self.session();
             let reason = match end {
@@ -272,11 +272,16 @@ impl Worker {
     }
 
     /// Validate (and refresh if needed) the token before using it.
-    fn check_token(&mut self) {
+    fn check_token(&mut self, force_revalidate: bool) {
         let Some(token) = self.token.clone() else {
             return;
         };
-        match auth::ensure_valid(&token) {
+        let res = if force_revalidate {
+            auth::revalidate(&token)
+        } else {
+            auth::ensure_valid(&token)
+        };
+        match res {
             Ok(Some(refreshed)) => {
                 self.token = Some(refreshed.clone());
                 self.emit(IrcEvent::TokenRefreshed(refreshed));
@@ -397,7 +402,7 @@ impl Worker {
 
             if authenticated && last_validate.elapsed() > REVALIDATE_EVERY {
                 last_validate = Instant::now();
-                self.check_token();
+                self.check_token(true);
                 if self.token.is_none() {
                     // Token revoked: reconnect anonymously.
                     return (SessionEnd::Disconnected("login expired".into()), joined);

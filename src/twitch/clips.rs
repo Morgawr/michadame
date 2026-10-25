@@ -110,21 +110,49 @@ impl ClipManager {
     }
 }
 
-fn post_create_clip(
+fn call_post_clip(
     agent: &ureq::Agent,
     broadcaster_id: &str,
     title: &str,
     token: &StoredToken,
-) -> Result<String, String> {
-    tracing::info!("Requesting Twitch clip for broadcaster '{broadcaster_id}' with title: '{title}'");
-    let resp = agent
+) -> Result<ureq::Response, ureq::Error> {
+    agent
         .post(CLIPS_URL)
         .query("broadcaster_id", broadcaster_id)
         .query("title", title)
         .query("duration", &format!("{CLIP_DURATION_SECS:.1}"))
-        .set("Client-Id", &token.client_id)
+        .set("Client-Id", token.effective_client_id())
         .set("Authorization", &format!("Bearer {}", token.access_token))
-        .send_bytes(&[]);
+        .send_bytes(&[])
+}
+
+fn post_create_clip(
+    agent: &ureq::Agent,
+    broadcaster_id: &str,
+    title: &str,
+    token: &mut StoredToken,
+) -> Result<String, String> {
+    tracing::info!("Requesting Twitch clip for broadcaster '{broadcaster_id}' with title: '{title}'");
+    let resp = match call_post_clip(agent, broadcaster_id, title, token) {
+        Err(ureq::Error::Status(401, resp)) => {
+            let msg = resp.into_string().unwrap_or_default();
+            if msg.contains("clips:edit") || msg.contains("Missing scope") {
+                tracing::error!("Twitch clip creation unauthorized (401): {msg}");
+                return Err(
+                    "Missing permission: your login lacks 'clips:edit'. Please log out and log in again under the Twitch tab."
+                        .into(),
+                );
+            }
+            if let Ok(refreshed) = super::auth::force_refresh(token) {
+                *token = refreshed;
+                call_post_clip(agent, broadcaster_id, title, token)
+            } else {
+                tracing::error!("Twitch clip creation unauthorized (401): {msg}");
+                return Err(format!("Twitch unauthorized (401): {msg}"));
+            }
+        }
+        other => other,
+    };
 
     let post_resp = match resp {
         Ok(r) => r,
@@ -185,7 +213,7 @@ fn poll_clip_ready(
         let get_resp = agent
             .get(CLIPS_URL)
             .query("id", clip_id)
-            .set("Client-Id", &token.client_id)
+            .set("Client-Id", token.effective_client_id())
             .set("Authorization", &format!("Bearer {}", token.access_token))
             .call();
 
@@ -231,6 +259,11 @@ pub fn trigger_warmup_clip(broadcaster_id: String, token: StoredToken) {
     let _ = std::thread::Builder::new()
         .name("twitch-warmup-clip".to_string())
         .spawn(move || {
+            let active_token = match super::auth::ensure_valid(&token) {
+                Ok(Some(refreshed)) => refreshed,
+                Ok(None) => token,
+                Err(_) => return,
+            };
             let agent = ureq::AgentBuilder::new()
                 .timeout(Duration::from_secs(10))
                 .build();
@@ -241,8 +274,8 @@ pub fn trigger_warmup_clip(broadcaster_id: String, token: StoredToken) {
                 .post(CLIPS_URL)
                 .query("broadcaster_id", &broadcaster_id)
                 .query("title", "michadame-stream-warmup")
-                .set("Client-Id", &token.client_id)
-                .set("Authorization", &format!("Bearer {}", token.access_token))
+                .set("Client-Id", active_token.effective_client_id())
+                .set("Authorization", &format!("Bearer {}", active_token.access_token))
                 .send_bytes(&[]);
             match resp {
                 Ok(_) => {
@@ -264,12 +297,21 @@ fn create_and_poll_clip(
     tracing::info!("Waiting {PRE_CLIP_BUFFER:?} buffer before requesting clip for '{title}'...");
     std::thread::sleep(PRE_CLIP_BUFFER);
 
+    let mut active_token = match super::auth::ensure_valid(token) {
+        Ok(Some(refreshed)) => refreshed,
+        Ok(None) => token.clone(),
+        Err(super::auth::AuthError::Invalid(e)) => {
+            return Err(format!("Twitch login expired ({e}). Please log in again."));
+        }
+        Err(super::auth::AuthError::Network(_)) => token.clone(),
+    };
+
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(10))
         .build();
 
-    let clip_id = post_create_clip(&agent, broadcaster_id, title, token)?;
-    if let Some(url) = poll_clip_ready(&agent, &clip_id, token)? {
+    let clip_id = post_create_clip(&agent, broadcaster_id, title, &mut active_token)?;
+    if let Some(url) = poll_clip_ready(&agent, &clip_id, &active_token)? {
         return Ok(url);
     }
 

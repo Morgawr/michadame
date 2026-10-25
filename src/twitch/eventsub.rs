@@ -222,7 +222,7 @@ impl Worker {
         Ok(None)
     }
 
-    fn subscribe_followers(&self, session_id: &str) -> Result<(), String> {
+    fn subscribe_followers(&mut self, session_id: &str) -> Result<(), String> {
         if self.token.user_id.is_empty() {
             tracing::warn!("Twitch EventSub: cannot subscribe without user_id");
             return Err("Missing user_id on token".to_string());
@@ -241,18 +241,27 @@ impl Worker {
             }
         });
 
-        let client_id = if self.token.client_id.is_empty() {
-            super::auth::DEFAULT_CLIENT_ID
-        } else {
-            &self.token.client_id
+        let body_str = body.to_string();
+        let post_sub = |tok: &StoredToken| {
+            ureq::post(SUBSCRIPTION_URL)
+                .set("Client-Id", tok.effective_client_id())
+                .set("Authorization", &format!("Bearer {}", tok.access_token))
+                .set("Content-Type", "application/json")
+                .send_string(&body_str)
         };
 
-        let body_str = body.to_string();
-        let resp = ureq::post(SUBSCRIPTION_URL)
-            .set("Client-Id", client_id)
-            .set("Authorization", &format!("Bearer {}", self.token.access_token))
-            .set("Content-Type", "application/json")
-            .send_string(&body_str);
+        let resp = match post_sub(&self.token) {
+            Err(ureq::Error::Status(401, _)) => {
+                if let Ok(refreshed) = super::auth::force_refresh(&self.token) {
+                    self.token = refreshed.clone();
+                    self.emit(EventSubMsg::TokenRefreshed(refreshed));
+                    post_sub(&self.token)
+                } else {
+                    return Err("EventSub subscribe HTTP 401: token expired".to_string());
+                }
+            }
+            other => other,
+        };
 
         match resp {
             Ok(_) => {

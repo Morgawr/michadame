@@ -44,15 +44,39 @@ pub fn parse_streams_response(body: &serde_json::Value) -> Option<StreamStatus> 
     })
 }
 
-fn query(channel: &str, token: &StoredToken) -> StreamStatus {
-    let result = ureq::AgentBuilder::new()
+fn call_streams_api(channel: &str, token: &StoredToken) -> Result<ureq::Response, ureq::Error> {
+    ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(15))
         .build()
         .get(STREAMS_URL)
         .query("user_login", channel)
-        .set("Client-Id", &token.client_id)
+        .set("Client-Id", token.effective_client_id())
         .set("Authorization", &format!("Bearer {}", token.access_token))
-        .call();
+        .call()
+}
+
+fn query(channel: &str, token: &mut StoredToken) -> StreamStatus {
+    match super::auth::ensure_valid(token) {
+        Ok(Some(refreshed)) => *token = refreshed,
+        Ok(None) => {}
+        Err(super::auth::AuthError::Invalid(_)) => {
+            return StreamStatus::Unknown("Twitch login expired".into());
+        }
+        Err(super::auth::AuthError::Network(_)) => {}
+    }
+
+    let result = match call_streams_api(channel, token) {
+        Err(ureq::Error::Status(401, _)) => {
+            if let Ok(refreshed) = super::auth::force_refresh(token) {
+                *token = refreshed;
+                call_streams_api(channel, token)
+            } else {
+                return StreamStatus::Unknown("Twitch login expired".into());
+            }
+        }
+        other => other,
+    };
+
     match result {
         Ok(resp) => {
             let body = resp
@@ -95,7 +119,7 @@ impl LivePoller {
     }
 }
 
-pub fn spawn(channel: String, token: StoredToken, ctx: egui::Context) -> LivePoller {
+pub fn spawn(channel: String, mut token: StoredToken, ctx: egui::Context) -> LivePoller {
     let (tx, rx) = crossbeam_channel::unbounded();
     let stop = Arc::new(AtomicBool::new(false));
     let poller = LivePoller {
@@ -108,7 +132,7 @@ pub fn spawn(channel: String, token: StoredToken, ctx: egui::Context) -> LivePol
         .name("twitch-live".into())
         .spawn(move || {
             while !stop.load(Ordering::Acquire) {
-                let status = query(&channel, &token);
+                let status = query(&channel, &mut token);
                 let wait = match status {
                     StreamStatus::Unknown(_) => RETRY_AFTER_ERROR,
                     _ => POLL_EVERY,

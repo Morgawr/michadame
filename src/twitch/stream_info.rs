@@ -503,17 +503,50 @@ pub fn fetch_category_by_id_gql(id: &str) -> Result<StreamCategory, String> {
     })
 }
 
-pub fn fetch_channel_info(token: &StoredToken) -> Result<StreamInfo, String> {
-    if token.user_id.is_empty() {
-        return Err("User ID is missing from login token".into());
-    }
-    let resp = ureq::get(CHANNELS_URL)
+fn call_get_channels(token: &StoredToken) -> Result<ureq::Response, ureq::Error> {
+    ureq::get(CHANNELS_URL)
         .query("broadcaster_id", &token.user_id)
-        .set("Client-Id", &token.client_id)
+        .set("Client-Id", token.effective_client_id())
         .set("Authorization", &format!("Bearer {}", token.access_token))
         .timeout(Duration::from_secs(12))
         .call()
-        .map_err(|e| format!("Failed to fetch channel info: {e}"))?;
+}
+
+fn call_patch_channels(token: &StoredToken, body_str: &str) -> Result<ureq::Response, ureq::Error> {
+    ureq::patch(CHANNELS_URL)
+        .query("broadcaster_id", &token.user_id)
+        .set("Client-Id", token.effective_client_id())
+        .set("Authorization", &format!("Bearer {}", token.access_token))
+        .set("Content-Type", "application/json")
+        .timeout(Duration::from_secs(15))
+        .send_string(body_str)
+}
+
+pub fn fetch_channel_info(token: &StoredToken) -> Result<StreamInfo, String> {
+    let mut active_token = match crate::twitch::auth::ensure_valid(token) {
+        Ok(Some(refreshed)) => refreshed,
+        Ok(None) => token.clone(),
+        Err(crate::twitch::auth::AuthError::Invalid(e)) => {
+            return Err(format!("Twitch login expired ({e}). Please log in again."));
+        }
+        Err(crate::twitch::auth::AuthError::Network(_)) => token.clone(),
+    };
+    if active_token.user_id.is_empty() {
+        return Err("User ID is missing from login token".into());
+    }
+    let resp = match call_get_channels(&active_token) {
+        Ok(resp) => resp,
+        Err(ureq::Error::Status(401, _)) => {
+            if let Ok(refreshed) = crate::twitch::auth::force_refresh(&active_token) {
+                active_token = refreshed;
+                call_get_channels(&active_token)
+                    .map_err(|e| format!("Failed to fetch channel info: {e}"))?
+            } else {
+                return Err("Twitch login expired or unauthorized (401)".into());
+            }
+        }
+        Err(e) => return Err(format!("Failed to fetch channel info: {e}")),
+    };
 
     let body = read_json(resp);
     let data = body
@@ -564,7 +597,15 @@ pub fn update_channel_info(
     title: &str,
     category: Option<&StreamCategory>,
 ) -> Result<StreamInfo, String> {
-    if token.user_id.is_empty() {
+    let mut active_token = match crate::twitch::auth::ensure_valid(token) {
+        Ok(Some(refreshed)) => refreshed,
+        Ok(None) => token.clone(),
+        Err(crate::twitch::auth::AuthError::Invalid(e)) => {
+            return Err(format!("Twitch login expired ({e}). Please log in again."));
+        }
+        Err(crate::twitch::auth::AuthError::Network(_)) => token.clone(),
+    };
+    if active_token.user_id.is_empty() {
         return Err("User ID is missing from login token".into());
     }
     let game_id = category.map(|c| c.id.as_str()).unwrap_or("");
@@ -574,13 +615,24 @@ pub fn update_channel_info(
     });
     let body_str = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
 
-    let resp_res = ureq::patch(CHANNELS_URL)
-        .query("broadcaster_id", &token.user_id)
-        .set("Client-Id", &token.client_id)
-        .set("Authorization", &format!("Bearer {}", token.access_token))
-        .set("Content-Type", "application/json")
-        .timeout(Duration::from_secs(15))
-        .send_string(&body_str);
+    let resp_res = match call_patch_channels(&active_token, &body_str) {
+        Err(ureq::Error::Status(401, resp)) => {
+            let msg = resp.into_string().unwrap_or_default();
+            if msg.contains("channel:manage:broadcast")
+                || msg.contains("user:edit:broadcast")
+                || msg.contains("Missing scope")
+            {
+                return Err("Missing permission: your login lacks channel:manage:broadcast. Please Log Out and Log In again under 'Twitch Account' to grant access.".into());
+            }
+            if let Ok(refreshed) = crate::twitch::auth::force_refresh(&active_token) {
+                active_token = refreshed;
+                call_patch_channels(&active_token, &body_str)
+            } else {
+                return Err(format!("Twitch unauthorized (401): {msg}"));
+            }
+        }
+        other => other,
+    };
 
     match resp_res {
         Ok(_) => Ok(StreamInfo {
