@@ -4,9 +4,7 @@ use std::time::Instant;
 
 /// Returns the mining status and headword of the top-most dictionary entry (`entries[0]`)
 /// in the currently open OCR dictionary popup, or `None` if no popup is open.
-pub fn top_popup_entry_mine_info(
-    state: &AppState,
-) -> Option<(crate::bank::MineStatus, String)> {
+pub fn top_popup_entry_mine_info(state: &AppState) -> Option<(crate::bank::MineStatus, String)> {
     let popup = state.dict.popup.as_ref()?;
     let first = popup.entries.first()?;
     let (sentence, _) =
@@ -27,12 +25,7 @@ pub fn execute_popup_mine_action(
     let entry_data = state.dict.popup.as_ref().and_then(|p| {
         p.entries.get(idx).map(|e| {
             (
-                crate::bank::MineRequest::from_lookup(
-                    e,
-                    &p.source_text,
-                    p.char_range,
-                    tag.clone(),
-                ),
+                crate::bank::MineRequest::from_lookup(e, &p.source_text, p.char_range, tag.clone()),
                 e.term.clone(),
                 e.reading.clone(),
             )
@@ -50,11 +43,7 @@ pub fn execute_popup_mine_action(
     }
 
     if with_clip {
-        let clip_title = crate::twitch::clips::format_clip_title(
-            &term,
-            &reading,
-            tag.as_deref(),
-        );
+        let clip_title = crate::twitch::clips::format_clip_title(&term, &reading, tag.as_deref());
         if let Err(e) = state.twitch.request_clip(clip_title, Some(created_at), ctx) {
             state.error(format!("Could not create Twitch clip: {e}"));
         } else {
@@ -98,7 +87,10 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
     // must not react to hover or clicks. This is checked against the *current* pointer
     // position so there is no one-frame lag when entering the popup.
     let pointer_in_popup = !whiteboard_open
-        && match (pointer_pos, state.dict.popup.as_ref().and_then(|p| p.popup_rect)) {
+        && match (
+            pointer_pos,
+            state.dict.popup.as_ref().and_then(|p| p.popup_rect),
+        ) {
             (Some(pos), Some(rect)) => rect.contains(pos),
             _ => false,
         };
@@ -109,15 +101,16 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
 
     // Draw detected OCR boxes
     for (idx, ocr_box) in state.ocr.boxes.iter().enumerate() {
-        let min_x = video_rect.min.x + (ocr_box.center_x - ocr_box.width / 2.0) * video_rect.width();
-        let min_y = video_rect.min.y + (ocr_box.center_y - ocr_box.height / 2.0) * video_rect.height();
-        let max_x = video_rect.min.x + (ocr_box.center_x + ocr_box.width / 2.0) * video_rect.width();
-        let max_y = video_rect.min.y + (ocr_box.center_y + ocr_box.height / 2.0) * video_rect.height();
+        let min_x =
+            video_rect.min.x + (ocr_box.center_x - ocr_box.width / 2.0) * video_rect.width();
+        let min_y =
+            video_rect.min.y + (ocr_box.center_y - ocr_box.height / 2.0) * video_rect.height();
+        let max_x =
+            video_rect.min.x + (ocr_box.center_x + ocr_box.width / 2.0) * video_rect.width();
+        let max_y =
+            video_rect.min.y + (ocr_box.center_y + ocr_box.height / 2.0) * video_rect.height();
 
-        let box_rect = egui::Rect::from_min_max(
-            egui::pos2(min_x, min_y),
-            egui::pos2(max_x, max_y),
-        );
+        let box_rect = egui::Rect::from_min_max(egui::pos2(min_x, min_y), egui::pos2(max_x, max_y));
 
         let box_id = ui.id().with("ocr_box").with(idx);
         let ocr_sense = egui::Sense {
@@ -129,17 +122,16 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
 
         let is_recently_copied = state.ocr.last_copied_index == Some(idx);
         let is_hovered = response.hovered() && !pointer_in_popup && !whiteboard_open;
-        let is_active_popup_box = state
-            .dict
-            .popup
-            .as_ref()
-            .map_or(false, |p| box_rect.expand(2.0).contains(p.word_rect.center()));
+        let is_active_popup_box = state.dict.popup.as_ref().map_or(false, |p| {
+            box_rect.expand(2.0).contains(p.word_rect.center())
+        });
 
         let is_active_box = is_hovered || is_active_popup_box;
 
         if is_hovered {
             hovered_any_box = true;
-            let software_mouse_active = crate::ui::video_player::is_software_mouse_active(state, true);
+            let software_mouse_active =
+                crate::ui::video_player::is_software_mouse_active(state, true);
             if !software_mouse_active {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
@@ -164,7 +156,10 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
             )
         } else {
             (
-                egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(66, 133, 244, 210)),
+                egui::Stroke::new(
+                    1.5,
+                    egui::Color32::from_rgba_unmultiplied(66, 133, 244, 210),
+                ),
                 egui::Color32::from_rgba_unmultiplied(66, 133, 244, 35),
             )
         };
@@ -191,14 +186,14 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
                     );
                 } else {
                     for line in &ocr_box.lines {
-                        let line_min_x =
-                            video_rect.min.x + (line.center_x - line.width / 2.0) * video_rect.width();
-                        let line_max_x =
-                            video_rect.min.x + (line.center_x + line.width / 2.0) * video_rect.width();
-                        let line_min_y =
-                            video_rect.min.y + (line.center_y - line.height / 2.0) * video_rect.height();
-                        let line_max_y =
-                            video_rect.min.y + (line.center_y + line.height / 2.0) * video_rect.height();
+                        let line_min_x = video_rect.min.x
+                            + (line.center_x - line.width / 2.0) * video_rect.width();
+                        let line_max_x = video_rect.min.x
+                            + (line.center_x + line.width / 2.0) * video_rect.width();
+                        let line_min_y = video_rect.min.y
+                            + (line.center_y - line.height / 2.0) * video_rect.height();
+                        let line_max_y = video_rect.min.y
+                            + (line.center_y + line.height / 2.0) * video_rect.height();
 
                         paint_ocr_text_line(
                             ui.painter(),
@@ -226,7 +221,11 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         if state.dict.installed_metadata.is_none() && !whiteboard_open {
             response.on_hover_ui(|ui| {
                 ui.label(egui::RichText::new(&ocr_box.text).size(16.0).strong());
-                ui.label(egui::RichText::new("📋 Click to copy | Right-click to dismiss").italics().weak());
+                ui.label(
+                    egui::RichText::new("📋 Click to copy | Right-click to dismiss")
+                        .italics()
+                        .weak(),
+                );
             });
         }
     }
@@ -408,7 +407,8 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         let retro_pc_frame = is_crt_on && state.video.retro_pc_frame;
         let curvature_active = is_crt_on
             && (filter == crate::devices::filter_type::CrtFilter::Lottes
-                || (filter == crate::devices::filter_type::CrtFilter::Halo && state.halo.curvature));
+                || (filter == crate::devices::filter_type::CrtFilter::Halo
+                    && state.halo.curvature));
         let ppp = ui.ctx().pixels_per_point();
         crate::dict::popup::calculate_crt_popup_safe_area(
             video_rect,
@@ -505,10 +505,7 @@ fn paint_ocr_text_line(
         let char_h = line_h / effective_char_count;
         let uniform_char_h = line_h / chars.len() as f32;
         let font_size = (line_w * 0.85).min(char_h * 1.25).clamp(10.0, 72.0);
-        let font_id = egui::FontId::new(
-            font_size,
-            egui::FontFamily::Name("GothicCJK".into()),
-        );
+        let font_id = egui::FontId::new(font_size, egui::FontFamily::Name("GothicCJK".into()));
         let center_x = (min_x + max_x) / 2.0;
 
         for (i, &c) in chars.iter().enumerate() {
@@ -535,10 +532,7 @@ fn paint_ocr_text_line(
         let char_w = line_w / effective_char_count;
         let uniform_char_w = line_w / chars.len() as f32;
         let font_size = (line_h * 0.85).min(char_w * 1.25).clamp(10.0, 72.0);
-        let font_id = egui::FontId::new(
-            font_size,
-            egui::FontFamily::Name("GothicCJK".into()),
-        );
+        let font_id = egui::FontId::new(font_size, egui::FontFamily::Name("GothicCJK".into()));
         let center_y = (min_y + max_y) / 2.0;
 
         for (i, &c) in chars.iter().enumerate() {
@@ -583,9 +577,8 @@ fn punct_ink_offset_x(c: char, font_size: f32, char_width_px: f32) -> f32 {
     }
     let t = ((font_size - char_width_px) / (0.65 * font_size)).clamp(0.0, 1.0);
     match c {
-        '。' | '、' | '，' | '．' | '」' | '』' | '）' | '】' | '〉' | '》' | '〕' | '］' | '｝' => {
-            0.30 * font_size * t
-        }
+        '。' | '、' | '，' | '．' | '」' | '』' | '）' | '】' | '〉' | '》' | '〕' | '］'
+        | '｝' => 0.30 * font_size * t,
         '「' | '『' | '（' | '【' | '〈' | '《' | '〔' | '［' | '｛' => {
             -0.30 * font_size * t
         }
@@ -600,7 +593,8 @@ mod tests {
 
     #[test]
     fn test_box_coordinate_mapping() {
-        let video_rect = egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(800.0, 600.0));
+        let video_rect =
+            egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(800.0, 600.0));
         let ocr_box = OcrBox {
             text: "テスト".to_string(),
             center_x: 0.5,
@@ -611,10 +605,14 @@ mod tests {
             writing_direction: WritingDirection::LeftToRight,
         };
 
-        let min_x = video_rect.min.x + (ocr_box.center_x - ocr_box.width / 2.0) * video_rect.width();
-        let max_x = video_rect.min.x + (ocr_box.center_x + ocr_box.width / 2.0) * video_rect.width();
-        let min_y = video_rect.min.y + (ocr_box.center_y - ocr_box.height / 2.0) * video_rect.height();
-        let max_y = video_rect.min.y + (ocr_box.center_y + ocr_box.height / 2.0) * video_rect.height();
+        let min_x =
+            video_rect.min.x + (ocr_box.center_x - ocr_box.width / 2.0) * video_rect.width();
+        let max_x =
+            video_rect.min.x + (ocr_box.center_x + ocr_box.width / 2.0) * video_rect.width();
+        let min_y =
+            video_rect.min.y + (ocr_box.center_y - ocr_box.height / 2.0) * video_rect.height();
+        let max_y =
+            video_rect.min.y + (ocr_box.center_y + ocr_box.height / 2.0) * video_rect.height();
 
         // 100 + (0.5 - 0.1) * 800 = 100 + 320 = 420
         assert_eq!(min_x, 420.0);

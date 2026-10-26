@@ -455,7 +455,10 @@ mod tests {
         assert!(loaded.audio_reactive.enabled);
         assert_eq!(loaded.audio_reactive.active_preset, "Custom Cyber Bass");
         assert_eq!(loaded.audio_reactive.current.deflection_shake, 1.42);
-        assert!(loaded.audio_reactive.presets.contains_key("Custom Cyber Bass"));
+        assert!(loaded
+            .audio_reactive
+            .presets
+            .contains_key("Custom Cyber Bass"));
         assert!(loaded
             .audio_reactive
             .presets

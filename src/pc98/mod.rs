@@ -312,8 +312,7 @@ impl Pc98State {
     pub fn ensure_slots_cache(&mut self) -> (String, String) {
         let (key, title) = self.current_game_key();
         if self.slots_cache_game_key != key {
-            self.slots_cache =
-                savestate::list_game_slots(&savestate::pc98_states_root(), &key);
+            self.slots_cache = savestate::list_game_slots(&savestate::pc98_states_root(), &key);
             self.slots_cache_game_key = key.clone();
         }
         (key, title)

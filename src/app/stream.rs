@@ -283,7 +283,6 @@ impl AppState {
         }
 
         if let Some(mut player) = self.video_player.take() {
-
             player.stop_requested.store(true, Ordering::Relaxed);
             let _ = player
                 .command_sender
@@ -399,7 +398,8 @@ impl AppState {
 
         // Stash current normal profile and capture card parameters
         let current_normal = crate::config::build_profile_from_state(self);
-        self.profiles.insert(self.active_profile.clone(), current_normal);
+        self.profiles
+            .insert(self.active_profile.clone(), current_normal);
         self.previous_gamescope_normal_profile = Some(self.active_profile.clone());
         // Apply dedicated gamescope profile
         crate::config::apply_profile_to_state(self, &self.gamescope_profile.clone());
@@ -455,7 +455,9 @@ impl AppState {
                 }
             }
         } else {
-            tracing::info!("Native PipeWire DMA-BUF zero-copy pipeline initialized for Gamescope video");
+            tracing::info!(
+                "Native PipeWire DMA-BUF zero-copy pipeline initialized for Gamescope video"
+            );
             None
         };
 
@@ -491,7 +493,9 @@ impl AppState {
         };
 
         // 4. Initialize X11 cursor monitor for automatic camera capture
-        let x11_cursor_monitor = if let Some(disp) = crate::gamescope::x11_cursor::find_gamescope_x_display() {
+        let x11_cursor_monitor = if let Some(disp) =
+            crate::gamescope::x11_cursor::find_gamescope_x_display()
+        {
             tracing::info!("Found Gamescope X11 display: {disp}, starting cursor monitor");
             crate::gamescope::x11_cursor::GamescopeX11CursorMonitor::start(&disp)
         } else {
@@ -708,7 +712,8 @@ impl AppState {
 
         // Stash current normal profile and capture card parameters
         let current_normal = crate::config::build_profile_from_state(self);
-        self.profiles.insert(self.active_profile.clone(), current_normal);
+        self.profiles
+            .insert(self.active_profile.clone(), current_normal);
         self.previous_normal_profile = Some(self.active_profile.clone());
         self.previous_capture_resolution = self.hardware.selected_resolution;
         self.previous_capture_framerate = self.hardware.selected_framerate;
@@ -930,7 +935,8 @@ impl AppState {
 
         // Stash current normal profile and capture card parameters
         let current_normal = crate::config::build_profile_from_state(self);
-        self.profiles.insert(self.active_profile.clone(), current_normal);
+        self.profiles
+            .insert(self.active_profile.clone(), current_normal);
         self.previous_pc98_normal_profile = Some(self.active_profile.clone());
         self.previous_capture_resolution = self.hardware.selected_resolution;
         self.previous_capture_framerate = self.hardware.selected_framerate;
@@ -1101,7 +1107,9 @@ impl AppState {
                         crate::pc98::Pc98MediaSlot::CdRom => {
                             self.pc98.config.cdrom_path = path_str;
                             if self.pc98.is_active {
-                                self.info("CD-ROM updated. Reboot PC-98 mode to apply CD-ROM changes.");
+                                self.info(
+                                    "CD-ROM updated. Reboot PC-98 mode to apply CD-ROM changes.",
+                                );
                             }
                         }
                         crate::pc98::Pc98MediaSlot::DosHdd => {
@@ -1182,7 +1190,9 @@ impl AppState {
                     self.info(msg);
                 }
                 crate::pc98::Pc98Event::Failed(err) => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(
+                        egui::CursorGrab::None,
+                    ));
                     ctx.set_cursor_icon(egui::CursorIcon::Default);
                     self.fullscreen_toggle_frame_count = None;
                     self.ui.is_fullscreen = false;
@@ -1201,7 +1211,11 @@ impl AppState {
         handled
     }
 
-    pub fn open_pc98_media_dialog(&mut self, slot: crate::pc98::Pc98MediaSlot, ctx: &egui::Context) {
+    pub fn open_pc98_media_dialog(
+        &mut self,
+        slot: crate::pc98::Pc98MediaSlot,
+        ctx: &egui::Context,
+    ) {
         let (tx, rx) = crossbeam_channel::bounded(1);
         self.pc98.file_picker_rx = Some(rx);
         let ctx_clone = ctx.clone();
@@ -1284,8 +1298,7 @@ impl AppState {
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
         let stop_requested = Arc::new(AtomicBool::new(false));
-        let input_state =
-            Arc::new(std::sync::Mutex::new(crate::pc98::Pc98InputState::default()));
+        let input_state = Arc::new(std::sync::Mutex::new(crate::pc98::Pc98InputState::default()));
 
         self.latest_frame = None;
         self.gui_fps = 0.0;
@@ -1425,7 +1438,9 @@ impl AppState {
                         crate::pc88::Pc88MediaSlot::Tape => {
                             self.pc88.config.tape_path = path_str;
                             if self.pc88.is_active {
-                                self.info("Tape image updated. Reboot PC-88 mode to apply tape changes.");
+                                self.info(
+                                    "Tape image updated. Reboot PC-88 mode to apply tape changes.",
+                                );
                             }
                         }
                         crate::pc88::Pc88MediaSlot::GamesDir => {}
@@ -1721,7 +1736,9 @@ mod tests {
         assert!(state.handle_video_file_player_events(&egui::Context::default()));
         assert_eq!(state.video_player.as_ref().unwrap().duration_secs, 300.0);
 
-        event_tx.send(crate::video::player::PlayerEvent::Eof).unwrap();
+        event_tx
+            .send(crate::video::player::PlayerEvent::Eof)
+            .unwrap();
         assert!(state.handle_video_file_player_events(&egui::Context::default()));
         assert!(state.video_player.as_ref().unwrap().is_eof);
         assert!(state.video_player.as_ref().unwrap().is_paused);

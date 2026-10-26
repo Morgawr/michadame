@@ -328,7 +328,12 @@ impl MicDspPipeline {
 
     /// Process interleaved audio samples through the pipeline in order:
     /// Raw Input -> Noise Gate -> Gain -> Compressor -> Master Volume
-    pub fn process_interleaved(&mut self, samples: &mut [f32], channels: usize, config: &MicConfig) {
+    pub fn process_interleaved(
+        &mut self,
+        samples: &mut [f32],
+        channels: usize,
+        config: &MicConfig,
+    ) {
         if samples.is_empty() {
             return;
         }
@@ -592,12 +597,9 @@ pub fn start_mic_stream(
     })
 }
 
-fn initialize_monitor_playback(stop: &Arc<AtomicBool>) -> Result<(
-    OutputStream,
-    rodio::OutputStreamHandle,
-    Sink,
-    Producer<f32>,
-)> {
+fn initialize_monitor_playback(
+    stop: &Arc<AtomicBool>,
+) -> Result<(OutputStream, rodio::OutputStreamHandle, Sink, Producer<f32>)> {
     let (guard, handle) = crate::devices::audio::initialize_rodio_playback()?;
     let sink = Sink::try_new(&handle).context("Failed to create monitor rodio sink")?;
     sink.set_volume(1.0);
@@ -652,7 +654,11 @@ fn run_mic_capture_worker(
         let pcm = match PCM::new(device_name, Direction::Capture, true) {
             Ok(p) => p,
             Err(e) => {
-                tracing::warn!("Could not open mic device {}: {}; retrying...", device_name, e);
+                tracing::warn!(
+                    "Could not open mic device {}: {}; retrying...",
+                    device_name,
+                    e
+                );
                 sleep_until_reconnect(&stop);
                 continue;
             }
@@ -707,7 +713,8 @@ fn run_mic_capture_worker(
         };
 
         let period_frames = (rate / 100).clamp(128, 1024); // ~10-20ms period
-        let _ = hwp.set_period_size_near(period_frames as alsa::pcm::Frames, alsa::ValueOr::Nearest);
+        let _ =
+            hwp.set_period_size_near(period_frames as alsa::pcm::Frames, alsa::ValueOr::Nearest);
 
         if let Err(e) = pcm.hw_params(&hwp) {
             tracing::warn!("Mic hw_params failed: {}", e);
@@ -729,8 +736,22 @@ fn run_mic_capture_worker(
         let mut f32_buf = vec![0.0f32; buffer_samples];
         // Conversion buffers and the config snapshot are reused across periods
         // so the capture thread does not allocate every ~10 ms.
-        let mut i32_buf = vec![0i32; if sample_format_str == "S32LE" { buffer_samples } else { 0 }];
-        let mut i16_buf = vec![0i16; if sample_format_str == "S16LE" { buffer_samples } else { 0 }];
+        let mut i32_buf = vec![
+            0i32;
+            if sample_format_str == "S32LE" {
+                buffer_samples
+            } else {
+                0
+            }
+        ];
+        let mut i16_buf = vec![
+            0i16;
+            if sample_format_str == "S16LE" {
+                buffer_samples
+            } else {
+                0
+            }
+        ];
         let mut cfg = config.read().map(|c| c.clone()).unwrap_or_default();
         let mut monitor_resample_phase = 0.0f64;
         let mut monitor_prev_frame = [0.0f32; 2];
@@ -806,7 +827,9 @@ fn run_mic_capture_worker(
                     current_level_db.store(cur_db.to_bits(), Ordering::Relaxed);
 
                     // Peak hold decay: hold for 1.2s, then decay smoothly
-                    if cur_db > current_peak_val || last_peak_instant.elapsed() > Duration::from_millis(1200) {
+                    if cur_db > current_peak_val
+                        || last_peak_instant.elapsed() > Duration::from_millis(1200)
+                    {
                         current_peak_val = cur_db;
                         last_peak_instant = Instant::now();
                     } else {
@@ -918,7 +941,11 @@ mod tests {
         // Total level is -18 + 4.5 = -13.5 dB (linear ~ 0.211).
         let out = comp.process_sample(1.0, 4.0, -18.0, 1.0, 50.0, 0.0);
         let out_db = 20.0 * out.log10();
-        assert!((out_db - (-13.5)).abs() < 1.0, "Expected ~ -13.5 dB, got {:.2}", out_db);
+        assert!(
+            (out_db - (-13.5)).abs() < 1.0,
+            "Expected ~ -13.5 dB, got {:.2}",
+            out_db
+        );
     }
 
     #[test]
@@ -966,7 +993,14 @@ mod tests {
         // Even if a stereo pair arrives mid-underrun, pending_right finishes the silent pair first.
         let mut phase = 0.0;
         let mut prev = [0.0; 2];
-        push_monitor_stereo(&mut prod, &[0.25, 0.75, 0.5, 0.9], 2, 48000, &mut phase, &mut prev);
+        push_monitor_stereo(
+            &mut prod,
+            &[0.25, 0.75, 0.5, 0.9],
+            2,
+            48000,
+            &mut phase,
+            &mut prev,
+        );
         // Only 1 stereo pair fit in the 3-slot buffer (the second pair was rejected intact).
         assert_eq!(source.next(), Some(0.0));
         assert_eq!(source.next(), Some(0.25));

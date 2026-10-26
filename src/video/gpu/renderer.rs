@@ -331,7 +331,8 @@ impl CrtFilterRenderer {
             let cathode_prog = compile_program(gl, VS_SRC, FS_CATHODE_INTERFERENCE);
             let retro_frame_prog = compile_program(gl, VS_SRC, FS_RETRO_FRAME);
 
-            let retro_output_res_loc = gl.get_uniform_location(retro_frame_prog, "outputResolution");
+            let retro_output_res_loc =
+                gl.get_uniform_location(retro_frame_prog, "outputResolution");
             let retro_source_size_loc = gl.get_uniform_location(retro_frame_prog, "source_size");
             let retro_horizontal_stretch_loc =
                 gl.get_uniform_location(retro_frame_prog, "horizontal_stretch");
@@ -370,8 +371,7 @@ impl CrtFilterRenderer {
                 gl.get_uniform_location(crt_glass_prog, "photographer_enabled");
             let glass_photographer_intensity_loc =
                 gl.get_uniform_location(crt_glass_prog, "photographer_intensity");
-            let glass_flash_enabled_loc =
-                gl.get_uniform_location(crt_glass_prog, "flash_enabled");
+            let glass_flash_enabled_loc = gl.get_uniform_location(crt_glass_prog, "flash_enabled");
             let glass_flash_intensity_loc =
                 gl.get_uniform_location(crt_glass_prog, "flash_intensity");
 
@@ -412,7 +412,8 @@ impl CrtFilterRenderer {
             let popup_offset_loc = gl.get_uniform_location(popup_prog, "u_offset");
             let popup_sampler_loc = gl.get_uniform_location(popup_prog, "u_sampler");
             let popup_shadow_mask_loc = gl.get_uniform_location(popup_prog, "u_shadow_mask");
-            let popup_scanline_strength_loc = gl.get_uniform_location(popup_prog, "u_scanline_strength");
+            let popup_scanline_strength_loc =
+                gl.get_uniform_location(popup_prog, "u_scanline_strength");
             let popup_scanline_freq_loc = gl.get_uniform_location(popup_prog, "u_scanline_freq");
             let popup_brightboost_loc = gl.get_uniform_location(popup_prog, "u_brightboost");
 
@@ -430,14 +431,22 @@ impl CrtFilterRenderer {
             gl.use_program(None);
 
             let retro_mouse_prog = compile_program(gl, VS_RETRO_MOUSE, FS_RETRO_MOUSE);
-            let retro_mouse_screen_size_loc = gl.get_uniform_location(retro_mouse_prog, "u_screen_size");
-            let retro_mouse_cursor_pos_loc = gl.get_uniform_location(retro_mouse_prog, "u_cursor_pos");
-            let retro_mouse_cursor_size_loc = gl.get_uniform_location(retro_mouse_prog, "u_cursor_size");
-            let retro_mouse_sampler_loc = gl.get_uniform_location(retro_mouse_prog, "u_cursor_sampler");
-            let retro_mouse_shadow_mask_loc = gl.get_uniform_location(retro_mouse_prog, "u_shadow_mask");
-            let retro_mouse_scanline_strength_loc = gl.get_uniform_location(retro_mouse_prog, "u_scanline_strength");
-            let retro_mouse_scanline_freq_loc = gl.get_uniform_location(retro_mouse_prog, "u_scanline_freq");
-            let retro_mouse_brightboost_loc = gl.get_uniform_location(retro_mouse_prog, "u_brightboost");
+            let retro_mouse_screen_size_loc =
+                gl.get_uniform_location(retro_mouse_prog, "u_screen_size");
+            let retro_mouse_cursor_pos_loc =
+                gl.get_uniform_location(retro_mouse_prog, "u_cursor_pos");
+            let retro_mouse_cursor_size_loc =
+                gl.get_uniform_location(retro_mouse_prog, "u_cursor_size");
+            let retro_mouse_sampler_loc =
+                gl.get_uniform_location(retro_mouse_prog, "u_cursor_sampler");
+            let retro_mouse_shadow_mask_loc =
+                gl.get_uniform_location(retro_mouse_prog, "u_shadow_mask");
+            let retro_mouse_scanline_strength_loc =
+                gl.get_uniform_location(retro_mouse_prog, "u_scanline_strength");
+            let retro_mouse_scanline_freq_loc =
+                gl.get_uniform_location(retro_mouse_prog, "u_scanline_freq");
+            let retro_mouse_brightboost_loc =
+                gl.get_uniform_location(retro_mouse_prog, "u_brightboost");
 
             gl.use_program(Some(retro_mouse_prog));
             if let Some(ref loc) = retro_mouse_sampler_loc {
@@ -448,7 +457,8 @@ impl CrtFilterRenderer {
             let linearize_prog = compile_program(gl, VS_SRC, FS_LINEARIZE);
             let linearize_sampler_loc = gl.get_uniform_location(linearize_prog, "srgb_tex");
             let linearize_overscan_loc = gl.get_uniform_location(linearize_prog, "overscan_offset");
-            let linearize_underscan_loc = gl.get_uniform_location(linearize_prog, "underscan_stretch");
+            let linearize_underscan_loc =
+                gl.get_uniform_location(linearize_prog, "underscan_stretch");
             gl.use_program(Some(linearize_prog));
             if let Some(ref loc) = linearize_sampler_loc {
                 gl.uniform_1_i32(Some(loc), 0);
@@ -461,7 +471,9 @@ impl CrtFilterRenderer {
             }
             gl.use_program(None);
 
-            let retro_mouse_texture = gl.create_texture().expect("Cannot create retro mouse texture");
+            let retro_mouse_texture = gl
+                .create_texture()
+                .expect("Cannot create retro mouse texture");
             gl.bind_texture(glow::TEXTURE_2D, Some(retro_mouse_texture));
             let cursor_pixels = generate_retro_cursor_pixels();
             gl.tex_image_2d(
@@ -475,10 +487,26 @@ impl CrtFilterRenderer {
                 glow::UNSIGNED_BYTE,
                 Some(&cursor_pixels),
             );
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::NEAREST as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::NEAREST as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE as i32,
+            );
             gl.bind_texture(glow::TEXTURE_2D, None);
 
             let p_passthrough_output_res_loc = gl
@@ -503,22 +531,25 @@ impl CrtFilterRenderer {
             gl.use_program(None);
 
             let deinterlace_mode_loc = gl.get_uniform_location(deinterlace_prog, "mode").unwrap();
-            let deinterlace_blend_loc =
-                gl.get_uniform_location(deinterlace_prog, "blend_amount").unwrap();
-            let deinterlace_motion_thresh_loc =
-                gl.get_uniform_location(deinterlace_prog, "motion_threshold").unwrap();
-            let deinterlace_line_spacing_loc =
-                gl.get_uniform_location(deinterlace_prog, "line_spacing").unwrap();
-            let deinterlace_spatial_mix_loc =
-                gl.get_uniform_location(deinterlace_prog, "spatial_mix").unwrap();
+            let deinterlace_blend_loc = gl
+                .get_uniform_location(deinterlace_prog, "blend_amount")
+                .unwrap();
+            let deinterlace_motion_thresh_loc = gl
+                .get_uniform_location(deinterlace_prog, "motion_threshold")
+                .unwrap();
+            let deinterlace_line_spacing_loc = gl
+                .get_uniform_location(deinterlace_prog, "line_spacing")
+                .unwrap();
+            let deinterlace_spatial_mix_loc = gl
+                .get_uniform_location(deinterlace_prog, "spatial_mix")
+                .unwrap();
             let deinterlace_current_frame_loc =
                 gl.get_uniform_location(deinterlace_prog, "current_frame");
             let deinterlace_prev_frame_loc =
                 gl.get_uniform_location(deinterlace_prog, "prev_frame");
             let deinterlace_prev_frame_2_loc =
                 gl.get_uniform_location(deinterlace_prog, "prev_frame_2");
-            let deinterlace_has_prev2_loc =
-                gl.get_uniform_location(deinterlace_prog, "has_prev2");
+            let deinterlace_has_prev2_loc = gl.get_uniform_location(deinterlace_prog, "has_prev2");
 
             gl.use_program(Some(deinterlace_prog));
             if let Some(loc) = &deinterlace_current_frame_loc {
@@ -565,8 +596,7 @@ impl CrtFilterRenderer {
             let passthrough_vibrance_loc = gl
                 .get_uniform_location(passthrough_prog, "vibrance")
                 .unwrap();
-            let final_border_crop_loc =
-                gl.get_uniform_location(final_prog, "border_crop").unwrap();
+            let final_border_crop_loc = gl.get_uniform_location(final_prog, "border_crop").unwrap();
             let passthrough_border_crop_loc = gl
                 .get_uniform_location(passthrough_prog, "border_crop")
                 .unwrap();
@@ -583,12 +613,8 @@ impl CrtFilterRenderer {
                 .get_uniform_location(cathode_prog, "horizontal_stretch")
                 .unwrap();
             let cathode_time_loc = gl.get_uniform_location(cathode_prog, "time").unwrap();
-            let cathode_intensity_loc = gl
-                .get_uniform_location(cathode_prog, "intensity")
-                .unwrap();
-            let cathode_frequency_loc = gl
-                .get_uniform_location(cathode_prog, "frequency")
-                .unwrap();
+            let cathode_intensity_loc = gl.get_uniform_location(cathode_prog, "intensity").unwrap();
+            let cathode_frequency_loc = gl.get_uniform_location(cathode_prog, "frequency").unwrap();
             let cathode_randomization_loc = gl
                 .get_uniform_location(cathode_prog, "randomization")
                 .unwrap();
@@ -767,10 +793,7 @@ impl CrtFilterRenderer {
                 gl.create_framebuffer().unwrap(),
                 gl.create_framebuffer().unwrap(),
             ];
-            let post_textures = [
-                gl.create_texture().unwrap(),
-                gl.create_texture().unwrap(),
-            ];
+            let post_textures = [gl.create_texture().unwrap(), gl.create_texture().unwrap()];
 
             let vertex_array = gl
                 .create_vertex_array()
@@ -813,9 +836,10 @@ impl CrtFilterRenderer {
             let popup_vbo = gl.create_buffer().unwrap();
             let popup_ebo = gl.create_buffer().unwrap();
 
-            let mut bezel_img = image::load_from_memory(include_bytes!("../../../assets/nec_pc98_bezel.png"))
-                .expect("Failed to load nec_pc98_bezel.png")
-                .to_rgba8();
+            let mut bezel_img =
+                image::load_from_memory(include_bytes!("../../../assets/nec_pc98_bezel.png"))
+                    .expect("Failed to load nec_pc98_bezel.png")
+                    .to_rgba8();
             image::imageops::flip_vertical_in_place(&mut bezel_img);
             let (bw, bh) = (bezel_img.width(), bezel_img.height());
             let bezel_texture = gl.create_texture().unwrap();
@@ -842,21 +866,15 @@ impl CrtFilterRenderer {
                 glow::TEXTURE_MAG_FILTER,
                 glow::LINEAR as i32,
             );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_S,
-                glow::REPEAT as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_T,
-                glow::REPEAT as i32,
-            );
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::REPEAT as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::REPEAT as i32);
             gl.bind_texture(glow::TEXTURE_2D, None);
 
-            let mut sil_img = image::load_from_memory(include_bytes!("../../../assets/crt_reflection_silhouette.png"))
-                .expect("Failed to load crt_reflection_silhouette.png")
-                .to_rgba8();
+            let mut sil_img = image::load_from_memory(include_bytes!(
+                "../../../assets/crt_reflection_silhouette.png"
+            ))
+            .expect("Failed to load crt_reflection_silhouette.png")
+            .to_rgba8();
             image::imageops::flip_vertical_in_place(&mut sil_img);
             let (sw, sh) = (sil_img.width(), sil_img.height());
             let silhouette_texture = gl.create_texture().unwrap();
@@ -1616,10 +1634,26 @@ impl CrtFilterRenderer {
                     glow::UNSIGNED_BYTE,
                     None,
                 );
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MIN_FILTER,
+                    glow::LINEAR as i32,
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MAG_FILTER,
+                    glow::LINEAR as i32,
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_WRAP_S,
+                    glow::CLAMP_TO_EDGE as i32,
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_WRAP_T,
+                    glow::CLAMP_TO_EDGE as i32,
+                );
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[i]));
                 gl.framebuffer_texture_2d(
                     glow::FRAMEBUFFER,
@@ -1739,12 +1773,8 @@ impl CrtFilterRenderer {
                 video_texture = Some(tex);
                 input_is_srgb = true;
             } else {
-                video_texture = Some(self.linearize_fallback_texture(
-                    gl,
-                    tex,
-                    resolution.0,
-                    resolution.1,
-                ));
+                video_texture =
+                    Some(self.linearize_fallback_texture(gl, tex, resolution.0, resolution.1));
             }
         }
 
@@ -1873,8 +1903,7 @@ impl CrtFilterRenderer {
         let has_alerts = !self.alert_primitives.is_empty();
         let has_overlay = has_popup || has_comments || has_alerts;
         let has_mouse = software_mouse_pos.is_some();
-        let has_post =
-            run_cathode || run_audio_reactive || run_glass || has_overlay || has_mouse;
+        let has_post = run_cathode || run_audio_reactive || run_glass || has_overlay || has_mouse;
 
         let upstream_target_fbo = if has_post {
             self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
@@ -2063,7 +2092,13 @@ impl CrtFilterRenderer {
             .store(false, std::sync::atomic::Ordering::Relaxed);
 
         if !run_cathode && !run_audio_reactive && !run_glass && (has_overlay || has_mouse) {
-            self.blit_texture(gl, self.post_textures[0], output_size, None, scissor_enabled);
+            self.blit_texture(
+                gl,
+                self.post_textures[0],
+                output_size,
+                None,
+                scissor_enabled,
+            );
         }
 
         if scissor_enabled {
@@ -2554,10 +2589,16 @@ impl CrtFilterRenderer {
         gl.uniform_1_f32(Some(&self.cathode_intensity_loc), cp.intensity);
         gl.uniform_1_f32(Some(&self.cathode_frequency_loc), cp.frequency);
         gl.uniform_1_f32(Some(&self.cathode_randomization_loc), cp.randomization);
-        gl.uniform_1_f32(Some(&self.cathode_electricity_glow_loc), cp.electricity_glow);
+        gl.uniform_1_f32(
+            Some(&self.cathode_electricity_glow_loc),
+            cp.electricity_glow,
+        );
         gl.uniform_1_f32(Some(&self.cathode_flicker_depth_loc), cp.flicker_depth);
         gl.uniform_1_f32(Some(&self.cathode_interference_loc), cp.interference);
-        gl.uniform_1_f32(Some(&self.cathode_lightbulb_effect_loc), cp.lightbulb_effect);
+        gl.uniform_1_f32(
+            Some(&self.cathode_lightbulb_effect_loc),
+            cp.lightbulb_effect,
+        );
         gl.uniform_4_f32(
             Some(&self.cathode_border_crop_loc),
             cp.border_crop[0],
@@ -2704,28 +2745,27 @@ impl CrtFilterRenderer {
             self.glass_filter_type_loc.as_ref(),
             glass_params.filter_type,
         );
-        gl.uniform_1_f32(
-            self.glass_intensity_loc.as_ref(),
-            glass_params.intensity,
-        );
-        gl.uniform_1_f32(
-            self.glass_glossiness_loc.as_ref(),
-            glass_params.glossiness,
-        );
+        gl.uniform_1_f32(self.glass_intensity_loc.as_ref(), glass_params.intensity);
+        gl.uniform_1_f32(self.glass_glossiness_loc.as_ref(), glass_params.glossiness);
         gl.active_texture(glow::TEXTURE1);
         gl.bind_texture(glow::TEXTURE_2D, Some(self.silhouette_texture));
 
-        gl.uniform_1_f32(
-            self.glass_time_loc.as_ref(),
-            time,
-        );
+        gl.uniform_1_f32(self.glass_time_loc.as_ref(), time);
         gl.uniform_1_i32(
             self.glass_ceiling_light_enabled_loc.as_ref(),
-            if glass_params.ceiling_light_enabled { 1 } else { 0 },
+            if glass_params.ceiling_light_enabled {
+                1
+            } else {
+                0
+            },
         );
         gl.uniform_1_i32(
             self.glass_photographer_enabled_loc.as_ref(),
-            if glass_params.photographer_enabled { 1 } else { 0 },
+            if glass_params.photographer_enabled {
+                1
+            } else {
+                0
+            },
         );
         gl.uniform_1_f32(
             self.glass_photographer_intensity_loc.as_ref(),
@@ -2821,10 +2861,7 @@ impl CrtFilterRenderer {
             gl.uniform_1_i32(self.popup_sampler_loc.as_ref(), 0);
 
             gl.uniform_1_f32(self.popup_shadow_mask_loc.as_ref(), shadow_mask);
-            gl.uniform_1_f32(
-                self.popup_scanline_strength_loc.as_ref(),
-                scanline_strength,
-            );
+            gl.uniform_1_f32(self.popup_scanline_strength_loc.as_ref(), scanline_strength);
             let scanline_freq = (output_size.1 / 240.0).max(2.0);
             gl.uniform_1_f32(self.popup_scanline_freq_loc.as_ref(), scanline_freq);
             gl.uniform_1_f32(self.popup_brightboost_loc.as_ref(), brightboost);
@@ -3133,27 +3170,11 @@ impl CrtFilterRenderer {
                 border_crop[2],
                 border_crop[3],
             );
-            gl.uniform_2_f32(
-                self.retro_warp_loc.as_ref(),
-                warp[0],
-                warp[1],
-            );
-            gl.uniform_1_f32(
-                self.retro_corner_size_loc.as_ref(),
-                corner_size,
-            );
-            gl.uniform_1_i32(
-                self.retro_filter_type_loc.as_ref(),
-                filter_type,
-            );
-            gl.uniform_1_f32(
-                self.retro_time_loc.as_ref(),
-                time,
-            );
-            gl.uniform_1_f32(
-                self.retro_ambient_glow_loc.as_ref(),
-                ambient_glow,
-            );
+            gl.uniform_2_f32(self.retro_warp_loc.as_ref(), warp[0], warp[1]);
+            gl.uniform_1_f32(self.retro_corner_size_loc.as_ref(), corner_size);
+            gl.uniform_1_i32(self.retro_filter_type_loc.as_ref(), filter_type);
+            gl.uniform_1_f32(self.retro_time_loc.as_ref(), time);
+            gl.uniform_1_f32(self.retro_ambient_glow_loc.as_ref(), ambient_glow);
             gl.uniform_1_i32(
                 self.retro_dark_mode_loc.as_ref(),
                 if dark_mode { 1 } else { 0 },
@@ -3161,16 +3182,8 @@ impl CrtFilterRenderer {
 
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MIN_FILTER,
-                prev_min_filter,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MAG_FILTER,
-                prev_mag_filter,
-            );
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, prev_min_filter);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, prev_mag_filter);
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, None);
@@ -3262,36 +3275,15 @@ impl CrtFilterRenderer {
                 border_crop[2],
                 border_crop[3],
             );
-            gl.uniform_2_f32(
-                self.night_glow_warp_loc.as_ref(),
-                warp[0],
-                warp[1],
-            );
-            gl.uniform_1_f32(
-                self.night_glow_corner_size_loc.as_ref(),
-                corner_size,
-            );
-            gl.uniform_1_i32(
-                self.night_glow_filter_type_loc.as_ref(),
-                filter_type,
-            );
-            gl.uniform_1_f32(
-                self.night_glow_intensity_loc.as_ref(),
-                glow_intensity,
-            );
+            gl.uniform_2_f32(self.night_glow_warp_loc.as_ref(), warp[0], warp[1]);
+            gl.uniform_1_f32(self.night_glow_corner_size_loc.as_ref(), corner_size);
+            gl.uniform_1_i32(self.night_glow_filter_type_loc.as_ref(), filter_type);
+            gl.uniform_1_f32(self.night_glow_intensity_loc.as_ref(), glow_intensity);
 
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MIN_FILTER,
-                prev_min_filter,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MAG_FILTER,
-                prev_mag_filter,
-            );
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, prev_min_filter);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, prev_mag_filter);
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.use_program(None);
 
@@ -3564,7 +3556,10 @@ mod tests {
 
         // Same-parity difference (t vs t-2):
         let parity_diff = (frame_t - frame_t2).abs();
-        assert_eq!(parity_diff, 0.0, "Same-parity difference must be zero on static bobbing edges");
+        assert_eq!(
+            parity_diff, 0.0,
+            "Same-parity difference must be zero on static bobbing edges"
+        );
 
         // 50% temporal weave on Frame N (curr = t, prev = t-1):
         let weave_n = frame_t * 0.5 + frame_t1 * 0.5;
@@ -3620,8 +3615,14 @@ mod tests {
             if step >= 6 {
                 // Steps 6, 7, 8 are Frame 3 (new + 2 repeat paints)
                 assert_eq!(buf_curr, 3, "Current frame must remain Frame 3");
-                assert_eq!(buf_prev1, 2, "Previous frame must remain Frame 2 on both new and repeat paints");
-                assert_eq!(buf_prev2, 1, "Previous-2 frame must remain Frame 1 on both new and repeat paints");
+                assert_eq!(
+                    buf_prev1, 2,
+                    "Previous frame must remain Frame 2 on both new and repeat paints"
+                );
+                assert_eq!(
+                    buf_prev2, 1,
+                    "Previous-2 frame must remain Frame 1 on both new and repeat paints"
+                );
                 assert_eq!(history_count, 3);
             }
         }

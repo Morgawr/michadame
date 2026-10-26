@@ -11,8 +11,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 enum Piece {
-    Text { white: Arc<egui::Galley> },
-    Image { texture: egui::TextureId, size: egui::Vec2 },
+    Text {
+        white: Arc<egui::Galley>,
+    },
+    Image {
+        texture: egui::TextureId,
+        size: egui::Vec2,
+    },
 }
 
 /// Lay out comments for this frame and pass them to the renderer.
@@ -110,7 +115,11 @@ fn build_shapes(
                         }));
                     }
                     x += white.size().x;
-                    shapes.push(Shape::Text(epaint::TextShape::new(pos, white, Color32::WHITE)));
+                    shapes.push(Shape::Text(epaint::TextShape::new(
+                        pos,
+                        white,
+                        Color32::WHITE,
+                    )));
                 }
                 Piece::Image { texture, size: img } => {
                     let rect = Rect::from_min_size(Pos2::new(x, y + (height - img.y) * 0.5), img);
@@ -131,7 +140,10 @@ fn build_shapes(
     }
     shapes
         .into_iter()
-        .map(|shape| epaint::ClippedShape { clip_rect: area, shape })
+        .map(|shape| epaint::ClippedShape {
+            clip_rect: area,
+            shape,
+        })
         .collect()
 }
 
@@ -160,7 +172,11 @@ fn layout_pieces(
                 Some(tex) => {
                     let tex_size = tex.size_vec2();
                     let h = size * 1.2;
-                    let w = if tex_size.y > 0.0 { h * tex_size.x / tex_size.y } else { h };
+                    let w = if tex_size.y > 0.0 {
+                        h * tex_size.x / tex_size.y
+                    } else {
+                        h
+                    };
                     pieces.push(Piece::Image {
                         texture: tex.id(),
                         size: egui::vec2(w, h),

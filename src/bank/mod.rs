@@ -65,7 +65,11 @@ impl MineRequest {
     }
 
     pub fn key(&self) -> MineKey {
-        (self.term.clone(), self.reading.clone(), self.sentence.clone())
+        (
+            self.term.clone(),
+            self.reading.clone(),
+            self.sentence.clone(),
+        )
     }
 }
 
@@ -172,7 +176,10 @@ pub fn entry_from_json(term: &str, reading: &str, json: &str) -> Option<TermEntr
         Some(crate::dict::TermFrequency {
             dictionary: f.get("dictionary")?.as_str()?.to_string(),
             rank: f.get("rank")?.as_i64()?,
-            display_value: f.get("display_value").and_then(|d| d.as_str()).map(str::to_string),
+            display_value: f
+                .get("display_value")
+                .and_then(|d| d.as_str())
+                .map(str::to_string),
         })
     });
     Some(TermEntry {
@@ -187,7 +194,11 @@ pub fn entry_from_json(term: &str, reading: &str, json: &str) -> Option<TermEntr
         inflection_reasons: v
             .get("inflection_reasons")
             .and_then(|x| x.as_array())
-            .map(|a| a.iter().filter_map(|r| r.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|r| r.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default(),
         frequency,
         custom_name_id: None,
@@ -287,7 +298,9 @@ fn save_entry(
         tag: request.tag,
         twitch_clip_url: None,
     };
-    let guard = db.lock().map_err(|_| anyhow::anyhow!("bank database lock poisoned"))?;
+    let guard = db
+        .lock()
+        .map_err(|_| anyhow::anyhow!("bank database lock poisoned"))?;
     let db = guard
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("mining bank database is not available"))?;
@@ -341,7 +354,11 @@ pub fn encode_screenshot(pixels: Vec<u8>, w: u32, h: u32) -> anyhow::Result<(Vec
 }
 
 /// Decodes an encoded image into an egui texture.
-pub fn load_texture(ctx: &egui::Context, name: String, bytes: &[u8]) -> Option<egui::TextureHandle> {
+pub fn load_texture(
+    ctx: &egui::Context,
+    name: String,
+    bytes: &[u8],
+) -> Option<egui::TextureHandle> {
     let img = image::load_from_memory(bytes).ok()?.to_rgba8();
     let size = [img.width() as usize, img.height() as usize];
     let color = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
@@ -446,11 +463,19 @@ impl BankState {
     fn with_database(db: Option<BankDatabase>, load_error: Option<String>) -> Self {
         let entries = db
             .as_ref()
-            .and_then(|db| db.list_meta().map_err(|e| tracing::warn!("Failed to list bank: {e}")).ok())
+            .and_then(|db| {
+                db.list_meta()
+                    .map_err(|e| tracing::warn!("Failed to list bank: {e}"))
+                    .ok()
+            })
             .unwrap_or_default();
         let custom_names = db
             .as_ref()
-            .and_then(|db| db.list_custom_names().map_err(|e| tracing::warn!("Failed to list custom names: {e}")).ok())
+            .and_then(|db| {
+                db.list_custom_names()
+                    .map_err(|e| tracing::warn!("Failed to list custom names: {e}"))
+                    .ok()
+            })
             .unwrap_or_default();
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         let mut state = Self {
@@ -496,7 +521,13 @@ impl BankState {
         self.mined_definitions = self
             .entries
             .iter()
-            .map(|e| (e.term.clone(), e.reading.clone(), extract_sequence_from_json(&e.definition_json)))
+            .map(|e| {
+                (
+                    e.term.clone(),
+                    e.reading.clone(),
+                    extract_sequence_from_json(&e.definition_json),
+                )
+            })
             .collect();
         self.mined_terms = self
             .entries
@@ -534,7 +565,9 @@ impl BankState {
             open: true,
             kanji: String::new(),
             furigana: String::new(),
-            source_tag: self.mining_tag().unwrap_or_else(|| self.current_tag.clone()),
+            source_tag: self
+                .mining_tag()
+                .unwrap_or_else(|| self.current_tag.clone()),
             notes: String::new(),
             focus: true,
             error_msg: None,
@@ -555,10 +588,15 @@ impl BankState {
             kanji: kanji.trim().to_string(),
             furigana: furigana.trim().to_string(),
             source_tag: tag,
-            notes: notes.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()),
+            notes: notes
+                .map(|n| n.trim().to_string())
+                .filter(|n| !n.is_empty()),
         };
         let entry = {
-            let guard = self.db.lock().map_err(|_| anyhow::anyhow!("bank database lock poisoned"))?;
+            let guard = self
+                .db
+                .lock()
+                .map_err(|_| anyhow::anyhow!("bank database lock poisoned"))?;
             let db = guard
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("mining bank database is not available"))?;
@@ -573,7 +611,10 @@ impl BankState {
     /// Deletes a custom name entry by id.
     pub fn delete_custom_name(&mut self, id: i64) -> anyhow::Result<()> {
         {
-            let guard = self.db.lock().map_err(|_| anyhow::anyhow!("lock poisoned"))?;
+            let guard = self
+                .db
+                .lock()
+                .map_err(|_| anyhow::anyhow!("lock poisoned"))?;
             if let Some(db) = guard.as_ref() {
                 db.delete_custom_name(id)?;
             }
@@ -605,7 +646,12 @@ impl BankState {
     /// existing tag's capitalization. Returns the stored tag.
     pub fn set_tag(&mut self, id: i64, tag: &str) -> anyhow::Result<Option<String>> {
         let tag = tags::canonicalize_tag(tag, &self.known_tags);
-        if let Some(db) = self.db.lock().map_err(|_| anyhow::anyhow!("lock poisoned"))?.as_ref() {
+        if let Some(db) = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock poisoned"))?
+            .as_ref()
+        {
             db.set_tag(id, tag.as_deref())?;
         }
         if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
@@ -643,7 +689,11 @@ impl BankState {
         {
             return true;
         }
-        if sequence == 0 && self.mined_terms.contains(&(term.to_string(), reading.to_string())) {
+        if sequence == 0
+            && self
+                .mined_terms
+                .contains(&(term.to_string(), reading.to_string()))
+        {
             return true;
         }
         // Fallback: match if bank contains (term, reading, 0)
@@ -655,7 +705,11 @@ impl BankState {
             return true;
         }
         // Also check if any in-flight requests match
-        if self.in_flight.iter().any(|(t, r, _)| t == term && r == reading) {
+        if self
+            .in_flight
+            .iter()
+            .any(|(t, r, _)| t == term && r == reading)
+        {
             return true;
         }
         false
@@ -689,7 +743,9 @@ impl BankState {
     pub fn poll(&mut self) -> Vec<Result<String, String>> {
         // Fallback: save without a screenshot if the paint callback never ran.
         let timed_out = self.pending.lock().ok().and_then(|mut p| {
-            if p.as_ref().map_or(false, |r| r.requested_at.elapsed() > CAPTURE_TIMEOUT) {
+            if p.as_ref()
+                .map_or(false, |r| r.requested_at.elapsed() > CAPTURE_TIMEOUT)
+            {
                 p.take()
             } else {
                 None
@@ -712,7 +768,11 @@ impl BankState {
                         }
                         meta.twitch_clip_url = Some(clip_url);
                     }
-                    let key = (meta.term.clone(), meta.reading.clone(), meta.sentence.clone());
+                    let key = (
+                        meta.term.clone(),
+                        meta.reading.clone(),
+                        meta.sentence.clone(),
+                    );
                     self.in_flight.remove(&key);
                     self.mined_keys.insert(key);
                     let seq = extract_sequence_from_json(&meta.definition_json);
@@ -784,7 +844,12 @@ impl BankState {
     }
 
     pub fn delete(&mut self, id: i64) -> anyhow::Result<()> {
-        if let Some(db) = self.db.lock().map_err(|_| anyhow::anyhow!("lock poisoned"))?.as_ref() {
+        if let Some(db) = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock poisoned"))?
+            .as_ref()
+        {
             db.delete(id)?;
         }
         self.entries.retain(|e| e.id != id);
@@ -819,16 +884,19 @@ impl BankState {
     }
 
     /// Loads (and caches) the thumbnail texture for an entry.
-    pub fn thumbnail(&mut self, ctx: &egui::Context, entry: &BankEntryMeta) -> Option<egui::TextureHandle> {
+    pub fn thumbnail(
+        &mut self,
+        ctx: &egui::Context,
+        entry: &BankEntryMeta,
+    ) -> Option<egui::TextureHandle> {
         if let Some(cached) = self.thumbnails.get(&entry.id) {
             return cached.clone();
         }
         let texture = if entry.has_screenshot {
-            let bytes = self
-                .db
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().and_then(|db| db.thumbnail(entry.id).ok().flatten()));
+            let bytes = self.db.lock().ok().and_then(|g| {
+                g.as_ref()
+                    .and_then(|db| db.thumbnail(entry.id).ok().flatten())
+            });
             bytes.and_then(|b| load_texture(ctx, format!("bank_thumb_{}", entry.id), &b))
         } else {
             None
@@ -986,7 +1054,8 @@ mod tests {
 
     #[test]
     fn mining_flow_saves_and_marks_entry_as_mined() {
-        let mut bank = BankState::with_database(Some(BankDatabase::open_in_memory().unwrap()), None);
+        let mut bank =
+            BankState::with_database(Some(BankDatabase::open_in_memory().unwrap()), None);
         let entry = TermEntry {
             term: "暑い".into(),
             reading: "あつい".into(),
@@ -1005,8 +1074,14 @@ mod tests {
         let request = MineRequest::from_lookup(&entry, text, (8, 10), bank.mining_tag());
         assert_eq!(request.sentence, "今日は暑いね。");
         assert!(bank.request_mine(request.clone()));
-        assert_eq!(bank.status("暑い", "あつい", "今日は暑いね。"), MineStatus::Pending);
-        assert!(!bank.request_mine(request), "duplicates are rejected while in flight");
+        assert_eq!(
+            bank.status("暑い", "あつい", "今日は暑いね。"),
+            MineStatus::Pending
+        );
+        assert!(
+            !bank.request_mine(request),
+            "duplicates are rejected while in flight"
+        );
 
         let handle = bank.capture_handle();
         assert!(handle.has_pending());
@@ -1026,13 +1101,19 @@ mod tests {
         assert_eq!(bank.entries.len(), 1);
         assert!(bank.entries[0].has_screenshot);
         assert_eq!(bank.entries[0].definition_text, "hot");
-        assert_eq!(bank.status("暑い", "あつい", "今日は暑いね。"), MineStatus::Mined);
+        assert_eq!(
+            bank.status("暑い", "あつい", "今日は暑いね。"),
+            MineStatus::Mined
+        );
         assert_eq!(bank.entries[0].tag, None);
 
         let id = bank.entries[0].id;
         bank.delete(id).unwrap();
         assert!(bank.entries.is_empty());
-        assert_eq!(bank.status("暑い", "あつい", "今日は暑いね。"), MineStatus::Available);
+        assert_eq!(
+            bank.status("暑い", "あつい", "今日は暑いね。"),
+            MineStatus::Available
+        );
     }
 
     fn mine_and_wait(bank: &mut BankState, term: &str, sentence: &str) -> i64 {
@@ -1065,7 +1146,8 @@ mod tests {
 
     #[test]
     fn mined_words_get_current_tag_with_canonical_casing() {
-        let mut bank = BankState::with_database(Some(BankDatabase::open_in_memory().unwrap()), None);
+        let mut bank =
+            BankState::with_database(Some(BankDatabase::open_in_memory().unwrap()), None);
         bank.current_tag = "  Final Fantasy 7 ".into();
         let a = mine_and_wait(&mut bank, "猫", "猫だ。");
         assert_eq!(bank.known_tags, vec!["Final Fantasy 7"]);
@@ -1079,7 +1161,14 @@ mod tests {
         bank.current_tag.clear();
         let d = mine_and_wait(&mut bank, "魚", "魚だ。");
 
-        let tag_of = |bank: &BankState, id| bank.entries.iter().find(|e| e.id == id).unwrap().tag.clone();
+        let tag_of = |bank: &BankState, id| {
+            bank.entries
+                .iter()
+                .find(|e| e.id == id)
+                .unwrap()
+                .tag
+                .clone()
+        };
         assert_eq!(tag_of(&bank, a).as_deref(), Some("Final Fantasy 7"));
         assert_eq!(tag_of(&bank, b).as_deref(), Some("Final Fantasy 7"));
         assert_eq!(tag_of(&bank, c).as_deref(), Some("final fantasy 8"));
@@ -1088,26 +1177,48 @@ mod tests {
 
         // Filtering by a partial tag shows matching words, most recent first.
         bank.filter_tag = "Final Fantasy".into();
-        let visible: Vec<i64> = bank.visible_indices().iter().map(|&i| bank.entries[i].id).collect();
+        let visible: Vec<i64> = bank
+            .visible_indices()
+            .iter()
+            .map(|&i| bank.entries[i].id)
+            .collect();
         assert_eq!(visible, vec![c, b, a]);
         bank.filter_tag = "fantasy 8".into();
-        let visible: Vec<i64> = bank.visible_indices().iter().map(|&i| bank.entries[i].id).collect();
+        let visible: Vec<i64> = bank
+            .visible_indices()
+            .iter()
+            .map(|&i| bank.entries[i].id)
+            .collect();
         assert_eq!(visible, vec![c]);
         bank.filter_tag.clear();
         assert_eq!(bank.visible_indices().len(), 4);
 
         // Editing tags: canonicalize, add, and remove.
-        assert_eq!(bank.set_tag(d, "FINAL FANTASY 7").unwrap().as_deref(), Some("Final Fantasy 7"));
+        assert_eq!(
+            bank.set_tag(d, "FINAL FANTASY 7").unwrap().as_deref(),
+            Some("Final Fantasy 7")
+        );
         assert_eq!(bank.set_tag(c, "  ").unwrap(), None);
         assert_eq!(tag_of(&bank, c), None);
         assert_eq!(bank.known_tags, vec!["Final Fantasy 7"]);
-        let reloaded = bank.db.lock().unwrap().as_ref().unwrap().list_meta().unwrap();
-        assert_eq!(reloaded.iter().find(|e| e.id == d).unwrap().tag.as_deref(), Some("Final Fantasy 7"));
+        let reloaded = bank
+            .db
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .list_meta()
+            .unwrap();
+        assert_eq!(
+            reloaded.iter().find(|e| e.id == d).unwrap().tag.as_deref(),
+            Some("Final Fantasy 7")
+        );
     }
 
     #[test]
     fn is_entry_mined_identifies_specific_mined_definitions() {
-        let mut bank = BankState::with_database(Some(BankDatabase::open_in_memory().unwrap()), None);
+        let mut bank =
+            BankState::with_database(Some(BankDatabase::open_in_memory().unwrap()), None);
         let entry1 = TermEntry {
             term: "熱い".into(),
             reading: "あつい".into(),
@@ -1142,7 +1253,10 @@ mod tests {
         assert!(!bank.is_entry_mined("暑い", "あつい", 101));
 
         // When looked up in another sentence, status() for the sentence is Available, but is_entry_mined is true!
-        assert_eq!(bank.status("熱い", "あつい", "別の文。"), MineStatus::Available);
+        assert_eq!(
+            bank.status("熱い", "あつい", "別の文。"),
+            MineStatus::Available
+        );
         assert!(bank.is_entry_mined("熱い", "あつい", 101));
 
         // Delete entry clears is_entry_mined
@@ -1233,7 +1347,8 @@ mod tests {
 
         // Test BankEvent::ClipboardFailed: clears copying_screenshot and produces error toast
         bank.copying_screenshot = Some(id);
-        tx.send(BankEvent::ClipboardFailed("test error".into())).unwrap();
+        tx.send(BankEvent::ClipboardFailed("test error".into()))
+            .unwrap();
         let msgs = bank.poll();
         assert_eq!(bank.copying_screenshot, None);
         assert_eq!(msgs.len(), 1);
@@ -1296,7 +1411,8 @@ mod tests {
         }
 
         assert_eq!(bank.entries[0].twitch_clip_url, None);
-        bank.attach_twitch_clip(10_000, "https://clips.twitch.tv/NekoClip").unwrap();
+        bank.attach_twitch_clip(10_000, "https://clips.twitch.tv/NekoClip")
+            .unwrap();
         assert_eq!(
             bank.entries[0].twitch_clip_url.as_deref(),
             Some("https://clips.twitch.tv/NekoClip")
@@ -1316,7 +1432,8 @@ mod tests {
             requested_at: Instant::now(),
         };
         // Queue clip first
-        bank.attach_twitch_clip(20_000, "https://clips.twitch.tv/InuClip").unwrap();
+        bank.attach_twitch_clip(20_000, "https://clips.twitch.tv/InuClip")
+            .unwrap();
         // Now save entry
         bank.capture_handle().save(req2, None);
         while bank.entries.len() < 2 {

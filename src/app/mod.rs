@@ -74,7 +74,8 @@ impl Default for AppState {
             halo: crate::app::models::HaloSettings::default(),
             halo_defaults: crate::app::models::HaloSettings::default(),
             cathode_interference: crate::app::models::CathodeInterferenceSettings::default(),
-            cathode_interference_defaults: crate::app::models::CathodeInterferenceSettings::default(),
+            cathode_interference_defaults: crate::app::models::CathodeInterferenceSettings::default(
+            ),
             audio_reactive: crate::app::models::AudioReactiveConfig::default(),
             audio_reactive_runtime: crate::app::models::AudioReactiveRuntime::default(),
             selected_crt_filter: CrtFilter::Lottes,
@@ -291,7 +292,8 @@ impl AppState {
             return;
         }
 
-        let term_entry = crate::bank::entry_from_json(&entry.term, &entry.reading, &entry.definition_json);
+        let term_entry =
+            crate::bank::entry_from_json(&entry.term, &entry.reading, &entry.definition_json);
         let def = if let Some(e) = term_entry {
             crate::dict::render::compact_definition_for_chat(&e)
         } else {
@@ -541,11 +543,12 @@ impl eframe::App for AppState {
         );
 
         let mic_db = f32::from_bits(self.mic.current_level_db.load(Ordering::Relaxed));
-        let raw_mic = if self.mic.config.enabled && self.mic.active_stream.is_some() && mic_db > -80.0 {
-            ((mic_db + 60.0) / 60.0).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
+        let raw_mic =
+            if self.mic.config.enabled && self.mic.active_stream.is_some() && mic_db > -80.0 {
+                ((mic_db + 60.0) / 60.0).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
         self.hardware.live_mic_peak = raw_mic.max(self.hardware.live_mic_peak * 0.88);
 
         self.replay.update();
@@ -801,12 +804,7 @@ impl eframe::App for AppState {
             }
         }
 
-        let dropped_file = ctx.input(|i| {
-            i.raw
-                .dropped_files
-                .first()
-                .and_then(|f| f.path.clone())
-        });
+        let dropped_file = ctx.input(|i| i.raw.dropped_files.first().and_then(|f| f.path.clone()));
         if let Some(path) = dropped_file {
             self.start_video_file(&path, ctx);
             repaint_requested = true;
@@ -814,7 +812,8 @@ impl eframe::App for AppState {
 
         if let Some(rx) = &self.device_scan_receiver {
             if let Ok(scan_result) = rx.try_recv() {
-                repaint_requested |= self.handle_device_scan_result_with_ctx(scan_result, Some(ctx));
+                repaint_requested |=
+                    self.handle_device_scan_result_with_ctx(scan_result, Some(ctx));
             } else {
                 repaint_requested = true;
             }
@@ -1054,7 +1053,9 @@ impl eframe::App for AppState {
                                     }
                                 }
                                 Err(e) => {
-                                    self.error(format!("Failed to open synced frequency dictionary: {e}"));
+                                    self.error(format!(
+                                        "Failed to open synced frequency dictionary: {e}"
+                                    ));
                                 }
                             }
                             self.dict.installed_freq_metadata = Some(meta.clone());
@@ -1062,7 +1063,10 @@ impl eframe::App for AppState {
                             if let Ok(mut lock) = self.dict.freq_sync_progress.lock() {
                                 *lock = None;
                             }
-                            self.info(format!("Jiten frequency dictionary updated to {}!", meta.revision));
+                            self.info(format!(
+                                "Jiten frequency dictionary updated to {}!",
+                                meta.revision
+                            ));
                         }
                         Err(e) => {
                             if let Ok(mut lock) = self.dict.freq_sync_progress.lock() {
@@ -1338,7 +1342,8 @@ mod tests {
                 "term": "飽きる",
                 "reading": "あきる",
                 "glossary": ["to get tired of / to tire of"]
-            }).to_string(),
+            })
+            .to_string(),
             sentence: "それは、いつまで見ていても飽きることがない。".into(),
             word_range: (14, 17),
             has_screenshot: false,
@@ -1348,7 +1353,10 @@ mod tests {
 
         // 1. Disabled toggle -> does nothing
         state.twitch.config.share_mined_words_to_chat = false;
-        state.twitch.stream_status = crate::twitch::StreamStatus::Live { viewer_count: Some(5), broadcaster_id: None };
+        state.twitch.stream_status = crate::twitch::StreamStatus::Live {
+            viewer_count: Some(5),
+            broadcaster_id: None,
+        };
         state.maybe_share_mined_word_to_twitch(&entry);
         assert_eq!(state.twitch.messages.len(), 0);
 
@@ -1364,7 +1372,10 @@ mod tests {
         assert_eq!(state.twitch.messages.len(), 0);
 
         // 4. Enabled toggle, stream is live, but not connected/authenticated -> does nothing
-        state.twitch.stream_status = crate::twitch::StreamStatus::Live { viewer_count: Some(5), broadcaster_id: None };
+        state.twitch.stream_status = crate::twitch::StreamStatus::Live {
+            viewer_count: Some(5),
+            broadcaster_id: None,
+        };
         assert!(!state.twitch.can_send());
         state.maybe_share_mined_word_to_twitch(&entry);
         assert_eq!(state.twitch.messages.len(), 0);

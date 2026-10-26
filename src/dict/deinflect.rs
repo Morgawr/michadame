@@ -77,7 +77,9 @@ impl Deinflector {
         let raw_json = include_str!("deinflect_data.json");
         Self::from_json(raw_json).unwrap_or_else(|e| {
             tracing::error!("Failed to parse embedded deinflect data: {e}");
-            Self { reasons: Vec::new() }
+            Self {
+                reasons: Vec::new(),
+            }
         })
     }
 
@@ -203,7 +205,10 @@ mod tests {
             .iter()
             .find(|c| c.term == "食べる" && (c.rules & RULE_V1) != 0);
         assert!(taberu.is_some(), "Expected 食べる in {:?}", candidates);
-        assert!(taberu.unwrap().reasons.contains(&"ta".to_string()) || taberu.unwrap().reasons.contains(&"past".to_string()));
+        assert!(
+            taberu.unwrap().reasons.contains(&"ta".to_string())
+                || taberu.unwrap().reasons.contains(&"past".to_string())
+        );
 
         // 書かない -> 書く (negative)
         let candidates = deinflector.deinflect("書かない");
@@ -235,12 +240,16 @@ mod tests {
 
         // 買っちゃう -> 買う (and NOT 書く/買く)
         let candidates = deinflector.deinflect("買っちゃう");
-        assert!(candidates.iter().any(|c| c.term == "買う" && (c.rules & RULE_V5) != 0));
+        assert!(candidates
+            .iter()
+            .any(|c| c.term == "買う" && (c.rules & RULE_V5) != 0));
         assert!(!candidates.iter().any(|c| c.term == "買く"));
 
         // 行っちゃう -> 行く
         let candidates = deinflector.deinflect("行っちゃう");
-        assert!(candidates.iter().any(|c| c.term == "行く" && (c.rules & RULE_V5) != 0));
+        assert!(candidates
+            .iter()
+            .any(|c| c.term == "行く" && (c.rules & RULE_V5) != 0));
 
         // 読め -> 読む via imperative (not masu stem -> potential)
         let candidates = deinflector.deinflect("読め");

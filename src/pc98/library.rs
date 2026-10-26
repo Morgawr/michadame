@@ -107,7 +107,10 @@ impl Pc98GameEntry {
             String::new()
         };
         if let Some(ref cat) = self.category {
-            format!("[{}] {} — [{}{}]", cat, self.title, badge, disk_count_suffix)
+            format!(
+                "[{}] {} — [{}{}]",
+                cat, self.title, badge, disk_count_suffix
+            )
         } else {
             format!("{} — [{}{}]", self.title, badge, disk_count_suffix)
         }
@@ -212,9 +215,8 @@ fn extract_floppy_payload(ext: &str, data: &[u8]) -> Option<Vec<u8>> {
                 if data.len() < 0x114 {
                     return None;
                 }
-                let hdr =
-                    u32::from_le_bytes([data[0x110], data[0x111], data[0x112], data[0x113]])
-                        as usize;
+                let hdr = u32::from_le_bytes([data[0x110], data[0x111], data[0x112], data[0x113]])
+                    as usize;
                 if hdr >= data.len() {
                     return None;
                 }
@@ -284,8 +286,7 @@ pub fn is_floppy_self_bootable(path: &Path) -> bool {
     let has_io_in_dir = has_io_sys_dir_entry(rest)
         || contains_bytes(rest, b"IBMBIO  COM")
         || (contains_bytes(bs, b"AL_DOS  SYS") && contains_bytes(rest, b"AL_DOS  SYS"));
-    let bs_checks_iosys =
-        contains_bytes(bs, b"IO      SYS") || contains_bytes(bs, b"MSDOS   SYS");
+    let bs_checks_iosys = contains_bytes(bs, b"IO      SYS") || contains_bytes(bs, b"MSDOS   SYS");
     if bs_checks_iosys && !has_io_in_dir {
         return false;
     }
@@ -326,14 +327,10 @@ pub fn inspect_hdd_image(path: &Path) -> (bool, bool) {
     }
     let has_io_dir = has_io_sys_dir_entry(&data) || contains_bytes(&data, b"IBMBIO  COM");
     let has_autoexec = contains_bytes(&data, b"AUTOEXECBAT");
-    let has_dos_boot_stub =
-        contains_bytes(&data, b"IO      SYSMSDOS   SYS") || contains_bytes(&data, b"NO SYSTEM FILES");
+    let has_dos_boot_stub = contains_bytes(&data, b"IO      SYSMSDOS   SYS")
+        || contains_bytes(&data, b"NO SYSTEM FILES");
 
-    let is_self_bootable = if has_io_dir {
-        true
-    } else {
-        !has_dos_boot_stub
-    };
+    let is_self_bootable = if has_io_dir { true } else { !has_dos_boot_stub };
     (is_self_bootable, has_autoexec)
 }
 
@@ -385,10 +382,7 @@ pub fn should_defer_fdd_boot(config: &Pc98Config) -> bool {
     }
 
     // FDD 1 is self-bootable; check whether HDD 1 needs FDD 1 as its boot disk.
-    let fdd1_name = fdd1_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
+    let fdd1_name = fdd1_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let (hdd_bootable, hdd_has_autoexec) = inspect_hdd_image(hdd1_path);
     let fdd_is_dedicated_boot =
         has_boot_floppy_keyword(fdd1_name) && floppy_has_autoexec(fdd1_path);
@@ -509,12 +503,15 @@ pub fn detect_floppy_startup_command(fdd1_path: &Path) -> String {
     let rent = u16::from_le_bytes([payload[0x11], payload[0x12]]) as usize;
     let spf = u16::from_le_bytes([payload[0x16], payload[0x17]]) as usize;
 
-    let (bps, spc, res, nfats, rent, spf) =
-        if matches!(bps, 512 | 1024) && (1..=2).contains(&nfats) && (16..=512).contains(&rent) && (1..=32).contains(&spf) {
-            (bps, spc, res, nfats, rent, spf)
-        } else {
-            (1024, 1, 1, 2, 192, 2)
-        };
+    let (bps, spc, res, nfats, rent, spf) = if matches!(bps, 512 | 1024)
+        && (1..=2).contains(&nfats)
+        && (16..=512).contains(&rent)
+        && (1..=32).contains(&spf)
+    {
+        (bps, spc, res, nfats, rent, spf)
+    } else {
+        (1024, 1, 1, 2, 192, 2)
+    };
 
     let rdir_off = (res + nfats * spf) * bps;
     let rdir_len = rent * 32;
@@ -722,7 +719,9 @@ pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
                     let mut len_a = 0;
                     while let Some(&d) = ia.peek() {
                         if d.is_ascii_digit() {
-                            na = na.saturating_mul(10).saturating_add((d as u8 - b'0') as u64);
+                            na = na
+                                .saturating_mul(10)
+                                .saturating_add((d as u8 - b'0') as u64);
                             len_a += 1;
                             ia.next();
                         } else {
@@ -733,7 +732,9 @@ pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
                     let mut len_b = 0;
                     while let Some(&d) = ib.peek() {
                         if d.is_ascii_digit() {
-                            nb = nb.saturating_mul(10).saturating_add((d as u8 - b'0') as u64);
+                            nb = nb
+                                .saturating_mul(10)
+                                .saturating_add((d as u8 - b'0') as u64);
                             len_b += 1;
                             ib.next();
                         } else {
@@ -803,16 +804,9 @@ pub fn floppy_role_tier(filename: &str) -> u8 {
     }
 
     // Tier 3: Ending / Visual disks
-    if [
-        "end",
-        "ending",
-        "エンディング",
-        "ｴﾝﾃﾞｨﾝｸﾞ",
-        "vis",
-        "visual",
-    ]
-    .iter()
-    .any(|k| stem.contains(k))
+    if ["end", "ending", "エンディング", "ｴﾝﾃﾞｨﾝｸﾞ", "vis", "visual"]
+        .iter()
+        .any(|k| stem.contains(k))
     {
         return 3;
     }
@@ -933,7 +927,18 @@ fn is_numbered_continuation_disk(filename: &str) -> bool {
 fn is_format_subfolder_name(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "d88" | "fdi" | "hdi" | "nhd" | "nfd" | "hdm" | "2hd" | "xdf" | "dup" | "fdd" | "cd" | "cdrom"
+        "d88"
+            | "fdi"
+            | "hdi"
+            | "nhd"
+            | "nfd"
+            | "hdm"
+            | "2hd"
+            | "xdf"
+            | "dup"
+            | "fdd"
+            | "cd"
+            | "cdrom"
     )
 }
 
@@ -986,7 +991,10 @@ pub fn detect_default_dos_hdd(root_dir: &Path) -> Option<PathBuf> {
             }
         }
     }
-    let os_sub = root_dir.join("ＯＳ").join("Master_MSDOS62").join("Master_MSDOS62.hdi");
+    let os_sub = root_dir
+        .join("ＯＳ")
+        .join("Master_MSDOS62")
+        .join("Master_MSDOS62.hdi");
     if os_sub.is_file() {
         return Some(os_sub);
     }
@@ -1066,10 +1074,7 @@ pub fn scan_games_directory(root_dir: &Path, dos_hdd_path: &str) -> Result<Vec<P
                         .and_then(|n| n.to_str())
                         .unwrap_or("");
                     if is_format_subfolder_name(dir_name) {
-                        current_dir
-                            .parent()
-                            .unwrap_or(&current_dir)
-                            .to_path_buf()
+                        current_dir.parent().unwrap_or(&current_dir).to_path_buf()
                     } else {
                         current_dir.clone()
                     }
@@ -1224,35 +1229,19 @@ pub fn apply_game_to_config(game: &mut Pc98GameEntry, config: &mut Pc98Config) -
         .get(1)
         .map(|p| path_str(p))
         .unwrap_or_default();
-    let cdrom = game
-        .cdroms
-        .first()
-        .map(|p| path_str(p))
-        .unwrap_or_default();
+    let cdrom = game.cdroms.first().map(|p| path_str(p)).unwrap_or_default();
 
     match game.boot_mode {
         Pc98BootMode::SelfBootHdd | Pc98BootMode::FloppyBootWithGameHdd => {
-            config.hdd1_path = game
-                .hdds
-                .first()
-                .map(|p| path_str(p))
-                .unwrap_or_default();
-            config.hdd2_path = game
-                .hdds
-                .get(1)
-                .map(|p| path_str(p))
-                .unwrap_or_default();
+            config.hdd1_path = game.hdds.first().map(|p| path_str(p)).unwrap_or_default();
+            config.hdd2_path = game.hdds.get(1).map(|p| path_str(p)).unwrap_or_default();
             config.fdd1_path = fdd1;
             config.fdd2_path = fdd2;
             config.cdrom_path = cdrom;
         }
         Pc98BootMode::DosHddWithGameHdd => {
             config.hdd1_path = config.dos_hdd_path.trim().to_string();
-            config.hdd2_path = game
-                .hdds
-                .first()
-                .map(|p| path_str(p))
-                .unwrap_or_default();
+            config.hdd2_path = game.hdds.first().map(|p| path_str(p)).unwrap_or_default();
             config.fdd1_path = fdd1;
             config.fdd2_path = fdd2;
             config.cdrom_path = cdrom;

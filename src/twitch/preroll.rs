@@ -408,7 +408,8 @@ fn run_preroll_worker(
                         }
                     }
 
-                    if mode == RollMode::Preroll && preroll_audio_active && frame_pts_us >= t_mid_us {
+                    if mode == RollMode::Preroll && preroll_audio_active && frame_pts_us >= t_mid_us
+                    {
                         preroll_audio_active = false;
                         audio_tap.set_broadcast_preroll_active(false);
                     }
@@ -490,7 +491,8 @@ fn run_preroll_worker(
                                         // Fade pre-roll audio volume out during transition first half
                                         if pts_sec > t_start {
                                             ((t_mid - pts_sec) / (t_mid - t_start).max(0.001))
-                                                .clamp(0.0, 1.0) as f32
+                                                .clamp(0.0, 1.0)
+                                                as f32
                                         } else {
                                             1.0f32
                                         }

@@ -163,7 +163,9 @@ fn seed_pc88_roms(quasi88_dir: &Path, games_dir: Option<&str>) {
             if upper == "PC88.ROM" {
                 if !split_bundle_done {
                     if let Ok(bytes) = fs::read(&path) {
-                        if bytes.len() >= 0x1C000 && split_combined_pc88_rom(&bytes, quasi88_dir).is_ok() {
+                        if bytes.len() >= 0x1C000
+                            && split_combined_pc88_rom(&bytes, quasi88_dir).is_ok()
+                        {
                             split_bundle_done = true;
                         }
                     }
@@ -173,28 +175,11 @@ fn seed_pc88_roms(quasi88_dir: &Path, games_dir: Option<&str>) {
 
             // Individual ROMs and rhythm samples
             let canonical_dest = match upper.as_str() {
-                "N88.ROM"
-                | "N88_0.ROM"
-                | "N88_1.ROM"
-                | "N88_2.ROM"
-                | "N88_3.ROM"
-                | "N88EXT0.ROM"
-                | "N88EXT1.ROM"
-                | "N88EXT2.ROM"
-                | "N88EXT3.ROM"
-                | "N80.ROM"
-                | "N88N.ROM"
-                | "DISK.ROM"
-                | "N88SUB.ROM"
-                | "KANJI1.ROM"
-                | "N88KNJ1.ROM"
-                | "KANJI2.ROM"
-                | "N88KNJ2.ROM"
-                | "JISYO.ROM"
-                | "N88JISHO.ROM"
-                | "FONT.ROM"
-                | "FONT2.ROM"
-                | "FONT3.ROM" => Some(upper),
+                "N88.ROM" | "N88_0.ROM" | "N88_1.ROM" | "N88_2.ROM" | "N88_3.ROM"
+                | "N88EXT0.ROM" | "N88EXT1.ROM" | "N88EXT2.ROM" | "N88EXT3.ROM" | "N80.ROM"
+                | "N88N.ROM" | "DISK.ROM" | "N88SUB.ROM" | "KANJI1.ROM" | "N88KNJ1.ROM"
+                | "KANJI2.ROM" | "N88KNJ2.ROM" | "JISYO.ROM" | "N88JISHO.ROM" | "FONT.ROM"
+                | "FONT2.ROM" | "FONT3.ROM" => Some(upper),
                 s if s.starts_with("2608_") && s.ends_with(".WAV") => Some(upper),
                 _ => None,
             };
@@ -234,12 +219,15 @@ pub fn ensure_quasi88_core(event_tx: Option<&Sender<Pc88Event>>) -> Result<PathB
     if let Ok(home) = std::env::var("HOME") {
         let hp = PathBuf::from(home);
         local_candidates.push(hp.join(".config/retroarch/cores/quasi88_libretro.so"));
-        local_candidates
-            .push(hp.join(".var/app/org.libretro.RetroArch/config/retroarch/cores/quasi88_libretro.so"));
+        local_candidates.push(
+            hp.join(".var/app/org.libretro.RetroArch/config/retroarch/cores/quasi88_libretro.so"),
+        );
     }
     local_candidates.push(PathBuf::from("/usr/lib/libretro/quasi88_libretro.so"));
     local_candidates.push(PathBuf::from("/usr/lib64/libretro/quasi88_libretro.so"));
-    local_candidates.push(PathBuf::from("/usr/lib/x86_64-linux-gnu/libretro/quasi88_libretro.so"));
+    local_candidates.push(PathBuf::from(
+        "/usr/lib/x86_64-linux-gnu/libretro/quasi88_libretro.so",
+    ));
 
     for cand in local_candidates {
         if cand.is_file() {
@@ -254,10 +242,14 @@ pub fn ensure_quasi88_core(event_tx: Option<&Sender<Pc88Event>>) -> Result<PathB
 
     if let Some(tx) = event_tx {
         let _ = tx.send(Pc88Event::SyncProgress(
-            "Downloading NEC PC-88 core (quasi88_libretro.so) from Libretro buildbot...".to_string(),
+            "Downloading NEC PC-88 core (quasi88_libretro.so) from Libretro buildbot..."
+                .to_string(),
         ));
     }
-    tracing::info!("Downloading Quasi88 Libretro core from {}", QUASI88_LIBRETRO_URL);
+    tracing::info!(
+        "Downloading Quasi88 Libretro core from {}",
+        QUASI88_LIBRETRO_URL
+    );
 
     let response = ureq::get(QUASI88_LIBRETRO_URL)
         .timeout(std::time::Duration::from_secs(60))
@@ -321,7 +313,8 @@ mod tests {
         fake_rom[0x16000] = 0xDD; // N80.ROM part 1 start
         fake_rom[0x08000] = 0xEE; // N80.ROM part 2 start
 
-        let tmp = std::env::temp_dir().join(format!("michadame_pc88_rom_test_{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("michadame_pc88_rom_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
 

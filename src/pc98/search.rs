@@ -33,9 +33,9 @@ impl Pc98SearchIndex {
     pub fn build(
         title: &str,
         category: Option<&str>,
-        floppies: &[ std::path::PathBuf ],
-        hdds: &[ std::path::PathBuf ],
-        cdroms: &[ std::path::PathBuf ],
+        floppies: &[std::path::PathBuf],
+        hdds: &[std::path::PathBuf],
+        cdroms: &[std::path::PathBuf],
     ) -> Self {
         let norm_title = normalize_text(title);
         let norm_title_compact = strip_spaces_and_punct(&norm_title);
@@ -130,7 +130,10 @@ pub fn match_game_score(game: &Pc98GameEntry, query: &str) -> Option<i32> {
 /// Computes a fuzzy match score (`Some(score > 0)`) if `idx` matches `query`, or `None` if it does not.
 pub fn match_search_index_score(idx: &Pc98SearchIndex, query: &str) -> Option<i32> {
     let norm_query = normalize_text(query);
-    let tokens: Vec<&str> = norm_query.split_whitespace().filter(|t| !t.is_empty()).collect();
+    let tokens: Vec<&str> = norm_query
+        .split_whitespace()
+        .filter(|t| !t.is_empty())
+        .collect();
     if tokens.is_empty() {
         return Some(0);
     }
@@ -274,9 +277,8 @@ fn score_single_token(idx: &Pc98SearchIndex, raw_tok: &str) -> Option<i32> {
 
     // 6. Subsequence fuzzy match (fzf-style) for abbreviations (e.g. "wiz6", "ultuw", "eam2")
     if tok_roma_short.len() >= 3 && tok_roma_short.is_ascii() {
-        if let Some(sub_score) =
-            subsequence_fuzzy_score(&tok_roma_short, &idx.romaji_short)
-                .or_else(|| subsequence_fuzzy_score(&tok_compact, &idx.norm_title_compact))
+        if let Some(sub_score) = subsequence_fuzzy_score(&tok_roma_short, &idx.romaji_short)
+            .or_else(|| subsequence_fuzzy_score(&tok_compact, &idx.norm_title_compact))
         {
             return Some(sub_score);
         }
@@ -358,9 +360,31 @@ pub fn normalize_text(input: &str) -> String {
         if c.is_whitespace()
             || matches!(
                 c,
-                '・' | '～' | '〜' | '－' | '―' | '‐' | '：' | '／' | '（' | '）' | '【' | '】'
-                    | '「' | '」' | '『' | '』' | '_' | '-' | '/' | ':' | '.' | '(' | ')' | '['
-                    | ']' | '~'
+                '・' | '～'
+                    | '〜'
+                    | '－'
+                    | '―'
+                    | '‐'
+                    | '：'
+                    | '／'
+                    | '（'
+                    | '）'
+                    | '【'
+                    | '】'
+                    | '「'
+                    | '」'
+                    | '『'
+                    | '』'
+                    | '_'
+                    | '-'
+                    | '/'
+                    | ':'
+                    | '.'
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | '~'
             )
         {
             out.push(' ');
@@ -680,7 +704,9 @@ pub fn hiragana_to_romaji(text: &str, kunrei: bool) -> String {
             if let Some(nc) = next {
                 let (next_roma, _) = kana_pair_to_romaji(nc, chars.get(i + 2).copied(), kunrei);
                 if let Some(first_ch) = next_roma.chars().next() {
-                    if first_ch.is_ascii_alphabetic() && !matches!(first_ch, 'a' | 'i' | 'u' | 'e' | 'o') {
+                    if first_ch.is_ascii_alphabetic()
+                        && !matches!(first_ch, 'a' | 'i' | 'u' | 'e' | 'o')
+                    {
                         out.push(first_ch);
                         i += 1;
                         continue;
@@ -1296,7 +1322,11 @@ mod tests {
                 Some("う"),
                 "WIZBCF_A.D88",
             ),
-            dummy_game("エアーマネジメントⅡ", Some("え"), "エアーマネジメントⅡ_A.fdi"),
+            dummy_game(
+                "エアーマネジメントⅡ",
+                Some("え"),
+                "エアーマネジメントⅡ_A.fdi",
+            ),
             dummy_game("イマージュ", Some("い"), "イマージュ_1.fdi"),
             dummy_game("同級生２", Some("と"), "DOKYU2.HDI"),
             dummy_game("三國志4PK", Some("さ"), "三國志4PK.hdi"),

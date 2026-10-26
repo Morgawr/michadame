@@ -416,7 +416,10 @@ fn is_pointer_occluded_by_higher_ui(
     if state.webcam.config.enabled
         && (state.webcam.is_dragging
             || state.webcam.resizing_corner.is_some()
-            || state.webcam.last_outer_rect.is_some_and(|r| r.contains(pos)))
+            || state
+                .webcam
+                .last_outer_rect
+                .is_some_and(|r| r.contains(pos)))
     {
         return true;
     }
@@ -438,13 +441,11 @@ pub fn draw_whiteboard(state: &mut AppState, ctx: &egui::Context, screen_rect: R
 
     // Handle Ctrl+Z (Undo) and Ctrl+Y (Redo) when the whiteboard is open and not typing in a text field
     if !ctx.wants_keyboard_input() {
-        let undo_pressed =
-            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z));
+        let undo_pressed = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z));
         if undo_pressed && state.whiteboard.undo() {
             ctx.request_repaint();
         }
-        let redo_pressed =
-            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y));
+        let redo_pressed = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y));
         if redo_pressed && state.whiteboard.redo() {
             ctx.request_repaint();
         }
@@ -463,8 +464,8 @@ pub fn draw_whiteboard(state: &mut AppState, ctx: &egui::Context, screen_rect: R
     let pointer_pos = ctx.input(|i| i.pointer.latest_pos());
     let primary_pressed = ctx.input(|i| i.pointer.primary_pressed());
     let primary_down = ctx.input(|i| i.pointer.primary_down());
-    let pointer_occluded = pointer_pos
-        .is_some_and(|p| is_pointer_occluded_by_higher_ui(state, ctx, p, layer_id));
+    let pointer_occluded =
+        pointer_pos.is_some_and(|p| is_pointer_occluded_by_higher_ui(state, ctx, p, layer_id));
 
     let panel_rect = screen_rect;
     let is_mining_capture = state.bank.has_pending();
@@ -1047,19 +1048,28 @@ mod tests {
         wb.color = WhiteboardColor::Green;
         wb.stamp_brush(5, 5);
         let idx1 = ((5 * 32 + 5) * 4) as usize;
-        assert_eq!(&wb.canvas_rgba[idx1..idx1 + 4], &WhiteboardColor::Green.to_rgba());
+        assert_eq!(
+            &wb.canvas_rgba[idx1..idx1 + 4],
+            &WhiteboardColor::Green.to_rgba()
+        );
 
         // Operation 2: Fill square (10, 10)..=(12, 12) Blue
         wb.save_undo_snapshot();
         wb.color = WhiteboardColor::Blue;
         wb.fill_rect((10, 10), (12, 12));
         let idx2 = ((11 * 32 + 11) * 4) as usize;
-        assert_eq!(&wb.canvas_rgba[idx2..idx2 + 4], &WhiteboardColor::Blue.to_rgba());
+        assert_eq!(
+            &wb.canvas_rgba[idx2..idx2 + 4],
+            &WhiteboardColor::Blue.to_rgba()
+        );
 
         // Ctrl+Z (undo #1) -> removes Blue square, keeps Green pixel
         assert!(wb.undo());
         assert_eq!(&wb.canvas_rgba[idx2..idx2 + 4], &[0, 0, 0, 0]);
-        assert_eq!(&wb.canvas_rgba[idx1..idx1 + 4], &WhiteboardColor::Green.to_rgba());
+        assert_eq!(
+            &wb.canvas_rgba[idx1..idx1 + 4],
+            &WhiteboardColor::Green.to_rgba()
+        );
 
         // Ctrl+Z (undo #2) -> removes Green pixel, canvas is completely empty
         assert!(wb.undo());
@@ -1068,12 +1078,18 @@ mod tests {
 
         // Ctrl+R (redo #1) -> restores Green pixel
         assert!(wb.redo());
-        assert_eq!(&wb.canvas_rgba[idx1..idx1 + 4], &WhiteboardColor::Green.to_rgba());
+        assert_eq!(
+            &wb.canvas_rgba[idx1..idx1 + 4],
+            &WhiteboardColor::Green.to_rgba()
+        );
         assert_eq!(&wb.canvas_rgba[idx2..idx2 + 4], &[0, 0, 0, 0]);
 
         // Ctrl+R (redo #2) -> restores Blue square
         assert!(wb.redo());
-        assert_eq!(&wb.canvas_rgba[idx2..idx2 + 4], &WhiteboardColor::Blue.to_rgba());
+        assert_eq!(
+            &wb.canvas_rgba[idx2..idx2 + 4],
+            &WhiteboardColor::Blue.to_rgba()
+        );
         assert!(!wb.redo()); // nothing left to redo
     }
 

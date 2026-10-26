@@ -175,7 +175,11 @@ impl Drop for WorkerHandle {
     }
 }
 
-pub fn spawn(channel: String, token: Option<StoredToken>, ctx: Option<egui::Context>) -> WorkerHandle {
+pub fn spawn(
+    channel: String,
+    token: Option<StoredToken>,
+    ctx: Option<egui::Context>,
+) -> WorkerHandle {
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
     let (ev_tx, ev_rx) = crossbeam_channel::unbounded();
     let stop = Arc::new(AtomicBool::new(false));
@@ -331,7 +335,11 @@ impl Worker {
                 if !authenticated || !joined {
                     continue;
                 }
-                let line = format!("PRIVMSG #{} :{}\r\n", self.channel, sanitize_outgoing(&text));
+                let line = format!(
+                    "PRIVMSG #{} :{}\r\n",
+                    self.channel,
+                    sanitize_outgoing(&text)
+                );
                 if let Err(e) = write_raw(&mut stream, &line) {
                     return (SessionEnd::Disconnected(e.to_string()), joined);
                 }
@@ -361,14 +369,18 @@ impl Worker {
                 };
                 match msg.command.as_str() {
                     "PING" => {
-                        let reply = format!("PONG :{}\r\n", msg.trailing().unwrap_or("tmi.twitch.tv"));
+                        let reply =
+                            format!("PONG :{}\r\n", msg.trailing().unwrap_or("tmi.twitch.tv"));
                         if let Err(e) = write_raw(&mut stream, &reply) {
                             return (SessionEnd::Disconnected(e.to_string()), joined);
                         }
                     }
                     "PONG" => {}
                     "RECONNECT" => {
-                        return (SessionEnd::Disconnected("server requested reconnect".into()), joined)
+                        return (
+                            SessionEnd::Disconnected("server requested reconnect".into()),
+                            joined,
+                        )
                     }
                     "NOTICE"
                         if msg.params.first().map(String::as_str) == Some("*")
@@ -382,7 +394,9 @@ impl Worker {
                     "JOIN" => {
                         if msg.nick().map_or(false, |n| n.eq_ignore_ascii_case(&nick)) && !joined {
                             joined = true;
-                            self.emit(IrcEvent::Status(ConnectionStatus::Connected { authenticated }));
+                            self.emit(IrcEvent::Status(ConnectionStatus::Connected {
+                                authenticated,
+                            }));
                         }
                     }
                     _ => self.emit(IrcEvent::Message(msg)),
@@ -391,7 +405,10 @@ impl Worker {
 
             let idle = last_rx.elapsed();
             if idle > IDLE_TIMEOUT {
-                return (SessionEnd::Disconnected("connection timed out".into()), joined);
+                return (
+                    SessionEnd::Disconnected("connection timed out".into()),
+                    joined,
+                );
             }
             if idle > IDLE_PING_AFTER && !pinged {
                 pinged = true;
@@ -459,7 +476,8 @@ fn connect_tls() -> std::io::Result<TlsStream> {
     tcp.set_nodelay(true)?;
     tcp.set_read_timeout(Some(Duration::from_secs(10)))?;
     tcp.set_write_timeout(Some(Duration::from_secs(10)))?;
-    let server_name = rustls::pki_types::ServerName::try_from(HOST).map_err(std::io::Error::other)?;
+    let server_name =
+        rustls::pki_types::ServerName::try_from(HOST).map_err(std::io::Error::other)?;
     let mut conn =
         rustls::ClientConnection::new(tls_config(), server_name).map_err(std::io::Error::other)?;
     while conn.is_handshaking() {
@@ -508,7 +526,10 @@ mod tests {
 
     #[test]
     fn sanitizes_outgoing_lines() {
-        assert_eq!(sanitize_outgoing("hi\r\nPRIVMSG #x :evil"), "hiPRIVMSG #x :evil");
+        assert_eq!(
+            sanitize_outgoing("hi\r\nPRIVMSG #x :evil"),
+            "hiPRIVMSG #x :evil"
+        );
         assert_eq!(sanitize_outgoing("/me waves"), "\u{1}ACTION waves\u{1}");
     }
 

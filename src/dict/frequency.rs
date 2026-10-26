@@ -91,7 +91,9 @@ impl FreqDatabase {
             .unwrap_or(0);
 
         Ok(DictMetadata {
-            title: map.remove("title").unwrap_or_else(|| "Jiten Frequency".to_string()),
+            title: map
+                .remove("title")
+                .unwrap_or_else(|| "Jiten Frequency".to_string()),
             revision: map.remove("revision").unwrap_or_default(),
             author: map.remove("author"),
             description: map.remove("description"),
@@ -213,10 +215,10 @@ impl FreqDatabase {
         F: FnMut(&str, f32),
     {
         progress_cb("Opening frequency dictionary archive...", 0.02);
-        let file = File::open(zip_path.as_ref())
-            .with_context(|| format!("Failed to open zip file at {}", zip_path.as_ref().display()))?;
-        let mut archive = zip::ZipArchive::new(file)
-            .context("Failed to parse zip archive")?;
+        let file = File::open(zip_path.as_ref()).with_context(|| {
+            format!("Failed to open zip file at {}", zip_path.as_ref().display())
+        })?;
+        let mut archive = zip::ZipArchive::new(file).context("Failed to parse zip archive")?;
 
         let tmp_db_path = db_path.as_ref().with_extension("tmp.db");
         if tmp_db_path.exists() {
@@ -245,7 +247,8 @@ impl FreqDatabase {
             if let Ok(val) = serde_json::from_reader::<_, serde_json::Value>(&mut index_file) {
                 let tx = conn.transaction()?;
                 {
-                    let mut stmt = tx.prepare("INSERT INTO metadata (key, value) VALUES (?1, ?2)")?;
+                    let mut stmt =
+                        tx.prepare("INSERT INTO metadata (key, value) VALUES (?1, ?2)")?;
                     if let Some(obj) = val.as_object() {
                         for (k, v) in obj {
                             let v_str = if let Some(s) = v.as_str() {
@@ -296,7 +299,8 @@ impl FreqDatabase {
 
             if let Some(arr) = bank_entries.as_array() {
                 for item in arr {
-                    if let Some((term, reading, rank, display_value)) = parse_frequency_entry(item) {
+                    if let Some((term, reading, rank, display_value)) = parse_frequency_entry(item)
+                    {
                         insert_batch.push((term, reading, rank, display_value));
                         total_inserted += 1;
                     }
@@ -308,7 +312,7 @@ impl FreqDatabase {
                 {
                     let mut stmt = tx.prepare(
                         "INSERT INTO frequencies (term, reading, rank, display_value)
-                         VALUES (?1, ?2, ?3, ?4)"
+                         VALUES (?1, ?2, ?3, ?4)",
                     )?;
                     for row in insert_batch.drain(..) {
                         stmt.execute(params![row.0, row.1, row.2, row.3])?;
@@ -324,7 +328,7 @@ impl FreqDatabase {
             {
                 let mut stmt = tx.prepare(
                     "INSERT INTO frequencies (term, reading, rank, display_value)
-                     VALUES (?1, ?2, ?3, ?4)"
+                     VALUES (?1, ?2, ?3, ?4)",
                 )?;
                 for row in insert_batch.drain(..) {
                     stmt.execute(params![row.0, row.1, row.2, row.3])?;

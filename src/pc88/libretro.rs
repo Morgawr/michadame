@@ -1,4 +1,6 @@
-use super::core_sync::{ensure_pc88_system_dir, ensure_quasi88_core, pc88_base_dir, pc88_saves_dir};
+use super::core_sync::{
+    ensure_pc88_system_dir, ensure_quasi88_core, pc88_base_dir, pc88_saves_dir,
+};
 use super::{Pc88Command, Pc88Config, Pc88Event};
 use crate::pc98::input::RETROK_F12;
 use crate::pc98::libretro::{
@@ -135,11 +137,7 @@ type RetroInputPollFn = unsafe extern "C" fn();
 type RetroInputStateFn =
     unsafe extern "C" fn(port: c_uint, device: c_uint, index: c_uint, id: c_uint) -> i16;
 
-unsafe extern "C" fn dummy_rumble_set(
-    _port: c_uint,
-    effect: c_uint,
-    strength: u16,
-) -> bool {
+unsafe extern "C" fn dummy_rumble_set(_port: c_uint, effect: c_uint, strength: u16) -> bool {
     if effect == 0 {
         with_bridge_ctx(|ctx| {
             if strength > 0 {
@@ -251,10 +249,7 @@ where
     Some(f(ctx))
 }
 
-pub fn populate_quasi88_variables(
-    vars: &mut HashMap<String, CString>,
-    config: &Pc88Config,
-) {
+pub fn populate_quasi88_variables(vars: &mut HashMap<String, CString>, config: &Pc88Config) {
     let mut set_var = |k: &str, v: &str| {
         if let Ok(c) = CString::new(v) {
             vars.insert(k.to_string(), c);
@@ -267,11 +262,19 @@ pub fn populate_quasi88_variables(
     set_var("q88_sound_board", &config.sound_board);
     set_var(
         "q88_use_fdc_wait",
-        if config.fdc_wait { "enabled" } else { "disabled" },
+        if config.fdc_wait {
+            "enabled"
+        } else {
+            "disabled"
+        },
     );
     set_var(
         "q88_pcg-8100",
-        if config.pcg_8100 { "enabled" } else { "disabled" },
+        if config.pcg_8100 {
+            "enabled"
+        } else {
+            "disabled"
+        },
     );
     set_var("q88_screen_size", &config.screen_size);
     set_var(
@@ -334,24 +337,20 @@ unsafe extern "C" fn bridge_environment_cb(cmd: c_uint, data: *mut c_void) -> bo
             }
             true
         }
-        RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY => {
-            with_bridge_ctx(|ctx| {
-                if !data.is_null() {
-                    *(data as *mut *const c_char) = ctx.system_dir_c.as_ptr();
-                }
-                true
-            })
-            .unwrap_or(false)
-        }
-        RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY => {
-            with_bridge_ctx(|ctx| {
-                if !data.is_null() {
-                    *(data as *mut *const c_char) = ctx.save_dir_c.as_ptr();
-                }
-                true
-            })
-            .unwrap_or(false)
-        }
+        RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY => with_bridge_ctx(|ctx| {
+            if !data.is_null() {
+                *(data as *mut *const c_char) = ctx.system_dir_c.as_ptr();
+            }
+            true
+        })
+        .unwrap_or(false),
+        RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY => with_bridge_ctx(|ctx| {
+            if !data.is_null() {
+                *(data as *mut *const c_char) = ctx.save_dir_c.as_ptr();
+            }
+            true
+        })
+        .unwrap_or(false),
         RETRO_ENVIRONMENT_SET_PIXEL_FORMAT => {
             if data.is_null() {
                 return false;
@@ -383,17 +382,15 @@ unsafe extern "C" fn bridge_environment_cb(cmd: c_uint, data: *mut c_void) -> bo
             })
             .unwrap_or(false)
         }
-        RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE => {
-            with_bridge_ctx(|ctx| {
-                let dirty = ctx.variables_dirty;
-                ctx.variables_dirty = false;
-                if !data.is_null() {
-                    *(data as *mut bool) = dirty;
-                }
-                true
-            })
-            .unwrap_or(false)
-        }
+        RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE => with_bridge_ctx(|ctx| {
+            let dirty = ctx.variables_dirty;
+            ctx.variables_dirty = false;
+            if !data.is_null() {
+                *(data as *mut bool) = dirty;
+            }
+            true
+        })
+        .unwrap_or(false),
         RETRO_ENVIRONMENT_SET_VARIABLE => {
             if data.is_null() {
                 return true;
@@ -537,9 +534,7 @@ unsafe extern "C" fn bridge_video_refresh_cb(
     let rgba = match pixel_format {
         RETRO_PIXEL_FORMAT_XRGB8888 => convert_xrgb8888_to_rgba(src_bytes, width, height, pitch),
         RETRO_PIXEL_FORMAT_RGB565 => convert_rgb565_to_rgba(src_bytes, width, height, pitch),
-        RETRO_PIXEL_FORMAT_0RGB1555 | _ => {
-            convert_rgb1555_to_rgba(src_bytes, width, height, pitch)
-        }
+        RETRO_PIXEL_FORMAT_0RGB1555 | _ => convert_rgb1555_to_rgba(src_bytes, width, height, pitch),
     };
 
     let raw_frame = Arc::new(RawFrame {
@@ -994,9 +989,7 @@ unsafe fn run_loaded_core(
         None => None,
     };
     let game_info = RetroGameInfo {
-        path: content_path_c
-            .as_ref()
-            .map_or(ptr::null(), |c| c.as_ptr()),
+        path: content_path_c.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
         data: ptr::null(),
         size: 0,
         meta: ptr::null(),
@@ -1007,25 +1000,26 @@ unsafe fn run_loaded_core(
         anyhow::bail!("Quasi88 retro_load_game returned false");
     }
 
-    let mount_fdd_live = |drive: usize,
-                          target_path: Option<&Path>,
-                          disk_list: &mut Vec<PathBuf>|
-     -> bool {
-        let (Some(start_fn), Some(cycle_fn), Some(set_fn)) =
-            (&retro_disks_start, &retro_disks_cycle, &retro_disks_set)
-        else {
-            return false;
-        };
+    let mount_fdd_live =
+        |drive: usize, target_path: Option<&Path>, disk_list: &mut Vec<PathBuf>| -> bool {
+            let (Some(start_fn), Some(cycle_fn), Some(set_fn)) =
+                (&retro_disks_start, &retro_disks_cycle, &retro_disks_set)
+            else {
+                return false;
+            };
 
-        let target_idx = if let Some(p) = target_path {
-            if let Some(pos) = disk_list.iter().position(|x| x == p) {
-                Some(pos)
-            } else if disk_list.len() < 16 {
-                if let Some(append_fn) = &retro_disks_append {
-                    if let Ok(c_path) = CString::new(p.to_string_lossy().as_bytes()) {
-                        if unsafe { append_fn(c_path.as_ptr()) } != 0 {
-                            disk_list.push(p.to_path_buf());
-                            Some(disk_list.len() - 1)
+            let target_idx = if let Some(p) = target_path {
+                if let Some(pos) = disk_list.iter().position(|x| x == p) {
+                    Some(pos)
+                } else if disk_list.len() < 16 {
+                    if let Some(append_fn) = &retro_disks_append {
+                        if let Ok(c_path) = CString::new(p.to_string_lossy().as_bytes()) {
+                            if unsafe { append_fn(c_path.as_ptr()) } != 0 {
+                                disk_list.push(p.to_path_buf());
+                                Some(disk_list.len() - 1)
+                            } else {
+                                None
+                            }
                         } else {
                             None
                         }
@@ -1037,30 +1031,27 @@ unsafe fn run_loaded_core(
                 }
             } else {
                 None
-            }
-        } else {
-            None
-        };
+            };
 
-        if target_path.is_some() && target_idx.is_none() {
-            return false;
-        }
-
-        let drive_inv: c_int = if drive == 0 { 1 } else { 0 };
-        unsafe {
-            start_fn(dummy_env_cb, drive_inv);
-            for _ in 0..16 {
-                cycle_fn(dummy_env_cb, 0);
+            if target_path.is_some() && target_idx.is_none() {
+                return false;
             }
-            if let Some(idx) = target_idx {
-                for _ in 0..=idx {
-                    cycle_fn(dummy_env_cb, 1);
+
+            let drive_inv: c_int = if drive == 0 { 1 } else { 0 };
+            unsafe {
+                start_fn(dummy_env_cb, drive_inv);
+                for _ in 0..16 {
+                    cycle_fn(dummy_env_cb, 0);
                 }
+                if let Some(idx) = target_idx {
+                    for _ in 0..=idx {
+                        cycle_fn(dummy_env_cb, 1);
+                    }
+                }
+                set_fn(dummy_env_cb);
             }
-            set_fn(dummy_env_cb);
-        }
-        true
-    };
+            true
+        };
 
     // Note: retro_load_game(&game_info) with boot.m3u already populates the
     // internal disk list and mounts index 0 in Drive 1 and index 1 in Drive 2
@@ -1160,18 +1151,15 @@ unsafe fn run_loaded_core(
                     }
                     if mount_fdd_live(drive as usize, path.as_deref(), &mut boot_plan.disk_list) {
                         if let Some(p) = path {
-                            let name = p
-                                .file_name()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("disk");
+                            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("disk");
                             let _ = event_tx.send(Pc88Event::Info(format!(
                                 "Mounted '{}' in FDD{}",
                                 name,
                                 drive + 1
                             )));
                         } else {
-                            let _ = event_tx
-                                .send(Pc88Event::Info(format!("Ejected FDD{}", drive + 1)));
+                            let _ =
+                                event_tx.send(Pc88Event::Info(format!("Ejected FDD{}", drive + 1)));
                         }
                     } else {
                         let _ = event_tx.send(Pc88Event::Info(format!(
@@ -1184,10 +1172,8 @@ unsafe fn run_loaded_core(
                     with_bridge_ctx(|ctx| {
                         populate_quasi88_variables(&mut ctx.variables, &new_cfg);
                         ctx.variables_dirty = true;
-                        ctx.seek_mixer.set_config(
-                            new_cfg.floppy_seek_sound,
-                            new_cfg.floppy_seek_volume,
-                        );
+                        ctx.seek_mixer
+                            .set_config(new_cfg.floppy_seek_sound, new_cfg.floppy_seek_volume);
                     });
                     active_config = new_cfg;
                 }
@@ -1340,4 +1326,3 @@ unsafe fn run_loaded_core(
 
     Ok(())
 }
-

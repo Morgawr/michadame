@@ -291,64 +291,64 @@ pub fn draw_shaders_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             ui.add_space(4.0);
 
             sub_heading(ui, "Beam Dynamics & Brightness:");
-                two_columns(ui, |c1, c2| {
-                    if slider_item(
-                        c1,
-                        "Brightboost (Dark):",
-                        egui::Slider::new(&mut state.halo.brightboost, 0.5..=3.0).step_by(0.05),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                    if slider_item(
-                        c2,
-                        "Brightboost (Bright):",
-                        egui::Slider::new(&mut state.halo.brightboost1, 0.5..=3.0).step_by(0.05),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                });
+            two_columns(ui, |c1, c2| {
+                if slider_item(
+                    c1,
+                    "Brightboost (Dark):",
+                    egui::Slider::new(&mut state.halo.brightboost, 0.5..=3.0).step_by(0.05),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+                if slider_item(
+                    c2,
+                    "Brightboost (Bright):",
+                    egui::Slider::new(&mut state.halo.brightboost1, 0.5..=3.0).step_by(0.05),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+            });
 
-                two_columns(ui, |c1, c2| {
-                    if slider_item(
-                        c1,
-                        "Beam Min:",
-                        egui::Slider::new(&mut state.halo.beam_min, 0.5..=3.0).step_by(0.05),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                    if slider_item(
-                        c2,
-                        "Beam Max:",
-                        egui::Slider::new(&mut state.halo.beam_max, 0.2..=2.0).step_by(0.05),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                });
+            two_columns(ui, |c1, c2| {
+                if slider_item(
+                    c1,
+                    "Beam Min:",
+                    egui::Slider::new(&mut state.halo.beam_min, 0.5..=3.0).step_by(0.05),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+                if slider_item(
+                    c2,
+                    "Beam Max:",
+                    egui::Slider::new(&mut state.halo.beam_max, 0.2..=2.0).step_by(0.05),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+            });
 
-                two_columns(ui, |c1, c2| {
-                    if slider_item(
-                        c1,
-                        "Beam Size:",
-                        egui::Slider::new(&mut state.halo.beam_size, 0.0..=2.0).step_by(0.05),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                    if slider_item(
+            two_columns(ui, |c1, c2| {
+                if slider_item(
+                    c1,
+                    "Beam Size:",
+                    egui::Slider::new(&mut state.halo.beam_size, 0.0..=2.0).step_by(0.05),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+                if slider_item(
                         c2,
                         "Sharpness:",
                         egui::Slider::new(&mut state.halo.h_sharp, 1.0..=10.0).step_by(0.1),
@@ -358,184 +358,187 @@ pub fn draw_shaders_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     {
                         changed = true;
                     }
-                });
+            });
 
-                technical_separator(ui);
+            technical_separator(ui);
 
-                sub_heading(ui, "Shadow Mask:");
-                two_columns(ui, |c1, c2| {
-                    // Left column: Shadow mask selector dropdown
-                    c1.horizontal(|ui| {
-                        ui.add_sized(
-                            [130.0, 18.0],
-                            egui::Label::new(
-                                egui::RichText::new("Shadow Mask:")
-                                    .monospace()
-                                    .size(11.0)
-                                    .color(egui::Color32::from_rgb(153, 153, 153)),
-                            ),
-                        );
-                        let mask_names = [
-                            (0.0, "0: None"),
-                            (1.0, "1: CGWG"),
-                            (2.0, "2: Lottes"),
-                            (3.0, "3: Stretched"),
-                            (4.0, "4: VGA"),
-                            (5.0, "5: Fine"),
-                            (6.0, "6: Trinitron"),
-                        ];
-                        let cur_val = state.halo.shadow_mask.round();
-                        let cur_text = mask_names
-                            .iter()
-                            .find(|(v, _)| *v == cur_val)
-                            .map(|(_, t)| *t)
-                            .unwrap_or("Custom");
-                        let avail_w = (ui.available_width() - 4.0).max(60.0);
-                        egui::ComboBox::from_id_source("halo_shadow_mask_combo")
-                            .selected_text(cur_text)
-                            .width(avail_w)
-                            .show_ui(ui, |ui| {
-                                for (val, text) in mask_names {
-                                    if ui.selectable_value(&mut state.halo.shadow_mask, val, text).clicked() {
-                                        changed = true;
-                                    }
+            sub_heading(ui, "Shadow Mask:");
+            two_columns(ui, |c1, c2| {
+                // Left column: Shadow mask selector dropdown
+                c1.horizontal(|ui| {
+                    ui.add_sized(
+                        [130.0, 18.0],
+                        egui::Label::new(
+                            egui::RichText::new("Shadow Mask:")
+                                .monospace()
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(153, 153, 153)),
+                        ),
+                    );
+                    let mask_names = [
+                        (0.0, "0: None"),
+                        (1.0, "1: CGWG"),
+                        (2.0, "2: Lottes"),
+                        (3.0, "3: Stretched"),
+                        (4.0, "4: VGA"),
+                        (5.0, "5: Fine"),
+                        (6.0, "6: Trinitron"),
+                    ];
+                    let cur_val = state.halo.shadow_mask.round();
+                    let cur_text = mask_names
+                        .iter()
+                        .find(|(v, _)| *v == cur_val)
+                        .map(|(_, t)| *t)
+                        .unwrap_or("Custom");
+                    let avail_w = (ui.available_width() - 4.0).max(60.0);
+                    egui::ComboBox::from_id_source("halo_shadow_mask_combo")
+                        .selected_text(cur_text)
+                        .width(avail_w)
+                        .show_ui(ui, |ui| {
+                            for (val, text) in mask_names {
+                                if ui
+                                    .selectable_value(&mut state.halo.shadow_mask, val, text)
+                                    .clicked()
+                                {
+                                    changed = true;
                                 }
-                            });
-                    });
-
-                    // Right column: Mask Strength
-                    if slider_item(
-                        c2,
-                        "Mask Strength:",
-                        percent_slider(&mut state.halo.maskstr, 0.0..=1.0),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
+                            }
+                        });
                 });
 
-                two_columns(ui, |c1, c2| {
-                    if slider_item(
-                        c1,
-                        "Mask Size:",
-                        egui::Slider::new(&mut state.halo.masksize, 1.0..=4.0).step_by(1.0),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                    if slider_item(
-                        c2,
-                        "Mask Cutoff:",
-                        percent_slider(&mut state.halo.mcut, 0.0..=1.0),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                });
+                // Right column: Mask Strength
+                if slider_item(
+                    c2,
+                    "Mask Strength:",
+                    percent_slider(&mut state.halo.maskstr, 0.0..=1.0),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+            });
 
-                two_columns(ui, |c1, c2| {
-                    if slider_item(
-                        c1,
-                        "Slot Mask (Bright):",
-                        percent_slider(&mut state.halo.slotmask, 0.0..=1.0),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                    if slider_item(
-                        c2,
-                        "Slot Mask (Dark):",
-                        percent_slider(&mut state.halo.slotmask1, 0.0..=1.0),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                });
+            two_columns(ui, |c1, c2| {
+                if slider_item(
+                    c1,
+                    "Mask Size:",
+                    egui::Slider::new(&mut state.halo.masksize, 1.0..=4.0).step_by(1.0),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+                if slider_item(
+                    c2,
+                    "Mask Cutoff:",
+                    percent_slider(&mut state.halo.mcut, 0.0..=1.0),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+            });
 
-                two_columns(ui, |c1, c2| {
-                    if slider_item(
-                        c1,
-                        "Double Slot:",
-                        egui::Slider::new(&mut state.halo.double_slot, 1.0..=4.0).step_by(1.0),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                    if slider_item(
-                        c2,
-                        "Smooth Mask:",
-                        egui::Slider::new(&mut state.halo.smoothmask, 0.0..=2.0).step_by(0.05),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                });
+            two_columns(ui, |c1, c2| {
+                if slider_item(
+                    c1,
+                    "Slot Mask (Bright):",
+                    percent_slider(&mut state.halo.slotmask, 0.0..=1.0),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+                if slider_item(
+                    c2,
+                    "Slot Mask (Dark):",
+                    percent_slider(&mut state.halo.slotmask1, 0.0..=1.0),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+            });
 
-                technical_separator(ui);
+            two_columns(ui, |c1, c2| {
+                if slider_item(
+                    c1,
+                    "Double Slot:",
+                    egui::Slider::new(&mut state.halo.double_slot, 1.0..=4.0).step_by(1.0),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+                if slider_item(
+                    c2,
+                    "Smooth Mask:",
+                    egui::Slider::new(&mut state.halo.smoothmask, 0.0..=2.0).step_by(0.05),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+            });
 
-                sub_heading(ui, "Glow & Curvature:");
-                two_columns(ui, |c1, c2| {
-                    if slider_item(
-                        c1,
-                        "Glow:",
-                        percent_slider(&mut state.halo.glow, 0.0..=1.0),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                    if slider_item(
-                        c2,
-                        "Bloom:",
-                        percent_slider(&mut state.halo.bloom, 0.0..=1.0),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                });
+            technical_separator(ui);
 
-                two_columns(ui, |c1, c2| {
-                    if slider_item(
-                        c1,
-                        "Halation:",
-                        percent_slider(&mut state.halo.halation, 0.0..=0.5),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                    if slider_item(
-                        c2,
-                        "Halo Glow:",
-                        egui::Slider::new(&mut state.halo.halo_intensity, 0.0..=2.0).step_by(0.05),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                });
+            sub_heading(ui, "Glow & Curvature:");
+            two_columns(ui, |c1, c2| {
+                if slider_item(
+                    c1,
+                    "Glow:",
+                    percent_slider(&mut state.halo.glow, 0.0..=1.0),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+                if slider_item(
+                    c2,
+                    "Bloom:",
+                    percent_slider(&mut state.halo.bloom, 0.0..=1.0),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+            });
 
-                two_columns(ui, |c1, c2| {
-                    if slider_item(
+            two_columns(ui, |c1, c2| {
+                if slider_item(
+                    c1,
+                    "Halation:",
+                    percent_slider(&mut state.halo.halation, 0.0..=0.5),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+                if slider_item(
+                    c2,
+                    "Halo Glow:",
+                    egui::Slider::new(&mut state.halo.halo_intensity, 0.0..=2.0).step_by(0.05),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+            });
+
+            two_columns(ui, |c1, c2| {
+                if slider_item(
                         c1,
                         "Screen Scale %:",
                         percent_slider_range(&mut state.halo.halo_zoom, 50.0..=100.0, 100.0),
@@ -545,23 +548,26 @@ pub fn draw_shaders_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     {
                         changed = true;
                     }
-                    if slider_item(
-                        c2,
-                        "Corner Size:",
-                        egui::Slider::new(&mut state.halo.corner_size, 0.0..=0.1).step_by(0.005),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                });
-
-                ui.add_space(3.0);
-                if ui.checkbox(&mut state.halo.curvature, "Curvature").changed() {
+                if slider_item(
+                    c2,
+                    "Corner Size:",
+                    egui::Slider::new(&mut state.halo.corner_size, 0.0..=0.1).step_by(0.005),
+                    None,
+                )
+                .changed()
+                {
                     changed = true;
                 }
             });
+
+            ui.add_space(3.0);
+            if ui
+                .checkbox(&mut state.halo.curvature, "Curvature")
+                .changed()
+            {
+                changed = true;
+            }
+        });
         ui.add_space(4.0);
     } else if current_filter == CrtFilter::Lottes {
         technical_group(ui, "", |ui| {
@@ -592,120 +598,120 @@ pub fn draw_shaders_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             ui.add_space(4.0);
 
             two_columns(ui, |c1, c2| {
-                    if slider_item(
-                        c1,
-                        "HardScan:",
-                        egui::Slider::new(&mut state.crt.hard_scan, -20.0..=0.0).step_by(0.5),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                    if slider_item(
-                        c2,
-                        "HardPix:",
-                        egui::Slider::new(&mut state.crt.hard_pix, -20.0..=0.0).step_by(0.5),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                });
-
-                two_columns(ui, |c1, c2| {
-                    if slider_item(
-                        c1,
-                        "Brightboost:",
-                        egui::Slider::new(&mut state.crt.brightboost, 0.5..=2.0).step_by(0.05),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                    if slider_item(
-                        c2,
-                        "Bloom Amount:",
-                        egui::Slider::new(&mut state.crt.bloom_amount, 0.0..=1.0).step_by(0.01),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                });
-
-                two_columns(ui, |c1, c2| {
-                    if slider_item(
-                        c1,
-                        "WarpX:",
-                        egui::Slider::new(&mut state.crt.warp_x, 0.0..=0.125).step_by(0.001),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                    if slider_item(
-                        c2,
-                        "WarpY:",
-                        egui::Slider::new(&mut state.crt.warp_y, 0.0..=0.125).step_by(0.001),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                });
-
-                two_columns(ui, |c1, c2| {
-                    if slider_item(
-                        c1,
-                        "ShadowMask:",
-                        egui::Slider::new(&mut state.crt.shadow_mask, 0.0..=4.0).step_by(1.0),
-                        Some("0=None, 1=Compressed TV, 2=Aperture-grille, 3=Stretched VGA, 4=VGA"),
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                    if slider_item(
-                        c2,
-                        "Shape:",
-                        egui::Slider::new(&mut state.crt.shape, 0.0..=10.0).step_by(0.05),
-                        Some("Kernel exponent. The original Lottes default is 2.0."),
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                });
-
-                two_columns(ui, |c1, c2| {
-                    if slider_item(
-                        c1,
-                        "BloomPix:",
-                        egui::Slider::new(&mut state.crt.hard_bloom_pix, -2.0..=-0.5).step_by(0.05),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                    if slider_item(
-                        c2,
-                        "BloomScan:",
-                        egui::Slider::new(&mut state.crt.hard_bloom_scan, -4.0..=-1.0).step_by(0.05),
-                        None,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                });
+                if slider_item(
+                    c1,
+                    "HardScan:",
+                    egui::Slider::new(&mut state.crt.hard_scan, -20.0..=0.0).step_by(0.5),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+                if slider_item(
+                    c2,
+                    "HardPix:",
+                    egui::Slider::new(&mut state.crt.hard_pix, -20.0..=0.0).step_by(0.5),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
             });
+
+            two_columns(ui, |c1, c2| {
+                if slider_item(
+                    c1,
+                    "Brightboost:",
+                    egui::Slider::new(&mut state.crt.brightboost, 0.5..=2.0).step_by(0.05),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+                if slider_item(
+                    c2,
+                    "Bloom Amount:",
+                    egui::Slider::new(&mut state.crt.bloom_amount, 0.0..=1.0).step_by(0.01),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+            });
+
+            two_columns(ui, |c1, c2| {
+                if slider_item(
+                    c1,
+                    "WarpX:",
+                    egui::Slider::new(&mut state.crt.warp_x, 0.0..=0.125).step_by(0.001),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+                if slider_item(
+                    c2,
+                    "WarpY:",
+                    egui::Slider::new(&mut state.crt.warp_y, 0.0..=0.125).step_by(0.001),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+            });
+
+            two_columns(ui, |c1, c2| {
+                if slider_item(
+                    c1,
+                    "ShadowMask:",
+                    egui::Slider::new(&mut state.crt.shadow_mask, 0.0..=4.0).step_by(1.0),
+                    Some("0=None, 1=Compressed TV, 2=Aperture-grille, 3=Stretched VGA, 4=VGA"),
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+                if slider_item(
+                    c2,
+                    "Shape:",
+                    egui::Slider::new(&mut state.crt.shape, 0.0..=10.0).step_by(0.05),
+                    Some("Kernel exponent. The original Lottes default is 2.0."),
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+            });
+
+            two_columns(ui, |c1, c2| {
+                if slider_item(
+                    c1,
+                    "BloomPix:",
+                    egui::Slider::new(&mut state.crt.hard_bloom_pix, -2.0..=-0.5).step_by(0.05),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+                if slider_item(
+                    c2,
+                    "BloomScan:",
+                    egui::Slider::new(&mut state.crt.hard_bloom_scan, -4.0..=-1.0).step_by(0.05),
+                    None,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+            });
+        });
         ui.add_space(4.0);
     } else {
         technical_group(ui, "", |ui| {
@@ -800,9 +806,12 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                             changed = true;
                         }
 
-                        let slider = egui::Slider::new(&mut state.video.deinterlace_motion_threshold, 0.01..=0.5)
-                            .step_by(0.01)
-                            .custom_formatter(|n, _| format!("{:.2}", n));
+                        let slider = egui::Slider::new(
+                            &mut state.video.deinterlace_motion_threshold,
+                            0.01..=0.5,
+                        )
+                        .step_by(0.01)
+                        .custom_formatter(|n, _| format!("{:.2}", n));
                         if slider_item(
                             c2,
                             "Motion Sensitivity:",
@@ -817,7 +826,8 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                     });
 
                     two_columns(ui, |c1, c2| {
-                        let slider = percent_slider(&mut state.video.deinterlace_spatial_mix, 0.0..=1.0);
+                        let slider =
+                            percent_slider(&mut state.video.deinterlace_spatial_mix, 0.0..=1.0);
                         if slider_item(
                             c1,
                             "Spatial Strength:",
@@ -830,7 +840,8 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                             changed = true;
                         }
 
-                        let slider = mult_slider(&mut state.video.deinterlace_line_spacing, 0.5..=3.0);
+                        let slider =
+                            mult_slider(&mut state.video.deinterlace_line_spacing, 0.5..=3.0);
                         if slider_item(
                             c2,
                             "Line Pitch Scale:",
@@ -864,7 +875,8 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                 2 | 3 => {
                     // FIR or Median: Spatial & Pitch
                     two_columns(ui, |c1, c2| {
-                        let slider = percent_slider(&mut state.video.deinterlace_spatial_mix, 0.0..=1.0);
+                        let slider =
+                            percent_slider(&mut state.video.deinterlace_spatial_mix, 0.0..=1.0);
                         if slider_item(
                             c1,
                             "Spatial Strength:",
@@ -877,7 +889,8 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                             changed = true;
                         }
 
-                        let slider = mult_slider(&mut state.video.deinterlace_line_spacing, 0.5..=3.0);
+                        let slider =
+                            mult_slider(&mut state.video.deinterlace_line_spacing, 0.5..=3.0);
                         if slider_item(
                             c2,
                             "Line Pitch Scale:",
@@ -894,14 +907,19 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                 4 => {
                     // Motion Map: Motion Sensitivity only
                     two_columns(ui, |c1, _| {
-                        let slider = egui::Slider::new(&mut state.video.deinterlace_motion_threshold, 0.01..=0.5)
-                            .step_by(0.01)
-                            .custom_formatter(|n, _| format!("{:.2}", n));
+                        let slider = egui::Slider::new(
+                            &mut state.video.deinterlace_motion_threshold,
+                            0.01..=0.5,
+                        )
+                        .step_by(0.01)
+                        .custom_formatter(|n, _| format!("{:.2}", n));
                         if slider_item(
                             c1,
                             "Motion Sensitivity:",
                             slider,
-                            Some("Threshold to distinguish moving objects from static field jitter"),
+                            Some(
+                                "Threshold to distinguish moving objects from static field jitter",
+                            ),
                         )
                         .changed()
                         {
@@ -929,7 +947,9 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                 .custom_formatter(|n, _| format!("{:.1}%", n * 100.0))
                 .custom_parser(|s| {
                     let s = s.trim().trim_end_matches('%').trim();
-                    s.parse::<f64>().ok().map(|v| if v > 1.5 { (v / 100.0) as f64 } else { v })
+                    s.parse::<f64>()
+                        .ok()
+                        .map(|v| if v > 1.5 { (v / 100.0) as f64 } else { v })
                 });
             if slider_item(c2, "Horizontal Stretch:", slider, None).changed() {
                 crate::config::save_config(state);
@@ -943,7 +963,9 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                 .custom_formatter(|n, _| format!("{:.1}%", n * 100.0))
                 .custom_parser(|s| {
                     let s = s.trim().trim_end_matches('%').trim();
-                    s.parse::<f64>().ok().map(|v| if v.abs() > 0.2 { (v / 100.0) as f64 } else { v })
+                    s.parse::<f64>()
+                        .ok()
+                        .map(|v| if v.abs() > 0.2 { (v / 100.0) as f64 } else { v })
                 });
             if slider_item(c1, "Overscan X:", slider, None).changed() {
                 crate::config::save_config(state);
@@ -955,7 +977,9 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                 .custom_formatter(|n, _| format!("{:.1}%", n * 100.0))
                 .custom_parser(|s| {
                     let s = s.trim().trim_end_matches('%').trim();
-                    s.parse::<f64>().ok().map(|v| if v.abs() > 0.2 { (v / 100.0) as f64 } else { v })
+                    s.parse::<f64>()
+                        .ok()
+                        .map(|v| if v.abs() > 0.2 { (v / 100.0) as f64 } else { v })
                 });
             if slider_item(c2, "Overscan Y:", slider, None).changed() {
                 crate::config::save_config(state);
@@ -969,7 +993,13 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                 .custom_formatter(|n, _| format!("{:.1}%", (1.0 + n) * 100.0))
                 .custom_parser(|s| {
                     let s = s.trim().trim_end_matches('%').trim();
-                    s.parse::<f64>().ok().map(|p| if p > 50.0 { (p / 100.0 - 1.0) as f64 } else { p })
+                    s.parse::<f64>().ok().map(|p| {
+                        if p > 50.0 {
+                            (p / 100.0 - 1.0) as f64
+                        } else {
+                            p
+                        }
+                    })
                 });
             if slider_item(
                 c1,
@@ -988,7 +1018,13 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                 .custom_formatter(|n, _| format!("{:.1}%", (1.0 + n) * 100.0))
                 .custom_parser(|s| {
                     let s = s.trim().trim_end_matches('%').trim();
-                    s.parse::<f64>().ok().map(|p| if p > 50.0 { (p / 100.0 - 1.0) as f64 } else { p })
+                    s.parse::<f64>().ok().map(|p| {
+                        if p > 50.0 {
+                            (p / 100.0 - 1.0) as f64
+                        } else {
+                            p
+                        }
+                    })
                 });
             if slider_item(
                 c2,
@@ -1012,7 +1048,9 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                 .custom_formatter(|n, _| format!("{:.1}%", n * 100.0))
                 .custom_parser(|s| {
                     let s = s.trim().trim_end_matches('%').trim();
-                    s.parse::<f64>().ok().map(|v| if v > 0.2 { (v / 100.0) as f64 } else { v })
+                    s.parse::<f64>()
+                        .ok()
+                        .map(|v| if v > 0.2 { (v / 100.0) as f64 } else { v })
                 });
             if slider_item(c1, "Top Cut-off:", slider, None).changed() {
                 crate::config::save_config(state);
@@ -1024,7 +1062,9 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                 .custom_formatter(|n, _| format!("{:.1}%", n * 100.0))
                 .custom_parser(|s| {
                     let s = s.trim().trim_end_matches('%').trim();
-                    s.parse::<f64>().ok().map(|v| if v > 0.2 { (v / 100.0) as f64 } else { v })
+                    s.parse::<f64>()
+                        .ok()
+                        .map(|v| if v > 0.2 { (v / 100.0) as f64 } else { v })
                 });
             if slider_item(c2, "Bottom Cut-off:", slider, None).changed() {
                 crate::config::save_config(state);
@@ -1038,7 +1078,9 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                 .custom_formatter(|n, _| format!("{:.1}%", n * 100.0))
                 .custom_parser(|s| {
                     let s = s.trim().trim_end_matches('%').trim();
-                    s.parse::<f64>().ok().map(|v| if v > 0.2 { (v / 100.0) as f64 } else { v })
+                    s.parse::<f64>()
+                        .ok()
+                        .map(|v| if v > 0.2 { (v / 100.0) as f64 } else { v })
                 });
             if slider_item(c1, "Left Cut-off:", slider, None).changed() {
                 crate::config::save_config(state);
@@ -1050,7 +1092,9 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                 .custom_formatter(|n, _| format!("{:.1}%", n * 100.0))
                 .custom_parser(|s| {
                     let s = s.trim().trim_end_matches('%').trim();
-                    s.parse::<f64>().ok().map(|v| if v > 0.2 { (v / 100.0) as f64 } else { v })
+                    s.parse::<f64>()
+                        .ok()
+                        .map(|v| if v > 0.2 { (v / 100.0) as f64 } else { v })
                 });
             if slider_item(c2, "Right Cut-off:", slider, None).changed() {
                 crate::config::save_config(state);
@@ -1130,7 +1174,9 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                     &mut state.video.use_magenta_background,
                     "Magenta Background",
                 )
-                .on_hover_text("Uses a magenta background around the video stream instead of black.")
+                .on_hover_text(
+                    "Uses a magenta background around the video stream instead of black.",
+                )
                 .changed()
             {
                 crate::config::save_config(state);
@@ -1161,23 +1207,30 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
 
             if state.video.retro_pc_frame {
                 two_columns(ui, |c1, c2| {
-                    let slider = egui::Slider::new(&mut state.video.retro_pc_ambient_glow, 0.0..=1.0)
-                        .step_by(0.05)
-                        .custom_formatter(|n, _| {
-                            if n <= 0.001 {
-                                "Off".to_string()
-                            } else {
-                                format!("{:.0}%", n * 100.0)
-                            }
-                        })
-                        .custom_parser(|s| {
-                            let s = s.trim().trim_end_matches('%').trim();
-                            if s.eq_ignore_ascii_case("off") {
-                                Some(0.0)
-                            } else {
-                                s.parse::<f64>().ok().map(|v| if v > 1.0 { (v / 100.0) as f64 } else { v })
-                            }
-                        });
+                    let slider =
+                        egui::Slider::new(&mut state.video.retro_pc_ambient_glow, 0.0..=1.0)
+                            .step_by(0.05)
+                            .custom_formatter(|n, _| {
+                                if n <= 0.001 {
+                                    "Off".to_string()
+                                } else {
+                                    format!("{:.0}%", n * 100.0)
+                                }
+                            })
+                            .custom_parser(|s| {
+                                let s = s.trim().trim_end_matches('%').trim();
+                                if s.eq_ignore_ascii_case("off") {
+                                    Some(0.0)
+                                } else {
+                                    s.parse::<f64>().ok().map(|v| {
+                                        if v > 1.0 {
+                                            (v / 100.0) as f64
+                                        } else {
+                                            v
+                                        }
+                                    })
+                                }
+                            });
                     if slider_item(
                         c1,
                         "Bezel Ambient Glow:",
@@ -1210,23 +1263,30 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
 
             if state.video.lights_off_night_mode {
                 two_columns(ui, |c1, _| {
-                    let slider = egui::Slider::new(&mut state.video.night_mode_glow_intensity, 0.0..=1.0)
-                        .step_by(0.05)
-                        .custom_formatter(|n, _| {
-                            if n <= 0.001 {
-                                "Off".to_string()
-                            } else {
-                                format!("{:.0}%", n * 100.0)
-                            }
-                        })
-                        .custom_parser(|s| {
-                            let s = s.trim().trim_end_matches('%').trim();
-                            if s.eq_ignore_ascii_case("off") {
-                                Some(0.0)
-                            } else {
-                                s.parse::<f64>().ok().map(|v| if v > 1.0 { (v / 100.0) as f64 } else { v })
-                            }
-                        });
+                    let slider =
+                        egui::Slider::new(&mut state.video.night_mode_glow_intensity, 0.0..=1.0)
+                            .step_by(0.05)
+                            .custom_formatter(|n, _| {
+                                if n <= 0.001 {
+                                    "Off".to_string()
+                                } else {
+                                    format!("{:.0}%", n * 100.0)
+                                }
+                            })
+                            .custom_parser(|s| {
+                                let s = s.trim().trim_end_matches('%').trim();
+                                if s.eq_ignore_ascii_case("off") {
+                                    Some(0.0)
+                                } else {
+                                    s.parse::<f64>().ok().map(|v| {
+                                        if v > 1.0 {
+                                            (v / 100.0) as f64
+                                        } else {
+                                            v
+                                        }
+                                    })
+                                }
+                            });
                     if slider_item(
                         c1,
                         "Night Halo Glow:",
@@ -1252,7 +1312,9 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                     c1,
                     "Glass Intensity:",
                     slider,
-                    Some("Controls the intensity of the glass patina, refractions, and reflections."),
+                    Some(
+                        "Controls the intensity of the glass patina, refractions, and reflections.",
+                    ),
                 )
                 .changed()
                 {
@@ -1327,7 +1389,10 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                 });
 
                 if state.video.crt_glass_photographer_enabled {
-                    let slider = percent_slider(&mut state.video.crt_glass_photographer_intensity, 0.0..=1.0);
+                    let slider = percent_slider(
+                        &mut state.video.crt_glass_photographer_intensity,
+                        0.0..=1.0,
+                    );
                     if slider_item(c2, "Photographer Int.:", slider, None).changed() {
                         crate::config::save_config(state);
                         changed = true;
@@ -1337,7 +1402,8 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
 
             if state.video.crt_glass_flash_enabled {
                 two_columns(ui, |c1, _| {
-                    let slider = percent_slider(&mut state.video.crt_glass_flash_intensity, 0.0..=1.0);
+                    let slider =
+                        percent_slider(&mut state.video.crt_glass_flash_intensity, 0.0..=1.0);
                     if slider_item(c1, "Flash Intensity:", slider, None).changed() {
                         crate::config::save_config(state);
                         changed = true;
@@ -1364,12 +1430,7 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
     changed
 }
 
-fn draw_mini_level_bar(
-    ui: &mut egui::Ui,
-    label: &str,
-    value: f32,
-    fill_color: egui::Color32,
-) {
+fn draw_mini_level_bar(ui: &mut egui::Ui, label: &str, value: f32, fill_color: egui::Color32) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         ui.label(
@@ -1379,8 +1440,11 @@ fn draw_mini_level_bar(
                 .color(egui::Color32::from_rgb(165, 165, 165)),
         );
         let (rect, _) = ui.allocate_exact_size(egui::vec2(78.0, 10.0), egui::Sense::hover());
-        ui.painter()
-            .rect_filled(rect, egui::Rounding::ZERO, egui::Color32::from_rgb(15, 15, 15));
+        ui.painter().rect_filled(
+            rect,
+            egui::Rounding::ZERO,
+            egui::Color32::from_rgb(15, 15, 15),
+        );
         let frac = (value / 1.5).clamp(0.0, 1.0);
         if frac > 0.002 {
             let mut fill_rect = rect;
@@ -1555,8 +1619,9 @@ pub fn draw_special_fx_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 .trim()
                 .to_string();
             let can_save_new = !trimmed_name.is_empty();
-            let enter_pressed =
-                can_save_new && name_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let enter_pressed = can_save_new
+                && name_resp.lost_focus()
+                && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if ui
                 .add_enabled(can_save_new, egui::Button::new("Save As New"))
                 .clicked()

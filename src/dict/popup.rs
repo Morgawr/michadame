@@ -150,17 +150,18 @@ pub fn draw_dict_popup(
                 // otherwise take the scroll delta (so nothing underneath scrolls) and apply
                 // it to the popup's scroll offset ourselves. egui clamps the offset.
                 let offset_key = egui::Id::new("jitendex_dict_popup_scroll_offset");
-                let pointer_over_popup = match (ui.input(|i| i.pointer.hover_pos()), popup.popup_rect) {
-                    (Some(ptr), Some(rect)) => rect.contains(ptr),
-                    _ => false,
-                };
-                let external_scroll = if !pointer_over_popup
-                    && popup.last_hover_time.elapsed().as_millis() < 50
-                {
-                    ui.ctx().input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta.y))
-                } else {
-                    0.0
-                };
+                let pointer_over_popup =
+                    match (ui.input(|i| i.pointer.hover_pos()), popup.popup_rect) {
+                        (Some(ptr), Some(rect)) => rect.contains(ptr),
+                        _ => false,
+                    };
+                let external_scroll =
+                    if !pointer_over_popup && popup.last_hover_time.elapsed().as_millis() < 50 {
+                        ui.ctx()
+                            .input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta.y))
+                    } else {
+                        0.0
+                    };
 
                 // Start at the top whenever the popup shows a different lookup, or it was not
                 // drawn on the previous frame (i.e. it was closed and has been re-opened).
@@ -174,7 +175,8 @@ pub fn draw_dict_popup(
                     }
                     None => true,
                 };
-                ui.ctx().data_mut(|d| d.insert_temp(session_key, (identity, frame_nr)));
+                ui.ctx()
+                    .data_mut(|d| d.insert_temp(session_key, (identity, frame_nr)));
 
                 let mut scroll_area = egui::ScrollArea::vertical()
                     .id_source("jitendex_dict_popup_scroll")
@@ -183,14 +185,21 @@ pub fn draw_dict_popup(
                 if is_new_session {
                     scroll_area = scroll_area.vertical_scroll_offset(0.0);
                 } else if external_scroll != 0.0 {
-                    let current: f32 =
-                        ui.ctx().data(|d| d.get_temp(offset_key)).unwrap_or(0.0);
-                    scroll_area = scroll_area.vertical_scroll_offset((current - external_scroll).max(0.0));
+                    let current: f32 = ui.ctx().data(|d| d.get_temp(offset_key)).unwrap_or(0.0);
+                    scroll_area =
+                        scroll_area.vertical_scroll_offset((current - external_scroll).max(0.0));
                 }
                 let scroll_output = scroll_area.show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(8.0, 5.0);
                     for (idx, entry) in popup.entries.iter().enumerate() {
-                        match render_term_entry(ui, entry, idx, Some(mine_status(entry)), is_mined(entry), can_clip) {
+                        match render_term_entry(
+                            ui,
+                            entry,
+                            idx,
+                            Some(mine_status(entry)),
+                            is_mined(entry),
+                            can_clip,
+                        ) {
                             crate::dict::render::EntryAction::Mine => {
                                 popup_action = Some(PopupAction::Mine(idx));
                             }
@@ -228,11 +237,14 @@ pub fn draw_dict_popup(
             })
             .unwrap_or_default();
         // Clear the stolen layer so egui does not paint it in foreground
-        let _ = ui.ctx().graphics_mut(|g| g.get_mut(layer_id).map(std::mem::take));
+        let _ = ui
+            .ctx()
+            .graphics_mut(|g| g.get_mut(layer_id).map(std::mem::take));
         if clipped_shapes.is_empty() {
             Vec::new()
         } else {
-            ui.ctx().tessellate(clipped_shapes, ui.ctx().pixels_per_point())
+            ui.ctx()
+                .tessellate(clipped_shapes, ui.ctx().pixels_per_point())
         }
     } else {
         // Keep the dictionary popup above CentralPanel within Order::Background,
@@ -377,10 +389,7 @@ pub fn calculate_crt_raster_surface(
         video_rect.min.x + w * u_start,
         video_rect.min.y + h * v_start,
     );
-    let mut max = egui::pos2(
-        video_rect.min.x + w * u_end,
-        video_rect.min.y + h * v_end,
-    );
+    let mut max = egui::pos2(video_rect.min.x + w * u_end, video_rect.min.y + h * v_end);
 
     // Ensure rect is valid and non-inverted
     if min.x >= max.x {
@@ -462,16 +471,33 @@ mod tests {
 
     #[test]
     fn test_calculate_crt_popup_safe_area_insets() {
-        let video_rect = egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(1000.0, 800.0));
+        let video_rect =
+            egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(1000.0, 800.0));
         let crop = [0.05, 0.05, 0.10, 0.10]; // 5% L/R (50px), 10% T/B (80px)
-        let vp = calculate_crt_popup_safe_area(video_rect, crop, [0.0, 0.0], [0.0, 0.0], false, false, 1.0);
+        let vp = calculate_crt_popup_safe_area(
+            video_rect,
+            crop,
+            [0.0, 0.0],
+            [0.0, 0.0],
+            false,
+            false,
+            1.0,
+        );
         assert_eq!(vp.min.x, 150.0);
         assert_eq!(vp.max.x, 1050.0);
         assert_eq!(vp.min.y, 180.0);
         assert_eq!(vp.max.y, 820.0);
 
         // With retro frame and curvature
-        let vp_retro = calculate_crt_popup_safe_area(video_rect, [0.0, 0.0, 0.0, 0.0], [0.0, 0.0], [0.0, 0.0], true, true, 1.0);
+        let vp_retro = calculate_crt_popup_safe_area(
+            video_rect,
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0],
+            [0.0, 0.0],
+            true,
+            true,
+            1.0,
+        );
         assert!(vp_retro.min.x > video_rect.min.x);
         assert!(vp_retro.max.x < video_rect.max.x);
         assert!(vp_retro.min.y > video_rect.min.y);
@@ -480,20 +506,35 @@ mod tests {
 
     #[test]
     fn test_calculate_crt_raster_surface_bounds() {
-        let video_rect = egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(1000.0, 800.0));
-        let surface = calculate_crt_raster_surface(video_rect, [0.0, 0.0, 0.0, 0.0], [0.0, 0.0], [0.0, 0.0]);
+        let video_rect =
+            egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(1000.0, 800.0));
+        let surface =
+            calculate_crt_raster_surface(video_rect, [0.0, 0.0, 0.0, 0.0], [0.0, 0.0], [0.0, 0.0]);
         // Default raster surface must match the entire video rect without safe margin shrinkage
         assert_eq!(surface, video_rect);
 
         // Border crop
-        let cropped = calculate_crt_raster_surface(video_rect, [0.05, 0.05, 0.10, 0.10], [0.0, 0.0], [0.0, 0.0]);
+        let cropped = calculate_crt_raster_surface(
+            video_rect,
+            [0.05, 0.05, 0.10, 0.10],
+            [0.0, 0.0],
+            [0.0, 0.0],
+        );
         assert_eq!(cropped.min.x, 150.0);
         assert_eq!(cropped.max.x, 1050.0);
         assert_eq!(cropped.min.y, 180.0);
         assert_eq!(cropped.max.y, 820.0);
 
         // Viewport with retro frame must be strictly smaller than raster surface
-        let vp_retro = calculate_crt_popup_safe_area(video_rect, [0.0, 0.0, 0.0, 0.0], [0.0, 0.0], [0.0, 0.0], true, true, 1.0);
+        let vp_retro = calculate_crt_popup_safe_area(
+            video_rect,
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0],
+            [0.0, 0.0],
+            true,
+            true,
+            1.0,
+        );
         assert!(vp_retro.min.x > surface.min.x);
         assert!(vp_retro.max.x < surface.max.x);
         assert!(vp_retro.min.y > surface.min.y);
@@ -502,7 +543,8 @@ mod tests {
 
     #[test]
     fn test_calculate_crt_popup_safe_area_underscan_and_overscan() {
-        let video_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 1000.0));
+        let video_rect =
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 1000.0));
         // Underscan -0.1 (shrunk by 10% -> 5% inset on left and right)
         let vp_under = calculate_crt_popup_safe_area(
             video_rect,
@@ -532,7 +574,11 @@ mod tests {
         assert!((vp_over.max.x - 1000.0).abs() < 0.01);
     }
 
-    fn popup_at(x: f32, char_range: (usize, usize), last_word_hover_time: Instant) -> DictPopupState {
+    fn popup_at(
+        x: f32,
+        char_range: (usize, usize),
+        last_word_hover_time: Instant,
+    ) -> DictPopupState {
         let word_rect = egui::Rect::from_min_size(egui::pos2(x, 100.0), egui::vec2(40.0, 30.0));
         DictPopupState {
             matched_term: "語".into(),
@@ -563,7 +609,10 @@ mod tests {
         // Left long enough ago: switch immediately.
         let stale = Instant::now() - Duration::from_millis(400);
         let current = popup_at(0.0, (0, 2), stale);
-        assert_eq!(popup_switch_wait(&current, &next, on_next_word, delay), None);
+        assert_eq!(
+            popup_switch_wait(&current, &next, on_next_word, delay),
+            None
+        );
 
         // Still on the current word (e.g. overlapping lookup): never switch.
         assert!(popup_switch_wait(&current, &next, egui::pos2(10.0, 110.0), delay).is_some());
@@ -571,12 +620,16 @@ mod tests {
         // Same word is always accepted.
         let same = popup_at(0.0, (0, 2), Instant::now());
         let current = popup_at(0.0, (0, 2), Instant::now());
-        assert_eq!(popup_switch_wait(&current, &same, egui::pos2(10.0, 110.0), delay), None);
+        assert_eq!(
+            popup_switch_wait(&current, &same, egui::pos2(10.0, 110.0), delay),
+            None
+        );
     }
 
     #[test]
     fn test_calculate_clamped_popup_pos_stays_in_video_rect() {
-        let video_rect = egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(800.0, 600.0));
+        let video_rect =
+            egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(800.0, 600.0));
         let word_rect = egui::Rect::from_min_size(egui::pos2(800.0, 650.0), egui::vec2(50.0, 30.0));
 
         let pos = calculate_clamped_popup_pos(word_rect, 400.0, 300.0, video_rect);
@@ -596,10 +649,12 @@ mod tests {
 
     #[test]
     fn test_calculate_popup_placement_follows_hovered_line() {
-        let video_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
+        let video_rect =
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
         // Multiline text: line 1 at y: 700..740, line 2 at y: 750..790
         // Hovering on word on line 2:
-        let line2_word = egui::Rect::from_min_max(egui::pos2(650.0, 750.0), egui::pos2(750.0, 790.0));
+        let line2_word =
+            egui::Rect::from_min_max(egui::pos2(650.0, 750.0), egui::pos2(750.0, 790.0));
 
         let placement_above = calculate_popup_placement(line2_word, 980.0, 760.0, video_rect);
         // Popup bottom must be 10px above line 2 (750 - 10 = 740), NOT above line 1 (700)!
@@ -609,7 +664,8 @@ mod tests {
         assert_eq!(placement_above.pos.x, 634.0);
 
         // Near top: line 1 at y: 80..120
-        let line1_word = egui::Rect::from_min_max(egui::pos2(800.0, 80.0), egui::pos2(880.0, 120.0));
+        let line1_word =
+            egui::Rect::from_min_max(egui::pos2(800.0, 80.0), egui::pos2(880.0, 120.0));
         let placement_below = calculate_popup_placement(line1_word, 980.0, 760.0, video_rect);
         // Popup top must be 10px below line 1 (120 + 10 = 130)
         assert!((placement_below.pos.y - 130.0).abs() < 1.0);
@@ -620,11 +676,18 @@ mod tests {
     fn test_draw_dict_popup_can_clip_flag() {
         let ctx = egui::Context::default();
         let mut fonts = egui::FontDefinitions::default();
-        let prop = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
-        fonts.families.insert(egui::FontFamily::Name("GothicCJK".into()), prop);
+        let prop = fonts
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .cloned()
+            .unwrap_or_default();
+        fonts
+            .families
+            .insert(egui::FontFamily::Name("GothicCJK".into()), prop);
         ctx.set_fonts(fonts);
 
-        let video_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
+        let video_rect =
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
         let mut popup_state = Some(DictPopupState {
             matched_term: "飽きる".into(),
             source_text: "飽きる".into(),

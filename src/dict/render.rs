@@ -57,8 +57,8 @@ const COLOR_MINED_TEXT: Color32 = Color32::from_rgb(254, 215, 170);
 
 /// Circled numbers for sense indices ①..⑳
 const CIRCLED_NUMBERS: &[&str] = &[
-    "①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩",
-    "⑪", "⑫", "⑬", "⑭", "⑮", "⑯", "⑰", "⑱", "⑲", "⑳",
+    "①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩", "⑪", "⑫", "⑬", "⑭", "⑮", "⑯", "⑰", "⑱", "⑲",
+    "⑳",
 ];
 
 /// Action taken on an entry in the dictionary popup.
@@ -161,18 +161,10 @@ fn render_delete_name_button(ui: &mut egui::Ui, size: f32) -> bool {
             Color32::from_rgb(248, 113, 113),
         )
     } else {
-        (
-            COLOR_TAG_BG,
-            COLOR_TAG_BORDER,
-            COLOR_TAG_TEXT,
-        )
+        (COLOR_TAG_BG, COLOR_TAG_BORDER, COLOR_TAG_TEXT)
     };
-    ui.painter().rect(
-        rect,
-        8.0,
-        fill,
-        egui::Stroke::new(1.5, stroke_color),
-    );
+    ui.painter()
+        .rect(rect, 8.0, fill, egui::Stroke::new(1.5, stroke_color));
 
     let center = rect.center();
     let arm = size * 0.22;
@@ -180,12 +172,18 @@ fn render_delete_name_button(ui: &mut egui::Ui, size: f32) -> bool {
 
     // Lid top handle
     ui.painter().line_segment(
-        [center + egui::vec2(-arm * 0.45, -arm * 1.15), center + egui::vec2(arm * 0.45, -arm * 1.15)],
+        [
+            center + egui::vec2(-arm * 0.45, -arm * 1.15),
+            center + egui::vec2(arm * 0.45, -arm * 1.15),
+        ],
         stroke,
     );
     // Lid horizontal bar
     ui.painter().line_segment(
-        [center + egui::vec2(-arm * 1.25, -arm * 0.8), center + egui::vec2(arm * 1.25, -arm * 0.8)],
+        [
+            center + egui::vec2(-arm * 1.25, -arm * 0.8),
+            center + egui::vec2(arm * 1.25, -arm * 0.8),
+        ],
         stroke,
     );
     // Can body
@@ -199,11 +197,17 @@ fn render_delete_name_button(ui: &mut egui::Ui, size: f32) -> bool {
     // Vertical inner ribs
     let inner_stroke = egui::Stroke::new(1.2, icon_color);
     ui.painter().line_segment(
-        [center + egui::vec2(-arm * 0.3, -arm * 0.1), center + egui::vec2(-arm * 0.25, arm * 0.8)],
+        [
+            center + egui::vec2(-arm * 0.3, -arm * 0.1),
+            center + egui::vec2(-arm * 0.25, arm * 0.8),
+        ],
         inner_stroke,
     );
     ui.painter().line_segment(
-        [center + egui::vec2(arm * 0.3, -arm * 0.1), center + egui::vec2(arm * 0.25, arm * 0.8)],
+        [
+            center + egui::vec2(arm * 0.3, -arm * 0.1),
+            center + egui::vec2(arm * 0.25, arm * 0.8),
+        ],
         inner_stroke,
     );
 
@@ -225,7 +229,11 @@ fn render_mine_button(ui: &mut egui::Ui, status: crate::bank::MineStatus, size: 
     let hovered = response.hovered() && status == MineStatus::Available;
     let (fill, stroke, glyph, glyph_color) = match status {
         MineStatus::Available => (
-            if hovered { Color32::from_rgb(14, 116, 144) } else { COLOR_TAG_BG },
+            if hovered {
+                Color32::from_rgb(14, 116, 144)
+            } else {
+                COLOR_TAG_BG
+            },
             COLOR_READING,
             "+",
             COLOR_HEADWORD,
@@ -233,8 +241,12 @@ fn render_mine_button(ui: &mut egui::Ui, status: crate::bank::MineStatus, size: 
         MineStatus::Pending => (COLOR_TAG_BG, COLOR_TAG_BORDER, "…", COLOR_TAG_TEXT),
         MineStatus::Mined => (COLOR_FREQ_BG, COLOR_FREQ_BORDER, "✔", COLOR_FREQ_TEXT),
     };
-    ui.painter()
-        .circle(rect.center(), size / 2.0 - 1.0, fill, egui::Stroke::new(1.5, stroke));
+    ui.painter().circle(
+        rect.center(),
+        size / 2.0 - 1.0,
+        fill,
+        egui::Stroke::new(1.5, stroke),
+    );
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
@@ -256,7 +268,11 @@ fn render_mine_button(ui: &mut egui::Ui, status: crate::bank::MineStatus, size: 
 }
 
 /// Round `++` / `…` / `✔` button used to add an entry to the mining bank and create a Twitch clip.
-fn render_mine_and_clip_button(ui: &mut egui::Ui, status: crate::bank::MineStatus, size: f32) -> bool {
+fn render_mine_and_clip_button(
+    ui: &mut egui::Ui,
+    status: crate::bank::MineStatus,
+    size: f32,
+) -> bool {
     use crate::bank::MineStatus;
     let non_focus_click = egui::Sense {
         click: true,
@@ -279,13 +295,21 @@ fn render_mine_and_clip_button(ui: &mut egui::Ui, status: crate::bank::MineStatu
         MineStatus::Pending => (COLOR_TAG_BG, COLOR_TAG_BORDER, "…", COLOR_TAG_TEXT),
         MineStatus::Mined => (COLOR_FREQ_BG, COLOR_FREQ_BORDER, "✔", COLOR_FREQ_TEXT),
     };
-    ui.painter()
-        .circle(rect.center(), size / 2.0 - 1.0, fill, egui::Stroke::new(1.5, stroke));
+    ui.painter().circle(
+        rect.center(),
+        size / 2.0 - 1.0,
+        fill,
+        egui::Stroke::new(1.5, stroke),
+    );
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
         glyph,
-        FontId::proportional(if glyph == "++" { size * 0.45 } else { size * 0.6 }),
+        FontId::proportional(if glyph == "++" {
+            size * 0.45
+        } else {
+            size * 0.6
+        }),
         glyph_color,
     );
     let response = match status {
@@ -433,13 +457,7 @@ pub fn render_entry_header(ui: &mut egui::Ui, entry: &TermEntry, is_mined: bool)
 
             // Part-of-speech & definition tags (excluding noise tags like ★ and form)
             for tag in tags_to_show {
-                render_pill_badge(
-                    ui,
-                    tag,
-                    COLOR_TAG_BG,
-                    COLOR_TAG_TEXT,
-                    COLOR_TAG_BORDER,
-                );
+                render_pill_badge(ui, tag, COLOR_TAG_BG, COLOR_TAG_TEXT, COLOR_TAG_BORDER);
             }
         });
     }
@@ -527,12 +545,8 @@ pub fn render_pill_badge(
     let desired_size = galley.size() + padding * 2.0;
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
 
-    ui.painter().rect(
-        rect,
-        5.0 * scale,
-        bg,
-        egui::Stroke::new(1.0, border),
-    );
+    ui.painter()
+        .rect(rect, 5.0 * scale, bg, egui::Stroke::new(1.0, border));
 
     let text_pos = rect.min + padding;
     ui.painter().galley(text_pos, galley, fg);
@@ -745,7 +759,12 @@ fn render_sense(ui: &mut egui::Ui, sense_val: &serde_json::Value, index: usize) 
         let accent_color = Color32::from_rgb(56, 189, 248); // sky-400 accent
         let frame_resp = egui::Frame::none()
             .fill(COLOR_EXAMPLE_BG)
-            .rounding(egui::Rounding { nw: 4.0, sw: 4.0, ne: 4.0, se: 4.0 })
+            .rounding(egui::Rounding {
+                nw: 4.0,
+                sw: 4.0,
+                ne: 4.0,
+                se: 4.0,
+            })
             .stroke(egui::Stroke::NONE)
             .inner_margin(egui::Margin {
                 left: 14.0,
@@ -773,7 +792,11 @@ fn render_sense(ui: &mut egui::Ui, sense_val: &serde_json::Value, index: usize) 
                 }
             });
         let r = frame_resp.response.rect;
-        ui.painter().vline(r.min.x + 2.0, r.y_range(), egui::Stroke::new(2.5, accent_color));
+        ui.painter().vline(
+            r.min.x + 2.0,
+            r.y_range(),
+            egui::Stroke::new(2.5, accent_color),
+        );
     }
 
     // E. Cross references ("See also")
@@ -834,11 +857,7 @@ fn render_attribution(ui: &mut egui::Ui, attr_val: &serde_json::Value) {
     let text = extract_plain_text_from_node(Some(attr_val));
     if !text.is_empty() {
         ui.add_space(6.0);
-        ui.label(
-            RichText::new(text)
-                .font(dict_font(24.0))
-                .color(COLOR_MUTED),
-        );
+        ui.label(RichText::new(text).font(dict_font(24.0)).color(COLOR_MUTED));
     }
 }
 
@@ -962,7 +981,11 @@ pub fn extract_ruby_segments(node: &serde_json::Value) -> Vec<RubySegment> {
     segments
 }
 
-fn collect_ruby_segments_recursive(val: &serde_json::Value, out: &mut Vec<RubySegment>, depth: usize) {
+fn collect_ruby_segments_recursive(
+    val: &serde_json::Value,
+    out: &mut Vec<RubySegment>,
+    depth: usize,
+) {
     if depth > MAX_JSON_WALK_DEPTH {
         return;
     }
@@ -1030,8 +1053,12 @@ pub fn render_ruby_item(ui: &mut egui::Ui, base: &str, rt: &str) {
     }
     let font_base = dict_font(38.0);
     let font_rt = dict_font(20.0);
-    let galley_rt = ui.painter().layout_no_wrap(rt.to_string(), font_rt.clone(), COLOR_RUBY);
-    let galley_base = ui.painter().layout_no_wrap(base.to_string(), font_base.clone(), COLOR_EXAMPLE_JA);
+    let galley_rt = ui
+        .painter()
+        .layout_no_wrap(rt.to_string(), font_rt.clone(), COLOR_RUBY);
+    let galley_base =
+        ui.painter()
+            .layout_no_wrap(base.to_string(), font_base.clone(), COLOR_EXAMPLE_JA);
     let w = galley_rt.size().x.max(galley_base.size().x);
     if w <= 0.0 {
         return;
@@ -1057,10 +1084,15 @@ pub fn render_ruby_item(ui: &mut egui::Ui, base: &str, rt: &str) {
     let rt_y = (target_bottom - rt_glyph_bottom).max(0.0);
 
     let rt_x = rect.min.x + (w - galley_rt.size().x) / 2.0;
-    ui.painter().galley(egui::pos2(rt_x, rect.min.y + rt_y), galley_rt, COLOR_RUBY);
+    ui.painter()
+        .galley(egui::pos2(rt_x, rect.min.y + rt_y), galley_rt, COLOR_RUBY);
 
     let base_x = rect.min.x + (w - galley_base.size().x) / 2.0;
-    ui.painter().galley(egui::pos2(base_x, rect.min.y + base_y_offset), galley_base, COLOR_EXAMPLE_JA);
+    ui.painter().galley(
+        egui::pos2(base_x, rect.min.y + base_y_offset),
+        galley_base,
+        COLOR_EXAMPLE_JA,
+    );
 }
 
 /// Renders a complete Japanese example sentence with furigana stacked neatly on top of the kanji.
@@ -1078,8 +1110,12 @@ fn render_ruby_flow(ui: &mut egui::Ui, segments: Vec<RubySegment>, badge: Option
     let font_base = dict_font(38.0);
     let font_rt = dict_font(20.0);
 
-    let sample_rt = ui.painter().layout_no_wrap("あ".to_string(), font_rt.clone(), COLOR_RUBY);
-    let sample_base = ui.painter().layout_no_wrap("あ".to_string(), font_base.clone(), COLOR_EXAMPLE_JA);
+    let sample_rt = ui
+        .painter()
+        .layout_no_wrap("あ".to_string(), font_rt.clone(), COLOR_RUBY);
+    let sample_base =
+        ui.painter()
+            .layout_no_wrap("あ".to_string(), font_base.clone(), COLOR_EXAMPLE_JA);
     let (base_y_offset, total_h) = calculate_ruby_metrics(&sample_rt, &sample_base);
     let base_top = sample_base
         .rows
@@ -1095,16 +1131,31 @@ fn render_ruby_flow(ui: &mut egui::Ui, segments: Vec<RubySegment>, badge: Option
 
         // Render the badge (e.g. example "例 ") aligned at the same base baseline
         if let Some(badge) = badge {
-            let badge_galley = ui.painter().layout_no_wrap(badge.to_string(), dict_font(28.0), COLOR_MUTED);
-            let badge_y_offset = if let (Some(r_base), Some(r_badge)) = (sample_base.rows.first(), badge_galley.rows.first()) {
-                let base_ascent = r_base.glyphs.first().map(|g| g.ascent).unwrap_or(sample_base.size().y * 0.77);
-                let badge_ascent = r_badge.glyphs.first().map(|g| g.ascent).unwrap_or(badge_galley.size().y * 0.77);
+            let badge_galley =
+                ui.painter()
+                    .layout_no_wrap(badge.to_string(), dict_font(28.0), COLOR_MUTED);
+            let badge_y_offset = if let (Some(r_base), Some(r_badge)) =
+                (sample_base.rows.first(), badge_galley.rows.first())
+            {
+                let base_ascent = r_base
+                    .glyphs
+                    .first()
+                    .map(|g| g.ascent)
+                    .unwrap_or(sample_base.size().y * 0.77);
+                let badge_ascent = r_badge
+                    .glyphs
+                    .first()
+                    .map(|g| g.ascent)
+                    .unwrap_or(badge_galley.size().y * 0.77);
                 base_y_offset + (base_ascent - badge_ascent)
             } else {
                 base_y_offset + (sample_base.size().y - badge_galley.size().y) / 2.0
             };
 
-            let (badge_rect, _) = ui.allocate_exact_size(egui::vec2(badge_galley.size().x, total_h), egui::Sense::hover());
+            let (badge_rect, _) = ui.allocate_exact_size(
+                egui::vec2(badge_galley.size().x, total_h),
+                egui::Sense::hover(),
+            );
             ui.painter().galley(
                 egui::pos2(badge_rect.min.x, badge_rect.min.y + badge_y_offset),
                 badge_galley,
@@ -1116,13 +1167,16 @@ fn render_ruby_flow(ui: &mut egui::Ui, segments: Vec<RubySegment>, badge: Option
             match seg {
                 RubySegment::Ruby { base, rt } => {
                     let galley_rt = ui.painter().layout_no_wrap(rt, font_rt.clone(), COLOR_RUBY);
-                    let galley_base = ui.painter().layout_no_wrap(base, font_base.clone(), COLOR_EXAMPLE_JA);
+                    let galley_base =
+                        ui.painter()
+                            .layout_no_wrap(base, font_base.clone(), COLOR_EXAMPLE_JA);
                     let w = galley_rt.size().x.max(galley_base.size().x);
                     if w <= 0.0 {
                         continue;
                     }
 
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, total_h), egui::Sense::hover());
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(w, total_h), egui::Sense::hover());
 
                     let rt_glyph_bottom = galley_rt
                         .rows
@@ -1133,21 +1187,33 @@ fn render_ruby_flow(ui: &mut egui::Ui, segments: Vec<RubySegment>, badge: Option
                     let rt_y = (target_bottom - rt_glyph_bottom).max(0.0);
 
                     let rt_x = rect.min.x + (w - galley_rt.size().x) / 2.0;
-                    ui.painter().galley(egui::pos2(rt_x, rect.min.y + rt_y), galley_rt, COLOR_RUBY);
+                    ui.painter()
+                        .galley(egui::pos2(rt_x, rect.min.y + rt_y), galley_rt, COLOR_RUBY);
 
                     let base_x = rect.min.x + (w - galley_base.size().x) / 2.0;
-                    ui.painter().galley(egui::pos2(base_x, rect.min.y + base_y_offset), galley_base, COLOR_EXAMPLE_JA);
+                    ui.painter().galley(
+                        egui::pos2(base_x, rect.min.y + base_y_offset),
+                        galley_base,
+                        COLOR_EXAMPLE_JA,
+                    );
                 }
                 RubySegment::Plain(text) => {
-                    let galley = ui.painter().layout_no_wrap(text, font_base.clone(), COLOR_EXAMPLE_JA);
+                    let galley =
+                        ui.painter()
+                            .layout_no_wrap(text, font_base.clone(), COLOR_EXAMPLE_JA);
                     let w = galley.size().x;
                     if w <= 0.0 {
                         continue;
                     }
 
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, total_h), egui::Sense::hover());
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(w, total_h), egui::Sense::hover());
 
-                    ui.painter().galley(egui::pos2(rect.min.x, rect.min.y + base_y_offset), galley, COLOR_EXAMPLE_JA);
+                    ui.painter().galley(
+                        egui::pos2(rect.min.x, rect.min.y + base_y_offset),
+                        galley,
+                        COLOR_EXAMPLE_JA,
+                    );
                 }
             }
         }
@@ -1158,7 +1224,18 @@ fn render_ruby_flow(ui: &mut egui::Ui, segments: Vec<RubySegment>, badge: Option
 fn is_inline_tag(tag: &str) -> bool {
     matches!(
         tag,
-        "" | "span" | "a" | "ruby" | "rt" | "rp" | "b" | "strong" | "i" | "em" | "sup" | "sub" | "small"
+        "" | "span"
+            | "a"
+            | "ruby"
+            | "rt"
+            | "rp"
+            | "b"
+            | "strong"
+            | "i"
+            | "em"
+            | "sup"
+            | "sub"
+            | "small"
     )
 }
 
@@ -1238,7 +1315,11 @@ fn build_layout_job_from_node(
     }
     match node {
         serde_json::Value::String(s) => {
-            let color = if is_bold { COLOR_HEADWORD } else { COLOR_DEFINITION };
+            let color = if is_bold {
+                COLOR_HEADWORD
+            } else {
+                COLOR_DEFINITION
+            };
             append_to_layout_job(
                 job,
                 s,
@@ -1316,7 +1397,8 @@ fn append_to_layout_job(job: &mut LayoutJob, text: &str, format: TextFormat) {
 
 /// Determines whether an automatic space is needed between two adjacent text fragments.
 fn should_insert_space(last: char, first: char) -> bool {
-    let last_is_ascii = last.is_ascii_alphanumeric() || last == ']' || last == ')' || last == '.' || last == ',';
+    let last_is_ascii =
+        last.is_ascii_alphanumeric() || last == ']' || last == ')' || last == '.' || last == ',';
     let first_is_ascii = first.is_ascii_alphanumeric() || first == '(' || first == '[';
     last_is_ascii && first_is_ascii
 }
@@ -1327,7 +1409,9 @@ fn render_ruby_inline(ui: &mut egui::Ui, map: &serde_json::Map<String, serde_jso
     render_ruby_item(ui, &base, &rt);
 }
 
-pub fn extract_ruby_components(map: &serde_json::Map<String, serde_json::Value>) -> (String, String) {
+pub fn extract_ruby_components(
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> (String, String) {
     let mut base = String::new();
     let mut rt = String::new();
 
@@ -1454,7 +1538,10 @@ fn collect_text_skip_extras(val: &serde_json::Value, out: &mut String, depth: us
                 .and_then(|d| d.get("content"))
                 .and_then(|c| c.as_str())
                 .unwrap_or("");
-            if matches!(dc, "extra-info" | "example-sentence" | "xref" | "sense-note" | "info-gloss") {
+            if matches!(
+                dc,
+                "extra-info" | "example-sentence" | "xref" | "sense-note" | "info-gloss"
+            ) {
                 return;
             }
             if let Some(content) = map.get("content") {
@@ -1478,7 +1565,10 @@ fn collect_tags(node: &serde_json::Value, out: &mut Vec<String>) {
                 .and_then(|d| d.get("content"))
                 .and_then(|c| c.as_str())
                 .unwrap_or("");
-            if matches!(dc, "part-of-speech-info" | "field-info" | "misc-info" | "dialect-info") {
+            if matches!(
+                dc,
+                "part-of-speech-info" | "field-info" | "misc-info" | "dialect-info"
+            ) {
                 let tag_text = extract_plain_text_from_node(map.get("content"));
                 if !tag_text.is_empty() && !out.contains(&tag_text) {
                     out.push(tag_text);
@@ -1499,7 +1589,10 @@ fn collect_tags(node: &serde_json::Value, out: &mut Vec<String>) {
 }
 
 /// Recursively finds the first node where `data.content == target`.
-fn find_node_by_data_content<'a>(val: &'a serde_json::Value, target: &str) -> Option<&'a serde_json::Value> {
+fn find_node_by_data_content<'a>(
+    val: &'a serde_json::Value,
+    target: &str,
+) -> Option<&'a serde_json::Value> {
     find_node_by_data_content_depth(val, target, 0)
 }
 
@@ -1660,7 +1753,11 @@ fn render_plain_html_text(ui: &mut egui::Ui, text: &str) {
 }
 
 fn append_styled_text(job: &mut LayoutJob, text: &str, bold: bool, italic: bool) {
-    let color = if bold { COLOR_HEADWORD } else { COLOR_DEFINITION };
+    let color = if bold {
+        COLOR_HEADWORD
+    } else {
+        COLOR_DEFINITION
+    };
     let font_id = if bold {
         dict_font(36.0)
     } else {
@@ -1810,7 +1907,8 @@ pub fn compact_definition_for_chat(entry: &TermEntry) -> String {
                             .collect::<Vec<_>>()
                             .join(" / ")
                     } else {
-                        let text = extract_plain_text_excluding_extras(val).replace(['\r', '\n'], " ");
+                        let text =
+                            extract_plain_text_excluding_extras(val).replace(['\r', '\n'], " ");
                         let parts: Vec<String> = text
                             .split(';')
                             .map(|s| s.trim().to_string())
@@ -1836,7 +1934,8 @@ pub fn compact_definition_for_chat(entry: &TermEntry) -> String {
                                 .collect::<Vec<_>>()
                                 .join(" / ")
                         } else {
-                            let text = extract_plain_text_excluding_extras(sense).replace(['\r', '\n'], " ");
+                            let text = extract_plain_text_excluding_extras(sense)
+                                .replace(['\r', '\n'], " ");
                             let parts: Vec<String> = text
                                 .split(';')
                                 .map(|s| s.trim().to_string())
@@ -1920,22 +2019,31 @@ mod tests {
             segs,
             vec![
                 RubySegment::Plain("→".into()),
-                RubySegment::Ruby { base: "熱".into(), rt: "あつ".into() },
+                RubySegment::Ruby {
+                    base: "熱".into(),
+                    rt: "あつ".into()
+                },
                 RubySegment::Plain("い".into()),
             ]
         );
 
         // Block content is not flattened
-        let block = serde_json::json!([{ "tag": "ul", "content": [{ "tag": "li", "content": "x" }] }]);
+        let block =
+            serde_json::json!([{ "tag": "ul", "content": [{ "tag": "li", "content": "x" }] }]);
         assert!(!is_inline_only(&block));
     }
 
     #[test]
     fn test_as_deinflection_glossary() {
         let v = serde_json::json!(["熱い", ["redirected from あっつい"]]);
-        assert_eq!(as_deinflection_glossary(&v), Some(("熱い", vec!["redirected from あっつい"])));
+        assert_eq!(
+            as_deinflection_glossary(&v),
+            Some(("熱い", vec!["redirected from あっつい"]))
+        );
         assert!(as_deinflection_glossary(&serde_json::json!(["a", "b"])).is_none());
-        assert!(as_deinflection_glossary(&serde_json::json!({"type": "structured-content"})).is_none());
+        assert!(
+            as_deinflection_glossary(&serde_json::json!({"type": "structured-content"})).is_none()
+        );
     }
 
     #[test]
@@ -1991,8 +2099,14 @@ mod tests {
 
         let mut defs = Vec::new();
         collect_definitions(&json, &mut defs);
-        assert_eq!(defs, vec!["to change", "to be transformed", "to be altered", "to vary"]);
-        assert_eq!(defs.join("; "), "to change; to be transformed; to be altered; to vary");
+        assert_eq!(
+            defs,
+            vec!["to change", "to be transformed", "to be altered", "to vary"]
+        );
+        assert_eq!(
+            defs.join("; "),
+            "to change; to be transformed; to be altered; to vary"
+        );
     }
 
     #[test]
@@ -2074,10 +2188,16 @@ mod tests {
         assert_eq!(
             segments,
             vec![
-                RubySegment::Ruby { base: "私".to_string(), rt: "わたし".to_string() },
+                RubySegment::Ruby {
+                    base: "私".to_string(),
+                    rt: "わたし".to_string()
+                },
                 RubySegment::Plain("は".to_string()),
                 RubySegment::Plain("、".to_string()),
-                RubySegment::Ruby { base: "ＣＤ".to_string(), rt: "シーディー".to_string() },
+                RubySegment::Ruby {
+                    base: "ＣＤ".to_string(),
+                    rt: "シーディー".to_string()
+                },
                 RubySegment::Plain("を".to_string()),
                 RubySegment::Plain("得".to_string()),
                 RubySegment::Plain("た".to_string()),
@@ -2111,13 +2231,18 @@ mod tests {
         let _ = ctx.begin_frame(egui::RawInput::default());
         let font_base = dict_font(38.0);
         let font_rt = dict_font(20.0);
-        let galley_base = ctx.fonts(|f| f.layout_no_wrap("私".to_string(), font_base, Color32::WHITE));
-        let galley_rt = ctx.fonts(|f| f.layout_no_wrap("わたし".to_string(), font_rt, Color32::WHITE));
+        let galley_base =
+            ctx.fonts(|f| f.layout_no_wrap("私".to_string(), font_base, Color32::WHITE));
+        let galley_rt =
+            ctx.fonts(|f| f.layout_no_wrap("わたし".to_string(), font_rt, Color32::WHITE));
 
         let (base_y_offset, total_h) = calculate_ruby_metrics(&galley_rt, &galley_base);
 
         // base_y_offset should tuck the base galley upwards into the ruby descent zone (~14-16px)
-        assert!(base_y_offset > 10.0 && base_y_offset < 20.0, "base_y_offset: {base_y_offset}");
+        assert!(
+            base_y_offset > 10.0 && base_y_offset < 20.0,
+            "base_y_offset: {base_y_offset}"
+        );
         // total_h should be significantly more compact than the naive sum (rt_h + base_h ≈ 84px)
         assert!(total_h < 72.0, "total_h: {total_h}");
 
@@ -2127,7 +2252,10 @@ mod tests {
         let g_base = &galley_base.rows[0].glyphs[0];
         let base_glyph_top = base_y_offset + g_base.pos.y + g_base.uv_rect.offset.y;
         let gap = base_glyph_top - rt_glyph_bottom;
-        assert!((gap - 2.0).abs() < 0.1, "Calculated visual gap was {gap} instead of 2.0");
+        assert!(
+            (gap - 2.0).abs() < 0.1,
+            "Calculated visual gap was {gap} instead of 2.0"
+        );
     }
 
     #[test]
@@ -2145,14 +2273,8 @@ mod tests {
         ctx.set_fonts(fonts);
         let _ = ctx.begin_frame(egui::RawInput::default());
 
-        let job = build_headword_reading_job(
-            "暗い",
-            "くらい",
-            48.0,
-            34.0,
-            COLOR_HEADWORD,
-            COLOR_READING,
-        );
+        let job =
+            build_headword_reading_job("暗い", "くらい", 48.0, 34.0, COLOR_HEADWORD, COLOR_READING);
 
         let galley = ctx.fonts(|f| f.layout_job(job));
         assert_eq!(galley.rows.len(), 1);
@@ -2231,18 +2353,16 @@ mod tests {
             "それは、いつまで見ていても飽きることがない。",
             &compacted,
         );
-        assert_eq!(msg1, "飽きる(あきる) - それは、いつまで見ていても飽きることがない。");
+        assert_eq!(
+            msg1,
+            "飽きる(あきる) - それは、いつまで見ていても飽きることがない。"
+        );
         assert_eq!(
             msg2,
             "飽きる - to get tired of / to tire of / to lose interest in || to become sated / to become satiated"
         );
 
-        let (kana_msg1, _) = format_mined_chat_messages(
-            "する",
-            "する",
-            "ゲームをする。",
-            "to do",
-        );
+        let (kana_msg1, _) = format_mined_chat_messages("する", "する", "ゲームをする。", "to do");
         assert_eq!(kana_msg1, "する - ゲームをする。");
     }
 
@@ -2265,8 +2385,14 @@ mod tests {
     fn test_render_term_entry_with_clip() {
         let ctx = egui::Context::default();
         let mut fonts = egui::FontDefinitions::default();
-        let prop = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
-        fonts.families.insert(egui::FontFamily::Name("GothicCJK".into()), prop);
+        let prop = fonts
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .cloned()
+            .unwrap_or_default();
+        fonts
+            .families
+            .insert(egui::FontFamily::Name("GothicCJK".into()), prop);
         ctx.set_fonts(fonts);
 
         let _ = ctx.run(Default::default(), |ctx| {
@@ -2285,13 +2411,26 @@ mod tests {
                     custom_name_id: None,
                     custom_tag: None,
                 };
-                let action = render_term_entry(ui, &entry, 0, Some(crate::bank::MineStatus::Available), false, true);
+                let action = render_term_entry(
+                    ui,
+                    &entry,
+                    0,
+                    Some(crate::bank::MineStatus::Available),
+                    false,
+                    true,
+                );
                 assert_eq!(action, EntryAction::None);
 
-                let action_no_clip = render_term_entry(ui, &entry, 0, Some(crate::bank::MineStatus::Available), false, false);
+                let action_no_clip = render_term_entry(
+                    ui,
+                    &entry,
+                    0,
+                    Some(crate::bank::MineStatus::Available),
+                    false,
+                    false,
+                );
                 assert_eq!(action_no_clip, EntryAction::None);
             });
         });
     }
 }
-

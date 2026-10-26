@@ -11,9 +11,9 @@ pub const AUDIO_FRAME_SIZE: usize = 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DenoiseBackend {
     #[default]
-    Afftdn,       // Realtime adaptive FFT spectral tracking (lapped windows, ideal for game audio)
-    Rnnoise,      // Realtime neural network noise suppression (nnnoiseless)
-    Disabled,     // No spectral denoiser (only notch filters / gate)
+    Afftdn, // Realtime adaptive FFT spectral tracking (lapped windows, ideal for game audio)
+    Rnnoise,  // Realtime neural network noise suppression (nnnoiseless)
+    Disabled, // No spectral denoiser (only notch filters / gate)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -43,19 +43,19 @@ pub struct AudioFilterConfig {
     pub enabled: bool,
     pub preset: FilterPreset,
     pub denoise_backend: DenoiseBackend,
-    pub denoise_reduction_db: f32, // for afftdn (default 18.0)
+    pub denoise_reduction_db: f32,   // for afftdn (default 18.0)
     pub denoise_noise_floor_db: f32, // baseline noise floor for afftdn (default -42.0)
-    pub denoise_track_noise: bool, // dynamically track noise fluctuations (e.g. bright scenes)
-    pub denoise_gain_smooth: u32,  // gain smooth radius across FFT bins (prevents underwater sound)
+    pub denoise_track_noise: bool,   // dynamically track noise fluctuations (e.g. bright scenes)
+    pub denoise_gain_smooth: u32, // gain smooth radius across FFT bins (prevents underwater sound)
     pub hum_filter: HumFilterMode,
-    pub hum_freq: f32,             // for Custom hum notch (default 60.0)
-    pub crt_notch: bool,           // 15.734 kHz flyback notch
-    pub crt_freq: f32,             // default 15734.26
-    pub rumble_filter: bool,       // 40 Hz highpass
-    pub treble_bypass: bool,       // Retain high frequencies above crossover (prevents muffled/underwater sound)
-    pub treble_crossover_hz: f32,  // Cutoff frequency for treble bypass (default 5000.0)
-    pub gate: bool,                // downward expander
-    pub gate_threshold_db: f32,    // default -50.0
+    pub hum_freq: f32,            // for Custom hum notch (default 60.0)
+    pub crt_notch: bool,          // 15.734 kHz flyback notch
+    pub crt_freq: f32,            // default 15734.26
+    pub rumble_filter: bool,      // 40 Hz highpass
+    pub treble_bypass: bool, // Retain high frequencies above crossover (prevents muffled/underwater sound)
+    pub treble_crossover_hz: f32, // Cutoff frequency for treble bypass (default 5000.0)
+    pub gate: bool,          // downward expander
+    pub gate_threshold_db: f32, // default -50.0
 }
 
 impl Default for AudioFilterConfig {

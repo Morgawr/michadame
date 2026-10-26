@@ -85,9 +85,16 @@ fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
                         .color(Color32::from_rgb(240, 245, 255)),
                 )
                 .fill(Color32::from_rgba_premultiplied(45, 55, 75, 200))
-                .stroke(egui::Stroke::new(1.0, Color32::from_rgba_premultiplied(90, 105, 135, 180)))
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    Color32::from_rgba_premultiplied(90, 105, 135, 180),
+                ))
                 .rounding(5.0);
-                if ui.add(add_btn).on_hover_text("Add a custom name to the dictionary").clicked() {
+                if ui
+                    .add(add_btn)
+                    .on_hover_text("Add a custom name to the dictionary")
+                    .clicked()
+                {
                     state.bank.open_add_name_dialog();
                 }
             });
@@ -110,7 +117,8 @@ fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
                 if out.cancelled {
                     bank.filter_tag.clear();
                 }
-                if !bank.filter_tag.is_empty() && render_close_button(ui, "Clear filter").clicked() {
+                if !bank.filter_tag.is_empty() && render_close_button(ui, "Clear filter").clicked()
+                {
                     bank.filter_tag.clear();
                 }
                 ui.add_space(16.0);
@@ -255,12 +263,8 @@ fn draw_compact_row(ui: &mut egui::Ui, entry: &BankEntryMeta) -> RowAction {
         ROW_STROKE
     };
 
-    ui.painter().rect(
-        rect,
-        6.0,
-        bg_color,
-        egui::Stroke::new(1.0, stroke_color),
-    );
+    ui.painter()
+        .rect(rect, 6.0, bg_color, egui::Stroke::new(1.0, stroke_color));
 
     let inner_rect = rect.shrink2(egui::vec2(12.0, 5.0));
     let mut tag_clicked = false;
@@ -330,7 +334,8 @@ fn draw_row(
             ui.horizontal_top(|ui| {
                 if state.bank.compact_mode {
                     let arrow_size = egui::vec2(22.0, 22.0);
-                    let (arrow_rect, arrow_resp) = ui.allocate_exact_size(arrow_size, egui::Sense::click());
+                    let (arrow_rect, arrow_resp) =
+                        ui.allocate_exact_size(arrow_size, egui::Sense::click());
                     let arrow_hovered = arrow_resp.hovered();
                     if arrow_hovered {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -353,7 +358,10 @@ fn draw_row(
                         egui::FontId::proportional(11.0),
                         arrow_color,
                     );
-                    if arrow_resp.on_hover_text("Click to collapse entry").clicked() {
+                    if arrow_resp
+                        .on_hover_text("Click to collapse entry")
+                        .clicked()
+                    {
                         action = RowAction::ToggleExpand(entry.id);
                     }
                     ui.add_space(4.0);
@@ -442,47 +450,58 @@ fn draw_row(
                                 }
                             },
                         );
-                        let _controls_resp = ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                            if state.bank.pending_delete == Some(entry.id) {
-                                if ui.button("Cancel").clicked() {
-                                    state.bank.pending_delete = None;
-                                }
-                                if ui
-                                    .button(RichText::new("Delete").color(Color32::from_rgb(248, 113, 113)))
-                                    .clicked()
-                                {
-                                    action = RowAction::Delete;
-                                }
-                            } else {
-                                let del_size = egui::vec2(28.0, 28.0);
-                                let (del_rect, del_resp) = ui.allocate_exact_size(del_size, egui::Sense::click());
-                                let del_hovered = del_resp.hovered();
-                                if del_hovered {
-                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                }
-                                paint_delete_button(ui.painter(), del_rect, del_hovered);
-                                if del_resp.on_hover_text("Delete this entry").clicked() {
-                                    state.bank.pending_delete = Some(entry.id);
-                                }
-                                ui.add_space(8.0);
-                                if let Some(clip_url) = &entry.twitch_clip_url {
-                                    let clip_btn = ui.link(
-                                        RichText::new("🎬 Clip")
-                                            .color(Color32::from_rgb(168, 85, 247))
-                                            .font(egui::FontId::proportional(12.5)),
-                                    );
-                                    if clip_btn.on_hover_text(format!("Open Twitch clip:\n{clip_url}")).clicked() {
-                                        ctx.output_mut(|o| o.open_url = Some(egui::output::OpenUrl::same_tab(clip_url)));
+                        let _controls_resp =
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                                if state.bank.pending_delete == Some(entry.id) {
+                                    if ui.button("Cancel").clicked() {
+                                        state.bank.pending_delete = None;
+                                    }
+                                    if ui
+                                        .button(
+                                            RichText::new("Delete")
+                                                .color(Color32::from_rgb(248, 113, 113)),
+                                        )
+                                        .clicked()
+                                    {
+                                        action = RowAction::Delete;
+                                    }
+                                } else {
+                                    let del_size = egui::vec2(28.0, 28.0);
+                                    let (del_rect, del_resp) =
+                                        ui.allocate_exact_size(del_size, egui::Sense::click());
+                                    let del_hovered = del_resp.hovered();
+                                    if del_hovered {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+                                    paint_delete_button(ui.painter(), del_rect, del_hovered);
+                                    if del_resp.on_hover_text("Delete this entry").clicked() {
+                                        state.bank.pending_delete = Some(entry.id);
                                     }
                                     ui.add_space(8.0);
+                                    if let Some(clip_url) = &entry.twitch_clip_url {
+                                        let clip_btn = ui.link(
+                                            RichText::new("🎬 Clip")
+                                                .color(Color32::from_rgb(168, 85, 247))
+                                                .font(egui::FontId::proportional(12.5)),
+                                        );
+                                        if clip_btn
+                                            .on_hover_text(format!("Open Twitch clip:\n{clip_url}"))
+                                            .clicked()
+                                        {
+                                            ctx.output_mut(|o| {
+                                                o.open_url =
+                                                    Some(egui::output::OpenUrl::same_tab(clip_url))
+                                            });
+                                        }
+                                        ui.add_space(8.0);
+                                    }
+                                    ui.label(
+                                        RichText::new(format_friendly_timestamp(entry.created_at))
+                                            .font(egui::FontId::proportional(12.5))
+                                            .color(COLOR_MUTED),
+                                    );
                                 }
-                                ui.label(
-                                    RichText::new(format_friendly_timestamp(entry.created_at))
-                                        .font(egui::FontId::proportional(12.5))
-                                        .color(COLOR_MUTED),
-                                );
-                            }
-                        });
+                            });
                     });
 
                     // Tag (click to edit)
@@ -517,16 +536,18 @@ fn draw_row(
 }
 
 /// Draws the entry's tag chip with an integrated sleek remove button, or the inline tag editor if this entry is being edited.
-fn draw_tag_row(
-    ui: &mut egui::Ui,
-    state: &mut AppState,
-    entry: &BankEntryMeta,
-) {
-    let editing = state.bank.editing_tag.as_ref().map_or(false, |e| e.id == entry.id);
+fn draw_tag_row(ui: &mut egui::Ui, state: &mut AppState, entry: &BankEntryMeta) {
+    let editing = state
+        .bank
+        .editing_tag
+        .as_ref()
+        .map_or(false, |e| e.id == entry.id);
     ui.horizontal(|ui| {
         if editing {
             let bank = &mut state.bank;
-            let Some(edit) = bank.editing_tag.as_mut() else { return };
+            let Some(edit) = bank.editing_tag.as_mut() else {
+                return;
+            };
             let request_focus = !edit.focused;
             edit.focused = true;
             ui.label(RichText::new("🏷").color(COLOR_TAG));
@@ -539,7 +560,11 @@ fn draw_tag_row(
                 260.0,
                 request_focus,
             );
-            ui.label(RichText::new("Enter to save · Esc to cancel").small().color(COLOR_MUTED));
+            ui.label(
+                RichText::new("Enter to save · Esc to cancel")
+                    .small()
+                    .color(COLOR_MUTED),
+            );
             if out.cancelled {
                 state.bank.editing_tag = None;
             } else if out.committed {
@@ -553,7 +578,11 @@ fn draw_tag_row(
         }
 
         let start_edit = |state: &mut AppState, text: String| {
-            state.bank.editing_tag = Some(TagEdit { id: entry.id, text, focused: false });
+            state.bank.editing_tag = Some(TagEdit {
+                id: entry.id,
+                text,
+                focused: false,
+            });
         };
         match &entry.tag {
             Some(tag) => {
@@ -568,19 +597,21 @@ fn draw_tag_row(
                 let height = 24.0;
                 let width = padding_left + galley.size().x + gap + remove_size + padding_right;
 
-                let (chip_rect, mut response) = ui.allocate_exact_size(
-                    egui::vec2(width, height),
-                    egui::Sense::click(),
-                );
+                let (chip_rect, mut response) =
+                    ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
 
                 let remove_rect = egui::Rect::from_min_max(
-                    egui::pos2(chip_rect.max.x - (remove_size + padding_right + 3.0), chip_rect.min.y),
+                    egui::pos2(
+                        chip_rect.max.x - (remove_size + padding_right + 3.0),
+                        chip_rect.min.y,
+                    ),
                     chip_rect.max,
                 );
 
                 let is_hovered = response.hovered();
                 let pointer_pos = ui.ctx().pointer_latest_pos();
-                let remove_hovered = is_hovered && pointer_pos.map_or(false, |p| remove_rect.contains(p));
+                let remove_hovered =
+                    is_hovered && pointer_pos.map_or(false, |p| remove_rect.contains(p));
                 let tag_hovered = is_hovered && !remove_hovered;
 
                 if is_hovered {
@@ -597,12 +628,8 @@ fn draw_tag_row(
                 };
 
                 // Draw base pill
-                ui.painter().rect(
-                    chip_rect,
-                    5.0,
-                    bg,
-                    egui::Stroke::new(1.0, border),
-                );
+                ui.painter()
+                    .rect(chip_rect, 5.0, bg, egui::Stroke::new(1.0, border));
 
                 // Draw tag text
                 let text_pos = egui::pos2(
@@ -622,10 +649,7 @@ fn draw_tag_row(
                 );
 
                 let (x_stroke_color, x_bg) = if remove_hovered {
-                    (
-                        Color32::WHITE,
-                        Color32::from_rgb(220, 38, 38),
-                    )
+                    (Color32::WHITE, Color32::from_rgb(220, 38, 38))
                 } else {
                     (
                         Color32::from_rgba_premultiplied(165, 175, 195, 200),
@@ -681,10 +705,17 @@ fn draw_tag_row(
                         .color(COLOR_MUTED),
                 )
                 .fill(Color32::from_rgba_premultiplied(35, 42, 55, 120))
-                .stroke(egui::Stroke::new(1.0, Color32::from_rgba_premultiplied(70, 80, 100, 100)))
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    Color32::from_rgba_premultiplied(70, 80, 100, 100),
+                ))
                 .rounding(5.0);
 
-                if ui.add(add_btn).on_hover_text("Add a tag to this word").clicked() {
+                if ui
+                    .add(add_btn)
+                    .on_hover_text("Add a tag to this word")
+                    .clicked()
+                {
                     start_edit(state, String::new());
                 }
             }
@@ -717,9 +748,7 @@ pub fn draw_tag_setting(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             bank.current_tag = bank.saved_current_tag.clone();
         }
         committed = out.committed;
-        if !bank.current_tag.is_empty()
-            && render_close_button(ui, "Clear the tag").clicked()
-        {
+        if !bank.current_tag.is_empty() && render_close_button(ui, "Clear the tag").clicked() {
             bank.current_tag.clear();
             committed = true;
         }
@@ -729,7 +758,8 @@ pub fn draw_tag_setting(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         return false;
     }
     let bank = &mut state.bank;
-    bank.current_tag = tags::canonicalize_tag(&bank.current_tag, &bank.known_tags).unwrap_or_default();
+    bank.current_tag =
+        tags::canonicalize_tag(&bank.current_tag, &bank.known_tags).unwrap_or_default();
     if bank.current_tag == bank.saved_current_tag {
         return false;
     }
@@ -758,7 +788,11 @@ fn paint_thumbnail(
             );
         }
         None => {
-            let text = if has_screenshot && !loaded { "Loading…" } else { "No screenshot" };
+            let text = if has_screenshot && !loaded {
+                "Loading…"
+            } else {
+                "No screenshot"
+            };
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -770,12 +804,7 @@ fn paint_thumbnail(
     }
 }
 
-fn paint_copy_overlay(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    hovered: bool,
-    copying: bool,
-) {
+fn paint_copy_overlay(painter: &egui::Painter, rect: egui::Rect, hovered: bool, copying: bool) {
     let (bg, stroke_color, icon_color) = if copying {
         (
             Color32::from_rgba_premultiplied(30, 41, 59, 230),
@@ -811,22 +840,30 @@ fn paint_copy_overlay(
     } else {
         let stroke = egui::Stroke::new(1.5, icon_color);
         // Back sheet (top-right)
-        let back = egui::Rect::from_min_size(center + egui::vec2(-2.0, -7.0), egui::vec2(10.0, 12.0));
+        let back =
+            egui::Rect::from_min_size(center + egui::vec2(-2.0, -7.0), egui::vec2(10.0, 12.0));
         painter.rect_stroke(back, 1.5, stroke);
 
         // Front sheet (bottom-left) - filled with bg to occlude overlapping back sheet
-        let front = egui::Rect::from_min_size(center + egui::vec2(-7.0, -3.0), egui::vec2(10.0, 12.0));
+        let front =
+            egui::Rect::from_min_size(center + egui::vec2(-7.0, -3.0), egui::vec2(10.0, 12.0));
         painter.rect_filled(front, 1.5, bg);
         painter.rect_stroke(front, 1.5, stroke);
 
         // Lines on front sheet to clearly represent a document
         let line_stroke = egui::Stroke::new(1.0, icon_color);
         painter.line_segment(
-            [center + egui::vec2(-4.5, 0.5), center + egui::vec2(0.5, 0.5)],
+            [
+                center + egui::vec2(-4.5, 0.5),
+                center + egui::vec2(0.5, 0.5),
+            ],
             line_stroke,
         );
         painter.line_segment(
-            [center + egui::vec2(-4.5, 3.5), center + egui::vec2(0.5, 3.5)],
+            [
+                center + egui::vec2(-4.5, 3.5),
+                center + egui::vec2(0.5, 3.5),
+            ],
             line_stroke,
         );
     }
@@ -858,7 +895,11 @@ fn sentence_job(entry: &BankEntryMeta, wrap_width: f32) -> LayoutJob {
     };
     let mut job = LayoutJob::default();
     job.wrap.max_width = wrap_width;
-    for (range, format) in [(0..start, &normal), (start..end, &highlight), (end..chars.len(), &normal)] {
+    for (range, format) in [
+        (0..start, &normal),
+        (start..end, &highlight),
+        (end..chars.len(), &normal),
+    ] {
         if !range.is_empty() {
             let text: String = chars[range].iter().collect();
             job.append(&text, 0.0, format.clone());
@@ -919,7 +960,8 @@ fn draw_add_name_dialog(state: &mut AppState, ctx: &egui::Context) {
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
             let (rect, _) = ui.allocate_exact_size(screen_rect.size(), egui::Sense::hover());
-            ui.painter().rect_filled(rect, 0.0, Color32::from_black_alpha(160));
+            ui.painter()
+                .rect_filled(rect, 0.0, Color32::from_black_alpha(160));
         });
 
     let mut close = false;
@@ -1053,13 +1095,13 @@ fn render_subtle_tag_chip(ui: &mut egui::Ui, tag: &str) -> egui::Response {
     } else {
         (COLOR_TAG_BG, COLOR_TAG_STROKE)
     };
-    ui.painter().rect(
-        chip_rect,
-        4.0,
-        bg,
-        egui::Stroke::new(1.0, border),
+    ui.painter()
+        .rect(chip_rect, 4.0, bg, egui::Stroke::new(1.0, border));
+    ui.painter().galley(
+        chip_rect.min + padding,
+        galley,
+        if hovered { COLOR_TERM } else { COLOR_TAG },
     );
-    ui.painter().galley(chip_rect.min + padding, galley, if hovered { COLOR_TERM } else { COLOR_TAG });
     response.on_hover_text("Click to filter by this tag")
 }
 
@@ -1084,12 +1126,25 @@ fn render_close_button(ui: &mut egui::Ui, hover_text: &str) -> egui::Response {
         )
     };
     ui.painter().rect_filled(rect, 4.0, bg);
-    ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(1.0, border_color));
+    ui.painter()
+        .rect_stroke(rect, 4.0, egui::Stroke::new(1.0, border_color));
     let center = rect.center();
     let arm = 3.5;
     let stroke = egui::Stroke::new(1.4, stroke_color);
-    ui.painter().line_segment([center + egui::vec2(-arm, -arm), center + egui::vec2(arm, arm)], stroke);
-    ui.painter().line_segment([center + egui::vec2(-arm, arm), center + egui::vec2(arm, -arm)], stroke);
+    ui.painter().line_segment(
+        [
+            center + egui::vec2(-arm, -arm),
+            center + egui::vec2(arm, arm),
+        ],
+        stroke,
+    );
+    ui.painter().line_segment(
+        [
+            center + egui::vec2(-arm, arm),
+            center + egui::vec2(arm, -arm),
+        ],
+        stroke,
+    );
     resp.on_hover_text(hover_text)
 }
 
@@ -1144,12 +1199,18 @@ fn paint_delete_button(painter: &egui::Painter, rect: egui::Rect, hovered: bool)
     let stroke = egui::Stroke::new(1.4, icon_color);
 
     // Lid top handle
-    let handle = egui::Rect::from_min_max(center + egui::vec2(-2.5, -7.0), center + egui::vec2(2.5, -5.5));
+    let handle = egui::Rect::from_min_max(
+        center + egui::vec2(-2.5, -7.0),
+        center + egui::vec2(2.5, -5.5),
+    );
     painter.rect_stroke(handle, 0.5, stroke);
 
     // Lid horizontal bar
     painter.line_segment(
-        [center + egui::vec2(-6.5, -5.0), center + egui::vec2(6.5, -5.0)],
+        [
+            center + egui::vec2(-6.5, -5.0),
+            center + egui::vec2(6.5, -5.0),
+        ],
         stroke,
     );
 
@@ -1166,11 +1227,17 @@ fn paint_delete_button(painter: &egui::Painter, rect: egui::Rect, hovered: bool)
     // Inner vertical slots
     let inner_stroke = egui::Stroke::new(1.0, icon_color);
     painter.line_segment(
-        [center + egui::vec2(-1.5, -1.5), center + egui::vec2(-1.5, 4.0)],
+        [
+            center + egui::vec2(-1.5, -1.5),
+            center + egui::vec2(-1.5, 4.0),
+        ],
         inner_stroke,
     );
     painter.line_segment(
-        [center + egui::vec2(1.5, -1.5), center + egui::vec2(1.5, 4.0)],
+        [
+            center + egui::vec2(1.5, -1.5),
+            center + egui::vec2(1.5, 4.0),
+        ],
         inner_stroke,
     );
 }
@@ -1202,7 +1269,8 @@ mod tests {
         ctx.set_fonts(fonts);
         let _ = ctx.begin_frame(egui::RawInput::default());
 
-        let job = build_headword_reading_job("暗い", "くらい", 19.0, 15.0, COLOR_TERM, COLOR_READING);
+        let job =
+            build_headword_reading_job("暗い", "くらい", 19.0, 15.0, COLOR_TERM, COLOR_READING);
         let galley = ctx.fonts(|f| f.layout_job(job));
         assert_eq!(galley.rows.len(), 1);
         let baseline_y = galley.rows[0].glyphs[0].pos.y;

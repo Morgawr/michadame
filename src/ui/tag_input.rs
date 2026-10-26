@@ -67,7 +67,12 @@ pub fn tag_input(
     }
 
     let lost_focus = response.lost_focus();
-    let (escape, tab) = ui.input(|i| (i.key_pressed(egui::Key::Escape), i.key_pressed(egui::Key::Tab)));
+    let (escape, tab) = ui.input(|i| {
+        (
+            i.key_pressed(egui::Key::Escape),
+            i.key_pressed(egui::Key::Tab),
+        )
+    });
     let cancelled = lost_focus && escape;
 
     // Tab moves focus before widgets run, so accept the highlighted suggestion here.
@@ -92,9 +97,10 @@ pub fn tag_input(
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.set_min_width(response.rect.width() - 12.0);
                         for (i, suggestion) in suggestions.iter().enumerate() {
-                            let r = ui.add(
-                                egui::SelectableLabel::new(selected == Some(i), suggestion.as_str())
-                            );
+                            let r = ui.add(egui::SelectableLabel::new(
+                                selected == Some(i),
+                                suggestion.as_str(),
+                            ));
                             // Pick on press: the text field loses focus at that moment.
                             if r.is_pointer_button_down_on() || r.clicked() {
                                 picked = Some(suggestion.clone());

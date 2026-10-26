@@ -361,7 +361,9 @@ mod tests {
         assert_eq!(clipboard.bytes(), 16);
 
         let size2 = clipboard
-            .publish_bytes_with("screenshot-", ".jpg", b"second-image-bytes-longer", |_| Ok(None))
+            .publish_bytes_with("screenshot-", ".jpg", b"second-image-bytes-longer", |_| {
+                Ok(None)
+            })
             .unwrap();
         assert_eq!(size2, 25);
         assert_eq!(clipboard.bytes(), 25);

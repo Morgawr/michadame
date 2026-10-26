@@ -83,7 +83,12 @@ impl SaveStateMeta {
 
     /// Returns a short label of the primary mounted media when the state was saved.
     pub fn media_label(&self) -> Option<String> {
-        for candidate in [&self.fdd1_path, &self.tape_path, &self.hdd1_path, &self.fdd2_path] {
+        for candidate in [
+            &self.fdd1_path,
+            &self.tape_path,
+            &self.hdd1_path,
+            &self.fdd2_path,
+        ] {
             let trimmed = candidate.trim();
             if !trimmed.is_empty() {
                 if let Some(name) = Path::new(trimmed).file_name().and_then(|s| s.to_str()) {
@@ -154,10 +159,7 @@ pub fn derive_pc98_game_key(config: &Pc98Config) -> (String, String) {
             if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
                 let trimmed_stem = stem.trim();
                 if !trimmed_stem.is_empty() {
-                    return (
-                        sanitize_game_key(trimmed_stem),
-                        trimmed_stem.to_string(),
-                    );
+                    return (sanitize_game_key(trimmed_stem), trimmed_stem.to_string());
                 }
             }
         }
@@ -188,10 +190,7 @@ pub fn derive_pc88_game_key(config: &Pc88Config) -> (String, String) {
             if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
                 let trimmed_stem = stem.trim();
                 if !trimmed_stem.is_empty() {
-                    return (
-                        sanitize_game_key(trimmed_stem),
-                        trimmed_stem.to_string(),
-                    );
+                    return (sanitize_game_key(trimmed_stem), trimmed_stem.to_string());
                 }
             }
         }

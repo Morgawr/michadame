@@ -13,7 +13,11 @@ fn set_private_file_permissions(path: &Path) {
 }
 
 pub fn quarantine_corrupted_config(path: &Path) -> Option<PathBuf> {
-    if path.exists() && std::fs::metadata(path).map(|m| m.len() > 0).unwrap_or(false) {
+    if path.exists()
+        && std::fs::metadata(path)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+    {
         let parent = path.parent()?;
         let backups_dir = parent.join("backups");
         let _ = std::fs::create_dir_all(&backups_dir);
@@ -90,7 +94,10 @@ pub fn prune_old_backups(dir: &Path, max_keep: usize) {
                 s.starts_with("config-") && s.ends_with(".toml")
             })
             .map(|e| {
-                let mtime = e.metadata().and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH);
+                let mtime = e
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(UNIX_EPOCH);
                 (mtime, e.path())
             })
             .collect();
@@ -105,7 +112,6 @@ pub fn prune_old_backups(dir: &Path, max_keep: usize) {
     }
 }
 
-
 pub fn store_config_atomic_at(path: &Path, cfg: &MichadameConfig) -> Result<(), confy::ConfyError> {
     create_rotating_backup(path);
 
@@ -116,7 +122,9 @@ pub fn store_config_atomic_at(path: &Path, cfg: &MichadameConfig) -> Result<(), 
 
     let tmp_path = parent.join(format!(
         ".{}.tmp-{}",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("config"),
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("config"),
         std::process::id()
     ));
 
@@ -326,7 +334,10 @@ pub fn save_global_hardware_config(state: &mut AppState) {
     save_config(state);
 }
 
-pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(), confy::ConfyError> {
+pub fn save_global_hardware_config_at(
+    path: &Path,
+    state: &AppState,
+) -> Result<(), confy::ConfyError> {
     if let Some(err) = &state.config_load_error {
         tracing::error!(
             "ABORTING save_global_hardware_config: Configuration loading failed at startup ({}). Overwriting is blocked to protect existing data.",
@@ -339,7 +350,7 @@ pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(
 
     let mut cfg = confy::load_path::<MichadameConfig>(path)?;
 
-    cfg. replay = state.replay.config.clone();
+    cfg.replay = state.replay.config.clone();
     cfg.video_device = Some(state.hardware.selected_video_device.clone());
     cfg.usb_device = state.hardware.selected_usb_device.clone();
     if state.video_player.is_none()
@@ -608,7 +619,12 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) -> bool {
     let mut audio_hardware_changed = false;
     if let Some(ref source) = profile.audio_source {
         if state.hardware.selected_audio_source_name.as_ref() != Some(source) {
-            if state.hardware.audio_sources.iter().any(|(_, name)| name == source) {
+            if state
+                .hardware
+                .audio_sources
+                .iter()
+                .any(|(_, name)| name == source)
+            {
                 state.hardware.selected_audio_source_name = Some(source.clone());
                 audio_hardware_changed = true;
             }
@@ -761,9 +777,7 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     if !cfg.has_shown_first_run_warning.unwrap_or(false) {
         state.ui.show_first_run_dialog = true;
     }
-    state
-        .ocr
-        .set_backend(cfg.ocr_backend.unwrap_or_default());
+    state.ocr.set_backend(cfg.ocr_backend.unwrap_or_default());
     state.ocr.sticky_distance = cfg.ocr_sticky_distance.unwrap_or(0.6);
     state.ocr.hide_overlay = cfg.ocr_hide_overlay.unwrap_or(false);
     state.ocr.timeout_seconds = cfg.ocr_timeout_seconds.unwrap_or(45);
@@ -917,7 +931,10 @@ mod tests {
         assert_eq!(state.cathode_interference.intensity, 0.9);
         assert_eq!(state.cathode_interference.frequency, 2.0);
         assert_eq!(state.cathode_interference.lightbulb_effect, 0.65);
-        assert_eq!(state.selected_crt_filter, crate::devices::filter_type::CrtFilter::Halo);
+        assert_eq!(
+            state.selected_crt_filter,
+            crate::devices::filter_type::CrtFilter::Halo
+        );
         assert!(state.video.pixelate_filter_enabled);
         assert_eq!(
             state.crt_filter.load(Ordering::Relaxed),
@@ -1441,7 +1458,8 @@ mod tests {
 
     #[test]
     fn test_save_aborted_when_config_load_error_set() {
-        let dir = std::env::temp_dir().join(format!("michadame-test-abort-{}", crate::replay::now_us()));
+        let dir =
+            std::env::temp_dir().join(format!("michadame-test-abort-{}", crate::replay::now_us()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("test-config.toml");
         std::fs::write(&path, "original_content = true\n").unwrap();
@@ -1450,7 +1468,10 @@ mod tests {
         state.config_load_error = Some("Failed to parse TOML".to_string());
 
         let result = save_config_at(&path, &mut state);
-        assert!(result.is_err(), "save_config_at must return an Err when config_load_error is set");
+        assert!(
+            result.is_err(),
+            "save_config_at must return an Err when config_load_error is set"
+        );
 
         // Verify the original file on disk was NOT touched or overwritten
         let current_content = std::fs::read_to_string(&path).unwrap();
@@ -1461,14 +1482,20 @@ mod tests {
 
     #[test]
     fn test_save_aborted_when_existing_file_corrupt() {
-        let dir = std::env::temp_dir().join(format!("michadame-test-corrupt-{}", crate::replay::now_us()));
+        let dir = std::env::temp_dir().join(format!(
+            "michadame-test-corrupt-{}",
+            crate::replay::now_us()
+        ));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("test-config.toml");
         std::fs::write(&path, "invalid = [[[\n").unwrap();
 
         let mut state = AppState::default();
         let result = save_config_at(&path, &mut state);
-        assert!(result.is_err(), "save_config_at must refuse to overwrite corrupt config on disk");
+        assert!(
+            result.is_err(),
+            "save_config_at must refuse to overwrite corrupt config on disk"
+        );
 
         let current_content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(current_content, "invalid = [[[\n");
@@ -1478,14 +1505,20 @@ mod tests {
 
     #[test]
     fn test_quarantine_corrupted_config() {
-        let dir = std::env::temp_dir().join(format!("michadame-test-quarantine-{}", crate::replay::now_us()));
+        let dir = std::env::temp_dir().join(format!(
+            "michadame-test-quarantine-{}",
+            crate::replay::now_us()
+        ));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("test-config.toml");
         let corrupted_bytes = b"bad toml content = { [ unclosed";
         std::fs::write(&path, corrupted_bytes).unwrap();
 
         let quarantined = quarantine_corrupted_config(&path);
-        assert!(quarantined.is_some(), "quarantine_corrupted_config should return a quarantine path");
+        assert!(
+            quarantined.is_some(),
+            "quarantine_corrupted_config should return a quarantine path"
+        );
         let q_path = quarantined.unwrap();
         assert!(q_path.exists(), "quarantine file must exist on disk");
         assert_eq!(std::fs::read(&q_path).unwrap(), corrupted_bytes);
@@ -1495,7 +1528,8 @@ mod tests {
 
     #[test]
     fn test_rotating_backup_and_pruning() {
-        let dir = std::env::temp_dir().join(format!("michadame-test-backup-{}", crate::replay::now_us()));
+        let dir =
+            std::env::temp_dir().join(format!("michadame-test-backup-{}", crate::replay::now_us()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("default-config.toml");
         std::fs::write(&path, "test = 1\n").unwrap();
@@ -1524,14 +1558,18 @@ mod tests {
                 name.starts_with("config-") && name.ends_with(".toml")
             })
             .count();
-        assert_eq!(count, 5, "prune_old_backups should reduce count to max_keep");
+        assert_eq!(
+            count, 5,
+            "prune_old_backups should reduce count to max_keep"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_legacy_config_missing_fields_deserialization() {
-        let dir = std::env::temp_dir().join(format!("michadame-test-legacy-{}", crate::replay::now_us()));
+        let dir =
+            std::env::temp_dir().join(format!("michadame-test-legacy-{}", crate::replay::now_us()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("test-config.toml");
         let old_toml = r#"
@@ -1546,7 +1584,8 @@ crt_hard_scan = -10.0
 crt_brightboost = 1.6
 "#;
         std::fs::write(&path, old_toml).unwrap();
-        let loaded: MichadameConfig = confy::load_path(&path).expect("Old TOML should deserialize cleanly");
+        let loaded: MichadameConfig =
+            confy::load_path(&path).expect("Old TOML should deserialize cleanly");
         assert_eq!(loaded.active_profile, "Saturn");
         assert!(loaded.profiles.contains_key("Saturn"));
         assert!(loaded.profiles.contains_key("Dreamcast"));
@@ -1591,7 +1630,9 @@ crt_brightboost = 1.6
         state.video.crt_glass_intensity = 0.85;
 
         let dreamcast_profile = build_profile_from_state(&state);
-        state.profiles.insert("Dreamcast".to_string(), dreamcast_profile);
+        state
+            .profiles
+            .insert("Dreamcast".to_string(), dreamcast_profile);
 
         // 2. Configure PS2 profile with CRT Off, Glass OFF
         let mut ps2_profile = Profile::default();
@@ -1713,9 +1754,7 @@ crt_brightboost = 1.6
         state
             .profiles
             .insert("Dreamcast".to_string(), Profile::default());
-        state
-            .profiles
-            .insert("PS2".to_string(), Profile::default());
+        state.profiles.insert("PS2".to_string(), Profile::default());
 
         save_config_at(&path, &mut state).unwrap();
 
@@ -1818,7 +1857,11 @@ crt_brightboost = 1.6
             crate::replay::now_us()
         ));
         // An existing config written before the Twitch table existed.
-        std::fs::write(&path, "active_profile = \"Default\"\nocr_timeout_seconds = 30\n").unwrap();
+        std::fs::write(
+            &path,
+            "active_profile = \"Default\"\nocr_timeout_seconds = 30\n",
+        )
+        .unwrap();
         let old: MichadameConfig = confy::load_path(&path).unwrap();
         assert_eq!(old.twitch, crate::config::TwitchConfig::default());
         assert_eq!(old.ocr_timeout_seconds, Some(30));
@@ -1870,7 +1913,10 @@ crt_brightboost = 1.6
         save_config_at(&path, &mut state).unwrap();
         let loaded: MichadameConfig = confy::load_path(&path).unwrap();
         assert_eq!(loaded.active_profile, "Retro");
-        assert_eq!(loaded.profiles.get("Retro").unwrap().crt_hard_scan, Some(-15.0));
+        assert_eq!(
+            loaded.profiles.get("Retro").unwrap().crt_hard_scan,
+            Some(-15.0)
+        );
 
         // 2. Switch to video mode
         let (cmd_tx, _cmd_rx) = crossbeam_channel::unbounded();
@@ -1906,10 +1952,7 @@ crt_brightboost = 1.6
             reloaded.profiles.get("Retro").unwrap().crt_hard_scan,
             Some(-15.0)
         );
-        assert_eq!(
-            reloaded.profiles.get("Retro").unwrap().vibrance,
-            Some(1.3)
-        );
+        assert_eq!(reloaded.profiles.get("Retro").unwrap().vibrance, Some(1.3));
 
         let vid_prof = reloaded.video_profile.expect("video_profile must be saved");
         assert_eq!(vid_prof.crt_hard_scan, Some(-3.0));
@@ -1931,7 +1974,9 @@ crt_brightboost = 1.6
         let mut retro_profile = Profile::default();
         retro_profile.crt_hard_scan = Some(-15.0);
         retro_profile.vibrance = Some(1.3);
-        config.profiles.insert("Retro".to_string(), retro_profile.clone());
+        config
+            .profiles
+            .insert("Retro".to_string(), retro_profile.clone());
         config.active_profile = "Retro".to_string();
         store_config_atomic_at(&path, &config).unwrap();
 
@@ -1962,12 +2007,11 @@ crt_brightboost = 1.6
             reloaded.profiles.get("Retro").unwrap().crt_hard_scan,
             Some(-15.0)
         );
-        assert_eq!(
-            reloaded.profiles.get("Retro").unwrap().vibrance,
-            Some(1.3)
-        );
+        assert_eq!(reloaded.profiles.get("Retro").unwrap().vibrance, Some(1.3));
 
-        let gs_prof = reloaded.gamescope_profile.expect("gamescope_profile must be saved");
+        let gs_prof = reloaded
+            .gamescope_profile
+            .expect("gamescope_profile must be saved");
         assert_eq!(gs_prof.crt_hard_scan, Some(-5.0));
         assert_eq!(gs_prof.vibrance, Some(1.8));
 
@@ -2015,8 +2059,14 @@ crt_brightboost = 1.6
         let mut fresh_state = AppState::default();
         apply_config(&mut fresh_state, &loaded);
         assert_eq!(fresh_state.webcam.config.enabled, true);
-        assert_eq!(fresh_state.webcam.config.device, Some("/dev/video2".to_string()));
-        assert_eq!(fresh_state.webcam.config.format_fourcc, Some("MJPG".to_string()));
+        assert_eq!(
+            fresh_state.webcam.config.device,
+            Some("/dev/video2".to_string())
+        );
+        assert_eq!(
+            fresh_state.webcam.config.format_fourcc,
+            Some("MJPG".to_string())
+        );
         assert_eq!(fresh_state.webcam.config.resolution, Some((1280, 720)));
         assert_eq!(fresh_state.webcam.config.framerate, Some(30));
         assert!((fresh_state.webcam.config.pos_x_pct - 0.55).abs() < 1e-4);

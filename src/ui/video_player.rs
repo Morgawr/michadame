@@ -79,7 +79,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
     let is_pc88 = state.pc88.is_active;
     let mut passthrough_active = false;
     if is_gamescope {
-        let toggle_passthrough = ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
+        let toggle_passthrough =
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
         if toggle_passthrough {
             if let Some(hook) = &mut state.gamescope_hook {
                 let _now_enabled = hook.toggle_passthrough();
@@ -92,9 +93,13 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 ctx.request_repaint();
             }
         }
-        passthrough_active = state.gamescope_hook.as_ref().map_or(false, |h| h.passthrough_enabled);
+        passthrough_active = state
+            .gamescope_hook
+            .as_ref()
+            .map_or(false, |h| h.passthrough_enabled);
     } else if is_pc98 {
-        let toggle_passthrough = ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
+        let toggle_passthrough =
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
         if toggle_passthrough {
             let _now_enabled = state.pc98.toggle_passthrough();
             ctx.memory_mut(|m| {
@@ -107,11 +112,15 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::F5)) {
             let slot = state.pc98.active_slot;
-            state.pc98.send_command(crate::pc98::Pc98Command::SaveState { slot });
+            state
+                .pc98
+                .send_command(crate::pc98::Pc98Command::SaveState { slot });
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::F9)) {
             let slot = state.pc98.active_slot;
-            state.pc98.send_command(crate::pc98::Pc98Command::LoadState { slot });
+            state
+                .pc98
+                .send_command(crate::pc98::Pc98Command::LoadState { slot });
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::F6)) {
             let slot = state.pc98.cycle_slot(-1);
@@ -127,7 +136,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         }
         passthrough_active = state.pc98.passthrough_enabled;
     } else if is_pc88 {
-        let toggle_passthrough = ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
+        let toggle_passthrough =
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
         if toggle_passthrough {
             let _now_enabled = state.pc88.toggle_passthrough();
             ctx.memory_mut(|m| {
@@ -140,11 +150,15 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::F5)) {
             let slot = state.pc88.active_slot;
-            state.pc88.send_command(crate::pc88::Pc88Command::SaveState { slot });
+            state
+                .pc88
+                .send_command(crate::pc88::Pc88Command::SaveState { slot });
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::F9)) {
             let slot = state.pc88.active_slot;
-            state.pc88.send_command(crate::pc88::Pc88Command::LoadState { slot });
+            state
+                .pc88
+                .send_command(crate::pc88::Pc88Command::LoadState { slot });
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::F6)) {
             let slot = state.pc88.cycle_slot(-1);
@@ -176,7 +190,10 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
     }
 
     // Space to capture OCR; Shift+Space to clear OCR boxes (suppressed when passthrough is active)
-    if !passthrough_active && !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+    if !passthrough_active
+        && !ctx.wants_keyboard_input()
+        && ctx.input(|i| i.key_pressed(egui::Key::Space))
+    {
         if ctx.input(|i| i.modifiers.shift) {
             if !state.ocr.boxes.is_empty() {
                 state.clear_ocr();
@@ -220,8 +237,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             .expect("Video texture not initialized");
         let texture_size = video_texture.size_vec2();
 
-        let filter =
-            CrtFilter::from_u8(state.crt_filter.load(Ordering::Relaxed));
+        let filter = CrtFilter::from_u8(state.crt_filter.load(Ordering::Relaxed));
         let fft_filter_ref = if state.video.fft_filter_enabled {
             state.fft_filter.clone()
         } else {
@@ -298,11 +314,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         } else {
             state.video.horizontal_stretch
         };
-        let rendered_area_geom = crate::video::gpu::geometry::RenderedArea::fit(
-            res,
-            output_size,
-            h_stretch,
-        );
+        let rendered_area_geom =
+            crate::video::gpu::geometry::RenderedArea::fit(res, output_size, h_stretch);
         let video_rect_min = response.rect.min
             + egui::vec2(
                 rendered_area_geom.x as f32 / ppp,
@@ -316,7 +329,10 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
         let is_window_focused = ctx.input(|i| i.focused);
         if is_gamescope && passthrough_active {
-            let is_cursor_hidden = state.gamescope_hook.as_ref().map_or(false, |h| h.is_cursor_hidden());
+            let is_cursor_hidden = state
+                .gamescope_hook
+                .as_ref()
+                .map_or(false, |h| h.is_cursor_hidden());
             if is_window_focused && is_cursor_hidden {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::Locked));
                 ui.ctx().set_cursor_icon(egui::CursorIcon::None);
@@ -336,7 +352,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             }
             // Consume key and text events so game inputs don't leak into egui widgets while passthrough is on
             ctx.input_mut(|i| {
-                i.events.retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
+                i.events
+                    .retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
             });
         } else if is_gamescope {
             ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
@@ -353,14 +370,20 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::Locked));
                 ui.ctx().set_cursor_icon(egui::CursorIcon::None);
                 let target_res = state.pc98.resolution;
-                crate::pc98::input::forward_pc98_inputs(&mut state.pc98, ctx, video_rect, target_res);
+                crate::pc98::input::forward_pc98_inputs(
+                    &mut state.pc98,
+                    ctx,
+                    video_rect,
+                    target_res,
+                );
             } else {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
                 state.pc98.release_all_inputs();
             }
             ctx.input_mut(|i| {
-                i.events.retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
+                i.events
+                    .retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
             });
         } else if is_pc98 {
             ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
@@ -377,14 +400,20 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::Locked));
                 ui.ctx().set_cursor_icon(egui::CursorIcon::None);
                 let target_res = state.pc88.resolution;
-                crate::pc98::input::forward_pc88_inputs(&mut state.pc88, ctx, video_rect, target_res);
+                crate::pc98::input::forward_pc88_inputs(
+                    &mut state.pc88,
+                    ctx,
+                    video_rect,
+                    target_res,
+                );
             } else {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
                 state.pc88.release_all_inputs();
             }
             ctx.input_mut(|i| {
-                i.events.retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
+                i.events
+                    .retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
             });
         } else if is_pc88 {
             ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
@@ -401,7 +430,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         // Use a 25ms safety timeout (1.5 frame periods):
                         // Under active 60 FPS streaming, this unblocks immediately when Gamescope delivers
                         // the frame (~16.67ms cadence).
-                        if let Ok(frame) = dma.rx.recv_timeout(std::time::Duration::from_millis(25)) {
+                        if let Ok(frame) = dma.rx.recv_timeout(std::time::Duration::from_millis(25))
+                        {
                             hook.current_dmabuf_frame = Some(std::sync::Arc::new(frame));
                             state.video_frames_since_last_check += 1;
                             while let Ok(extra) = dma.rx.try_recv() {
@@ -476,12 +506,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         let real_mouse_active = !software_mouse_active
             && is_window_focused
             && is_real_game_cursor_active(state, pointer_pos, video_rect, is_hovering_controls);
-        let passthrough_hide_host_cursor = is_passthrough_host_cursor_hidden(
-            state,
-            pointer_pos,
-            video_rect,
-            is_hovering_controls,
-        );
+        let passthrough_hide_host_cursor =
+            is_passthrough_host_cursor_hidden(state, pointer_pos, video_rect, is_hovering_controls);
 
         let (software_mouse_pos, software_mouse_clip) = if software_mouse_active {
             let pos = pointer_pos.map(|pos| {
@@ -512,7 +538,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             || light_switch_flicker_active
             || is_roll_active
         {
-            ui.ctx().request_repaint_after(std::time::Duration::from_nanos(1_000_000_000 / 60));
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_nanos(1_000_000_000 / 60));
         }
 
         if !is_showing_roll
@@ -599,8 +626,11 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 crate::gamescope::egl::drain_orphaned_dma_textures(painter.gl());
                             }
                             let output_size = (rect.width() * ppp, rect.height() * ppp);
-                            let mut fallback_tex = video_texture_id.and_then(|id| painter.texture(id));
-                            if let (Some(importer_arc), Some(dma_frame)) = (&egl_importer_cb, &latest_dmabuf_frame_cb) {
+                            let mut fallback_tex =
+                                video_texture_id.and_then(|id| painter.texture(id));
+                            if let (Some(importer_arc), Some(dma_frame)) =
+                                (&egl_importer_cb, &latest_dmabuf_frame_cb)
+                            {
                                 if let Ok(mut importer) = importer_arc.lock() {
                                     unsafe {
                                         if let Some(imported_tex) = importer.import_dmabuf(
@@ -623,7 +653,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                             let res = latest_frame
                                 .as_ref()
                                 .map(|f| (f.width, f.height))
-                                .or_else(|| latest_dmabuf_frame_cb.as_ref().map(|f| (f.width, f.height)))
+                                .or_else(|| {
+                                    latest_dmabuf_frame_cb.as_ref().map(|f| (f.width, f.height))
+                                })
                                 .or_else(|| {
                                     if stream_res.0 > 0 {
                                         Some(stream_res)
@@ -679,11 +711,12 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                     capture_frame_pixels_raw(painter.gl(), rendered_area)
                                 {
                                     if let Some(req_tx) = &ocr_req_sender_cb {
-                                        let _ = req_tx.send(crate::ocr::models::OcrCaptureRequest {
-                                            raw_rgba: pixels,
-                                            width: w,
-                                            height: h,
-                                        });
+                                        let _ =
+                                            req_tx.send(crate::ocr::models::OcrCaptureRequest {
+                                                raw_rgba: pixels,
+                                                width: w,
+                                                height: h,
+                                            });
                                     }
                                 }
                             }
@@ -798,18 +831,63 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 state.video.horizontal_stretch
             };
             let median_filter_enabled = !is_showing_roll && state.video.median_filter_enabled;
-            let median_mix = if is_showing_roll { 0.0 } else { state.video.median_mix };
-            let deinterlace_filter_enabled = !is_showing_roll && state.video.deinterlace_filter_enabled;
-            let deinterlace_mode = if is_showing_roll { 0 } else { state.video.deinterlace_mode };
-            let deinterlace_blend = if is_showing_roll { 0.0 } else { state.video.deinterlace_blend };
-            let deinterlace_motion_threshold = if is_showing_roll { 0.0 } else { state.video.deinterlace_motion_threshold };
-            let deinterlace_line_spacing = if is_showing_roll { 1.0 } else { state.video.deinterlace_line_spacing };
-            let deinterlace_spatial_mix = if is_showing_roll { 0.0 } else { state.video.deinterlace_spatial_mix };
-            let vibrance = if is_showing_roll { 0.0 } else { state.video.vibrance };
-            let overscan_x = if is_showing_roll { 0.0 } else { state.video.overscan_x };
-            let overscan_y = if is_showing_roll { 0.0 } else { state.video.overscan_y };
-            let underscan_x = if is_showing_roll { 0.0 } else { state.video.underscan_x };
-            let underscan_y = if is_showing_roll { 0.0 } else { state.video.underscan_y };
+            let median_mix = if is_showing_roll {
+                0.0
+            } else {
+                state.video.median_mix
+            };
+            let deinterlace_filter_enabled =
+                !is_showing_roll && state.video.deinterlace_filter_enabled;
+            let deinterlace_mode = if is_showing_roll {
+                0
+            } else {
+                state.video.deinterlace_mode
+            };
+            let deinterlace_blend = if is_showing_roll {
+                0.0
+            } else {
+                state.video.deinterlace_blend
+            };
+            let deinterlace_motion_threshold = if is_showing_roll {
+                0.0
+            } else {
+                state.video.deinterlace_motion_threshold
+            };
+            let deinterlace_line_spacing = if is_showing_roll {
+                1.0
+            } else {
+                state.video.deinterlace_line_spacing
+            };
+            let deinterlace_spatial_mix = if is_showing_roll {
+                0.0
+            } else {
+                state.video.deinterlace_spatial_mix
+            };
+            let vibrance = if is_showing_roll {
+                0.0
+            } else {
+                state.video.vibrance
+            };
+            let overscan_x = if is_showing_roll {
+                0.0
+            } else {
+                state.video.overscan_x
+            };
+            let overscan_y = if is_showing_roll {
+                0.0
+            } else {
+                state.video.overscan_y
+            };
+            let underscan_x = if is_showing_roll {
+                0.0
+            } else {
+                state.video.underscan_x
+            };
+            let underscan_y = if is_showing_roll {
+                0.0
+            } else {
+                state.video.underscan_y
+            };
             let border_crop = if is_showing_roll {
                 [0.0, 0.0, 0.0, 0.0]
             } else {
@@ -820,7 +898,11 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     state.video.border_crop_bottom,
                 ]
             };
-            let retro_pc_ambient_glow = if is_showing_roll { 0.0 } else { retro_pc_ambient_glow };
+            let retro_pc_ambient_glow = if is_showing_roll {
+                0.0
+            } else {
+                retro_pc_ambient_glow
+            };
             let scaler_filter = if is_showing_roll {
                 0
             } else {
@@ -828,13 +910,30 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             };
             let latest_frame = active_frame.clone();
             let video_texture_id = state.video_texture.as_ref().map(|t| t.id());
-            let fft_clone = if is_showing_roll { None } else { fft_filter_ref.clone() };
-            let fft_threshold = if is_showing_roll { 0.0 } else { state.fft_mask_threshold };
-            let fft_black = if is_showing_roll { 0.0 } else { state.fft_black_threshold };
+            let fft_clone = if is_showing_roll {
+                None
+            } else {
+                fft_filter_ref.clone()
+            };
+            let fft_threshold = if is_showing_roll {
+                0.0
+            } else {
+                state.fft_mask_threshold
+            };
+            let fft_black = if is_showing_roll {
+                0.0
+            } else {
+                state.fft_black_threshold
+            };
             let glass_params = if is_showing_roll {
                 None
             } else {
-                Some(video::gpu::GlassShaderParams::from_state(state, [0.0, 0.0], 0.0, 0))
+                Some(video::gpu::GlassShaderParams::from_state(
+                    state,
+                    [0.0, 0.0],
+                    0.0,
+                    0,
+                ))
             };
 
             let replay_gpu = state.replay.gpu.clone();
@@ -871,7 +970,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         crate::gamescope::egl::drain_orphaned_dma_textures(painter.gl());
                     }
                     let mut fallback_tex = video_texture_id.and_then(|id| painter.texture(id));
-                    if let (Some(importer_arc), Some(dma_frame)) = (&egl_importer_cb, &latest_dmabuf_frame_cb) {
+                    if let (Some(importer_arc), Some(dma_frame)) =
+                        (&egl_importer_cb, &latest_dmabuf_frame_cb)
+                    {
                         if let Ok(mut importer) = importer_arc.lock() {
                             unsafe {
                                 if let Some(imported_tex) = importer.import_dmabuf(
@@ -996,8 +1097,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
                     if !whiteboard_visible {
                         if let Some(request) = bank_capture_cb.take_pending() {
-                            let shot =
-                                capture_frame_pixels(painter.gl(), full_or_rendered_area);
+                            let shot = capture_frame_pixels(painter.gl(), full_or_rendered_area);
                             bank_capture_cb.save(request, shot);
                         }
 
@@ -1036,7 +1136,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             draw_video_file_controls(state, ui, ctx, response.rect);
         }
 
-        if (software_mouse_active || real_mouse_active || passthrough_hide_host_cursor) && !is_roll_active {
+        if (software_mouse_active || real_mouse_active || passthrough_hide_host_cursor)
+            && !is_roll_active
+        {
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
         }
 
@@ -1047,8 +1149,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             if state.whiteboard.is_visible() && mining_capture_this_frame {
                 let bank_capture_cb = bank_capture.clone();
                 let repaint_ctx = ctx.clone();
-                let full_window_effects =
-                    retro_pc_frame || night_mode_glow_intensity > 0.001;
+                let full_window_effects = retro_pc_frame || night_mode_glow_intensity > 0.001;
                 let capture_area = if full_window_effects {
                     crate::video::gpu::geometry::RenderedArea::full(output_size)
                 } else {
@@ -1120,16 +1221,18 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                             let hot_x = img.xhot as f32 * scale_x;
                             let hot_y = img.yhot as f32 * scale_y;
                             let top_left = egui::pos2(pos.x - hot_x, pos.y - hot_y);
-                            let cursor_rect = egui::Rect::from_min_size(top_left, egui::vec2(cursor_w, cursor_h));
+                            let cursor_rect =
+                                egui::Rect::from_min_size(top_left, egui::vec2(cursor_w, cursor_h));
 
-                            ui.painter()
-                                .with_clip_rect(response.rect)
-                                .image(
-                                    texture.id(),
-                                    cursor_rect,
-                                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                                    egui::Color32::WHITE,
-                                );
+                            ui.painter().with_clip_rect(response.rect).image(
+                                texture.id(),
+                                cursor_rect,
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
+                                egui::Color32::WHITE,
+                            );
                             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
                         }
                     }
@@ -1167,19 +1270,21 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             } else {
                 None
             };
-            let broadcast_sink = state.twitch.broadcast.as_ref().map(|b| {
-                crate::replay::gpu::BroadcastSink {
-                    tx: b.video_tx.clone(),
-                    free_rx: b.video_free_rx.clone(),
-                    dropped: b.metrics.video_dropped.clone(),
-                }
-            });
+            let broadcast_sink =
+                state
+                    .twitch
+                    .broadcast
+                    .as_ref()
+                    .map(|b| crate::replay::gpu::BroadcastSink {
+                        tx: b.video_tx.clone(),
+                        free_rx: b.video_free_rx.clone(),
+                        dropped: b.metrics.video_dropped.clone(),
+                    });
             let at = active_frame
                 .as_ref()
                 .map(|f| f.captured_at)
                 .unwrap_or_else(crate::replay::now_us);
-            let full_window_effects =
-                retro_pc_frame || night_mode_glow_intensity > 0.001;
+            let full_window_effects = retro_pc_frame || night_mode_glow_intensity > 0.001;
             let rendered_area = if full_window_effects {
                 crate::video::gpu::geometry::RenderedArea::full(output_size)
             } else {
@@ -1188,17 +1293,15 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
             let callback = egui::PaintCallback {
                 rect: response.rect,
-                callback: std::sync::Arc::new(egui_glow::CallbackFn::new(
-                    move |_info, painter| {
-                        replay_gpu.lock().unwrap().capture(
-                            painter.gl(),
-                            replay.as_ref(),
-                            broadcast_sink.as_ref(),
-                            rendered_area,
-                            at,
-                        );
-                    },
-                )),
+                callback: std::sync::Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
+                    replay_gpu.lock().unwrap().capture(
+                        painter.gl(),
+                        replay.as_ref(),
+                        broadcast_sink.as_ref(),
+                        rendered_area,
+                        at,
+                    );
+                })),
             };
             ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Tooltip,
@@ -1223,7 +1326,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
         if !passthrough_active
             && response.double_clicked()
-            && !state.whiteboard.contains_pointer(pointer_pos, response.rect)
+            && !state
+                .whiteboard
+                .contains_pointer(pointer_pos, response.rect)
         {
             let is_fullscreen = !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(is_fullscreen));
@@ -1239,7 +1344,11 @@ pub fn is_software_mouse_active(state: &AppState, is_on_crt_surface: bool) -> bo
     if state.twitch.is_roll_active() {
         return false;
     }
-    if state.gamescope_hook.as_ref().map_or(false, |h| h.is_active && h.is_cursor_hidden()) {
+    if state
+        .gamescope_hook
+        .as_ref()
+        .map_or(false, |h| h.is_active && h.is_cursor_hidden())
+    {
         return false;
     }
     if (state.pc98.is_active && state.pc98.passthrough_enabled)
@@ -1475,7 +1584,8 @@ pub fn draw_video_file_controls(
                         let exit_btn_width = 85.0;
                         let item_spacing = ui.spacing().item_spacing.x;
                         let remaining_width = ui.available_width();
-                        let seek_width = (remaining_width - exit_btn_width - item_spacing).max(60.0);
+                        let seek_width =
+                            (remaining_width - exit_btn_width - item_spacing).max(60.0);
 
                         let duration = player.duration_secs.max(0.1);
                         let current_pos = player.current_position_secs.clamp(0.0, duration);
@@ -1497,8 +1607,9 @@ pub fn draw_video_file_controls(
 
                         if seek_resp.dragged() {
                             if let Some(mouse_pos) = seek_resp.interact_pointer_pos() {
-                                let fraction = ((mouse_pos.x - seek_rect.min.x) / seek_rect.width())
-                                    .clamp(0.0, 1.0);
+                                let fraction = ((mouse_pos.x - seek_rect.min.x)
+                                    / seek_rect.width())
+                                .clamp(0.0, 1.0);
                                 let seek_target = fraction as f64 * duration;
                                 player.current_position_secs = seek_target;
                                 let _ = player
@@ -1511,8 +1622,9 @@ pub fn draw_video_file_controls(
                         if seek_resp.drag_stopped() {
                             player.is_seeking = false;
                             if let Some(mouse_pos) = seek_resp.interact_pointer_pos() {
-                                let fraction = ((mouse_pos.x - seek_rect.min.x) / seek_rect.width())
-                                    .clamp(0.0, 1.0);
+                                let fraction = ((mouse_pos.x - seek_rect.min.x)
+                                    / seek_rect.width())
+                                .clamp(0.0, 1.0);
                                 let seek_target = fraction as f64 * duration;
                                 player.current_position_secs = seek_target;
                                 let _ = player
@@ -1530,8 +1642,9 @@ pub fn draw_video_file_controls(
 
                         if seek_resp.clicked() && !seek_resp.dragged() {
                             if let Some(mouse_pos) = seek_resp.interact_pointer_pos() {
-                                let fraction = ((mouse_pos.x - seek_rect.min.x) / seek_rect.width())
-                                    .clamp(0.0, 1.0);
+                                let fraction = ((mouse_pos.x - seek_rect.min.x)
+                                    / seek_rect.width())
+                                .clamp(0.0, 1.0);
                                 let seek_target = fraction as f64 * duration;
                                 player.current_position_secs = seek_target;
                                 let _ = player
@@ -1543,15 +1656,17 @@ pub fn draw_video_file_controls(
 
                         // Hover timestamp tooltip
                         if let Some(hover_pos) = seek_resp.hover_pos() {
-                            let hover_fraction = ((hover_pos.x - seek_rect.min.x) / seek_rect.width())
-                                .clamp(0.0, 1.0);
+                            let hover_fraction = ((hover_pos.x - seek_rect.min.x)
+                                / seek_rect.width())
+                            .clamp(0.0, 1.0);
                             let hover_secs = hover_fraction as f64 * duration;
                             seek_resp.clone().on_hover_ui_at_pointer(|ui| {
                                 ui.label(
-                                    egui::RichText::new(crate::video::player::format_time_with_duration(
-                                        hover_secs,
-                                        duration,
-                                    ))
+                                    egui::RichText::new(
+                                        crate::video::player::format_time_with_duration(
+                                            hover_secs, duration,
+                                        ),
+                                    )
                                     .monospace()
                                     .size(11.0)
                                     .color(egui::Color32::WHITE),
@@ -1728,7 +1843,8 @@ pub fn forward_gamescope_inputs(
         if raw_motion.x != 0.0 || raw_motion.y != 0.0 {
             let scale_x = target_res.0 as f64 / video_rect.width().max(1.0) as f64;
             let scale_y = target_res.1 as f64 / video_rect.height().max(1.0) as f64;
-            client.send_pointer_motion(raw_motion.x as f64 * scale_x, raw_motion.y as f64 * scale_y);
+            client
+                .send_pointer_motion(raw_motion.x as f64 * scale_x, raw_motion.y as f64 * scale_y);
         }
     } else {
         // In standard mode (Slay the Spire 2, RPGs, strategy):
@@ -1765,7 +1881,12 @@ pub fn forward_gamescope_inputs(
     let events = ctx.input(|i| i.events.clone());
     for event in events {
         match event {
-            egui::Event::PointerButton { pos, button, pressed, .. } => {
+            egui::Event::PointerButton {
+                pos,
+                button,
+                pressed,
+                ..
+            } => {
                 let btn_code = match button {
                     egui::PointerButton::Primary => crate::gamescope::input::BTN_LEFT,
                     egui::PointerButton::Secondary => crate::gamescope::input::BTN_RIGHT,
@@ -1778,8 +1899,10 @@ pub fn forward_gamescope_inputs(
                     client.send_button(btn_code, pressed);
                 } else if pressed {
                     if video_rect.contains(pos) {
-                        let rel_x = ((pos.x - video_rect.min.x) / video_rect.width()).clamp(0.0, 1.0);
-                        let rel_y = ((pos.y - video_rect.min.y) / video_rect.height()).clamp(0.0, 1.0);
+                        let rel_x =
+                            ((pos.x - video_rect.min.x) / video_rect.width()).clamp(0.0, 1.0);
+                        let rel_y =
+                            ((pos.y - video_rect.min.y) / video_rect.height()).clamp(0.0, 1.0);
                         let gs_x = rel_x as f64 * target_res.0 as f64;
                         let gs_y = rel_y as f64 * target_res.1 as f64;
                         client.send_pointer_motion_absolute(gs_x, gs_y);
@@ -1803,14 +1926,17 @@ pub fn forward_gamescope_inputs(
                             // Touchpad / smooth scroll: 50 points per notch
                             (delta.x as f64 / 50.0, -delta.y as f64 / 50.0)
                         }
-                        egui::MouseWheelUnit::Page => {
-                            (delta.x as f64 * 5.0, -delta.y as f64 * 5.0)
-                        }
+                        egui::MouseWheelUnit::Page => (delta.x as f64 * 5.0, -delta.y as f64 * 5.0),
                     };
                     client.send_scroll(scroll_x, scroll_y);
                 }
             }
-            egui::Event::Key { key, pressed, modifiers, .. } => {
+            egui::Event::Key {
+                key,
+                pressed,
+                modifiers,
+                ..
+            } => {
                 // Ignore Shift+Tab (handled as passthrough toggle)
                 if key == egui::Key::Tab && modifiers.shift {
                     continue;
@@ -1925,7 +2051,11 @@ mod tests {
         let window_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(640.0, 480.0));
 
         // When no video player active, always false
-        assert!(!is_hovering_video_controls(&state, Some(egui::pos2(320.0, 460.0)), window_rect));
+        assert!(!is_hovering_video_controls(
+            &state,
+            Some(egui::pos2(320.0, 460.0)),
+            window_rect
+        ));
 
         // When video player is active
         let (cmd_tx, _cmd_rx) = crossbeam_channel::unbounded();
@@ -1948,25 +2078,46 @@ mod tests {
         });
 
         // Near top/middle of screen -> false
-        assert!(!is_hovering_video_controls(&state, Some(egui::pos2(320.0, 240.0)), window_rect));
-        assert!(!is_hovering_video_controls(&state, Some(egui::pos2(320.0, 100.0)), window_rect));
+        assert!(!is_hovering_video_controls(
+            &state,
+            Some(egui::pos2(320.0, 240.0)),
+            window_rect
+        ));
+        assert!(!is_hovering_video_controls(
+            &state,
+            Some(egui::pos2(320.0, 100.0)),
+            window_rect
+        ));
 
         // Near bottom of screen within hover zone -> true
-        assert!(is_hovering_video_controls(&state, Some(egui::pos2(320.0, 460.0)), window_rect));
-        assert!(is_hovering_video_controls(&state, Some(egui::pos2(320.0, 440.0)), window_rect));
+        assert!(is_hovering_video_controls(
+            &state,
+            Some(egui::pos2(320.0, 460.0)),
+            window_rect
+        ));
+        assert!(is_hovering_video_controls(
+            &state,
+            Some(egui::pos2(320.0, 440.0)),
+            window_rect
+        ));
 
         // When actively seeking/dragging, remains true even if cursor moves away
         if let Some(ref mut p) = state.video_player {
             p.is_seeking = true;
         }
-        assert!(is_hovering_video_controls(&state, Some(egui::pos2(320.0, 100.0)), window_rect));
+        assert!(is_hovering_video_controls(
+            &state,
+            Some(egui::pos2(320.0, 100.0)),
+            window_rect
+        ));
         assert!(is_hovering_video_controls(&state, None, window_rect));
     }
 
     #[test]
     fn test_real_game_cursor_and_precedence() {
         let mut state = AppState::default();
-        let video_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
+        let video_rect =
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
         let cursor_pos = Some(egui::pos2(960.0, 540.0));
 
         let dummy_cursor = crate::gamescope::x11_cursor::GameCursorImage {
@@ -1979,7 +2130,9 @@ mod tests {
         };
 
         // 1. Without Gamescope hook -> real cursor inactive
-        assert!(!is_real_game_cursor_active(&state, cursor_pos, video_rect, false));
+        assert!(!is_real_game_cursor_active(
+            &state, cursor_pos, video_rect, false
+        ));
 
         // 2. Set up Gamescope hook with visible cursor image
         let monitor = crate::gamescope::x11_cursor::GamescopeX11CursorMonitor::dummy_for_test(
@@ -1994,20 +2147,31 @@ mod tests {
         });
 
         // Real cursor should be active in normal playback
-        assert!(is_real_game_cursor_active(&state, cursor_pos, video_rect, false));
+        assert!(is_real_game_cursor_active(
+            &state, cursor_pos, video_rect, false
+        ));
 
         // When mouse is hovering controls -> inactive
-        assert!(!is_real_game_cursor_active(&state, cursor_pos, video_rect, true));
+        assert!(!is_real_game_cursor_active(
+            &state, cursor_pos, video_rect, true
+        ));
 
         // When mouse is outside video rect -> inactive
-        assert!(!is_real_game_cursor_active(&state, Some(egui::pos2(2000.0, 500.0)), video_rect, false));
+        assert!(!is_real_game_cursor_active(
+            &state,
+            Some(egui::pos2(2000.0, 500.0)),
+            video_rect,
+            false
+        ));
         assert!(!is_real_game_cursor_active(&state, None, video_rect, false));
 
         // When passthrough is disabled -> inactive
         if let Some(h) = &mut state.gamescope_hook {
             h.passthrough_enabled = false;
         }
-        assert!(!is_real_game_cursor_active(&state, cursor_pos, video_rect, false));
+        assert!(!is_real_game_cursor_active(
+            &state, cursor_pos, video_rect, false
+        ));
         if let Some(h) = &mut state.gamescope_hook {
             h.passthrough_enabled = true;
         }
@@ -2018,17 +2182,23 @@ mod tests {
                 m.set_hidden_for_test(true);
             }
         }
-        assert!(!is_real_game_cursor_active(&state, cursor_pos, video_rect, false));
+        assert!(!is_real_game_cursor_active(
+            &state, cursor_pos, video_rect, false
+        ));
         if let Some(h) = &state.gamescope_hook {
             if let Some(m) = &h.x11_cursor_monitor {
                 m.set_hidden_for_test(false);
             }
         }
-        assert!(is_real_game_cursor_active(&state, cursor_pos, video_rect, false));
+        assert!(is_real_game_cursor_active(
+            &state, cursor_pos, video_rect, false
+        ));
 
         // When system dialog is open -> inactive
         state.ui.show_quit_dialog = true;
-        assert!(!is_real_game_cursor_active(&state, cursor_pos, video_rect, false));
+        assert!(!is_real_game_cursor_active(
+            &state, cursor_pos, video_rect, false
+        ));
         state.ui.show_quit_dialog = false;
 
         // PRECEDENCE TESTS:
@@ -2048,7 +2218,10 @@ mod tests {
             && is_window_focused
             && is_real_game_cursor_active(&state, cursor_pos, video_rect, is_hovering_controls);
         assert!(software_mouse_active, "Retro mouse must be active");
-        assert!(!real_mouse_active, "Retro mouse must take precedence over real mouse");
+        assert!(
+            !real_mouse_active,
+            "Retro mouse must take precedence over real mouse"
+        );
 
         // Case B: Retro mouse disabled + CRT enabled (Lottes)
         state.video.retro_software_mouse = false;
@@ -2059,7 +2232,10 @@ mod tests {
             && is_window_focused
             && is_real_game_cursor_active(&state, cursor_pos, video_rect, is_hovering_controls);
         assert!(!software_mouse_active, "Retro mouse must be inactive");
-        assert!(real_mouse_active, "Real mouse must be active when retro mouse is disabled");
+        assert!(
+            real_mouse_active,
+            "Real mouse must be active when retro mouse is disabled"
+        );
 
         // Case C: Retro mouse enabled + CRT filter OFF
         state.video.retro_software_mouse = true;
@@ -2069,8 +2245,14 @@ mod tests {
         let real_mouse_active = !software_mouse_active
             && is_window_focused
             && is_real_game_cursor_active(&state, cursor_pos, video_rect, is_hovering_controls);
-        assert!(!software_mouse_active, "Retro mouse must be inactive when CRT is off");
-        assert!(real_mouse_active, "Real mouse must be active when CRT is off");
+        assert!(
+            !software_mouse_active,
+            "Retro mouse must be inactive when CRT is off"
+        );
+        assert!(
+            real_mouse_active,
+            "Real mouse must be active when CRT is off"
+        );
 
         // Case D: Retro mouse disabled + CRT filter OFF
         state.video.retro_software_mouse = false;
@@ -2096,8 +2278,14 @@ mod tests {
         let real_mouse_active = !software_mouse_active
             && is_window_focused
             && is_real_game_cursor_active(&state, cursor_pos, video_rect, is_hovering_controls);
-        assert!(!software_mouse_active, "Retro mouse must NOT render during camera rotation");
-        assert!(!real_mouse_active, "Real mouse must NOT render during camera rotation");
+        assert!(
+            !software_mouse_active,
+            "Retro mouse must NOT render during camera rotation"
+        );
+        assert!(
+            !real_mouse_active,
+            "Real mouse must NOT render during camera rotation"
+        );
         assert!(
             is_passthrough_host_cursor_hidden(&state, cursor_pos, video_rect, is_hovering_controls),
             "Host hardware cursor must be hidden over video_rect during active passthrough"

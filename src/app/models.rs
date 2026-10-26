@@ -304,10 +304,7 @@ impl Default for AudioReactiveConfig {
     fn default() -> Self {
         let presets = Self::builtin_presets();
         let active_preset = AUDIO_REACTIVE_DEFAULT_PRESET.to_string();
-        let current = presets
-            .get(&active_preset)
-            .cloned()
-            .unwrap_or_default();
+        let current = presets.get(&active_preset).cloned().unwrap_or_default();
         Self {
             enabled: false,
             active_preset,
@@ -495,9 +492,9 @@ impl AudioReactiveRuntime {
             0.0
         };
         let stereo_alpha = 1.0 - (-dt / 0.030).exp();
-        self.stereo_balance =
-            (self.stereo_balance + (target_stereo - self.stereo_balance) * stereo_alpha)
-                .clamp(-1.0, 1.0);
+        self.stereo_balance = (self.stereo_balance
+            + (target_stereo - self.stereo_balance) * stereo_alpha)
+            .clamp(-1.0, 1.0);
 
         // Underdamped 2D harmonic spring oscillator for magnetic deflection yoke shake
         let bass_kick = (self.low_env - prev_low).max(0.0) * 32.0
@@ -701,7 +698,8 @@ pub struct WebcamState {
     pub active_stream: Option<crate::devices::webcam::WebcamStreamHandle>,
     pub texture: Option<egui::TextureHandle>,
     pub latest_frame: Option<Arc<crate::devices::webcam::WebcamFrame>>,
-    pub frame_receiver: Option<crossbeam_channel::Receiver<Arc<crate::devices::webcam::WebcamFrame>>>,
+    pub frame_receiver:
+        Option<crossbeam_channel::Receiver<Arc<crate::devices::webcam::WebcamFrame>>>,
     pub is_dragging: bool,
     pub drag_start_pointer: Option<egui::Pos2>,
     pub drag_start_pos: Option<[f32; 2]>,
@@ -854,11 +852,17 @@ mod tests {
         assert_eq!(state.crt.hard_scan, -8.0);
         assert_eq!(state.halo.brightboost, 1.30);
         assert_eq!(state.halo_defaults, state.halo);
-        assert_eq!(state.cathode_interference_defaults, state.cathode_interference);
+        assert_eq!(
+            state.cathode_interference_defaults,
+            state.cathode_interference
+        );
         assert!(!state.cathode_interference.enabled);
         assert!(state.config_load_error.is_none());
         assert!(state.config_quarantine_path.is_none());
-        assert_eq!(state.selected_crt_filter, crate::devices::filter_type::CrtFilter::Lottes);
+        assert_eq!(
+            state.selected_crt_filter,
+            crate::devices::filter_type::CrtFilter::Lottes
+        );
         assert_eq!(state.video.horizontal_stretch, 1.0);
     }
 
@@ -915,17 +919,18 @@ mod tests {
         }
         state.replay.audio.observe_reactive(&samples, 48000, 2);
         let raw = state.replay.audio.take_reactive_raw();
-        assert!(raw.0 > 0.1, "Low band should detect 90Hz bass: got {}", raw.0);
+        assert!(
+            raw.0 > 0.1,
+            "Low band should detect 90Hz bass: got {}",
+            raw.0
+        );
         assert!(raw.4 > raw.3, "Right channel should be louder than left");
 
         state.audio_reactive_runtime.last_step =
             Instant::now() - std::time::Duration::from_millis(16);
-        state.audio_reactive_runtime.step(
-            raw,
-            0.0,
-            &state.audio_reactive.current,
-            true,
-        );
+        state
+            .audio_reactive_runtime
+            .step(raw, 0.0, &state.audio_reactive.current, true);
         assert!(state.audio_reactive_runtime.low_env > 0.0);
         assert!(state.audio_reactive_runtime.stereo_balance > 0.0);
         assert!(

@@ -1,7 +1,7 @@
 //! Twitch integration: chat connection state, messages and login.
 
-pub mod alerts;
 pub mod alert_audio;
+pub mod alerts;
 pub mod auth;
 pub mod broadcast;
 pub mod clips;
@@ -98,7 +98,8 @@ pub struct Comment {
 impl Comment {
     /// 0 when entering on the right, 1 when fully gone on the left.
     pub fn progress(&self, now: Instant) -> f32 {
-        now.saturating_duration_since(self.spawned).as_secs_f32() / self.duration.as_secs_f32().max(0.1)
+        now.saturating_duration_since(self.spawned).as_secs_f32()
+            / self.duration.as_secs_f32().max(0.1)
     }
 }
 
@@ -264,7 +265,10 @@ pub fn normalize_channel(input: &str) -> String {
     if let Some(r) = s.strip_prefix("twitch.tv/") {
         s = r;
     }
-    let s = s.split(['/', '?', '#']).find(|p| !p.is_empty()).unwrap_or("");
+    let s = s
+        .split(['/', '?', '#'])
+        .find(|p| !p.is_empty())
+        .unwrap_or("");
     s.trim_start_matches('@')
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
@@ -280,7 +284,11 @@ pub fn parse_color(tag: Option<&str>) -> Option<egui::Color32> {
         return None;
     }
     let v = u32::from_str_radix(hex, 16).ok()?;
-    Some(egui::Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
+    Some(egui::Color32::from_rgb(
+        (v >> 16) as u8,
+        (v >> 8) as u8,
+        v as u8,
+    ))
 }
 
 impl TwitchState {
@@ -345,7 +353,11 @@ impl TwitchState {
 
     /// Resolves the broadcaster Twitch user ID for the current live stream.
     pub fn live_broadcaster_id(&self) -> Option<String> {
-        if let StreamStatus::Live { broadcaster_id: Some(ref id), .. } = self.stream_status {
+        if let StreamStatus::Live {
+            broadcaster_id: Some(ref id),
+            ..
+        } = self.stream_status
+        {
             return Some(id.clone());
         }
         if let Some(token) = &self.token {
@@ -369,8 +381,13 @@ impl TwitchState {
         let Some(broadcaster_id) = self.live_broadcaster_id() else {
             return Err("Cannot determine live stream broadcaster ID".into());
         };
-        self.clips
-            .trigger_clip(broadcaster_id, title, token.clone(), ctx.clone(), mined_created_at);
+        self.clips.trigger_clip(
+            broadcaster_id,
+            title,
+            token.clone(),
+            ctx.clone(),
+            mined_created_at,
+        );
         Ok(())
     }
 
@@ -399,7 +416,10 @@ impl TwitchState {
     }
 
     pub fn is_preroll_in_fade_in(&self) -> bool {
-        self.preroll.as_ref().map(|p| p.is_in_fade_in_phase()).unwrap_or(false)
+        self.preroll
+            .as_ref()
+            .map(|p| p.is_in_fade_in_phase())
+            .unwrap_or(false)
     }
 
     pub fn preroll_frame(&self) -> Option<Arc<crate::video::types::RawFrame>> {
@@ -425,7 +445,10 @@ impl TwitchState {
     }
 
     pub fn is_outro_in_fade_out(&self) -> bool {
-        self.outro.as_ref().map(|p| p.is_in_fade_out_phase()).unwrap_or(false)
+        self.outro
+            .as_ref()
+            .map(|p| p.is_in_fade_out_phase())
+            .unwrap_or(false)
     }
 
     pub fn outro_frame(&self) -> Option<Arc<crate::video::types::RawFrame>> {
@@ -450,7 +473,8 @@ impl TwitchState {
         }
         let stream_key = self.config.stream_key.trim();
         if stream_key.is_empty() {
-            let err = "No stream key set. Please enter or fetch your Twitch stream key.".to_string();
+            let err =
+                "No stream key set. Please enter or fetch your Twitch stream key.".to_string();
             self.notify_error(&err);
             return Err(err);
         }
@@ -458,7 +482,8 @@ impl TwitchState {
         let preroll_path = if self.config.preroll_enabled {
             let trimmed = self.config.preroll_video_path.trim();
             if trimmed.is_empty() {
-                let err = "Pre-roll video is enabled, but no video file has been selected.".to_string();
+                let err =
+                    "Pre-roll video is enabled, but no video file has been selected.".to_string();
                 self.notify_error(&err);
                 return Err(err);
             }
@@ -664,7 +689,10 @@ impl TwitchState {
     pub fn can_send(&self) -> bool {
         self.worker.is_some()
             && self.token.is_some()
-            && self.status == ConnectionStatus::Connected { authenticated: true }
+            && self.status
+                == ConnectionStatus::Connected {
+                    authenticated: true,
+                }
     }
 
     pub fn overlay_contains(&self, pos: egui::Pos2) -> bool {
@@ -730,9 +758,7 @@ impl TwitchState {
         self.eventsub = None;
         self.last_token_check = None;
         auth::delete_token();
-        self.notify_error(format!(
-            "Twitch login expired ({reason}). Log in again."
-        ));
+        self.notify_error(format!("Twitch login expired ({reason}). Log in again."));
     }
 
     /// Per-frame update. Returns true if a repaint is useful.
@@ -951,14 +977,19 @@ impl TwitchState {
             ctx.request_repaint();
             changed = true;
         }
-        if self.config.alerts_enabled && self.alerts.take_just_activated() && !self.is_roll_active() {
+        if self.config.alerts_enabled && self.alerts.take_just_activated() && !self.is_roll_active()
+        {
             self.play_alert_sound();
         }
 
         for event in self.clips.poll() {
             changed = true;
             match event {
-                clips::ClipEvent::Ready { title, clip_url, mined_created_at } => {
+                clips::ClipEvent::Ready {
+                    title,
+                    clip_url,
+                    mined_created_at,
+                } => {
                     self.send_chat_message(&clip_url);
                     self.notify_info(format!("Twitch clip ready for '{title}'!"));
                     if let Some(created_at) = mined_created_at {
@@ -978,7 +1009,8 @@ impl TwitchState {
     }
 
     fn sync_eventsub(&mut self, ctx: &egui::Context) {
-        let wanted = self.config.alerts_enabled && self.config.alert_follows && self.token.is_some();
+        let wanted =
+            self.config.alerts_enabled && self.config.alert_follows && self.token.is_some();
         if !wanted {
             self.eventsub = None;
             return;
@@ -1012,15 +1044,18 @@ impl TwitchState {
         }
         let Some(token) = self.token.clone() else {
             self.live_poller = None;
-            self.stream_status = StreamStatus::Unknown("log in to Twitch to see live status".into());
+            self.stream_status =
+                StreamStatus::Unknown("log in to Twitch to see live status".into());
             return;
         };
-        let up_to_date = self
-            .live_poller
-            .as_ref()
-            .map_or(false, |p| p.channel == channel && p.access_token == token.access_token);
+        let up_to_date = self.live_poller.as_ref().map_or(false, |p| {
+            p.channel == channel && p.access_token == token.access_token
+        });
         if !up_to_date {
-            let channel_changed = self.live_poller.as_ref().map_or(true, |p| p.channel != channel);
+            let channel_changed = self
+                .live_poller
+                .as_ref()
+                .map_or(true, |p| p.channel != channel);
             if channel_changed {
                 self.stream_status = StreamStatus::Unknown("checking…".into());
             }
@@ -1045,8 +1080,10 @@ impl TwitchState {
             if channel_changed {
                 self.messages.clear();
                 self.comments.clear();
-                self.messages
-                    .push_back(ChatMessage::system(format!("Joining #{channel}…"), Instant::now()));
+                self.messages.push_back(ChatMessage::system(
+                    format!("Joining #{channel}…"),
+                    Instant::now(),
+                ));
             }
             self.worker = Some(irc::spawn(channel, self.token.clone(), Some(ctx.clone())));
             self.status = ConnectionStatus::Connecting;
@@ -1098,7 +1135,10 @@ impl TwitchState {
 
     /// Store a chat message, firing it as a niconico comment if enabled.
     fn push_chat(&mut self, chat: ChatMessage, now: Instant) {
-        if self.config.niconico_enabled && chat.kind != MessageKind::System && !self.is_streamer(&chat) {
+        if self.config.niconico_enabled
+            && chat.kind != MessageKind::System
+            && !self.is_streamer(&chat)
+        {
             self.spawn_comment(&chat, now, &mut rand::thread_rng());
         }
         self.messages.push_back(chat);
@@ -1168,7 +1208,8 @@ impl TwitchState {
                         if let Some(bits_str) = msg.tag("bits") {
                             if let Ok(bits) = bits_str.parse::<u32>() {
                                 if bits >= self.config.alert_min_bits {
-                                    let raw_text = msg.params.get(1).map(String::as_str).unwrap_or("");
+                                    let raw_text =
+                                        msg.params.get(1).map(String::as_str).unwrap_or("");
                                     let text = raw_text
                                         .strip_prefix("\u{1}ACTION ")
                                         .map(|t| t.trim_end_matches('\u{1}'))
@@ -1176,13 +1217,23 @@ impl TwitchState {
                                         .trim()
                                         .to_string();
                                     self.enqueue_alert(AlertEvent {
-                                        id: msg.tag("id").map(str::to_string).unwrap_or_else(|| {
-                                            format!("bits-{}-{}", chat.login, alerts::next_alert_seq())
-                                        }),
+                                        id: msg.tag("id").map(str::to_string).unwrap_or_else(
+                                            || {
+                                                format!(
+                                                    "bits-{}-{}",
+                                                    chat.login,
+                                                    alerts::next_alert_seq()
+                                                )
+                                            },
+                                        ),
                                         kind: AlertKind::Bits {
                                             user: chat.display_name.clone(),
                                             amount: bits,
-                                            message: if text.is_empty() { None } else { Some(text) },
+                                            message: if text.is_empty() {
+                                                None
+                                            } else {
+                                                Some(text)
+                                            },
                                         },
                                     });
                                 }
@@ -1213,7 +1264,10 @@ impl TwitchState {
                                     .tag("msg-param-cumulative-months")
                                     .and_then(|m| m.parse::<u32>().ok())
                                     .unwrap_or(1);
-                                let message = msg.trailing().filter(|m| !m.trim().is_empty()).map(str::to_string);
+                                let message = msg
+                                    .trailing()
+                                    .filter(|m| !m.trim().is_empty())
+                                    .map(str::to_string);
                                 self.enqueue_alert(AlertEvent {
                                     id: msg.tag("id").map(str::to_string).unwrap_or_else(|| {
                                         format!("sub-{user}-{}", alerts::next_alert_seq())
@@ -1371,16 +1425,20 @@ impl TwitchState {
         };
         let is_streamer = is_broadcaster_badge
             || is_room_owner
-            || (!login.is_empty() && !channel_param.is_empty() && login.eq_ignore_ascii_case(channel_param))
+            || (!login.is_empty()
+                && !channel_param.is_empty()
+                && login.eq_ignore_ascii_case(channel_param))
             || (!login.is_empty() && !channel.is_empty() && login.eq_ignore_ascii_case(&channel))
-            || self
-                .token
-                .as_ref()
-                .map_or(false, |t| !t.login.is_empty() && !login.is_empty() && login.eq_ignore_ascii_case(&t.login));
+            || self.token.as_ref().map_or(false, |t| {
+                !t.login.is_empty() && !login.is_empty() && login.eq_ignore_ascii_case(&t.login)
+            });
 
         Some(ChatMessage {
             id: msg.tag("id").map(str::to_string),
-            display_name: msg.tag("display-name").map(str::to_string).unwrap_or_else(|| login.clone()),
+            display_name: msg
+                .tag("display-name")
+                .map(str::to_string)
+                .unwrap_or_else(|| login.clone()),
             login,
             color: parse_color(msg.tag("color")),
             fragments,
@@ -1401,14 +1459,21 @@ impl TwitchState {
         };
         worker.send_privmsg(text);
         let now = Instant::now();
-        let login = self.token.as_ref().map(|t| t.login.clone()).unwrap_or_default();
+        let login = self
+            .token
+            .as_ref()
+            .map(|t| t.login.clone())
+            .unwrap_or_default();
         let (body, kind) = match text.strip_prefix("/me ") {
             Some(b) => (b, MessageKind::Action),
             None => (text, MessageKind::Chat),
         };
         let chat = ChatMessage {
             id: None,
-            display_name: self.self_display_name.clone().unwrap_or_else(|| login.clone()),
+            display_name: self
+                .self_display_name
+                .clone()
+                .unwrap_or_else(|| login.clone()),
             login,
             color: self.self_color,
             fragments: emotes::split_by_known_names(body, &self.emotes.names),
@@ -1484,7 +1549,11 @@ impl TwitchState {
     pub fn start_login(&mut self, ctx: &egui::Context) {
         self.cancel_login();
         let cancel = Arc::new(AtomicBool::new(false));
-        self.auth_rx = Some(auth::start_device_flow(self.client_id(), cancel.clone(), ctx.clone()));
+        self.auth_rx = Some(auth::start_device_flow(
+            self.client_id(),
+            cancel.clone(),
+            ctx.clone(),
+        ));
         self.auth_cancel = Some(cancel);
         self.auth_flow = AuthFlow::Requesting;
     }
@@ -1554,7 +1623,11 @@ impl TwitchState {
 }
 
 pub fn open_in_browser(ctx: &egui::Context, url: &str) {
-    if std::process::Command::new("xdg-open").arg(url).spawn().is_err() {
+    if std::process::Command::new("xdg-open")
+        .arg(url)
+        .spawn()
+        .is_err()
+    {
         ctx.open_url(egui::OpenUrl::new_tab(url));
     }
 }
@@ -1568,7 +1641,10 @@ mod tests {
         assert_eq!(normalize_channel("  SomeStreamer "), "somestreamer");
         assert_eq!(normalize_channel("#some_streamer"), "some_streamer");
         assert_eq!(normalize_channel("@name"), "name");
-        assert_eq!(normalize_channel("https://www.twitch.tv/Foo_Bar/videos"), "foo_bar");
+        assert_eq!(
+            normalize_channel("https://www.twitch.tv/Foo_Bar/videos"),
+            "foo_bar"
+        );
         assert_eq!(normalize_channel("twitch.tv/foo?x=1"), "foo");
         assert_eq!(normalize_channel("bad name!"), "badname");
         assert_eq!(normalize_channel(""), "");
@@ -1576,7 +1652,10 @@ mod tests {
 
     #[test]
     fn parses_colors() {
-        assert_eq!(parse_color(Some("#FF4500")), Some(egui::Color32::from_rgb(255, 69, 0)));
+        assert_eq!(
+            parse_color(Some("#FF4500")),
+            Some(egui::Color32::from_rgb(255, 69, 0))
+        );
         assert_eq!(parse_color(Some("")), None);
         assert_eq!(parse_color(None), None);
         assert_eq!(parse_color(Some("#12345")), None);
@@ -1598,7 +1677,10 @@ mod tests {
             &irc("@display-name=Bob;id=m2 :bob!bob@bob.tmi.twitch.tv PRIVMSG #c :\u{1}ACTION waves\u{1}"),
             now,
         );
-        state.handle_irc(&irc("@id=m3 :alice!alice@alice.tmi.twitch.tv PRIVMSG #c :again"), now);
+        state.handle_irc(
+            &irc("@id=m3 :alice!alice@alice.tmi.twitch.tv PRIVMSG #c :again"),
+            now,
+        );
         assert_eq!(state.messages.len(), 3);
         let first = &state.messages[0];
         assert_eq!(first.display_name, "Alice");
@@ -1607,21 +1689,36 @@ mod tests {
             first.fragments,
             vec![
                 Fragment::Text("hello ".into()),
-                Fragment::Emote { id: "25".into(), name: "Kappa".into() }
+                Fragment::Emote {
+                    id: "25".into(),
+                    name: "Kappa".into()
+                }
             ]
         );
-        assert_eq!(state.emotes.names.get("Kappa").map(String::as_str), Some("25"));
+        assert_eq!(
+            state.emotes.names.get("Kappa").map(String::as_str),
+            Some("25")
+        );
         assert_eq!(state.messages[1].kind, MessageKind::Action);
-        assert_eq!(state.messages[1].fragments, vec![Fragment::Text("waves".into())]);
+        assert_eq!(
+            state.messages[1].fragments,
+            vec![Fragment::Text("waves".into())]
+        );
 
         // A deleted message disappears.
-        state.handle_irc(&irc("@target-msg-id=m2 :tmi.twitch.tv CLEARMSG #c :waves"), now);
+        state.handle_irc(
+            &irc("@target-msg-id=m2 :tmi.twitch.tv CLEARMSG #c :waves"),
+            now,
+        );
         assert_eq!(state.messages.len(), 2);
         // A timeout removes that user's messages.
         state.handle_irc(&irc(":tmi.twitch.tv CLEARCHAT #c :alice"), now);
         assert!(state.messages.is_empty());
         // A full clear leaves a system notice.
-        state.handle_irc(&irc("@id=m4 :bob!bob@bob.tmi.twitch.tv PRIVMSG #c :hi"), now);
+        state.handle_irc(
+            &irc("@id=m4 :bob!bob@bob.tmi.twitch.tv PRIVMSG #c :hi"),
+            now,
+        );
         state.handle_irc(&irc(":tmi.twitch.tv CLEARCHAT #c"), now);
         assert_eq!(state.messages.len(), 1);
         assert_eq!(state.messages[0].kind, MessageKind::System);
@@ -1634,9 +1731,10 @@ mod tests {
         state.config.message_lifetime_secs = 60;
         let start = Instant::now();
         for i in 0..5u64 {
-            state
-                .messages
-                .push_back(ChatMessage::system(format!("{i}"), start + Duration::from_secs(i * 20)));
+            state.messages.push_back(ChatMessage::system(
+                format!("{i}"),
+                start + Duration::from_secs(i * 20),
+            ));
         }
         state.trim_messages(start + Duration::from_secs(80));
         // Count cap keeps t=40,60,80; all are younger than the 60s lifetime.
@@ -1646,12 +1744,21 @@ mod tests {
         assert_eq!(state.messages.len(), 2);
 
         let msg = state.messages.front().unwrap().clone(); // t=60
-        assert_eq!(state.message_alpha(&msg, start + Duration::from_secs(100)), 1.0);
-        let a = state.message_alpha(&msg, start + Duration::from_secs(117) + Duration::from_millis(500));
+        assert_eq!(
+            state.message_alpha(&msg, start + Duration::from_secs(100)),
+            1.0
+        );
+        let a = state.message_alpha(
+            &msg,
+            start + Duration::from_secs(117) + Duration::from_millis(500),
+        );
         assert!((a - 0.5).abs() < 0.01);
 
         state.config.message_lifetime_secs = 0;
-        assert_eq!(state.message_alpha(&msg, start + Duration::from_secs(10_000)), 1.0);
+        assert_eq!(
+            state.message_alpha(&msg, start + Duration::from_secs(10_000)),
+            1.0
+        );
         assert!(state.next_fade_repaint(start).is_none());
     }
 
@@ -1664,9 +1771,14 @@ mod tests {
         state.config.chat_overlay_enabled = true;
         state.sync_live_poller(&ctx);
         assert!(state.live_poller.is_none());
-        assert!(matches!(state.stream_status, StreamStatus::Unknown(ref r) if r.contains("log in")));
+        assert!(
+            matches!(state.stream_status, StreamStatus::Unknown(ref r) if r.contains("log in"))
+        );
         // Even if a stale "live" result was around, disabling clears it.
-        state.stream_status = StreamStatus::Live { viewer_count: None, broadcaster_id: None };
+        state.stream_status = StreamStatus::Live {
+            viewer_count: None,
+            broadcaster_id: None,
+        };
         state.config.chat_overlay_enabled = false;
         state.sync_live_poller(&ctx);
         assert!(matches!(state.stream_status, StreamStatus::Unknown(_)));
@@ -1686,27 +1798,52 @@ mod tests {
         let mut state = TwitchState::default();
         let now = Instant::now();
         // Disabled: no comments.
-        state.handle_irc(&irc("@id=a0 :alice!alice@alice.tmi.twitch.tv PRIVMSG #c :hi"), now);
+        state.handle_irc(
+            &irc("@id=a0 :alice!alice@alice.tmi.twitch.tv PRIVMSG #c :hi"),
+            now,
+        );
         assert!(state.comments.is_empty());
 
         state.config.niconico_enabled = true;
-        state.handle_irc(&irc("@id=a1 :alice!alice@alice.tmi.twitch.tv PRIVMSG #c :hello"), now);
-        state.handle_irc(&irc("@id=b1 :bob!bob@bob.tmi.twitch.tv PRIVMSG #c :yo"), now);
-        state.handle_irc(&irc("@id=b2 :bob!bob@bob.tmi.twitch.tv PRIVMSG #c :   "), now);
+        state.handle_irc(
+            &irc("@id=a1 :alice!alice@alice.tmi.twitch.tv PRIVMSG #c :hello"),
+            now,
+        );
+        state.handle_irc(
+            &irc("@id=b1 :bob!bob@bob.tmi.twitch.tv PRIVMSG #c :yo"),
+            now,
+        );
+        state.handle_irc(
+            &irc("@id=b2 :bob!bob@bob.tmi.twitch.tv PRIVMSG #c :   "),
+            now,
+        );
         state.handle_irc(&irc(":tmi.twitch.tv NOTICE #c :system stuff"), now);
-        assert_eq!(state.comments.len(), 2, "blank and system messages don't fly");
+        assert_eq!(
+            state.comments.len(),
+            2,
+            "blank and system messages don't fly"
+        );
         let c = &state.comments[0];
         assert_eq!(c.fragments, vec![Fragment::Text("hello".into())]);
         assert!((0.0..=1.0).contains(&c.y_norm));
         let base = state.config.niconico_duration_secs;
-        assert!(c.duration.as_secs_f32() >= base * 0.75 - 0.01 && c.duration.as_secs_f32() <= base * 1.3);
+        assert!(
+            c.duration.as_secs_f32() >= base * 0.75 - 0.01
+                && c.duration.as_secs_f32() <= base * 1.3
+        );
 
-        state.handle_irc(&irc("@target-msg-id=a1 :tmi.twitch.tv CLEARMSG #c :hello"), now);
+        state.handle_irc(
+            &irc("@target-msg-id=a1 :tmi.twitch.tv CLEARMSG #c :hello"),
+            now,
+        );
         assert_eq!(state.comments.len(), 1);
         state.handle_irc(&irc(":tmi.twitch.tv CLEARCHAT #c :bob"), now);
         assert!(state.comments.is_empty());
 
-        state.handle_irc(&irc("@id=a2 :alice!alice@alice.tmi.twitch.tv PRIVMSG #c :again"), now);
+        state.handle_irc(
+            &irc("@id=a2 :alice!alice@alice.tmi.twitch.tv PRIVMSG #c :again"),
+            now,
+        );
         state.trim_comments(now + Duration::from_secs(1));
         assert_eq!(state.comments.len(), 1);
         state.trim_comments(now + Duration::from_secs(60));
@@ -1714,7 +1851,12 @@ mod tests {
 
         // Unlimited by default.
         for i in 0..200 {
-            state.handle_irc(&irc(&format!("@id=x{i} :x!x@x.tmi.twitch.tv PRIVMSG #c :spam {i}")), now);
+            state.handle_irc(
+                &irc(&format!(
+                    "@id=x{i} :x!x@x.tmi.twitch.tv PRIVMSG #c :spam {i}"
+                )),
+                now,
+            );
         }
         assert_eq!(state.comments.len(), 200);
         // A cap drops the oldest.
@@ -1758,14 +1900,25 @@ mod tests {
         let now = Instant::now();
 
         // 1. Regular viewer chat spawns a comment and records a message.
-        state.handle_irc(&irc("@id=v1 :viewer!viewer@viewer.tmi.twitch.tv PRIVMSG #coolstreamer :hello"), now);
+        state.handle_irc(
+            &irc("@id=v1 :viewer!viewer@viewer.tmi.twitch.tv PRIVMSG #coolstreamer :hello"),
+            now,
+        );
         assert_eq!(state.comments.len(), 1);
         assert_eq!(state.messages.len(), 1);
 
         // 2. Chat from the channel broadcaster itself (same login as channel) is skipped for comments.
         state.handle_irc(&irc("@id=s1 :coolstreamer!coolstreamer@coolstreamer.tmi.twitch.tv PRIVMSG #coolstreamer :streamer says hi"), now);
-        assert_eq!(state.comments.len(), 1, "streamer message must not spawn a niconico comment");
-        assert_eq!(state.messages.len(), 2, "streamer message is still recorded in chat overlay");
+        assert_eq!(
+            state.comments.len(),
+            1,
+            "streamer message must not spawn a niconico comment"
+        );
+        assert_eq!(
+            state.messages.len(),
+            2,
+            "streamer message is still recorded in chat overlay"
+        );
 
         // 3. Chat with broadcaster badge is skipped even if channel name differed.
         state.handle_irc(&irc("@id=b1;badges=broadcaster/1,subscriber/12 :someone!someone@someone.tmi.twitch.tv PRIVMSG #coolstreamer :broadcaster badge"), now);
@@ -1801,7 +1954,11 @@ mod tests {
             is_streamer: true,
         };
         state.spawn_comment(&streamer_msg, now, &mut rand::thread_rng());
-        assert_eq!(state.comments.len(), 1, "direct spawn_comment on streamer message must be skipped");
+        assert_eq!(
+            state.comments.len(),
+            1,
+            "direct spawn_comment on streamer message must be skipped"
+        );
     }
 
     #[test]
@@ -1836,10 +1993,15 @@ mod tests {
         // 3. Min bits filter
         state.config.alert_min_bits = 500;
         state.handle_irc(
-            &irc("@id=b2;bits=250;display-name=SmallCheer :sc!sc@tmi.twitch.tv PRIVMSG #c :cheer250"),
+            &irc(
+                "@id=b2;bits=250;display-name=SmallCheer :sc!sc@tmi.twitch.tv PRIVMSG #c :cheer250",
+            ),
             now,
         );
-        assert!(state.alerts.queue.is_empty(), "cheer below min bits ignored");
+        assert!(
+            state.alerts.queue.is_empty(),
+            "cheer below min bits ignored"
+        );
 
         state.handle_irc(
             &irc("@id=b3;bits=500;display-name=BigCheer :bc!bc@tmi.twitch.tv PRIVMSG #c :cheer500"),
@@ -1958,7 +2120,9 @@ mod tests {
         state.token_loaded = true;
         state.config.channel = "streamer".into();
         state.config.chat_overlay_enabled = true;
-        state.status = ConnectionStatus::Connected { authenticated: true };
+        state.status = ConnectionStatus::Connected {
+            authenticated: true,
+        };
         let token = StoredToken {
             access_token: "tok".into(),
             refresh_token: None,
@@ -1979,12 +2143,21 @@ mod tests {
 
         state.poll(&ctx);
         // Clip url was posted to chat and sent to IRC worker
-        assert_eq!(cmd_rx.try_recv().unwrap(), "https://clips.twitch.tv/TestClip123");
+        assert_eq!(
+            cmd_rx.try_recv().unwrap(),
+            "https://clips.twitch.tv/TestClip123"
+        );
         assert_eq!(state.messages.len(), 1);
         let msg = state.messages.back().unwrap();
-        assert_eq!(msg.fragments, vec![Fragment::Text("https://clips.twitch.tv/TestClip123".into())]);
+        assert_eq!(
+            msg.fragments,
+            vec![Fragment::Text("https://clips.twitch.tv/TestClip123".into())]
+        );
         // And ready_mined_clips was queued for the word bank
-        assert_eq!(state.take_ready_mined_clips(), vec![(12345, "https://clips.twitch.tv/TestClip123".into())]);
+        assert_eq!(
+            state.take_ready_mined_clips(),
+            vec![(12345, "https://clips.twitch.tv/TestClip123".into())]
+        );
         // And in-app confirmation popup was displayed
         let notifs = state.take_notifications();
         assert_eq!(notifs.len(), 1);
@@ -2063,12 +2236,15 @@ mod tests {
         assert!(state.warmup_clip_deadline.is_none());
     }
 
-    fn make_mock_roll_player(mode: preroll::RollMode, audio_tap: Arc<crate::replay::AudioTap>) -> PrerollPlayer {
+    fn make_mock_roll_player(
+        mode: preroll::RollMode,
+        audio_tap: Arc<crate::replay::AudioTap>,
+    ) -> PrerollPlayer {
         audio_tap.set_broadcast_preroll_active(true);
         PrerollPlayer {
             mode,
             duration_secs: 10.0,
-            position_us: Arc::new( std::sync::atomic::AtomicI64::new(0)),
+            position_us: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             is_finished: Arc::new(AtomicBool::new(false)),
             stop_requested: Arc::new(AtomicBool::new(false)),
             frame_rx: crossbeam_channel::unbounded().1,
@@ -2089,7 +2265,10 @@ mod tests {
         state.broadcast = Some(BroadcastHandle::mock_live(tap.clone()));
 
         // While pre-roll (intro) is playing, ending with outro is not clickable / ignored
-        state.preroll = Some(make_mock_roll_player(preroll::RollMode::Preroll, tap.clone()));
+        state.preroll = Some(make_mock_roll_player(
+            preroll::RollMode::Preroll,
+            tap.clone(),
+        ));
         assert!(!state.can_end_with_outro());
         state.stop_broadcast_with_outro(&ctx);
         assert!(state.broadcast.is_some());
@@ -2133,7 +2312,10 @@ mod tests {
         state.outro = Some(make_mock_roll_player(preroll::RollMode::Outro, tap.clone()));
         assert!(state.is_roll_active());
         assert!(!state.can_end_with_outro());
-        assert!(tap.is_broadcast_preroll_active(), "game and mic audio must be muted during outro");
+        assert!(
+            tap.is_broadcast_preroll_active(),
+            "game and mic audio must be muted during outro"
+        );
 
         // While outro is not finished, polling keeps broadcast alive
         state.poll(&ctx);
@@ -2147,7 +2329,10 @@ mod tests {
         }
         state.poll(&ctx);
         assert!(state.outro.is_none());
-        assert!(state.broadcast.is_none(), "Twitch connection must stop when outro finishes");
+        assert!(
+            state.broadcast.is_none(),
+            "Twitch connection must stop when outro finishes"
+        );
         assert!(!tap.is_broadcast_preroll_active());
     }
 }

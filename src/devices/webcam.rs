@@ -134,7 +134,9 @@ fn open_webcam_input(
     unsafe {
         let mut context = avformat_alloc_context();
         if context.is_null() {
-            return Err(anyhow!("FFmpeg could not allocate input context for webcam"));
+            return Err(anyhow!(
+                "FFmpeg could not allocate input context for webcam"
+            ));
         }
 
         (*context).interrupt_callback = AVIOInterruptCB {
@@ -144,12 +146,8 @@ fn open_webcam_input(
 
         let input_fmt = av_find_input_format(c"v4l2".as_ptr());
         let mut options_ptr = options.disown();
-        let open_result = avformat_open_input(
-            &mut context,
-            device_c.as_ptr(),
-            input_fmt,
-            &mut options_ptr,
-        );
+        let open_result =
+            avformat_open_input(&mut context, device_c.as_ptr(), input_fmt, &mut options_ptr);
         drop(ffmpeg_next::Dictionary::own(options_ptr));
 
         if open_result < 0 {
@@ -271,7 +269,11 @@ fn run_webcam_worker(
             Ok(input) => break input,
             Err(_) if stop_requested.load(Ordering::Relaxed) => return Ok(()),
             Err(e) if open_attempt < WEBCAM_OPEN_ATTEMPTS => {
-                tracing::warn!("Webcam open attempt {} failed: {}; retrying...", open_attempt, e);
+                tracing::warn!(
+                    "Webcam open attempt {} failed: {}; retrying...",
+                    open_attempt,
+                    e
+                );
                 open_attempt += 1;
                 thread::sleep(WEBCAM_OPEN_RETRY_DELAY);
             }
@@ -355,7 +357,10 @@ fn run_webcam_worker(
                     ) {
                         Ok(new_scaler) => scaler = Some(new_scaler),
                         Err(e) => {
-                            tracing::warn!("Failed to create scaler for webcam RGBA conversion: {}", e);
+                            tracing::warn!(
+                                "Failed to create scaler for webcam RGBA conversion: {}",
+                                e
+                            );
                             continue;
                         }
                     }

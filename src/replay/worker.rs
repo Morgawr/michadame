@@ -54,7 +54,9 @@ pub(super) struct ScheduleOutput {
 #[cfg(test)]
 impl ScheduleOutput {
     pub fn all_frames(self) -> impl Iterator<Item = (i64, bool)> {
-        self.repeats.into_iter().chain(std::iter::once((self.pts, self.key)))
+        self.repeats
+            .into_iter()
+            .chain(std::iter::once((self.pts, self.key)))
     }
 }
 
@@ -75,7 +77,8 @@ impl VideoSchedule {
         if at < self.epoch {
             return None;
         }
-        let tick = ((at - self.epoch) as f64 * config::OUTPUT_FPS as f64 / 1_000_000.0).round() as i64;
+        let tick =
+            ((at - self.epoch) as f64 * config::OUTPUT_FPS as f64 / 1_000_000.0).round() as i64;
         if self.last_tick.is_some_and(|last| tick <= last) {
             return None;
         }
@@ -398,16 +401,14 @@ pub(super) fn run(
                 queue.recycle(frame.generation, frame.rgba);
                 continue;
             }
-            if session.as_ref().is_none_or(|s| {
-                (s.width, s.height) != (frame.width, frame.height)
-            }) {
+            if session
+                .as_ref()
+                .is_none_or(|s| (s.width, s.height) != (frame.width, frame.height))
+            {
                 if let Some(s) = &session {
                     shared.record_reset(format!(
                         "Video format changed: {} × {} → {} × {}",
-                        s.width,
-                        s.height,
-                        frame.width,
-                        frame.height,
+                        s.width, s.height, frame.width, frame.height,
                     ));
                 }
                 history.clear();
@@ -1025,9 +1026,7 @@ mod tests {
                     );
                 }
                 ff::format::Sample::F32(ff::format::sample::Type::Packed) => {
-                    decoded.extend(
-                        frame.plane::<(f32, f32)>(0).iter().map(|(l, r)| [*l, *r]),
-                    );
+                    decoded.extend(frame.plane::<(f32, f32)>(0).iter().map(|(l, r)| [*l, *r]));
                 }
                 other => panic!("Unexpected decoder format {other:?}"),
             }
@@ -1110,7 +1109,10 @@ mod tests {
             assert_eq!(output.pts, epoch + rate.us(tick));
         }
         assert!(accepted.iter().all(|o| o.repeats.is_empty()));
-        assert!(accepted[5].key, "Recovered frame needs a time-based keyframe");
+        assert!(
+            accepted[5].key,
+            "Recovered frame needs a time-based keyframe"
+        );
         assert!(!accepted[6].key);
         assert!(
             schedule.accept(epoch + rate.us(160)).is_none(),
@@ -1207,7 +1209,10 @@ mod tests {
         for i in 1..5 {
             mixer.push(MixSource::Game, (i * n) as i64, &vec![[0.2, 0.2]; n], 1.0);
         }
-        assert!(mixer.take().is_none(), "must not encode before the mic arrives");
+        assert!(
+            mixer.take().is_none(),
+            "must not encode before the mic arrives"
+        );
 
         for i in 1..5 {
             mixer.push(MixSource::Mic, (i * n) as i64, &vec![[0.1, 0.1]; n], 1.0);
@@ -1249,5 +1254,4 @@ mod tests {
         assert!((frame[0][0] - 0.5).abs() < 1e-6);
         assert!((frame[0][1] - 0.5).abs() < 1e-6);
     }
-
 }

@@ -163,7 +163,9 @@ impl GamescopeX11CursorMonitor {
 
     #[cfg(test)]
     pub fn set_hidden_for_test(&self, hidden: bool) {
-        self.shared.is_cursor_hidden.store(hidden, Ordering::Release);
+        self.shared
+            .is_cursor_hidden
+            .store(hidden, Ordering::Release);
     }
 
     #[cfg(test)]
@@ -343,7 +345,12 @@ mod tests {
         }
 
         assert!(!shared.is_cursor_hidden.load(Ordering::Acquire));
-        let img = shared.cursor_image.lock().unwrap().clone().expect("cursor image");
+        let img = shared
+            .cursor_image
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("cursor image");
         assert_eq!(img.width, 2);
         assert_eq!(img.height, 1);
         assert_eq!(img.xhot, 1);

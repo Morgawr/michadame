@@ -2,8 +2,8 @@ pub mod database;
 pub mod deinflect;
 pub mod elongation;
 pub mod frequency;
-pub mod lookup;
 pub mod long_vowel;
+pub mod lookup;
 pub mod models;
 pub mod particles;
 pub mod popup;
@@ -88,7 +88,9 @@ impl DictState {
                         installed_metadata = Some(meta);
                         db_handle = Some(database);
                     }
-                    Err(e) => tracing::warn!("Failed to read metadata from {}: {e}", db_path.display()),
+                    Err(e) => {
+                        tracing::warn!("Failed to read metadata from {}: {e}", db_path.display())
+                    }
                 },
                 Err(e) => tracing::warn!("Failed to open dictionary at {}: {e}", db_path.display()),
             }
@@ -110,9 +112,15 @@ impl DictState {
                         installed_freq_metadata = Some(meta);
                         freq_db_handle = Some(database);
                     }
-                    Err(e) => tracing::warn!("Failed to read freq metadata from {}: {e}", freq_db_path.display()),
+                    Err(e) => tracing::warn!(
+                        "Failed to read freq metadata from {}: {e}",
+                        freq_db_path.display()
+                    ),
                 },
-                Err(e) => tracing::warn!("Failed to open freq dictionary at {}: {e}", freq_db_path.display()),
+                Err(e) => tracing::warn!(
+                    "Failed to open freq dictionary at {}: {e}",
+                    freq_db_path.display()
+                ),
             }
         }
 
@@ -133,7 +141,11 @@ impl DictState {
         sync::spawn_check_version(current_rev, is_checking_update.clone(), tx.clone());
 
         let current_freq_rev = installed_freq_metadata.as_ref().map(|m| m.revision.clone());
-        sync::spawn_check_freq_version(current_freq_rev, is_checking_freq_update.clone(), tx.clone());
+        sync::spawn_check_freq_version(
+            current_freq_rev,
+            is_checking_freq_update.clone(),
+            tx.clone(),
+        );
 
         Self {
             db: Arc::new(Mutex::new(db_handle)),
@@ -208,7 +220,10 @@ impl DictState {
 
     /// Triggers a version check against jiten.moe frequency index.
     pub fn trigger_check_freq_version(&mut self) {
-        let current_rev = self.installed_freq_metadata.as_ref().map(|m| m.revision.clone());
+        let current_rev = self
+            .installed_freq_metadata
+            .as_ref()
+            .map(|m| m.revision.clone());
         sync::spawn_check_freq_version(
             current_rev,
             self.is_checking_freq_update.clone(),
@@ -231,7 +246,10 @@ pub fn resolve_dict_directory() -> PathBuf {
         }
     }
     if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".config").join("michadame").join("dict")
+        PathBuf::from(home)
+            .join(".config")
+            .join("michadame")
+            .join("dict")
     } else {
         PathBuf::from("./dict")
     }

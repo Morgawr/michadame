@@ -353,7 +353,8 @@ pub fn apply_pc98_key_event(
     }
 
     // 4. All other keys (with fallback to `physical_key` if shifted symbol changed logical `key`)
-    if let Some(code) = egui_key_to_retrok(key).or_else(|| physical_key.and_then(egui_key_to_retrok))
+    if let Some(code) =
+        egui_key_to_retrok(key).or_else(|| physical_key.and_then(egui_key_to_retrok))
     {
         if (code as usize) < keys.len() {
             keys[code as usize] = pressed;
@@ -414,17 +415,13 @@ pub fn forward_pc98_inputs(
     for event in events {
         match event {
             egui::Event::PointerButton {
-                button,
-                pressed,
-                ..
-            } => {
-                match button {
-                    egui::PointerButton::Primary => state.mouse_left = pressed,
-                    egui::PointerButton::Secondary => state.mouse_right = pressed,
-                    egui::PointerButton::Middle => state.mouse_middle = pressed,
-                    _ => {}
-                }
-            }
+                button, pressed, ..
+            } => match button {
+                egui::PointerButton::Primary => state.mouse_left = pressed,
+                egui::PointerButton::Secondary => state.mouse_right = pressed,
+                egui::PointerButton::Middle => state.mouse_middle = pressed,
+                _ => {}
+            },
             egui::Event::Key {
                 key,
                 physical_key,
@@ -507,9 +504,7 @@ pub fn forward_pc88_inputs(
     for event in events {
         match event {
             egui::Event::PointerButton {
-                button,
-                pressed,
-                ..
+                button, pressed, ..
             } => match button {
                 egui::PointerButton::Primary => state.mouse_left = pressed,
                 egui::PointerButton::Secondary => state.mouse_right = pressed,

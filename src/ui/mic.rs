@@ -26,7 +26,9 @@ pub fn draw_mic_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             let mut mic_enabled = state.mic.config.enabled;
             if ui
                 .checkbox(&mut mic_enabled, "Enable Microphone")
-                .on_hover_text("Enables microphone audio input capture and recording into the replay buffer.")
+                .on_hover_text(
+                    "Enables microphone audio input capture and recording into the replay buffer.",
+                )
                 .changed()
             {
                 state.mic.config.enabled = mic_enabled;
@@ -179,8 +181,16 @@ pub fn draw_mic_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     }
                     let is_active = selected_tab == SelectedFilterTab::NoiseGate;
                     let text = egui::RichText::new("Noise Gate").monospace().size(11.0);
-                    let btn = egui::Button::new(if is_active { text.strong().color(egui::Color32::WHITE) } else { text.color(egui::Color32::from_rgb(170, 170, 170)) })
-                        .fill(if is_active { egui::Color32::from_rgb(33, 97, 159) } else { egui::Color32::from_rgb(34, 34, 34) });
+                    let btn = egui::Button::new(if is_active {
+                        text.strong().color(egui::Color32::WHITE)
+                    } else {
+                        text.color(egui::Color32::from_rgb(170, 170, 170))
+                    })
+                    .fill(if is_active {
+                        egui::Color32::from_rgb(33, 97, 159)
+                    } else {
+                        egui::Color32::from_rgb(34, 34, 34)
+                    });
                     if ui.add(btn).clicked() {
                         selected_tab = SelectedFilterTab::NoiseGate;
                     }
@@ -199,8 +209,16 @@ pub fn draw_mic_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     }
                     let is_active = selected_tab == SelectedFilterTab::Gain;
                     let text = egui::RichText::new("Gain").monospace().size(11.0);
-                    let btn = egui::Button::new(if is_active { text.strong().color(egui::Color32::WHITE) } else { text.color(egui::Color32::from_rgb(170, 170, 170)) })
-                        .fill(if is_active { egui::Color32::from_rgb(33, 97, 159) } else { egui::Color32::from_rgb(34, 34, 34) });
+                    let btn = egui::Button::new(if is_active {
+                        text.strong().color(egui::Color32::WHITE)
+                    } else {
+                        text.color(egui::Color32::from_rgb(170, 170, 170))
+                    })
+                    .fill(if is_active {
+                        egui::Color32::from_rgb(33, 97, 159)
+                    } else {
+                        egui::Color32::from_rgb(34, 34, 34)
+                    });
                     if ui.add(btn).clicked() {
                         selected_tab = SelectedFilterTab::Gain;
                     }
@@ -219,8 +237,16 @@ pub fn draw_mic_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     }
                     let is_active = selected_tab == SelectedFilterTab::Compressor;
                     let text = egui::RichText::new("Compressor").monospace().size(11.0);
-                    let btn = egui::Button::new(if is_active { text.strong().color(egui::Color32::WHITE) } else { text.color(egui::Color32::from_rgb(170, 170, 170)) })
-                        .fill(if is_active { egui::Color32::from_rgb(33, 97, 159) } else { egui::Color32::from_rgb(34, 34, 34) });
+                    let btn = egui::Button::new(if is_active {
+                        text.strong().color(egui::Color32::WHITE)
+                    } else {
+                        text.color(egui::Color32::from_rgb(170, 170, 170))
+                    })
+                    .fill(if is_active {
+                        egui::Color32::from_rgb(33, 97, 159)
+                    } else {
+                        egui::Color32::from_rgb(34, 34, 34)
+                    });
                     if ui.add(btn).clicked() {
                         selected_tab = SelectedFilterTab::Compressor;
                     }
@@ -236,78 +262,198 @@ pub fn draw_mic_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     SelectedFilterTab::NoiseGate => {
                         let gate = &mut state.mic.config.noise_gate;
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("Close Threshold:").monospace().size(11.0).color(egui::Color32::from_rgb(170, 170, 170)));
-                            slider_changed |= ui.add(egui::Slider::new(&mut gate.close_threshold_db, -96.0..=0.0).suffix(" dB").custom_formatter(|v, _| format!("{:.2} dB", v))).changed();
+                            ui.label(
+                                egui::RichText::new("Close Threshold:")
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(170, 170, 170)),
+                            );
+                            slider_changed |= ui
+                                .add(
+                                    egui::Slider::new(&mut gate.close_threshold_db, -96.0..=0.0)
+                                        .suffix(" dB")
+                                        .custom_formatter(|v, _| format!("{:.2} dB", v)),
+                                )
+                                .changed();
                         });
 
                         ui.add_space(2.0);
 
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("Open Threshold: ").monospace().size(11.0).color(egui::Color32::from_rgb(170, 170, 170)));
-                            slider_changed |= ui.add(egui::Slider::new(&mut gate.open_threshold_db, -96.0..=0.0).suffix(" dB").custom_formatter(|v, _| format!("{:.2} dB", v))).changed();
+                            ui.label(
+                                egui::RichText::new("Open Threshold: ")
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(170, 170, 170)),
+                            );
+                            slider_changed |= ui
+                                .add(
+                                    egui::Slider::new(&mut gate.open_threshold_db, -96.0..=0.0)
+                                        .suffix(" dB")
+                                        .custom_formatter(|v, _| format!("{:.2} dB", v)),
+                                )
+                                .changed();
                         });
 
                         ui.add_space(2.0);
 
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("Attack Time:    ").monospace().size(11.0).color(egui::Color32::from_rgb(170, 170, 170)));
-                            slider_changed |= ui.add(egui::Slider::new(&mut gate.attack_time_ms, 0.0..=500.0).suffix(" ms").custom_formatter(|v, _| format!("{:.0} ms", v))).changed();
+                            ui.label(
+                                egui::RichText::new("Attack Time:    ")
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(170, 170, 170)),
+                            );
+                            slider_changed |= ui
+                                .add(
+                                    egui::Slider::new(&mut gate.attack_time_ms, 0.0..=500.0)
+                                        .suffix(" ms")
+                                        .custom_formatter(|v, _| format!("{:.0} ms", v)),
+                                )
+                                .changed();
                         });
 
                         ui.add_space(2.0);
 
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("Hold Time:      ").monospace().size(11.0).color(egui::Color32::from_rgb(170, 170, 170)));
-                            slider_changed |= ui.add(egui::Slider::new(&mut gate.hold_time_ms, 0.0..=2000.0).suffix(" ms").custom_formatter(|v, _| format!("{:.0} ms", v))).changed();
+                            ui.label(
+                                egui::RichText::new("Hold Time:      ")
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(170, 170, 170)),
+                            );
+                            slider_changed |= ui
+                                .add(
+                                    egui::Slider::new(&mut gate.hold_time_ms, 0.0..=2000.0)
+                                        .suffix(" ms")
+                                        .custom_formatter(|v, _| format!("{:.0} ms", v)),
+                                )
+                                .changed();
                         });
 
                         ui.add_space(2.0);
 
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("Release Time:   ").monospace().size(11.0).color(egui::Color32::from_rgb(170, 170, 170)));
-                            slider_changed |= ui.add(egui::Slider::new(&mut gate.release_time_ms, 0.0..=1000.0).suffix(" ms").custom_formatter(|v, _| format!("{:.0} ms", v))).changed();
+                            ui.label(
+                                egui::RichText::new("Release Time:   ")
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(170, 170, 170)),
+                            );
+                            slider_changed |= ui
+                                .add(
+                                    egui::Slider::new(&mut gate.release_time_ms, 0.0..=1000.0)
+                                        .suffix(" ms")
+                                        .custom_formatter(|v, _| format!("{:.0} ms", v)),
+                                )
+                                .changed();
                         });
                     }
                     SelectedFilterTab::Gain => {
                         let gain = &mut state.mic.config.gain;
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("Gain:").monospace().size(11.0).color(egui::Color32::from_rgb(170, 170, 170)));
-                            slider_changed |= ui.add(egui::Slider::new(&mut gain.gain_db, -30.0..=30.0).suffix(" dB").custom_formatter(|v, _| format!("{:.2} dB", v))).changed();
+                            ui.label(
+                                egui::RichText::new("Gain:")
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(170, 170, 170)),
+                            );
+                            slider_changed |= ui
+                                .add(
+                                    egui::Slider::new(&mut gain.gain_db, -30.0..=30.0)
+                                        .suffix(" dB")
+                                        .custom_formatter(|v, _| format!("{:.2} dB", v)),
+                                )
+                                .changed();
                         });
                     }
                     SelectedFilterTab::Compressor => {
                         let comp = &mut state.mic.config.compressor;
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("Ratio:      ").monospace().size(11.0).color(egui::Color32::from_rgb(170, 170, 170)));
-                            slider_changed |= ui.add(egui::Slider::new(&mut comp.ratio, 1.0..=32.0).custom_formatter(|v, _| format!("{:.2}:1", v))).changed();
+                            ui.label(
+                                egui::RichText::new("Ratio:      ")
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(170, 170, 170)),
+                            );
+                            slider_changed |= ui
+                                .add(
+                                    egui::Slider::new(&mut comp.ratio, 1.0..=32.0)
+                                        .custom_formatter(|v, _| format!("{:.2}:1", v)),
+                                )
+                                .changed();
                         });
 
                         ui.add_space(2.0);
 
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("Threshold:  ").monospace().size(11.0).color(egui::Color32::from_rgb(170, 170, 170)));
-                            slider_changed |= ui.add(egui::Slider::new(&mut comp.threshold_db, -60.0..=0.0).suffix(" dB").custom_formatter(|v, _| format!("{:.2} dB", v))).changed();
+                            ui.label(
+                                egui::RichText::new("Threshold:  ")
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(170, 170, 170)),
+                            );
+                            slider_changed |= ui
+                                .add(
+                                    egui::Slider::new(&mut comp.threshold_db, -60.0..=0.0)
+                                        .suffix(" dB")
+                                        .custom_formatter(|v, _| format!("{:.2} dB", v)),
+                                )
+                                .changed();
                         });
 
                         ui.add_space(2.0);
 
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("Attack:     ").monospace().size(11.0).color(egui::Color32::from_rgb(170, 170, 170)));
-                            slider_changed |= ui.add(egui::Slider::new(&mut comp.attack_time_ms, 1.0..=500.0).suffix(" ms").custom_formatter(|v, _| format!("{:.0} ms", v))).changed();
+                            ui.label(
+                                egui::RichText::new("Attack:     ")
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(170, 170, 170)),
+                            );
+                            slider_changed |= ui
+                                .add(
+                                    egui::Slider::new(&mut comp.attack_time_ms, 1.0..=500.0)
+                                        .suffix(" ms")
+                                        .custom_formatter(|v, _| format!("{:.0} ms", v)),
+                                )
+                                .changed();
                         });
 
                         ui.add_space(2.0);
 
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("Release:    ").monospace().size(11.0).color(egui::Color32::from_rgb(170, 170, 170)));
-                            slider_changed |= ui.add(egui::Slider::new(&mut comp.release_time_ms, 1.0..=1000.0).suffix(" ms").custom_formatter(|v, _| format!("{:.0} ms", v))).changed();
+                            ui.label(
+                                egui::RichText::new("Release:    ")
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(170, 170, 170)),
+                            );
+                            slider_changed |= ui
+                                .add(
+                                    egui::Slider::new(&mut comp.release_time_ms, 1.0..=1000.0)
+                                        .suffix(" ms")
+                                        .custom_formatter(|v, _| format!("{:.0} ms", v)),
+                                )
+                                .changed();
                         });
 
                         ui.add_space(2.0);
 
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("Output Gain:").monospace().size(11.0).color(egui::Color32::from_rgb(170, 170, 170)));
-                            slider_changed |= ui.add(egui::Slider::new(&mut comp.output_gain_db, -32.0..=32.0).suffix(" dB").custom_formatter(|v, _| format!("{:.2} dB", v))).changed();
+                            ui.label(
+                                egui::RichText::new("Output Gain:")
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(170, 170, 170)),
+                            );
+                            slider_changed |= ui
+                                .add(
+                                    egui::Slider::new(&mut comp.output_gain_db, -32.0..=32.0)
+                                        .suffix(" dB")
+                                        .custom_formatter(|v, _| format!("{:.2} dB", v)),
+                                )
+                                .changed();
                         });
                     }
                 }
@@ -345,17 +491,23 @@ fn draw_db_meter(ui: &mut egui::Ui, current_db: f32, peak_db: f32, clipping: boo
 
         let meter_width = 240.0;
         let meter_height = 14.0;
-        let (rect, _response) = ui.allocate_exact_size(
-            egui::vec2(meter_width, meter_height),
-            egui::Sense::hover(),
-        );
+        let (rect, _response) =
+            ui.allocate_exact_size(egui::vec2(meter_width, meter_height), egui::Sense::hover());
 
         if ui.is_rect_visible(rect) {
             let painter = ui.painter();
 
             // Background trough
-            painter.rect_filled(rect, egui::Rounding::ZERO, egui::Color32::from_rgb(17, 17, 17));
-            painter.rect_stroke(rect, egui::Rounding::ZERO, egui::Stroke::new(1.0, egui::Color32::from_rgb(53, 53, 53)));
+            painter.rect_filled(
+                rect,
+                egui::Rounding::ZERO,
+                egui::Color32::from_rgb(17, 17, 17),
+            );
+            painter.rect_stroke(
+                rect,
+                egui::Rounding::ZERO,
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(53, 53, 53)),
+            );
 
             // Normalized level 0.0 .. 1.0 (corresponds to -60 dB .. 0 dB)
             let norm_level = ((current_db + 60.0) / 60.0).clamp(0.0, 1.0);
@@ -373,18 +525,28 @@ fn draw_db_meter(ui: &mut egui::Ui, current_db: f32, peak_db: f32, clipping: boo
             if fill_width > 0.0 {
                 // Green part
                 let green_w = fill_width.min(p_green_end * rect.width());
-                let r_green = egui::Rect::from_min_size(rect.min, egui::vec2(green_w, rect.height()));
-                painter.rect_filled(r_green, egui::Rounding::ZERO, egui::Color32::from_rgb(46, 204, 113));
+                let r_green =
+                    egui::Rect::from_min_size(rect.min, egui::vec2(green_w, rect.height()));
+                painter.rect_filled(
+                    r_green,
+                    egui::Rounding::ZERO,
+                    egui::Color32::from_rgb(46, 204, 113),
+                );
 
                 // Orange part
                 if fill_width > p_green_end * rect.width() {
                     let orange_start = rect.min.x + p_green_end * rect.width();
-                    let orange_w = (fill_width - p_green_end * rect.width()).min((p_orange_end - p_green_end) * rect.width());
+                    let orange_w = (fill_width - p_green_end * rect.width())
+                        .min((p_orange_end - p_green_end) * rect.width());
                     let r_orange = egui::Rect::from_min_size(
                         egui::pos2(orange_start, rect.min.y),
                         egui::vec2(orange_w, rect.height()),
                     );
-                    painter.rect_filled(r_orange, egui::Rounding::ZERO, egui::Color32::from_rgb(243, 156, 18));
+                    painter.rect_filled(
+                        r_orange,
+                        egui::Rounding::ZERO,
+                        egui::Color32::from_rgb(243, 156, 18),
+                    );
                 }
 
                 // Red part
@@ -395,7 +557,11 @@ fn draw_db_meter(ui: &mut egui::Ui, current_db: f32, peak_db: f32, clipping: boo
                         egui::pos2(red_start, rect.min.y),
                         egui::vec2(red_w, rect.height()),
                     );
-                    painter.rect_filled(r_red, egui::Rounding::ZERO, egui::Color32::from_rgb(231, 76, 60));
+                    painter.rect_filled(
+                        r_red,
+                        egui::Rounding::ZERO,
+                        egui::Color32::from_rgb(231, 76, 60),
+                    );
                 }
             }
 
@@ -419,12 +585,18 @@ fn draw_db_meter(ui: &mut egui::Ui, current_db: f32, peak_db: f32, clipping: boo
             // Subdivision lines at -20 dB and -9 dB
             let line_20_x = rect.min.x + p_green_end * rect.width();
             painter.line_segment(
-                [egui::pos2(line_20_x, rect.min.y), egui::pos2(line_20_x, rect.max.y)],
+                [
+                    egui::pos2(line_20_x, rect.min.y),
+                    egui::pos2(line_20_x, rect.max.y),
+                ],
                 egui::Stroke::new(1.0, egui::Color32::from_rgb(30, 30, 30)),
             );
             let line_9_x = rect.min.x + p_orange_end * rect.width();
             painter.line_segment(
-                [egui::pos2(line_9_x, rect.min.y), egui::pos2(line_9_x, rect.max.y)],
+                [
+                    egui::pos2(line_9_x, rect.min.y),
+                    egui::pos2(line_9_x, rect.max.y),
+                ],
                 egui::Stroke::new(1.0, egui::Color32::from_rgb(30, 30, 30)),
             );
         }

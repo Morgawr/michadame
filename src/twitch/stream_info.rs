@@ -315,8 +315,7 @@ impl StreamInfoState {
                 InfoEvent::ChannelUpdated(Ok(info)) => {
                     self.original_title = info.title.clone();
                     self.original_category = info.category.clone();
-                    self.status_message =
-                        Some((false, "Stream info updated successfully!".into()));
+                    self.status_message = Some((false, "Stream info updated successfully!".into()));
                     self.is_saving = false;
                 }
                 InfoEvent::ChannelUpdated(Err(e)) => {
@@ -389,7 +388,9 @@ pub fn search_categories_gql(query: &str) -> Result<Vec<StreamCategory>, String>
 
     let mut results = Vec::new();
     for edge in edges {
-        let Some(node) = edge.get("node") else { continue };
+        let Some(node) = edge.get("node") else {
+            continue;
+        };
         let id = node
             .get("id")
             .and_then(|v| v.as_str())
@@ -464,9 +465,7 @@ pub fn fetch_category_by_id_gql(id: &str) -> Result<StreamCategory, String> {
     let arr = json_val.as_array().ok_or("Invalid response array")?;
     let first = arr.first().ok_or("Empty response")?;
 
-    let game = first
-        .pointer("/data/game")
-        .ok_or("Game not found in GQL")?;
+    let game = first.pointer("/data/game").ok_or("Game not found in GQL")?;
     let id = game
         .get("id")
         .and_then(|v| v.as_str())

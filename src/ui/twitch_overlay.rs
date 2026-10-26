@@ -66,17 +66,15 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
 
 /// `T` (no modifiers, window focused, not typing), same rules as the Debug `D` key.
 fn toggle_pressed(ctx: &egui::Context) -> bool {
-    !ctx.wants_keyboard_input()
-        && ctx.input(|i| i.focused)
-        && ctx.input_mut(|i| {
-            let pressed = i.events.iter().any(|event| {
-                matches!(event,
-                    egui::Event::Key { key: egui::Key::T, pressed: true, repeat: false, modifiers, .. }
-                    if modifiers.is_none()
-                )
-            });
-            pressed && i.consume_key(egui::Modifiers::NONE, egui::Key::T)
-        })
+    !ctx.wants_keyboard_input() && ctx.input(|i| i.focused) && ctx.input_mut(|i| {
+        let pressed = i.events.iter().any(|event| {
+            matches!(event,
+                egui::Event::Key { key: egui::Key::T, pressed: true, repeat: false, modifiers, .. }
+                if modifiers.is_none()
+            )
+        });
+        pressed && i.consume_key(egui::Modifiers::NONE, egui::Key::T)
+    })
 }
 
 fn draw_contents(ui: &mut egui::Ui, tw: &mut TwitchState, rect: egui::Rect, now: Instant) {
@@ -90,7 +88,8 @@ fn draw_contents(ui: &mut egui::Ui, tw: &mut TwitchState, rect: egui::Rect, now:
     );
 
     let header = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), HEADER_H));
-    let footer = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - FOOTER_H), rect.max);
+    let footer =
+        egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - FOOTER_H), rect.max);
     let body = egui::Rect::from_min_max(
         egui::pos2(rect.left(), header.bottom()),
         egui::pos2(rect.right(), footer.top()),
@@ -161,15 +160,29 @@ fn draw_header(ui: &mut egui::Ui, tw: &mut TwitchState, header: egui::Rect) {
             dot
         },
     );
-    painter.circle_filled(egui::pos2(live_rect.left() - 7.0, header.center().y), 4.0, dot);
+    painter.circle_filled(
+        egui::pos2(live_rect.left() - 7.0, header.center().y),
+        4.0,
+        dot,
+    );
     // No hover tooltip: tooltips render beneath the chat's Debug layer.
-    let close = ui.interact(close_rect, ui.id().with("twitch-chat-hide"), egui::Sense::click());
+    let close = ui.interact(
+        close_rect,
+        ui.id().with("twitch-chat-hide"),
+        egui::Sense::click(),
+    );
     let color = if close.hovered() {
         egui::Color32::WHITE
     } else {
         egui::Color32::from_gray(160)
     };
-    painter.text(close_rect.center(), egui::Align2::CENTER_CENTER, "×", egui::FontId::proportional(16.0), color);
+    painter.text(
+        close_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "×",
+        egui::FontId::proportional(16.0),
+        color,
+    );
     if close.clicked() {
         tw.overlay_hidden = true;
     }
@@ -210,8 +223,15 @@ fn draw_messages(ui: &mut egui::Ui, tw: &mut TwitchState, body: egui::Rect, now:
             break;
         }
         let alpha = tw.message_alpha(msg, now);
-        let (galley, emote_sections) =
-            layout_message(ui, msg, &font_id, line_h, emote_size, placeholder_w, inner.width());
+        let (galley, emote_sections) = layout_message(
+            ui,
+            msg,
+            &font_id,
+            line_h,
+            emote_size,
+            placeholder_w,
+            inner.width(),
+        );
         y -= galley.size().y;
         let origin = egui::pos2(inner.left(), y);
         painter.add(TextShape {
@@ -235,7 +255,8 @@ fn draw_messages(ui: &mut egui::Ui, tw: &mut TwitchState, body: egui::Rect, now:
                     Some(tex) => {
                         let size = tex.size_vec2();
                         // Keep aspect ratio inside the square slot.
-                        let scale = (emote_size / size.x.max(1.0)).min(emote_size / size.y.max(1.0));
+                        let scale =
+                            (emote_size / size.x.max(1.0)).min(emote_size / size.y.max(1.0));
                         let draw = egui::Rect::from_center_size(emote_rect.center(), size * scale);
                         painter.image(
                             tex.id(),
@@ -278,10 +299,11 @@ fn layout_message(
         ..Default::default()
     };
     let mut sections: Vec<Option<String>> = Vec::new();
-    let mut push = |job: &mut LayoutJob, text: &str, format: egui::TextFormat, emote: Option<String>| {
-        job.append(text, 0.0, format);
-        sections.push(emote);
-    };
+    let mut push =
+        |job: &mut LayoutJob, text: &str, format: egui::TextFormat, emote: Option<String>| {
+            job.append(text, 0.0, format);
+            sections.push(emote);
+        };
 
     let name_color = readable_name_color(msg.color, &msg.login);
     let text_format = match msg.kind {
@@ -301,10 +323,26 @@ fn layout_message(
     match msg.kind {
         MessageKind::System => {}
         MessageKind::Action => {
-            push(&mut job, &format!("{} ", msg.display_name), egui::TextFormat { color: name_color, ..base.clone() }, None);
+            push(
+                &mut job,
+                &format!("{} ", msg.display_name),
+                egui::TextFormat {
+                    color: name_color,
+                    ..base.clone()
+                },
+                None,
+            );
         }
         MessageKind::Chat => {
-            push(&mut job, &msg.display_name, egui::TextFormat { color: name_color, ..base.clone() }, None);
+            push(
+                &mut job,
+                &msg.display_name,
+                egui::TextFormat {
+                    color: name_color,
+                    ..base.clone()
+                },
+                None,
+            );
             push(&mut job, ": ", base.clone(), None);
         }
     }
@@ -318,7 +356,12 @@ fn layout_message(
                     extra_letter_spacing: (emote_size - placeholder_w).max(0.0),
                     ..base.clone()
                 };
-                push(&mut job, &EMOTE_PLACEHOLDER.to_string(), format, Some(id.clone()));
+                push(
+                    &mut job,
+                    &EMOTE_PLACEHOLDER.to_string(),
+                    format,
+                    Some(id.clone()),
+                );
             }
         }
     }
@@ -340,7 +383,9 @@ fn readable_name_color(color: Option<egui::Color32>, login: &str) -> egui::Color
         egui::Color32::from_rgb(220, 210, 90),
     ];
     let c = color.unwrap_or_else(|| {
-        let hash = login.bytes().fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
+        let hash = login
+            .bytes()
+            .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
         FALLBACK[hash as usize % FALLBACK.len()]
     });
     let luma = 0.2126 * c.r() as f32 + 0.7152 * c.g() as f32 + 0.0722 * c.b() as f32;
@@ -404,7 +449,10 @@ mod tests {
         let bright = egui::Color32::from_rgb(255, 200, 0);
         assert_eq!(readable_name_color(Some(bright), "x"), bright);
         // Fallback is stable per login.
-        assert_eq!(readable_name_color(None, "alice"), readable_name_color(None, "alice"));
+        assert_eq!(
+            readable_name_color(None, "alice"),
+            readable_name_color(None, "alice")
+        );
     }
 
     #[test]

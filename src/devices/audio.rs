@@ -1033,34 +1033,106 @@ mod tests {
         use alsa::Direction;
 
         // Valid input devices
-        assert!(is_usable_input_device("pulse", "PulseAudio Sound Server", None));
-        assert!(is_usable_input_device("pipewire", "PipeWire Sound Server", None));
-        assert!(is_usable_input_device("default", "Default Audio Device", None));
-        assert!(is_usable_input_device("default:CARD=PCH", "HDA Intel PCH, ALC1220 Analog\nDefault Audio Device", None));
-        assert!(is_usable_input_device("default:CARD=U25773", "UGREEN 25773, USB Audio\nDefault Audio Device", Some(Direction::Capture)));
-        assert!(is_usable_input_device("front:CARD=PCH,DEV=0", "HDA Intel PCH, ALC1220 Analog\nFront output / input", None));
+        assert!(is_usable_input_device(
+            "pulse",
+            "PulseAudio Sound Server",
+            None
+        ));
+        assert!(is_usable_input_device(
+            "pipewire",
+            "PipeWire Sound Server",
+            None
+        ));
+        assert!(is_usable_input_device(
+            "default",
+            "Default Audio Device",
+            None
+        ));
+        assert!(is_usable_input_device(
+            "default:CARD=PCH",
+            "HDA Intel PCH, ALC1220 Analog\nDefault Audio Device",
+            None
+        ));
+        assert!(is_usable_input_device(
+            "default:CARD=U25773",
+            "UGREEN 25773, USB Audio\nDefault Audio Device",
+            Some(Direction::Capture)
+        ));
+        assert!(is_usable_input_device(
+            "front:CARD=PCH,DEV=0",
+            "HDA Intel PCH, ALC1220 Analog\nFront output / input",
+            None
+        ));
 
         // Output-only direction
-        assert!(!is_usable_input_device("anything", "Any device", Some(Direction::Playback)));
+        assert!(!is_usable_input_device(
+            "anything",
+            "Any device",
+            Some(Direction::Playback)
+        ));
 
         // Output descriptions
-        assert!(!is_usable_input_device("hdmi:CARD=HDMI,DEV=0", "HDA ATI HDMI, LG ULTRAFINE\nHDMI Audio Output", None));
-        assert!(!is_usable_input_device("iec958:CARD=PCH,DEV=0", "HDA Intel PCH\nIEC958 (S/PDIF) Digital Audio Output", None));
-        assert!(!is_usable_input_device("surround51:CARD=PCH,DEV=0", "5.1 Surround output to Front, Center, Rear and Subwoofer speakers", None));
-        assert!(!is_usable_input_device("usbstream:CARD=PCH", "USB Stream Output", None));
+        assert!(!is_usable_input_device(
+            "hdmi:CARD=HDMI,DEV=0",
+            "HDA ATI HDMI, LG ULTRAFINE\nHDMI Audio Output",
+            None
+        ));
+        assert!(!is_usable_input_device(
+            "iec958:CARD=PCH,DEV=0",
+            "HDA Intel PCH\nIEC958 (S/PDIF) Digital Audio Output",
+            None
+        ));
+        assert!(!is_usable_input_device(
+            "surround51:CARD=PCH,DEV=0",
+            "5.1 Surround output to Front, Center, Rear and Subwoofer speakers",
+            None
+        ));
+        assert!(!is_usable_input_device(
+            "usbstream:CARD=PCH",
+            "USB Stream Output",
+            None
+        ));
 
         // ALSA plugins & internal endpoints
         assert!(!is_usable_input_device("null", "Discard all samples", None));
-        assert!(!is_usable_input_device("samplerate", "Rate Converter Plugin", None));
-        assert!(!is_usable_input_device("speexrate", "Rate Converter Plugin", None));
-        assert!(!is_usable_input_device("lavrate", "Rate Converter Plugin", None));
-        assert!(!is_usable_input_device("upmix", "Plugin for channel upmix", None));
-        assert!(!is_usable_input_device("vdownmix", "Plugin for channel downmix", None));
-        assert!(!is_usable_input_device("jack", "JACK Audio Connection Kit", None));
+        assert!(!is_usable_input_device(
+            "samplerate",
+            "Rate Converter Plugin",
+            None
+        ));
+        assert!(!is_usable_input_device(
+            "speexrate",
+            "Rate Converter Plugin",
+            None
+        ));
+        assert!(!is_usable_input_device(
+            "lavrate",
+            "Rate Converter Plugin",
+            None
+        ));
+        assert!(!is_usable_input_device(
+            "upmix",
+            "Plugin for channel upmix",
+            None
+        ));
+        assert!(!is_usable_input_device(
+            "vdownmix",
+            "Plugin for channel downmix",
+            None
+        ));
+        assert!(!is_usable_input_device(
+            "jack",
+            "JACK Audio Connection Kit",
+            None
+        ));
         assert!(!is_usable_input_device("oss", "Open Sound System", None));
 
         // Duplicates
-        assert!(!is_usable_input_device("sysdefault:CARD=PCH", "Default Audio Device", None));
+        assert!(!is_usable_input_device(
+            "sysdefault:CARD=PCH",
+            "Default Audio Device",
+            None
+        ));
     }
 
     #[test]
@@ -1071,13 +1143,47 @@ mod tests {
             let n = name.to_lowercase();
             let d = desc.to_lowercase();
 
-            assert!(!n.starts_with("surround"), "Surround output device listed: {}", name);
-            assert!(!n.starts_with("iec958"), "IEC958 output device listed: {}", name);
-            assert!(!n.starts_with("hdmi"), "HDMI output device listed: {}", name);
-            assert!(!n.starts_with("usbstream"), "USBStream output device listed: {}", name);
-            assert!(!n.starts_with("sysdefault"), "Duplicate sysdefault listed: {}", name);
-            assert!(n != "null" && n != "samplerate" && n != "speexrate" && n != "upmix" && n != "vdownmix", "Plugin listed: {}", name);
-            assert!(!d.contains("output to") && !d.contains("digital audio output") && !d.contains("hdmi audio output"), "Output-only description listed: {}", desc);
+            assert!(
+                !n.starts_with("surround"),
+                "Surround output device listed: {}",
+                name
+            );
+            assert!(
+                !n.starts_with("iec958"),
+                "IEC958 output device listed: {}",
+                name
+            );
+            assert!(
+                !n.starts_with("hdmi"),
+                "HDMI output device listed: {}",
+                name
+            );
+            assert!(
+                !n.starts_with("usbstream"),
+                "USBStream output device listed: {}",
+                name
+            );
+            assert!(
+                !n.starts_with("sysdefault"),
+                "Duplicate sysdefault listed: {}",
+                name
+            );
+            assert!(
+                n != "null"
+                    && n != "samplerate"
+                    && n != "speexrate"
+                    && n != "upmix"
+                    && n != "vdownmix",
+                "Plugin listed: {}",
+                name
+            );
+            assert!(
+                !d.contains("output to")
+                    && !d.contains("digital audio output")
+                    && !d.contains("hdmi audio output"),
+                "Output-only description listed: {}",
+                desc
+            );
         }
     }
 }

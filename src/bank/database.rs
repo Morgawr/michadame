@@ -118,7 +118,9 @@ impl BankDatabase {
         }
         // Migration: databases created before twitch_clip_url was introduced lack the column.
         let has_clip = conn
-            .prepare("SELECT 1 FROM pragma_table_info('mined_words') WHERE name = 'twitch_clip_url'")?
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('mined_words') WHERE name = 'twitch_clip_url'",
+            )?
             .exists([])?;
         if !has_clip {
             conn.execute_batch("ALTER TABLE mined_words ADD COLUMN twitch_clip_url TEXT;")?;
@@ -192,7 +194,10 @@ impl BankDatabase {
                 reading: row.get(3)?,
                 definition_text: row.get(4)?,
                 sentence: row.get(5)?,
-                word_range: (row.get::<_, i64>(6)? as usize, row.get::<_, i64>(7)? as usize),
+                word_range: (
+                    row.get::<_, i64>(6)? as usize,
+                    row.get::<_, i64>(7)? as usize,
+                ),
                 has_screenshot: row.get(8)?,
                 definition_json: row.get(9)?,
                 tag: row.get(10)?,
@@ -221,8 +226,10 @@ impl BankDatabase {
 
     /// Sets (or, with `None`, removes) the tag of an entry.
     pub fn set_tag(&self, id: i64, tag: Option<&str>) -> Result<()> {
-        self.conn
-            .execute("UPDATE mined_words SET tag = ?1 WHERE id = ?2", params![tag, id])?;
+        self.conn.execute(
+            "UPDATE mined_words SET tag = ?1 WHERE id = ?2",
+            params![tag, id],
+        )?;
         Ok(())
     }
 
@@ -255,7 +262,8 @@ impl BankDatabase {
     }
 
     pub fn delete(&self, id: i64) -> Result<()> {
-        self.conn.execute("DELETE FROM mined_words WHERE id = ?1", params![id])?;
+        self.conn
+            .execute("DELETE FROM mined_words WHERE id = ?1", params![id])?;
         Ok(())
     }
 
@@ -303,7 +311,8 @@ impl BankDatabase {
 
     /// Deletes a custom name entry by id.
     pub fn delete_custom_name(&self, id: i64) -> Result<()> {
-        self.conn.execute("DELETE FROM custom_names WHERE id = ?1", params![id])?;
+        self.conn
+            .execute("DELETE FROM custom_names WHERE id = ?1", params![id])?;
         Ok(())
     }
 }
@@ -336,7 +345,10 @@ mod tests {
         let b = db.insert(&entry("犬", 2_000, false)).unwrap();
 
         let list = db.list_meta().unwrap();
-        assert_eq!(list.iter().map(|e| e.id).collect::<Vec<_>>(), vec![b.id, a.id]);
+        assert_eq!(
+            list.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![b.id, a.id]
+        );
         assert!(list[1].has_screenshot);
         assert!(!list[0].has_screenshot);
         assert_eq!(list[1].word_range, (0, 1));
@@ -356,7 +368,10 @@ mod tests {
     fn tags_round_trip_and_can_be_edited() {
         let db = BankDatabase::open_in_memory().unwrap();
         let a = db
-            .insert(&NewBankEntry { tag: Some("Final Fantasy 7".into()), ..entry("猫", 1_000, false) })
+            .insert(&NewBankEntry {
+                tag: Some("Final Fantasy 7".into()),
+                ..entry("猫", 1_000, false)
+            })
             .unwrap();
         assert_eq!(a.tag.as_deref(), Some("Final Fantasy 7"));
         let b = db.insert(&entry("犬", 2_000, false)).unwrap();
@@ -382,19 +397,33 @@ mod tests {
                 ..entry("猫", 1_000, false)
             })
             .unwrap();
-        assert_eq!(a.twitch_clip_url.as_deref(), Some("https://clips.twitch.tv/ClipA"));
+        assert_eq!(
+            a.twitch_clip_url.as_deref(),
+            Some("https://clips.twitch.tv/ClipA")
+        );
         let b = db.insert(&entry("犬", 2_000, false)).unwrap();
         assert_eq!(b.twitch_clip_url, None);
 
         let list = db.list_meta().unwrap();
-        assert_eq!(list[1].twitch_clip_url.as_deref(), Some("https://clips.twitch.tv/ClipA"));
+        assert_eq!(
+            list[1].twitch_clip_url.as_deref(),
+            Some("https://clips.twitch.tv/ClipA")
+        );
         assert_eq!(list[0].twitch_clip_url, None);
 
-        db.set_twitch_clip_url(b.id, Some("https://clips.twitch.tv/ClipB")).unwrap();
-        db.set_twitch_clip_url_by_created_at(1_000, "https://clips.twitch.tv/ClipAUpdated").unwrap();
+        db.set_twitch_clip_url(b.id, Some("https://clips.twitch.tv/ClipB"))
+            .unwrap();
+        db.set_twitch_clip_url_by_created_at(1_000, "https://clips.twitch.tv/ClipAUpdated")
+            .unwrap();
         let list = db.list_meta().unwrap();
-        assert_eq!(list[0].twitch_clip_url.as_deref(), Some("https://clips.twitch.tv/ClipB"));
-        assert_eq!(list[1].twitch_clip_url.as_deref(), Some("https://clips.twitch.tv/ClipAUpdated"));
+        assert_eq!(
+            list[0].twitch_clip_url.as_deref(),
+            Some("https://clips.twitch.tv/ClipB")
+        );
+        assert_eq!(
+            list[1].twitch_clip_url.as_deref(),
+            Some("https://clips.twitch.tv/ClipAUpdated")
+        );
     }
 
     #[test]
@@ -418,10 +447,14 @@ mod tests {
         assert_eq!(list[0].tag, None);
         assert_eq!(list[0].twitch_clip_url, None);
         db.set_tag(list[0].id, Some("Grandia 2")).unwrap();
-        db.set_twitch_clip_url(list[0].id, Some("https://clips.twitch.tv/Grandia")).unwrap();
+        db.set_twitch_clip_url(list[0].id, Some("https://clips.twitch.tv/Grandia"))
+            .unwrap();
         let list = db.list_meta().unwrap();
         assert_eq!(list[0].tag.as_deref(), Some("Grandia 2"));
-        assert_eq!(list[0].twitch_clip_url.as_deref(), Some("https://clips.twitch.tv/Grandia"));
+        assert_eq!(
+            list[0].twitch_clip_url.as_deref(),
+            Some("https://clips.twitch.tv/Grandia")
+        );
     }
 
     #[test]

@@ -89,7 +89,11 @@ pub fn suggest(query: &str, known: &[String], limit: usize) -> Vec<String> {
         .filter_map(|(i, k)| fuzzy_score(trimmed, k).map(|s| (s, i, k)))
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    scored.into_iter().take(limit).map(|(_, _, k)| k.clone()).collect()
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, _, k)| k.clone())
+        .collect()
 }
 
 #[cfg(test)]
@@ -97,10 +101,15 @@ mod tests {
     use super::*;
 
     fn known() -> Vec<String> {
-        ["Final Fantasy 7", "Dragon Quest", "Final Fantasy 8", "Fire Emblem"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
+        [
+            "Final Fantasy 7",
+            "Dragon Quest",
+            "Final Fantasy 8",
+            "Fire Emblem",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
     }
 
     #[test]
@@ -113,9 +122,18 @@ mod tests {
     #[test]
     fn canonicalize_prefers_existing_spelling() {
         let k = known();
-        assert_eq!(canonicalize_tag("final fantasy 7 ", &k), Some("Final Fantasy 7".into()));
-        assert_eq!(canonicalize_tag("FINAL FANTASY 8", &k), Some("Final Fantasy 8".into()));
-        assert_eq!(canonicalize_tag("final fantasy 9", &k), Some("final fantasy 9".into()));
+        assert_eq!(
+            canonicalize_tag("final fantasy 7 ", &k),
+            Some("Final Fantasy 7".into())
+        );
+        assert_eq!(
+            canonicalize_tag("FINAL FANTASY 8", &k),
+            Some("Final Fantasy 8".into())
+        );
+        assert_eq!(
+            canonicalize_tag("final fantasy 9", &k),
+            Some("final fantasy 9".into())
+        );
         assert_eq!(canonicalize_tag(" ", &k), None);
     }
 
@@ -143,7 +161,10 @@ mod tests {
     #[test]
     fn suggest_orders_by_score_then_recency() {
         let k = known();
-        assert_eq!(suggest("final", &k, 8), vec!["Final Fantasy 7", "Final Fantasy 8"]);
+        assert_eq!(
+            suggest("final", &k, 8),
+            vec!["Final Fantasy 7", "Final Fantasy 8"]
+        );
         assert_eq!(suggest("ff8", &k, 8), vec!["Final Fantasy 8"]);
         assert_eq!(suggest("fin", &k, 1), vec!["Final Fantasy 7"]);
         assert_eq!(suggest("", &k, 2), vec!["Final Fantasy 7", "Dragon Quest"]);

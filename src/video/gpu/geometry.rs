@@ -45,11 +45,7 @@ impl RenderedArea {
     }
 
     pub fn full(output: (f32, f32)) -> Self {
-        if !output.0.is_finite()
-            || !output.1.is_finite()
-            || output.0 < 1.
-            || output.1 < 1.
-        {
+        if !output.0.is_finite() || !output.1.is_finite() || output.0 < 1. || output.1 < 1. {
             return Self::default();
         }
         Self {

@@ -131,7 +131,8 @@ pub struct OcrState {
     /// Channel sender for Screen AI sync/update worker events.
     pub screen_ai_event_tx: crossbeam_channel::Sender<crate::ocr::screen_ai::ScreenAiEvent>,
     /// Channel receiver for Screen AI sync/update worker events.
-    pub screen_ai_event_rx: Option<crossbeam_channel::Receiver<crate::ocr::screen_ai::ScreenAiEvent>>,
+    pub screen_ai_event_rx:
+        Option<crossbeam_channel::Receiver<crate::ocr::screen_ai::ScreenAiEvent>>,
     /// Atomic flag set by the UI when an OCR screenshot capture is requested.
     /// Polled and cleared by the OpenGL paint callback.
     pub capture_requested: Arc<AtomicBool>,
@@ -170,7 +171,8 @@ impl OcrState {
     /// Updates the selected OCR backend and synchronizes the atomic value read by the worker thread.
     pub fn set_backend(&mut self, backend: OcrBackend) {
         self.backend = backend;
-        self.backend_shared.store(backend.as_u8(), Ordering::Release);
+        self.backend_shared
+            .store(backend.as_u8(), Ordering::Release);
     }
 
     /// Triggers a background version check for the Chrome Screen AI model on CIPD.
@@ -385,7 +387,8 @@ impl OcrState {
 
     /// Recomputes merged `boxes` from `raw_lines` using the current `sticky_distance`.
     pub fn recompute_boxes(&mut self) {
-        self.boxes = crate::ocr::lens::group_lines_into_blocks(&self.raw_lines, self.sticky_distance);
+        self.boxes =
+            crate::ocr::lens::group_lines_into_blocks(&self.raw_lines, self.sticky_distance);
         self.last_copied_index = None;
     }
 

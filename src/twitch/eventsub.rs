@@ -119,7 +119,9 @@ impl Worker {
                     is_reconnect = false;
                 }
                 Err(err) => {
-                    tracing::warn!("Twitch EventSub disconnected ({err}), reconnecting in {backoff}s");
+                    tracing::warn!(
+                        "Twitch EventSub disconnected ({err}), reconnecting in {backoff}s"
+                    );
                     current_url = EVENTSUB_WS_URL.to_string();
                     is_reconnect = false;
                     let until = Instant::now() + Duration::from_secs(backoff);
@@ -169,8 +171,9 @@ impl Worker {
                                 // keepalive received
                             }
                             "session_reconnect" => {
-                                if let Some(reconnect_url) =
-                                    json.pointer("/payload/session/reconnect_url").and_then(|v| v.as_str())
+                                if let Some(reconnect_url) = json
+                                    .pointer("/payload/session/reconnect_url")
+                                    .and_then(|v| v.as_str())
                                 {
                                     return Ok(Some(reconnect_url.to_string()));
                                 }

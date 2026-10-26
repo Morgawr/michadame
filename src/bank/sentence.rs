@@ -33,11 +33,17 @@ fn is_closing_bracket(c: char) -> bool {
 }
 
 fn closer_for(open: char) -> Option<char> {
-    BRACKET_PAIRS.iter().find(|&&(o, _)| o == open).map(|&(_, c)| c)
+    BRACKET_PAIRS
+        .iter()
+        .find(|&&(o, _)| o == open)
+        .map(|&(_, c)| c)
 }
 
 fn opener_for(close: char) -> Option<char> {
-    BRACKET_PAIRS.iter().find(|&&(_, c)| c == close).map(|&(o, _)| o)
+    BRACKET_PAIRS
+        .iter()
+        .find(|&&(_, c)| c == close)
+        .map(|&(o, _)| o)
 }
 
 fn is_open_bracket_matched(slice: &[char], open: char, close: char) -> bool {
@@ -79,7 +85,8 @@ fn sentence_spans(chars: &[char]) -> Vec<(usize, usize)> {
         if is_terminator(chars[i]) {
             // Absorb runs of terminators ("！？", "。。") and closing brackets ("。」").
             let mut end = i + 1;
-            while end < chars.len() && (is_terminator(chars[end]) || is_closing_bracket(chars[end])) {
+            while end < chars.len() && (is_terminator(chars[end]) || is_closing_bracket(chars[end]))
+            {
                 end += 1;
             }
             spans.push((start, end));
@@ -109,7 +116,10 @@ pub fn extract_sentence(text: &str, char_range: (usize, usize)) -> (String, (usi
     let word_end = char_range.1.clamp(word_start, chars.len());
 
     let spans = sentence_spans(&chars);
-    let last_word_char = word_end.saturating_sub(1).max(word_start).min(chars.len() - 1);
+    let last_word_char = word_end
+        .saturating_sub(1)
+        .max(word_start)
+        .min(chars.len() - 1);
     let containing = |idx: usize| {
         spans
             .iter()
@@ -137,7 +147,10 @@ pub fn extract_sentence(text: &str, char_range: (usize, usize)) -> (String, (usi
             let first = chars[start];
             let unmatched = match closer_for(first) {
                 Some(close) => !is_open_bracket_matched(&chars[start..end], first, close),
-                None => first == '"' && chars[start + 1..end].iter().filter(|&&c| c == '"').count() % 2 == 0,
+                None => {
+                    first == '"'
+                        && chars[start + 1..end].iter().filter(|&&c| c == '"').count() % 2 == 0
+                }
             };
             if unmatched {
                 start += 1;
@@ -148,7 +161,10 @@ pub fn extract_sentence(text: &str, char_range: (usize, usize)) -> (String, (usi
             let last = chars[end - 1];
             let unmatched = match opener_for(last) {
                 Some(open) => !is_close_bracket_matched(&chars[start..end], open, last),
-                None => last == '"' && chars[start..end - 1].iter().filter(|&&c| c == '"').count() % 2 == 0,
+                None => {
+                    last == '"'
+                        && chars[start..end - 1].iter().filter(|&&c| c == '"').count() % 2 == 0
+                }
             };
             if unmatched {
                 end -= 1;

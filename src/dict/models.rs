@@ -52,7 +52,9 @@ impl TermFrequency {
 
     /// Returns true if this frequency is specifically a kana-only reading frequency (marked with ㋕).
     pub fn is_kana_freq(&self) -> bool {
-        self.display_value.as_deref().map_or(false, |dv| dv.contains('㋕'))
+        self.display_value
+            .as_deref()
+            .map_or(false, |dv| dv.contains('㋕'))
     }
 }
 

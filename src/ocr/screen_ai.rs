@@ -1,7 +1,5 @@
 use super::lens::{build_line_text_and_spans, estimate_line_char_em, is_dot_leader_char};
-use super::models::{
-    CenterRotatedBox, Geometry, ParsedLine, TextLayoutWord, WritingDirection,
-};
+use super::models::{CenterRotatedBox, Geometry, ParsedLine, TextLayoutWord, WritingDirection};
 use crossbeam_channel::Sender;
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -115,8 +113,7 @@ pub fn save_installed_metadata(dir: &Path, meta: &ScreenAiMetadata) -> Result<()
     let meta_path = dir.join("metadata.json");
     let json = serde_json::to_string_pretty(meta)
         .map_err(|e| format!("Failed to serialize Screen AI metadata: {e}"))?;
-    std::fs::write(&meta_path, json)
-        .map_err(|e| format!("Failed to write Screen AI metadata: {e}"))
+    std::fs::write(&meta_path, json).map_err(|e| format!("Failed to write Screen AI metadata: {e}"))
 }
 
 /// Strips the pRPC XSSI protection prefix `)]}'` from a CIPD JSON response body.
@@ -134,8 +131,9 @@ pub fn parse_cipd_version_responses(
     resolve_body: &str,
     describe_body: Option<&str>,
 ) -> Result<ScreenAiMetadata, String> {
-    let resolve_json: serde_json::Value = serde_json::from_str(strip_prpc_xssi_prefix(resolve_body))
-        .map_err(|e| format!("Failed to parse CIPD ResolveVersion JSON: {e}"))?;
+    let resolve_json: serde_json::Value =
+        serde_json::from_str(strip_prpc_xssi_prefix(resolve_body))
+            .map_err(|e| format!("Failed to parse CIPD ResolveVersion JSON: {e}"))?;
 
     let hex_digest = resolve_json
         .get("instance")
@@ -240,7 +238,10 @@ where
     std::fs::create_dir_all(target_dir)
         .map_err(|e| format!("Failed to create directory {}: {e}", target_dir.display()))?;
 
-    progress_cb("Checking latest Chrome Screen AI version...".to_string(), 0.02);
+    progress_cb(
+        "Checking latest Chrome Screen AI version...".to_string(),
+        0.02,
+    );
     let meta = check_remote_screen_ai_version().unwrap_or_else(|_| ScreenAiMetadata {
         version: "latest".to_string(),
         instance_digest: String::new(),
@@ -306,7 +307,10 @@ where
             .map_err(|e| format!("Failed to flush temporary zip file: {e}"))?;
     }
 
-    progress_cb("Extracting Chrome Screen AI model files...".to_string(), 0.76);
+    progress_cb(
+        "Extracting Chrome Screen AI model files...".to_string(),
+        0.76,
+    );
 
     let extract_result = extract_screen_ai_archive(&tmp_zip_path, target_dir, &progress_cb);
     let _ = std::fs::remove_file(&tmp_zip_path);
@@ -398,7 +402,11 @@ where
 
         let frac = (i + 1) as f32 / total_entries as f32;
         progress_cb(
-            format!("Extracting Chrome Screen AI model files ({}/{})...", i + 1, total_entries),
+            format!(
+                "Extracting Chrome Screen AI model files ({}/{})...",
+                i + 1,
+                total_entries
+            ),
             0.76 + 0.22 * frac,
         );
     }
@@ -567,7 +575,10 @@ extern "C" fn get_file_content_cb(
         Err(_) => return,
     };
     let Some(full_path) = resolve_model_file_path(&dir, rel_str) else {
-        tracing::warn!("Screen AI requested missing model file content: {}", rel_str);
+        tracing::warn!(
+            "Screen AI requested missing model file content: {}",
+            rel_str
+        );
         return;
     };
     if let Ok(bytes) = std::fs::read(full_path) {
@@ -613,14 +624,13 @@ fn ensure_runtime_loaded_and_initialized(
     update_active_model_dir(model_dir);
 
     if guard.is_none() {
-        let so_path = resolve_model_file_path(model_dir, "libchromescreenai.so").ok_or_else(
-            || {
+        let so_path =
+            resolve_model_file_path(model_dir, "libchromescreenai.so").ok_or_else(|| {
                 format!(
                     "Chrome Screen AI library not found in {}",
                     model_dir.display()
                 )
-            },
-        )?;
+            })?;
 
         unsafe {
             #[cfg(unix)]
@@ -831,7 +841,7 @@ pub fn convert_and_scale_gl_rgba_to_bgra(
                 dst_px[0] = src_px[2]; // B
                 dst_px[1] = src_px[1]; // G
                 dst_px[2] = src_px[0]; // R
-                dst_px[3] = 255;       // A (opaque)
+                dst_px[3] = 255; // A (opaque)
             }
         }
         return;
@@ -848,10 +858,10 @@ pub fn convert_and_scale_gl_rgba_to_bgra(
             let src_idx = src_row_offset + src_x * 4;
             let dst_idx = dst_row_offset + dst_x * 4;
 
-            out_bgra[dst_idx] = raw_rgba[src_idx + 2];     // B
+            out_bgra[dst_idx] = raw_rgba[src_idx + 2]; // B
             out_bgra[dst_idx + 1] = raw_rgba[src_idx + 1]; // G
-            out_bgra[dst_idx + 2] = raw_rgba[src_idx];     // R
-            out_bgra[dst_idx + 3] = 255;                   // A
+            out_bgra[dst_idx + 2] = raw_rgba[src_idx]; // R
+            out_bgra[dst_idx + 3] = 255; // A
         }
     }
 }
@@ -1635,7 +1645,10 @@ mod tests {
 
         let lines = execute_screen_ai_ocr_bgra(&model_dir, &bgra, w, h)
             .expect("Failed to execute Screen AI OCR");
-        assert!(!lines.is_empty(), "Expected local Screen AI OCR to detect text");
+        assert!(
+            !lines.is_empty(),
+            "Expected local Screen AI OCR to detect text"
+        );
         let boxes = group_lines_into_blocks(&lines, 0.6);
         assert!(!boxes.is_empty());
     }

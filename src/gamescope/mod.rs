@@ -71,11 +71,15 @@ impl GamescopeHookState {
     }
 
     pub fn is_cursor_hidden(&self) -> bool {
-        self.x11_cursor_monitor.as_ref().map_or(false, |m| m.is_cursor_hidden())
+        self.x11_cursor_monitor
+            .as_ref()
+            .map_or(false, |m| m.is_cursor_hidden())
     }
 
     pub fn cursor_image(&self) -> Option<std::sync::Arc<x11_cursor::GameCursorImage>> {
-        self.x11_cursor_monitor.as_ref().and_then(|m| m.cursor_image())
+        self.x11_cursor_monitor
+            .as_ref()
+            .and_then(|m| m.cursor_image())
     }
 
     pub fn resolution(&self) -> (u32, u32) {
@@ -137,5 +141,3 @@ mod tests {
         assert!(state.passthrough_enabled);
     }
 }
-
-

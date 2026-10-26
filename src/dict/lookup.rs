@@ -25,11 +25,15 @@ pub fn lookup_word_at_pointer(
     }
 
     for ocr_box in ocr_boxes {
-        let min_x = video_rect.min.x + (ocr_box.center_x - ocr_box.width / 2.0) * video_rect.width();
-        let max_x = video_rect.min.x + (ocr_box.center_x + ocr_box.width / 2.0) * video_rect.width();
+        let min_x =
+            video_rect.min.x + (ocr_box.center_x - ocr_box.width / 2.0) * video_rect.width();
+        let max_x =
+            video_rect.min.x + (ocr_box.center_x + ocr_box.width / 2.0) * video_rect.width();
         let is_box_vertical = ocr_box.writing_direction.is_vertical();
-        let min_y = video_rect.min.y + (ocr_box.center_y - ocr_box.height / 2.0) * video_rect.height();
-        let max_y = video_rect.min.y + (ocr_box.center_y + ocr_box.height / 2.0) * video_rect.height();
+        let min_y =
+            video_rect.min.y + (ocr_box.center_y - ocr_box.height / 2.0) * video_rect.height();
+        let max_y =
+            video_rect.min.y + (ocr_box.center_y + ocr_box.height / 2.0) * video_rect.height();
 
         let box_rect = Rect::from_min_max(egui::pos2(min_x, min_y), egui::pos2(max_x, max_y));
 
@@ -81,10 +85,14 @@ pub fn lookup_word_at_pointer(
                     };
                     LineSegment {
                         text: line.text.as_str(),
-                        min_x: video_rect.min.x + (line.center_x - line.width / 2.0) * video_rect.width(),
-                        max_x: video_rect.min.x + (line.center_x + line.width / 2.0) * video_rect.width(),
-                        min_y: video_rect.min.y + (line.center_y - line.height / 2.0) * video_rect.height(),
-                        max_y: video_rect.min.y + (line.center_y + line.height / 2.0) * video_rect.height(),
+                        min_x: video_rect.min.x
+                            + (line.center_x - line.width / 2.0) * video_rect.width(),
+                        max_x: video_rect.min.x
+                            + (line.center_x + line.width / 2.0) * video_rect.width(),
+                        min_y: video_rect.min.y
+                            + (line.center_y - line.height / 2.0) * video_rect.height(),
+                        max_y: video_rect.min.y
+                            + (line.center_y + line.height / 2.0) * video_rect.height(),
                         char_start: 0,
                         char_len: 0,
                         is_vertical: is_vert,
@@ -306,13 +314,11 @@ pub fn lookup_word_at_pointer(
                     };
                     let mut tagged: Vec<_> = groups.into_iter().zip(entries).collect();
                     tagged.sort_by(|(ga, a), (gb, b)| {
-                        ga.cmp(gb)
-                            .then_with(|| by_freq(a, b))
-                            .then_with(|| {
-                                b.score
-                                    .partial_cmp(&a.score)
-                                    .unwrap_or(std::cmp::Ordering::Equal)
-                            })
+                        ga.cmp(gb).then_with(|| by_freq(a, b)).then_with(|| {
+                            b.score
+                                .partial_cmp(&a.score)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
                     });
                     entries = tagged.into_iter().map(|(_, e)| e).collect();
                 }
@@ -323,7 +329,6 @@ pub fn lookup_word_at_pointer(
         };
 
         if let Some((start_offset, end_offset, entries)) = matched_entry {
-
             // Calculate precise per-line sub-bounding boxes for the recognized word.
             // The segment on the hovered line becomes `word_rect` (popup anchor); segments on
             // other lines (when the word wraps) are kept as extra highlight rects.
@@ -473,12 +478,18 @@ impl LineSegment<'_> {
             let h = self.max_y - self.min_y;
             let y0 = self.min_y + (local_s as f32 / n) * h;
             let y1 = self.min_y + (local_e as f32 / n) * h;
-            Some(Rect::from_min_max(egui::pos2(self.min_x, y0), egui::pos2(self.max_x, y1)))
+            Some(Rect::from_min_max(
+                egui::pos2(self.min_x, y0),
+                egui::pos2(self.max_x, y1),
+            ))
         } else {
             let w = self.max_x - self.min_x;
             let x0 = self.min_x + (local_s as f32 / n) * w;
             let x1 = self.min_x + (local_e as f32 / n) * w;
-            Some(Rect::from_min_max(egui::pos2(x0, self.min_y), egui::pos2(x1, self.max_y)))
+            Some(Rect::from_min_max(
+                egui::pos2(x0, self.min_y),
+                egui::pos2(x1, self.max_y),
+            ))
         }
     }
 }
@@ -560,16 +571,16 @@ fn find_span_entries(
     let matching_names: Vec<&CustomNameEntry> = custom_names
         .iter()
         .filter(|n| {
-            n.kanji == sub_str
-                || n.furigana == sub_str
-                || alt_kana.as_deref() == Some(&n.furigana)
+            n.kanji == sub_str || n.furigana == sub_str || alt_kana.as_deref() == Some(&n.furigana)
         })
         .collect();
 
     if !matching_names.is_empty() {
         let matches_tag = |n: &&CustomNameEntry| -> bool {
             match (current_tag, n.source_tag.as_deref()) {
-                (Some(curr), Some(tag)) => !curr.trim().is_empty() && tag.trim().eq_ignore_ascii_case(curr.trim()),
+                (Some(curr), Some(tag)) => {
+                    !curr.trim().is_empty() && tag.trim().eq_ignore_ascii_case(curr.trim())
+                }
                 _ => false,
             }
         };
@@ -739,13 +750,39 @@ impl ScanAccumulator {
 
 /// Checks if a character is punctuation or whitespace that cannot start or end a word.
 fn is_punct_char(c: char) -> bool {
-    matches!(c,
-        ' ' | '\t' | '\n' | '\r'
-        | '、' | '。' | '，' | '．' | '！' | '？'
-        | '「' | '」' | '『' | '』' | '（' | '）'
-        | '(' | ')' | '[' | ']' | '{' | '}'
-        | '・' | '：' | '；' | ':' | ';'
-        | '—' | '-' | '…' | '~' | '～'
+    matches!(
+        c,
+        ' ' | '\t'
+            | '\n'
+            | '\r'
+            | '、'
+            | '。'
+            | '，'
+            | '．'
+            | '！'
+            | '？'
+            | '「'
+            | '」'
+            | '『'
+            | '』'
+            | '（'
+            | '）'
+            | '('
+            | ')'
+            | '['
+            | ']'
+            | '{'
+            | '}'
+            | '・'
+            | '：'
+            | '；'
+            | ':'
+            | ';'
+            | '—'
+            | '-'
+            | '…'
+            | '~'
+            | '～'
     )
 }
 
@@ -756,13 +793,40 @@ fn is_ignorable_token(s: &str) -> bool {
         return true;
     }
     trimmed.chars().all(|c| {
-        matches!(c,
-            ' ' | '\t' | '\n' | '\r'
-            | '、' | '。' | '，' | '．' | '！' | '？'
-            | '「' | '」' | '『' | '』' | '（' | '）'
-            | '(' | ')' | '[' | ']' | '{' | '}'
-            | '・' | '：' | '；' | ':' | ';'
-            | '—' | 'ー' | '-' | '…' | '~' | '～'
+        matches!(
+            c,
+            ' ' | '\t'
+                | '\n'
+                | '\r'
+                | '、'
+                | '。'
+                | '，'
+                | '．'
+                | '！'
+                | '？'
+                | '「'
+                | '」'
+                | '『'
+                | '』'
+                | '（'
+                | '）'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '・'
+                | '：'
+                | '；'
+                | ':'
+                | ';'
+                | '—'
+                | 'ー'
+                | '-'
+                | '…'
+                | '~'
+                | '～'
         )
     })
 }
@@ -1200,7 +1264,17 @@ mod tests {
         let video_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
         // Box spans x: 100..900; first char center
         let x = 100.0 + (800.0 / n) * 0.5;
-        lookup_word_at_pointer(egui::pos2(x, 300.0), &[ocr_box], video_rect, Some(db), None, global_deinflector(), &[], None, 0)
+        lookup_word_at_pointer(
+            egui::pos2(x, 300.0),
+            &[ocr_box],
+            video_rect,
+            Some(db),
+            None,
+            global_deinflector(),
+            &[],
+            None,
+            0,
+        )
     }
 
     /// Hovers over the character at `idx` of `text` (single-line box) and returns the popup.
@@ -1217,7 +1291,17 @@ mod tests {
         };
         let video_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
         let x = 100.0 + (800.0 / n) * (idx as f32 + 0.5);
-        lookup_word_at_pointer(egui::pos2(x, 300.0), &[ocr_box], video_rect, Some(db), None, global_deinflector(), &[], None, 0)
+        lookup_word_at_pointer(
+            egui::pos2(x, 300.0),
+            &[ocr_box],
+            video_rect,
+            Some(db),
+            None,
+            global_deinflector(),
+            &[],
+            None,
+            0,
+        )
     }
 
     #[test]
@@ -1251,7 +1335,11 @@ mod tests {
         let p = hover_first_char("なーい", &db).unwrap();
         assert_eq!(p.matched_term, "ナーイ");
         assert_eq!(p.char_range, (0, 3));
-        assert!(p.entries.iter().any(|e| e.term == "無い"), "{:?}", p.entries);
+        assert!(
+            p.entries.iter().any(|e| e.term == "無い"),
+            "{:?}",
+            p.entries
+        );
         assert_eq!(p.entries[0].term, "ナーイ");
     }
 
@@ -1798,7 +1886,10 @@ mod tests {
             None,
             0,
         );
-        assert!(popup_gap.is_none(), "Hovering over whitespace gap should not match any word");
+        assert!(
+            popup_gap.is_none(),
+            "Hovering over whitespace gap should not match any word"
+        );
 
         // 3. Hover over "魔性" on row 1 (row1 spans 10px to 990px, width 980px, 21 chars -> ~46.6px/char)
         // "魔性" is at char indices 8..10 -> approx x = 10 + 8.5 * 46.6 = 406px
@@ -1833,7 +1924,10 @@ mod tests {
             None,
             0,
         );
-        assert!(popup_korosu.is_some(), "Hovering over 殺された should match 殺す");
+        assert!(
+            popup_korosu.is_some(),
+            "Hovering over 殺された should match 殺す"
+        );
         let p_k = popup_korosu.unwrap();
         assert_eq!(p_k.matched_term, "殺す");
         assert!((p_k.word_rect.center().y - 240.0).abs() < 1.0);
@@ -1932,7 +2026,10 @@ mod tests {
             None,
             0,
         );
-        assert!(popup_tokyo.is_some(), "Hovering over vertical '東' should match");
+        assert!(
+            popup_tokyo.is_some(),
+            "Hovering over vertical '東' should match"
+        );
         let p_t = popup_tokyo.unwrap();
         assert_eq!(p_t.matched_term, "東京");
         assert_eq!(p_t.char_range, (0, 2));

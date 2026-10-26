@@ -16,7 +16,12 @@ const LABEL: egui::Color32 = egui::Color32::from_rgb(153, 153, 153);
 fn label(ui: &mut egui::Ui, text: &str) {
     ui.add_sized(
         [115.0, 18.0],
-        egui::Label::new(egui::RichText::new(text).monospace().size(11.0).color(LABEL)),
+        egui::Label::new(
+            egui::RichText::new(text)
+                .monospace()
+                .size(11.0)
+                .color(LABEL),
+        ),
     );
 }
 
@@ -48,9 +53,13 @@ pub fn draw_twitch_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 }
             });
             let (color, text) = status_line(state);
-            col1.label(egui::RichText::new(text).monospace().size(11.0).color(color));
-            if state.twitch.config.chat_overlay_enabled && !state.twitch.config.channel.is_empty()
-            {
+            col1.label(
+                egui::RichText::new(text)
+                    .monospace()
+                    .size(11.0)
+                    .color(color),
+            );
+            if state.twitch.config.chat_overlay_enabled && !state.twitch.config.channel.is_empty() {
                 let (color, text) = match &state.twitch.stream_status {
                     StreamStatus::Live {
                         viewer_count: Some(count),
@@ -74,7 +83,12 @@ pub fn draw_twitch_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     }
                     StreamStatus::Unknown(reason) => (MUTED, format!("Stream: unknown ({reason})")),
                 };
-                col1.label(egui::RichText::new(text).monospace().size(11.0).color(color));
+                col1.label(
+                    egui::RichText::new(text)
+                        .monospace()
+                        .size(11.0)
+                        .color(color),
+                );
             }
 
             let ctx = col2.ctx().clone();
@@ -92,7 +106,10 @@ pub fn draw_twitch_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         changed = true;
                     }
                 });
-                note(col2, "Authenticated for chat sending, stream key & stream info.");
+                note(
+                    col2,
+                    "Authenticated for chat sending, stream key & stream info.",
+                );
             } else {
                 match state.twitch.auth_flow.clone() {
                     AuthFlow::Idle => {
@@ -175,10 +192,7 @@ pub fn draw_twitch_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         }
                     }
                 });
-                note(
-                    ui,
-                    "Leave empty to use Michadame's built-in application.",
-                );
+                note(ui, "Leave empty to use Michadame's built-in application.");
             });
         });
     });
@@ -346,7 +360,12 @@ pub fn draw_twitch_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             .changed();
 
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Events:").monospace().size(11.0).color(LABEL));
+                ui.label(
+                    egui::RichText::new("Events:")
+                        .monospace()
+                        .size(11.0)
+                        .color(LABEL),
+                );
                 dirty |= ui.checkbox(&mut cfg.alert_follows, "Follows").changed();
                 dirty |= ui.checkbox(&mut cfg.alert_subs, "Subs").changed();
                 dirty |= ui.checkbox(&mut cfg.alert_bits, "Bits").changed();
@@ -369,24 +388,49 @@ pub fn draw_twitch_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             }
 
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Test:").monospace().size(11.0).color(LABEL));
-                if ui.small_button("Follow").on_hover_text("Trigger a simulated follower alert").clicked() {
+                ui.label(
+                    egui::RichText::new("Test:")
+                        .monospace()
+                        .size(11.0)
+                        .color(LABEL),
+                );
+                if ui
+                    .small_button("Follow")
+                    .on_hover_text("Trigger a simulated follower alert")
+                    .clicked()
+                {
                     state.twitch.alerts.trigger_test(AlertTestKind::Follow);
                     changed = true;
                 }
-                if ui.small_button("Sub").on_hover_text("Trigger a simulated subscriber alert").clicked() {
+                if ui
+                    .small_button("Sub")
+                    .on_hover_text("Trigger a simulated subscriber alert")
+                    .clicked()
+                {
                     state.twitch.alerts.trigger_test(AlertTestKind::Sub);
                     changed = true;
                 }
-                if ui.small_button("Gift Sub").on_hover_text("Trigger a simulated gift sub alert").clicked() {
+                if ui
+                    .small_button("Gift Sub")
+                    .on_hover_text("Trigger a simulated gift sub alert")
+                    .clicked()
+                {
                     state.twitch.alerts.trigger_test(AlertTestKind::GiftSub);
                     changed = true;
                 }
-                if ui.small_button("Bits").on_hover_text("Trigger a simulated 500 bits cheer alert").clicked() {
+                if ui
+                    .small_button("Bits")
+                    .on_hover_text("Trigger a simulated 500 bits cheer alert")
+                    .clicked()
+                {
                     state.twitch.alerts.trigger_test(AlertTestKind::Bits);
                     changed = true;
                 }
-                if ui.small_button("Raid").on_hover_text("Trigger a simulated raid alert").clicked() {
+                if ui
+                    .small_button("Raid")
+                    .on_hover_text("Trigger a simulated raid alert")
+                    .clicked()
+                {
                     state.twitch.alerts.trigger_test(AlertTestKind::Raid);
                     changed = true;
                 }
@@ -412,10 +456,14 @@ fn status_line(state: &AppState) -> (egui::Color32, String) {
         return (MUTED, "Status: no channel set".into());
     }
     match &tw.status {
-        ConnectionStatus::Disabled if !tw.config.chat_overlay_enabled && !tw.config.niconico_enabled => (
-            MUTED,
-            "Status: idle (enable the chat overlay or niconico comments to connect)".into(),
-        ),
+        ConnectionStatus::Disabled
+            if !tw.config.chat_overlay_enabled && !tw.config.niconico_enabled =>
+        {
+            (
+                MUTED,
+                "Status: idle (enable the chat overlay or niconico comments to connect)".into(),
+            )
+        }
         ConnectionStatus::Disabled => (MUTED, "Status: disconnected".into()),
         ConnectionStatus::Connecting => (
             egui::Color32::from_rgb(230, 190, 60),
@@ -426,7 +474,11 @@ fn status_line(state: &AppState) -> (egui::Color32, String) {
             format!(
                 "Status: connected to #{} ({})",
                 tw.config.channel,
-                if *authenticated { "can chat" } else { "read-only" }
+                if *authenticated {
+                    "can chat"
+                } else {
+                    "read-only"
+                }
             ),
         ),
         ConnectionStatus::Reconnecting { secs, reason } => (
@@ -1001,10 +1053,8 @@ fn draw_stream_info_group(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             ui.add(egui::Image::new(tex).fit_to_exact_size(egui::vec2(36.0, 48.0)));
                         } else {
                             info.box_art_cache.request(&cat_clone.box_art_url, &ctx);
-                            let (rect, _) = ui.allocate_exact_size(
-                                egui::vec2(36.0, 48.0),
-                                egui::Sense::hover(),
-                            );
+                            let (rect, _) = ui
+                                .allocate_exact_size(egui::vec2(36.0, 48.0), egui::Sense::hover());
                             ui.painter().rect_filled(
                                 rect,
                                 4.0,
@@ -1046,11 +1096,9 @@ fn draw_stream_info_group(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                             .inner_margin(egui::Margin::symmetric(7.0, 2.0))
                                             .show(ui, |ui| {
                                                 ui.label(
-                                                    egui::RichText::new(tag)
-                                                        .size(9.5)
-                                                        .color(egui::Color32::from_rgb(
-                                                            220, 220, 225,
-                                                        )),
+                                                    egui::RichText::new(tag).size(9.5).color(
+                                                        egui::Color32::from_rgb(220, 220, 225),
+                                                    ),
                                                 );
                                             });
                                     }
@@ -1060,10 +1108,8 @@ fn draw_stream_info_group(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
                         // Clear button on the right (vector-drawn "X" so it never renders as a font tofu box)
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let (rect, resp) = ui.allocate_exact_size(
-                                egui::vec2(22.0, 22.0),
-                                egui::Sense::click(),
-                            );
+                            let (rect, resp) = ui
+                                .allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
                             let hovered = resp.hovered();
                             if hovered {
                                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -1083,11 +1129,17 @@ fn draw_stream_info_group(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             let arm = 4.5;
                             let stroke = egui::Stroke::new(2.0, stroke_color);
                             ui.painter().line_segment(
-                                [center + egui::vec2(-arm, -arm), center + egui::vec2(arm, arm)],
+                                [
+                                    center + egui::vec2(-arm, -arm),
+                                    center + egui::vec2(arm, arm),
+                                ],
                                 stroke,
                             );
                             ui.painter().line_segment(
-                                [center + egui::vec2(-arm, arm), center + egui::vec2(arm, -arm)],
+                                [
+                                    center + egui::vec2(-arm, arm),
+                                    center + egui::vec2(arm, -arm),
+                                ],
                                 stroke,
                             );
                             if resp
@@ -1143,7 +1195,10 @@ fn draw_stream_info_group(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                         if let Some(tex) =
                                             info.box_art_cache.texture(&cat.box_art_url)
                                         {
-                                            ui.add(egui::Image::new(tex).fit_to_exact_size(egui::vec2(24.0, 32.0)));
+                                            ui.add(
+                                                egui::Image::new(tex)
+                                                    .fit_to_exact_size(egui::vec2(24.0, 32.0)),
+                                            );
                                         } else {
                                             info.box_art_cache.request(&cat.box_art_url, &ctx);
                                             let (rect, _) = ui.allocate_exact_size(
@@ -1206,7 +1261,10 @@ fn draw_stream_info_group(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 egui::Color32::from_rgb(50, 50, 55)
             });
 
-            if ui.add_enabled(has_changes && !is_saving, save_btn).clicked() {
+            if ui
+                .add_enabled(has_changes && !is_saving, save_btn)
+                .clicked()
+            {
                 if let Some(token) = &state.twitch.token {
                     info.save_channel(token, &ctx);
                     changed = true;
@@ -1252,5 +1310,3 @@ fn draw_stream_info_group(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     });
     changed
 }
-
-

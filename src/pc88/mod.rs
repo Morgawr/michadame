@@ -154,10 +154,7 @@ pub enum Pc88Command {
     /// Update master audio volume (`0.0..=1.0`).
     SetVolume(f32),
     /// Swap or eject a floppy disk image live (`drive`: 0 for FDD1, 1 for FDD2).
-    MountFdd {
-        drive: u8,
-        path: Option<PathBuf>,
-    },
+    MountFdd { drive: u8, path: Option<PathBuf> },
     /// Push updated core options to Quasi88.
     UpdateOptions(Pc88Config),
     /// Save the current emulator state + visual thumbnail into slot (`1..=8`).
@@ -172,16 +169,9 @@ pub enum Pc88Event {
     /// Core download / BIOS setup progress message.
     SyncProgress(String),
     /// Core initialized and started running at the given resolution and frame rate.
-    Started {
-        width: u32,
-        height: u32,
-        fps: f64,
-    },
+    Started { width: u32, height: u32, fps: f64 },
     /// Video resolution changed dynamically (e.g. 640x400 <-> 640x200).
-    ResolutionChanged {
-        width: u32,
-        height: u32,
-    },
+    ResolutionChanged { width: u32, height: u32 },
     /// Save state was written to disk along with its thumbnail and metadata.
     StateSaved {
         slot: u8,
@@ -278,8 +268,8 @@ impl Pc88State {
                 .find(|g| g.id == self.config.selected_game)
                 .cloned()
             {
-                let (floppies, labels) = library::materialize_game_floppies(&entry)
-                    .unwrap_or_else(|_| {
+                let (floppies, labels) =
+                    library::materialize_game_floppies(&entry).unwrap_or_else(|_| {
                         let names = entry
                             .floppies
                             .iter()
@@ -381,8 +371,7 @@ impl Pc88State {
     pub fn ensure_slots_cache(&mut self) -> (String, String) {
         let (key, title) = self.current_game_key();
         if self.slots_cache_game_key != key {
-            self.slots_cache =
-                savestate::list_game_slots(&savestate::pc88_states_root(), &key);
+            self.slots_cache = savestate::list_game_slots(&savestate::pc88_states_root(), &key);
             self.slots_cache_game_key = key.clone();
         }
         (key, title)

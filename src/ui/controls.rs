@@ -73,27 +73,41 @@ pub fn two_columns<R>(
     })
 }
 
-pub fn percent_slider<'a>(value: &'a mut f32, range: std::ops::RangeInclusive<f32>) -> egui::Slider<'a> {
+pub fn percent_slider<'a>(
+    value: &'a mut f32,
+    range: std::ops::RangeInclusive<f32>,
+) -> egui::Slider<'a> {
     egui::Slider::new(value, range)
         .step_by(0.01)
         .custom_formatter(|n, _| format!("{:.0}%", n * 100.0))
         .custom_parser(|s| {
             let s = s.trim().trim_end_matches('%').trim();
-            s.parse::<f64>().ok().map(|v| if v > 1.0 { (v / 100.0) as f64 } else { v })
+            s.parse::<f64>()
+                .ok()
+                .map(|v| if v > 1.0 { (v / 100.0) as f64 } else { v })
         })
 }
 
-pub fn percent_slider_range<'a>(value: &'a mut f32, range: std::ops::RangeInclusive<f32>, max_pct: f64) -> egui::Slider<'a> {
+pub fn percent_slider_range<'a>(
+    value: &'a mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    max_pct: f64,
+) -> egui::Slider<'a> {
     egui::Slider::new(value, range)
         .step_by(0.01)
         .custom_formatter(|n, _| format!("{:.0}%", n * 100.0))
         .custom_parser(move |s| {
             let s = s.trim().trim_end_matches('%').trim();
-            s.parse::<f64>().ok().map(|v| if v > max_pct { (v / 100.0) as f64 } else { v })
+            s.parse::<f64>()
+                .ok()
+                .map(|v| if v > max_pct { (v / 100.0) as f64 } else { v })
         })
 }
 
-pub fn mult_slider<'a>(value: &'a mut f32, range: std::ops::RangeInclusive<f32>) -> egui::Slider<'a> {
+pub fn mult_slider<'a>(
+    value: &'a mut f32,
+    range: std::ops::RangeInclusive<f32>,
+) -> egui::Slider<'a> {
     egui::Slider::new(value, range)
         .step_by(0.05)
         .custom_formatter(|n, _| format!("{:.2}x", n))
@@ -117,7 +131,8 @@ pub fn sub_heading(ui: &mut egui::Ui, title: &str) {
 
 pub fn technical_separator(ui: &mut egui::Ui) {
     ui.add_space(4.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
     ui.painter().hline(
         rect.x_range(),
         rect.top(),
@@ -528,15 +543,20 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 let text_widths: Vec<f32> = ui.fonts(|f| {
                     tabs.iter()
                         .map(|(_, label)| {
-                            f.layout_no_wrap((*label).to_string(), font_id.clone(), egui::Color32::WHITE)
-                                .size()
-                                .x
+                            f.layout_no_wrap(
+                                (*label).to_string(),
+                                font_id.clone(),
+                                egui::Color32::WHITE,
+                            )
+                            .size()
+                            .x
                         })
                         .collect()
                 });
                 let total_text_w: f32 = text_widths.iter().sum();
                 let total_spacing = spacing * (tabs.len().saturating_sub(1) as f32);
-                let extra_per_tab = ((avail_w - total_text_w - total_spacing) / (tabs.len() as f32)).max(6.0);
+                let extra_per_tab =
+                    ((avail_w - total_text_w - total_spacing) / (tabs.len() as f32)).max(6.0);
 
                 for ((tab, label), text_w) in tabs.into_iter().zip(text_widths.into_iter()) {
                     let is_active = state.ui.active_settings_tab == tab;
@@ -550,7 +570,10 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                 .color(egui::Color32::WHITE),
                         )
                         .fill(egui::Color32::from_rgb(26, 26, 26)) // #1a1a1a
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(84, 136, 184)))
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            egui::Color32::from_rgb(84, 136, 184),
+                        ))
                         .rounding(egui::Rounding::ZERO)
                     } else {
                         egui::Button::new(
@@ -598,8 +621,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         state.ui.video_window_open,
                     ) {
                         changed = true;
-                        if let Err(error) =
-                            crate::config::save_replay_config(&state.replay.config)
+                        if let Err(error) = crate::config::save_replay_config(&state.replay.config)
                         {
                             state.error(format!("Could not save replay settings: {error}"));
                         }
@@ -912,7 +934,8 @@ fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool
             let is_syncing = state.dict.is_syncing.load(Ordering::Relaxed);
             if is_syncing {
                 let (msg, prog) = if let Ok(lock) = state.dict.sync_progress.lock() {
-                    lock.clone().unwrap_or(("Syncing dictionary...".into(), 0.0))
+                    lock.clone()
+                        .unwrap_or(("Syncing dictionary...".into(), 0.0))
                 } else {
                     ("Syncing dictionary...".into(), 0.0)
                 };
@@ -985,7 +1008,8 @@ fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool
             let is_freq_syncing = state.dict.is_freq_syncing.load(Ordering::Relaxed);
             if is_freq_syncing {
                 let (msg, prog) = if let Ok(lock) = state.dict.freq_sync_progress.lock() {
-                    lock.clone().unwrap_or(("Syncing frequency dictionary...".into(), 0.0))
+                    lock.clone()
+                        .unwrap_or(("Syncing frequency dictionary...".into(), 0.0))
                 } else {
                     ("Syncing frequency dictionary...".into(), 0.0)
                 };

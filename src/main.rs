@@ -1,16 +1,16 @@
 mod app;
+mod bank;
 mod config;
 mod devices;
-mod replay;
-mod ui;
-mod video;
-mod ocr;
-mod bank;
-mod twitch;
 pub mod dict;
 pub mod gamescope;
+mod ocr;
 pub mod pc88;
 pub mod pc98;
+mod replay;
+mod twitch;
+mod ui;
+mod video;
 
 use anyhow::Result;
 use eframe::egui;

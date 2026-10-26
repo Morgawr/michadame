@@ -121,14 +121,18 @@ impl ParticleIndex {
 
     /// Returns true if `(term, reading)` is an indexed expression entry.
     pub fn is_allowed(&self, term: &str, reading: &str) -> bool {
-        self.allowed.contains(&(term.to_string(), reading.to_string()))
+        self.allowed
+            .contains(&(term.to_string(), reading.to_string()))
     }
 
     /// Generates particle-swapped candidates for the given deinflection candidates.
     /// Each swapped candidate keeps the deinflection rules/reasons and gains an extra
     /// reason such as `"が→も"`. Candidates identical to the input are skipped
     /// (those are already handled by the normal exact lookup).
-    pub fn swapped_candidates(&self, candidates: &[DeinflectionCandidate]) -> Vec<DeinflectionCandidate> {
+    pub fn swapped_candidates(
+        &self,
+        candidates: &[DeinflectionCandidate],
+    ) -> Vec<DeinflectionCandidate> {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
         for cand in candidates {
@@ -175,7 +179,10 @@ mod tests {
 
     #[test]
     fn test_particle_mask_interior_only() {
-        assert_eq!(particle_mask("突拍子もない"), Some("突拍子\u{FFFC}ない".to_string()));
+        assert_eq!(
+            particle_mask("突拍子もない"),
+            Some("突拍子\u{FFFC}ない".to_string())
+        );
         assert_eq!(particle_mask("突拍子がない"), particle_mask("突拍子はない"));
         // First/last characters are never masked
         assert_eq!(particle_mask("はなす"), None);
@@ -189,8 +196,14 @@ mod tests {
     #[test]
     fn test_kanji_never_wildcarded() {
         // Kanji text must not match a kana reading and vice versa
-        assert_ne!(particle_mask("突拍子がない"), particle_mask("とっぴょうしもない"));
-        assert_eq!(particle_mask("とっぴょうしがない"), particle_mask("とっぴょうしもない"));
+        assert_ne!(
+            particle_mask("突拍子がない"),
+            particle_mask("とっぴょうしもない")
+        );
+        assert_eq!(
+            particle_mask("とっぴょうしがない"),
+            particle_mask("とっぴょうしもない")
+        );
     }
 
     #[test]

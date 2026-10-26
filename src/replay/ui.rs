@@ -43,11 +43,7 @@ pub fn draw_toggle(replay: &mut Replay, ui: &mut egui::Ui, streaming: bool) {
     }
 }
 
-pub fn draw_replay_buffer_group(
-    replay: &mut Replay,
-    ui: &mut egui::Ui,
-    streaming: bool,
-) -> bool {
+pub fn draw_replay_buffer_group(replay: &mut Replay, ui: &mut egui::Ui, streaming: bool) -> bool {
     let mut changed = false;
 
     crate::ui::controls::technical_group(ui, "Live Replay Buffer:", |ui| {
@@ -163,7 +159,10 @@ pub fn draw_replay_buffer_group(
                     );
                     let avail = (ui.available_width() - 4.0).max(60.0);
                     changed |= ui
-                        .add_sized([avail, 18.0], egui::TextEdit::singleline(&mut replay.config.render_device))
+                        .add_sized(
+                            [avail, 18.0],
+                            egui::TextEdit::singleline(&mut replay.config.render_device),
+                        )
                         .changed();
                 });
             });
@@ -180,7 +179,10 @@ pub fn draw_replay_buffer_group(
                 );
                 let avail = (ui.available_width() - 4.0).max(100.0);
                 changed |= ui
-                    .add_sized([avail, 18.0], egui::TextEdit::singleline(&mut replay.config.directory))
+                    .add_sized(
+                        [avail, 18.0],
+                        egui::TextEdit::singleline(&mut replay.config.directory),
+                    )
                     .changed();
             });
         });
@@ -202,10 +204,7 @@ pub fn draw_replay_buffer_group(
                     .color(egui::Color32::from_rgb(170, 170, 170)),
             );
             changed |= ui
-                .add(
-                    egui::DragValue::new(&mut replay.config.custom_seconds)
-                        .clamp_range(1..=3600),
-                )
+                .add(egui::DragValue::new(&mut replay.config.custom_seconds).clamp_range(1..=3600))
                 .changed();
         });
 
@@ -429,9 +428,7 @@ pub fn draw_audio_filter_contents(replay: &mut Replay, ui: &mut egui::Ui) -> boo
             FilterPreset::DreamcastNtsc => {
                 "Dreamcast / NTSC (FFmpeg afftdn + 60 Hz Notch + 15.7 kHz CRT)"
             }
-            FilterPreset::ConsolePal => {
-                "PAL Console (FFmpeg afftdn + 50 Hz Notch + 15.6 kHz CRT)"
-            }
+            FilterPreset::ConsolePal => "PAL Console (FFmpeg afftdn + 50 Hz Notch + 15.6 kHz CRT)",
             FilterPreset::MainsHum60 => "60 Hz Mains Hum (Single Notch Only)",
             FilterPreset::VoiceChat => "Voice Chat / Mic (RNNoise Neural Network)",
             FilterPreset::Custom => "Custom DSP Configuration",
@@ -561,8 +558,7 @@ pub fn draw_audio_filter_contents(replay: &mut Replay, ui: &mut egui::Ui) -> boo
         });
 
         crate::ui::controls::two_columns(ui, |c1, c2| {
-            let slider =
-                egui::Slider::new(&mut filter.denoise_gain_smooth, 0..=10).suffix(" bins");
+            let slider = egui::Slider::new(&mut filter.denoise_gain_smooth, 0..=10).suffix(" bins");
             if crate::ui::controls::slider_item(
                 c1,
                 "Smoothing:",
@@ -580,10 +576,7 @@ pub fn draw_audio_filter_contents(replay: &mut Replay, ui: &mut egui::Ui) -> boo
 
             c2.horizontal(|ui| {
                 if ui
-                    .checkbox(
-                        &mut filter.denoise_track_noise,
-                        "Track Bright-Scene Surges",
-                    )
+                    .checkbox(&mut filter.denoise_track_noise, "Track Bright-Scene Surges")
                     .on_hover_text(
                         "Dynamically tracks fluctuating noise levels in real time.\n\
                          Adapts when bright video scenes draw higher current through\n\
@@ -757,8 +750,7 @@ pub fn draw_audio_filter_contents(replay: &mut Replay, ui: &mut egui::Ui) -> boo
             ui.label("Threshold:");
             if ui
                 .add(
-                    egui::Slider::new(&mut filter.gate_threshold_db, -70.0..=-30.0)
-                        .suffix(" dBFS"),
+                    egui::Slider::new(&mut filter.gate_threshold_db, -70.0..=-30.0).suffix(" dBFS"),
                 )
                 .changed()
             {

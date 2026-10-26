@@ -138,7 +138,10 @@ pub fn draw_deck_button(
                     egui::pos2(rect.min.x + 8.0, rect.min.y + 2.0),
                     egui::pos2(rect.max.x - 8.0, rect.min.y + 2.0),
                 ],
-                egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(46, 204, 113, 100)),
+                egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgba_premultiplied(46, 204, 113, 100),
+                ),
             );
         } else {
             painter.line_segment(
@@ -146,7 +149,10 @@ pub fn draw_deck_button(
                     egui::pos2(rect.min.x + 8.0, rect.min.y + 2.0),
                     egui::pos2(rect.max.x - 8.0, rect.min.y + 2.0),
                 ],
-                egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 255, 255, 20)),
+                egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgba_premultiplied(255, 255, 255, 20),
+                ),
             );
         }
 
@@ -172,10 +178,7 @@ pub fn draw_deck_button(
                     pts.push(egui::pos2(px, py));
                 }
                 for i in 0..pts.len() - 1 {
-                    painter.line_segment(
-                        [pts[i], pts[i + 1]],
-                        egui::Stroke::new(2.2, icon_color),
-                    );
+                    painter.line_segment([pts[i], pts[i + 1]], egui::Stroke::new(2.2, icon_color));
                 }
                 // Arrowhead
                 let tip = pts[0];
@@ -447,10 +450,7 @@ pub fn draw_deck_button(
             let slash_p2 = egui::pos2(icon_center.x + 15.0, icon_center.y + 15.0);
 
             // Dark background cutout stroke under the slash
-            painter.line_segment(
-                [slash_p1, slash_p2],
-                egui::Stroke::new(4.5, bg_color),
-            );
+            painter.line_segment([slash_p1, slash_p2], egui::Stroke::new(4.5, bg_color));
             // Bright red oblique bar on top
             painter.line_segment(
                 [slash_p1, slash_p2],
@@ -621,7 +621,8 @@ pub fn studio_mixer_slider(
         }
 
         // 3. Studio Fader Thumb (Hardware console fader cap)
-        let norm_val = ((*value - *range.start()) / (*range.end() - *range.start())).clamp(0.0, 1.0);
+        let norm_val =
+            ((*value - *range.start()) / (*range.end() - *range.start())).clamp(0.0, 1.0);
         let thumb_center_x = rect.min.x + track_margin + norm_val * usable_w;
         let thumb_rect = egui::Rect::from_center_size(
             egui::pos2(thumb_center_x, rect.center().y),
@@ -782,9 +783,7 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
             .rounding(egui::Rounding::same(6.0));
 
             let outro_resp = ui
-                .add_enabled_ui(can_end_outro, |ui| {
-                    ui.add_sized([half_w, 46.0], outro_btn)
-                })
+                .add_enabled_ui(can_end_outro, |ui| ui.add_sized([half_w, 46.0], outro_btn))
                 .inner
                 .on_hover_text("Play the outro video (if configured) and then end the stream");
             if outro_resp.clicked() {
@@ -832,11 +831,17 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
         .fill(egui::Color32::from_rgb(145, 70, 255))
         .rounding(egui::Rounding::same(6.0));
 
-        if ui.add_sized([ui.available_width(), 46.0], giant_btn).clicked() {
+        if ui
+            .add_sized([ui.available_width(), 46.0], giant_btn)
+            .clicked()
+        {
             let audio_tap = state.replay.audio.clone();
             audio_tap.set_game_volume(state.hardware.master_volume);
             let render_dev = state.replay.config.render_device.clone();
-            if let Err(_) = state.twitch.start_broadcast(audio_tap, &render_dev, ui.ctx()) {
+            if let Err(_) = state
+                .twitch
+                .start_broadcast(audio_tap, &render_dev, ui.ctx())
+            {
                 // Error notification is dispatched inside start_broadcast
             }
             changed = true;
@@ -864,7 +869,10 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
         let (display_text, display_color) = if stream_title.is_empty() {
             ("(No stream title set)".to_string(), MUTED_COLOR)
         } else {
-            (stream_title.to_string(), egui::Color32::from_rgb(220, 220, 220))
+            (
+                stream_title.to_string(),
+                egui::Color32::from_rgb(220, 220, 220),
+            )
         };
         let avail_w = ui.available_width().max(100.0);
         ui.add_sized(
@@ -979,8 +987,10 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
                         if let Some(first_fmt) = state.webcam.supported_formats.first() {
                             state.webcam.config.format_fourcc = Some(first_fmt.fourcc.clone());
                             if let Some(first_res) = first_fmt.resolutions.first() {
-                                state.webcam.config.resolution = Some((first_res.width, first_res.height));
-                                state.webcam.config.framerate = first_res.framerates.first().cloned();
+                                state.webcam.config.resolution =
+                                    Some((first_res.width, first_res.height));
+                                state.webcam.config.framerate =
+                                    first_res.framerates.first().cloned();
                             }
                         }
                     }
@@ -1318,7 +1328,8 @@ mod tests {
         let (connecting_health, _) = evaluate_stream_health(&BroadcastStatus::Connecting, 0, 0, 0);
         assert_eq!(connecting_health, "Connecting…");
 
-        let (err_health, _) = evaluate_stream_health(&BroadcastStatus::Error("err".into()), 0, 0, 0);
+        let (err_health, _) =
+            evaluate_stream_health(&BroadcastStatus::Error("err".into()), 0, 0, 0);
         assert_eq!(err_health, "Error");
     }
 
@@ -1357,8 +1368,14 @@ mod tests {
     fn test_format_stream_duration() {
         assert_eq!(format_stream_duration(Duration::from_secs(0)), "00:00:00");
         assert_eq!(format_stream_duration(Duration::from_secs(65)), "00:01:05");
-        assert_eq!(format_stream_duration(Duration::from_secs(3661)), "01:01:01");
-        assert_eq!(format_stream_duration(Duration::from_secs(36000)), "10:00:00");
+        assert_eq!(
+            format_stream_duration(Duration::from_secs(3661)),
+            "01:01:01"
+        );
+        assert_eq!(
+            format_stream_duration(Duration::from_secs(36000)),
+            "10:00:00"
+        );
     }
 
     #[test]
@@ -1418,8 +1435,16 @@ mod tests {
             ("VOCAB", "Share Mined Vocab: Click to toggle sharing newly mined words to Twitch chat while live"),
         ];
         for (label, tooltip) in quick_buttons {
-            assert!(label.chars().all(|c| c.is_ascii()), "Label contains non-ascii: {}", label);
-            assert!(tooltip.chars().all(|c| c.is_ascii()), "Tooltip contains non-ascii: {}", tooltip);
+            assert!(
+                label.chars().all(|c| c.is_ascii()),
+                "Label contains non-ascii: {}",
+                label
+            );
+            assert!(
+                tooltip.chars().all(|c| c.is_ascii()),
+                "Tooltip contains non-ascii: {}",
+                tooltip
+            );
         }
     }
 
@@ -1462,7 +1487,8 @@ mod tests {
         for is_live in [false, true] {
             if is_live {
                 let tap = std::sync::Arc::new(crate::replay::AudioTap::default());
-                state.twitch.broadcast = Some(crate::twitch::broadcast::BroadcastHandle::mock_live(tap));
+                state.twitch.broadcast =
+                    Some(crate::twitch::broadcast::BroadcastHandle::mock_live(tap));
             } else {
                 state.twitch.broadcast = None;
             }

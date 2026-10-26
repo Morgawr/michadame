@@ -25,7 +25,9 @@ pub fn detect_gamescope_resolution() -> (u32, u32) {
                                     fmt["size"]["height"].as_u64(),
                                 ) {
                                     if w > 0 && h > 0 {
-                                        tracing::info!("Detected Gamescope PipeWire resolution: {w}x{h}");
+                                        tracing::info!(
+                                            "Detected Gamescope PipeWire resolution: {w}x{h}"
+                                        );
                                         return (w as u32, h as u32);
                                     }
                                 }

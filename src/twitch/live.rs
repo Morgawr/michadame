@@ -33,8 +33,14 @@ pub fn parse_streams_response(body: &serde_json::Value) -> Option<StreamStatus> 
         .find(|s| s.get("type").and_then(|t| t.as_str()) == Some("live"));
     Some(match live_stream {
         Some(s) => {
-            let viewer_count = s.get("viewer_count").and_then(|v| v.as_u64()).map(|v| v as u32);
-            let broadcaster_id = s.get("user_id").and_then(|u| u.as_str()).map(str::to_string);
+            let viewer_count = s
+                .get("viewer_count")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+            let broadcaster_id = s
+                .get("user_id")
+                .and_then(|u| u.as_str())
+                .map(str::to_string);
             StreamStatus::Live {
                 viewer_count,
                 broadcaster_id,
@@ -88,7 +94,9 @@ fn query(channel: &str, token: &mut StoredToken) -> StreamStatus {
                 .unwrap_or_else(|| StreamStatus::Unknown("unexpected response from Twitch".into()))
         }
         Err(ureq::Error::Status(401, _)) => StreamStatus::Unknown("Twitch login expired".into()),
-        Err(ureq::Error::Status(code, _)) => StreamStatus::Unknown(format!("Twitch API error {code}")),
+        Err(ureq::Error::Status(code, _)) => {
+            StreamStatus::Unknown(format!("Twitch API error {code}"))
+        }
         Err(e) => StreamStatus::Unknown(e.to_string()),
     }
 }
@@ -157,14 +165,33 @@ mod tests {
     #[test]
     fn parses_live_offline_and_garbage() {
         let live = serde_json::json!({"data": [{"type": "live", "user_id": "123", "user_login": "x", "viewer_count": 42}], "pagination": {}});
-        assert_eq!(parse_streams_response(&live), Some(StreamStatus::Live { viewer_count: Some(42), broadcaster_id: Some("123".into()) }));
-        let live_no_viewers = serde_json::json!({"data": [{"type": "live", "user_login": "x"}], "pagination": {}});
-        assert_eq!(parse_streams_response(&live_no_viewers), Some(StreamStatus::Live { viewer_count: None, broadcaster_id: None }));
+        assert_eq!(
+            parse_streams_response(&live),
+            Some(StreamStatus::Live {
+                viewer_count: Some(42),
+                broadcaster_id: Some("123".into())
+            })
+        );
+        let live_no_viewers =
+            serde_json::json!({"data": [{"type": "live", "user_login": "x"}], "pagination": {}});
+        assert_eq!(
+            parse_streams_response(&live_no_viewers),
+            Some(StreamStatus::Live {
+                viewer_count: None,
+                broadcaster_id: None
+            })
+        );
         let offline = serde_json::json!({"data": [], "pagination": {}});
-        assert_eq!(parse_streams_response(&offline), Some(StreamStatus::Offline));
+        assert_eq!(
+            parse_streams_response(&offline),
+            Some(StreamStatus::Offline)
+        );
         // Anything other than type "live" is not considered live.
         let other = serde_json::json!({"data": [{"type": ""}]});
         assert_eq!(parse_streams_response(&other), Some(StreamStatus::Offline));
-        assert_eq!(parse_streams_response(&serde_json::json!({"error": "x"})), None);
+        assert_eq!(
+            parse_streams_response(&serde_json::json!({"error": "x"})),
+            None
+        );
     }
 }

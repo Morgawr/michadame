@@ -187,9 +187,8 @@ pub fn ensure_np2kai_core(event_tx: Option<&Sender<Pc98Event>>) -> Result<PathBu
         PathBuf::from("/usr/lib64/libretro/np2kai_libretro.so"),
     ];
     if let Ok(home) = std::env::var("HOME") {
-        local_candidates.push(
-            PathBuf::from(home).join(".config/retroarch/cores/np2kai_libretro.so"),
-        );
+        local_candidates
+            .push(PathBuf::from(home).join(".config/retroarch/cores/np2kai_libretro.so"));
     }
     for cand in local_candidates {
         if cand.is_file() {
@@ -328,9 +327,6 @@ mod tests {
         extract_core_zip(&zip_buf, &target_so).unwrap();
 
         assert!(target_so.exists());
-        assert_eq!(
-            fs::read(&target_so).unwrap(),
-            b"\x7fELF-dummy-np2kai-core"
-        );
+        assert_eq!(fs::read(&target_so).unwrap(), b"\x7fELF-dummy-np2kai-core");
     }
 }

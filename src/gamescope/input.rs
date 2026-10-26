@@ -31,13 +31,13 @@ pub const EI_EVENT_DEVICE_REMOVED: c_uint = 6;
 pub const EI_EVENT_DEVICE_PAUSED: c_uint = 7;
 pub const EI_EVENT_DEVICE_RESUMED: c_uint = 8;
 
-pub const EI_DEVICE_CAP_POINTER: c_uint = 1 << 0;          // 1
+pub const EI_DEVICE_CAP_POINTER: c_uint = 1 << 0; // 1
 pub const EI_DEVICE_CAP_POINTER_ABSOLUTE: c_uint = 1 << 1; // 2
-pub const EI_DEVICE_CAP_KEYBOARD: c_uint = 1 << 2;         // 4
-pub const EI_DEVICE_CAP_TOUCH: c_uint = 1 << 3;            // 8
-pub const EI_DEVICE_CAP_SCROLL: c_uint = 1 << 4;           // 16
-pub const EI_DEVICE_CAP_BUTTON: c_uint = 1 << 5;           // 32
-pub const EI_DEVICE_CAP_TEXT: c_uint = 1 << 6;             // 64
+pub const EI_DEVICE_CAP_KEYBOARD: c_uint = 1 << 2; // 4
+pub const EI_DEVICE_CAP_TOUCH: c_uint = 1 << 3; // 8
+pub const EI_DEVICE_CAP_SCROLL: c_uint = 1 << 4; // 16
+pub const EI_DEVICE_CAP_BUTTON: c_uint = 1 << 5; // 32
+pub const EI_DEVICE_CAP_TEXT: c_uint = 1 << 6; // 64
 
 pub const BTN_LEFT: u32 = 0x110;
 pub const BTN_RIGHT: u32 = 0x111;
@@ -98,7 +98,8 @@ impl Drop for GamescopeInputClient {
 }
 
 pub fn find_gamescope_ei_socket() -> PathBuf {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".to_string());
+    let runtime_dir =
+        std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".to_string());
 
     // 1. If explicit GAMESCOPE_WAYLAND_DISPLAY is specified in environment
     if let Ok(display) = std::env::var("GAMESCOPE_WAYLAND_DISPLAY") {
@@ -148,7 +149,9 @@ impl GamescopeInputClient {
             let ret = ei_setup_backend_socket(ei, c_socket.as_ptr());
             if ret != 0 {
                 ei_unref(ei);
-                anyhow::bail!("ei_setup_backend_socket failed connecting to {socket_path}: error code {ret}");
+                anyhow::bail!(
+                    "ei_setup_backend_socket failed connecting to {socket_path}: error code {ret}"
+                );
             }
 
             let mut client = Self {
@@ -180,7 +183,10 @@ impl GamescopeInputClient {
                 return dev;
             }
         }
-        self.devices.first().copied().unwrap_or(std::ptr::null_mut())
+        self.devices
+            .first()
+            .copied()
+            .unwrap_or(std::ptr::null_mut())
     }
 
     pub fn dispatch(&mut self) {
@@ -465,5 +471,3 @@ mod tests {
         assert!(p.to_string_lossy().ends_with("-ei"));
     }
 }
-
-

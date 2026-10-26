@@ -156,8 +156,7 @@ impl VideoEncoder {
             (*encoder.as_mut_ptr()).color_range = ffi::AVColorRange::AVCOL_RANGE_MPEG;
             (*encoder.as_mut_ptr()).colorspace = ffi::AVColorSpace::AVCOL_SPC_BT709;
             (*encoder.as_mut_ptr()).color_primaries = ffi::AVColorPrimaries::AVCOL_PRI_BT709;
-            (*encoder.as_mut_ptr()).color_trc =
-                ffi::AVColorTransferCharacteristic::AVCOL_TRC_BT709;
+            (*encoder.as_mut_ptr()).color_trc = ffi::AVColorTransferCharacteristic::AVCOL_TRC_BT709;
         }
         let options = video_options();
         let encoder = encoder.open_with(options).context(
@@ -250,8 +249,7 @@ pub struct AudioEncoder {
 }
 impl AudioEncoder {
     pub fn new() -> Result<Self> {
-        let codec =
-            encoder::find_by_name("aac").context("FFmpeg aac encoder is unavailable")?;
+        let codec = encoder::find_by_name("aac").context("FFmpeg aac encoder is unavailable")?;
         let mut encoder = codec::context::Context::new_with_codec(codec)
             .encoder()
             .audio()?;
@@ -262,7 +260,10 @@ impl AudioEncoder {
         encoder.set_bit_rate(super::config::AUDIO_BITRATE);
         encoder.set_flags(codec::Flags::GLOBAL_HEADER);
         let encoder = encoder.open()?;
-        ensure!(encoder.frame_size() == super::config::AUDIO_FRAME_SIZE as u32, "Unexpected AAC frame size");
+        ensure!(
+            encoder.frame_size() == super::config::AUDIO_FRAME_SIZE as u32,
+            "Unexpected AAC frame size"
+        );
         let mut frame = frame::Audio::new(
             format::Sample::F32(format::sample::Type::Planar),
             super::config::AUDIO_FRAME_SIZE,
@@ -275,14 +276,22 @@ impl AudioEncoder {
         codec::Parameters::from(&self.encoder)
     }
     pub fn encode(&mut self, samples: &[[f32; 2]], pts: i64) -> Result<Vec<Encoded>> {
-        ensure!(samples.len() == super::config::AUDIO_FRAME_SIZE, "Expected 1024 audio samples");
+        ensure!(
+            samples.len() == super::config::AUDIO_FRAME_SIZE,
+            "Expected 1024 audio samples"
+        );
         unsafe {
             check(ffi::av_frame_make_writable(self.frame.as_mut_ptr()))?;
         }
         self.frame.set_rate(48000);
         self.frame.set_pts(Some(pts));
         for channel in 0..2 {
-            for (out, input) in self.frame.plane_mut::<f32>(channel).iter_mut().zip(samples.iter()) {
+            for (out, input) in self
+                .frame
+                .plane_mut::<f32>(channel)
+                .iter_mut()
+                .zip(samples.iter())
+            {
                 *out = input[channel];
             }
         }
@@ -529,7 +538,9 @@ fn decode_audio_timeline(
                 .collect(),
             format::Sample::F32(format::sample::Type::Packed) => {
                 let data: &[f32] = bytemuck::cast_slice(&frame.data(0)[..count * channels * 4]);
-                data.chunks_exact(channels).map(|s| [s[0], s[right]]).collect()
+                data.chunks_exact(channels)
+                    .map(|s| [s[0], s[right]])
+                    .collect()
             }
             format::Sample::I16(format::sample::Type::Packed) => {
                 let data: &[i16] = bytemuck::cast_slice(&frame.data(0)[..count * channels * 2]);
@@ -732,9 +743,7 @@ mod tests {
                 }
             }
         }
-        let (packets, start, end) = history
-            .audio_clip(15, epoch + 19_000_000, 120_000)
-            .unwrap();
+        let (packets, start, end) = history.audio_clip(15, epoch + 19_000_000, 120_000).unwrap();
         assert_eq!(end - start, 15_000_000);
         let temporary = tempfile::NamedTempFile::new().unwrap();
         let limit = 15 * MP3_BITRATE / 8 * 11 / 10 + 256 * 1024;
@@ -801,7 +810,10 @@ mod tests {
         };
         // Clip covers 4–19 s of the source; the 10.0–10.5 s gap sits at 6.0–6.5 s.
         assert!(rms(1.0..5.5) > 0.15, "audible tone expected");
-        assert!(rms(7.0..14.0) > 0.15, "audio after the gap kept its timeline");
+        assert!(
+            rms(7.0..14.0) > 0.15,
+            "audio after the gap kept its timeline"
+        );
         assert!(rms(6.1..6.4) < 0.02, "lost packets must be silence");
     }
     #[test]
@@ -1160,23 +1172,25 @@ mod tests {
             "Clipboard and disk export must preserve identical A/V, timestamps and crop"
         );
         let too_small = tempfile::NamedTempFile::new_in("/tmp").unwrap();
-        assert!(export_clipboard(
-            too_small.path(),
-            128,
-            vp,
-            audio.parameters(),
-            clip
-        )
-        .is_err());
+        assert!(export_clipboard(too_small.path(), 128, vp, audio.parameters(), clip).is_err());
         assert!(too_small.as_file().metadata().unwrap().len() <= 128);
         assert_eq!(
             &bytes[4..8],
             b"ftyp",
             "Must write an MP4 container, not just rename Matroska"
         );
-        let moov_pos = bytes.windows(4).position(|w| w == b"moov").expect("must have moov");
-        let mdat_pos = bytes.windows(4).position(|w| w == b"mdat").expect("must have mdat");
-        assert!(moov_pos < mdat_pos, "moov box must precede mdat box (+faststart)");
+        let moov_pos = bytes
+            .windows(4)
+            .position(|w| w == b"moov")
+            .expect("must have moov");
+        let mdat_pos = bytes
+            .windows(4)
+            .position(|w| w == b"mdat")
+            .expect("must have mdat");
+        assert!(
+            moov_pos < mdat_pos,
+            "moov box must precede mdat box (+faststart)"
+        );
         let mut input = format::input(&path).unwrap();
         assert_eq!(input.nb_streams(), 2);
         let vs = input.streams().best(ff::media::Type::Video).unwrap();

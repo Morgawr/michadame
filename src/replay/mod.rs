@@ -313,7 +313,11 @@ impl AudioTap {
         }
         let read_and_decay = |atom: &AtomicU32| -> f32 {
             let v = f32::from_bits(atom.load(Ordering::Relaxed));
-            let clean = if v.is_finite() { v.clamp(0.0, 4.0) } else { 0.0 };
+            let clean = if v.is_finite() {
+                v.clamp(0.0, 4.0)
+            } else {
+                0.0
+            };
             atom.store((clean * 0.88).to_bits(), Ordering::Relaxed);
             clean
         };
@@ -344,7 +348,8 @@ impl AudioTap {
     /// Called on microphone restart/recovery.
     pub fn mark_mic_discontinuity(&self) {
         self.mic_discontinuity.store(true, Ordering::Relaxed);
-        self.broadcast_mic_discontinuity.store(true, Ordering::Relaxed);
+        self.broadcast_mic_discontinuity
+            .store(true, Ordering::Relaxed);
     }
     /// Plays an alert chime into the stream broadcast and replay routes.
     ///
@@ -462,18 +467,46 @@ impl AudioTap {
             }
         };
 
-        submit_to_route(&self.route, &self.discontinuity, effective_samples, rate, channels, at);
+        submit_to_route(
+            &self.route,
+            &self.discontinuity,
+            effective_samples,
+            rate,
+            channels,
+            at,
+        );
         if !self.broadcast_preroll_active.load(Ordering::Relaxed) {
-            submit_to_route(&self.broadcast_route, &self.broadcast_discontinuity, effective_samples, rate, channels, at);
+            submit_to_route(
+                &self.broadcast_route,
+                &self.broadcast_discontinuity,
+                effective_samples,
+                rate,
+                channels,
+                at,
+            );
         }
     }
     pub fn submit_mic(&self, samples: &[f32], rate: u32, channels: u16, at: i64) {
         if !self.enabled.load(Ordering::Relaxed) {
             return;
         }
-        submit_to_route(&self.mic_route, &self.mic_discontinuity, samples, rate, channels, at);
+        submit_to_route(
+            &self.mic_route,
+            &self.mic_discontinuity,
+            samples,
+            rate,
+            channels,
+            at,
+        );
         if !self.broadcast_preroll_active.load(Ordering::Relaxed) {
-            submit_to_route(&self.broadcast_mic_route, &self.broadcast_mic_discontinuity, samples, rate, channels, at);
+            submit_to_route(
+                &self.broadcast_mic_route,
+                &self.broadcast_mic_discontinuity,
+                samples,
+                rate,
+                channels,
+                at,
+            );
         }
     }
     /// Submits decoded pre-roll audio directly into the live broadcast route.
@@ -491,9 +524,11 @@ impl AudioTap {
         );
     }
     pub fn set_broadcast_preroll_active(&self, active: bool) {
-        self.broadcast_preroll_active.store(active, Ordering::SeqCst);
+        self.broadcast_preroll_active
+            .store(active, Ordering::SeqCst);
         self.broadcast_discontinuity.store(true, Ordering::Relaxed);
-        self.broadcast_mic_discontinuity.store(true, Ordering::Relaxed);
+        self.broadcast_mic_discontinuity
+            .store(true, Ordering::Relaxed);
     }
     pub fn is_broadcast_preroll_active(&self) -> bool {
         self.broadcast_preroll_active.load(Ordering::Relaxed)
@@ -516,7 +551,8 @@ impl AudioTap {
     fn refresh_enabled(&self) {
         let replay_on = self.route.lock().unwrap().is_some();
         let broadcast_on = self.broadcast_route.lock().unwrap().is_some();
-        self.enabled.store(replay_on || broadcast_on, Ordering::Release);
+        self.enabled
+            .store(replay_on || broadcast_on, Ordering::Release);
     }
 }
 #[derive(Default, Clone)]
@@ -629,7 +665,8 @@ impl Replay {
     }
 
     pub fn sync_audio_filter(&self) {
-        self.audio.set_filter_config(self.config.audio_filter.clone());
+        self.audio
+            .set_filter_config(self.config.audio_filter.clone());
     }
 
     pub fn set_game_volume(&self, volume: f32) {
@@ -1167,7 +1204,9 @@ mod tests {
         let chime = vec![0.3f32; 3840]; // 1 full 40ms block of stereo
         tap.play_alert(&chime);
 
-        let block = rx.try_recv().expect("Direct alert submission should send block when idle");
+        let block = rx
+            .try_recv()
+            .expect("Direct alert submission should send block when idle");
         assert_eq!(block.len, 3840);
         assert!((block.samples[0] - 0.3).abs() < 1e-4);
         free.send(block).unwrap();

@@ -1,6 +1,7 @@
 use crate::app::AppState;
 use eframe::egui;
 
+pub mod alerts;
 pub mod bank;
 pub mod controls;
 pub mod debug;
@@ -10,14 +11,13 @@ pub mod fft_mask;
 pub mod filters;
 pub mod mic;
 pub mod networking;
+pub mod niconico;
 pub mod pc98;
 pub mod profiles;
+pub mod studio;
 pub mod tag_input;
 pub mod twitch;
 pub mod twitch_overlay;
-pub mod niconico;
-pub mod alerts;
-pub mod studio;
 pub mod video_player;
 pub mod webcam_overlay;
 pub mod whiteboard;

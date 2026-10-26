@@ -302,11 +302,7 @@ pub fn arm_steam_launch_wrapper_in_roots(
             let real = dir.join("steam-launch-wrapper.real");
             if wrapper.is_file() {
                 fs::rename(&wrapper, &real).with_context(|| {
-                    format!(
-                        "Failed to move {} to {}",
-                        wrapper.display(),
-                        real.display()
-                    )
+                    format!("Failed to move {} to {}", wrapper.display(), real.display())
                 })?;
                 if let Err(e) = (|| -> Result<()> {
                     fs::write(&wrapper, script_content.as_bytes())?;
@@ -317,10 +313,7 @@ pub fn arm_steam_launch_wrapper_in_roots(
                 })() {
                     let _ = fs::rename(&real, &wrapper);
                     return Err(e).with_context(|| {
-                        format!(
-                            "Failed to write ephemeral wrapper to {}",
-                            wrapper.display()
-                        )
+                        format!("Failed to write ephemeral wrapper to {}", wrapper.display())
                     });
                 }
                 armed.push(wrapper);
@@ -479,26 +472,34 @@ mod tests {
         }
 
         let launcher = temp_dir.join("launcher.sh");
-        fs::write(&launcher, "#!/bin/sh\necho \"LAUNCHER_WRAPPED\"\nexec \"$@\"\n").unwrap();
+        fs::write(
+            &launcher,
+            "#!/bin/sh\necho \"LAUNCHER_WRAPPED\"\nexec \"$@\"\n",
+        )
+        .unwrap();
         let mut lp = fs::metadata(&launcher).unwrap().permissions();
         lp.set_mode(0o755);
         fs::set_permissions(&launcher, lp).unwrap();
 
         let roots = vec![temp_dir.clone()];
-        let armed = arm_steam_launch_wrapper_in_roots(
-            &roots,
-            "3259780",
-            &launcher,
-            std::process::id(),
-        )
-        .unwrap();
+        let armed =
+            arm_steam_launch_wrapper_in_roots(&roots, "3259780", &launcher, std::process::id())
+                .unwrap();
         assert_eq!(armed.len(), 2);
         assert!(rt64.join("steam-launch-wrapper.real").is_file());
         assert!(u32_dir.join("steam-launch-wrapper.real").is_file());
 
         // 1. Install=1 step should not consume the hook or wrap
         let out_install = Command::new(rt64.join("steam-launch-wrapper"))
-            .args(["--", "reaper", "SteamLaunch", "AppId=3259780", "Install=1", "--", "setup.exe"])
+            .args([
+                "--",
+                "reaper",
+                "SteamLaunch",
+                "AppId=3259780",
+                "Install=1",
+                "--",
+                "setup.exe",
+            ])
             .output()
             .unwrap();
         let stdout_install = String::from_utf8_lossy(&out_install.stdout);
@@ -508,12 +509,21 @@ mod tests {
 
         // 2. Actual game launch should wrap with launcher AND immediately restore both binaries
         let out_game = Command::new(rt64.join("steam-launch-wrapper"))
-            .args(["--", "reaper", "SteamLaunch", "AppId=3259780", "--", "game.exe", "-skipintro"])
+            .args([
+                "--",
+                "reaper",
+                "SteamLaunch",
+                "AppId=3259780",
+                "--",
+                "game.exe",
+                "-skipintro",
+            ])
             .output()
             .unwrap();
         let stdout_game = String::from_utf8_lossy(&out_game.stdout);
         assert!(stdout_game.contains("LAUNCHER_WRAPPED"));
-        assert!(stdout_game.contains("ORIG_RAN:-- reaper SteamLaunch AppId=3259780 -- game.exe -skipintro"));
+        assert!(stdout_game
+            .contains("ORIG_RAN:-- reaper SteamLaunch AppId=3259780 -- game.exe -skipintro"));
         assert!(!rt64.join("steam-launch-wrapper.real").exists());
         assert!(!u32_dir.join("steam-launch-wrapper.real").exists());
         assert_eq!(

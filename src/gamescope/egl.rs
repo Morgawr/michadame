@@ -1,6 +1,6 @@
+use eframe::glow::{self, HasContext};
 use std::ffi::{c_char, c_void};
 use std::ptr::null_mut;
-use eframe::glow::{self, HasContext};
 
 type EglCreateImageKHR = unsafe extern "C" fn(
     dpy: *mut c_void,
@@ -10,15 +10,9 @@ type EglCreateImageKHR = unsafe extern "C" fn(
     attrib_list: *const i32,
 ) -> *mut c_void;
 
-type EglDestroyImageKHR = unsafe extern "C" fn(
-    dpy: *mut c_void,
-    image: *mut c_void,
-) -> u32;
+type EglDestroyImageKHR = unsafe extern "C" fn(dpy: *mut c_void, image: *mut c_void) -> u32;
 
-type GlEGLImageTargetTexture2DOES = unsafe extern "C" fn(
-    target: u32,
-    image: *mut c_void,
-);
+type GlEGLImageTargetTexture2DOES = unsafe extern "C" fn(target: u32, image: *mut c_void);
 
 type EglGetCurrentDisplay = unsafe extern "C" fn() -> *mut c_void;
 type EglGetProcAddress = unsafe extern "C" fn(procname: *const c_char) -> *mut c_void;
@@ -93,8 +87,10 @@ impl EglDmaBufImporter {
                 return None;
             }
 
-            let get_proc_addr_sym = libc::dlsym(lib, b"eglGetProcAddress\0".as_ptr() as *const c_char);
-            let get_current_display_sym = libc::dlsym(lib, b"eglGetCurrentDisplay\0".as_ptr() as *const c_char);
+            let get_proc_addr_sym =
+                libc::dlsym(lib, b"eglGetProcAddress\0".as_ptr() as *const c_char);
+            let get_current_display_sym =
+                libc::dlsym(lib, b"eglGetCurrentDisplay\0".as_ptr() as *const c_char);
 
             if get_proc_addr_sym.is_null() || get_current_display_sym.is_null() {
                 tracing::warn!("Failed to resolve eglGetProcAddress / eglGetCurrentDisplay");
@@ -103,17 +99,21 @@ impl EglDmaBufImporter {
             }
 
             let get_proc_addr: EglGetProcAddress = std::mem::transmute(get_proc_addr_sym);
-            let get_current_display: EglGetCurrentDisplay = std::mem::transmute(get_current_display_sym);
+            let get_current_display: EglGetCurrentDisplay =
+                std::mem::transmute(get_current_display_sym);
 
             let mut egl_display = get_current_display();
             if egl_display.is_null() {
-                let get_display_sym = libc::dlsym(lib, b"eglGetDisplay\0".as_ptr() as *const c_char);
+                let get_display_sym =
+                    libc::dlsym(lib, b"eglGetDisplay\0".as_ptr() as *const c_char);
                 let initialize_sym = libc::dlsym(lib, b"eglInitialize\0".as_ptr() as *const c_char);
                 if !get_display_sym.is_null() {
-                    let get_display: unsafe extern "C" fn(*mut c_void) -> *mut c_void = std::mem::transmute(get_display_sym);
+                    let get_display: unsafe extern "C" fn(*mut c_void) -> *mut c_void =
+                        std::mem::transmute(get_display_sym);
                     egl_display = get_display(null_mut());
                     if !egl_display.is_null() && !initialize_sym.is_null() {
-                        let init_fn: unsafe extern "C" fn(*mut c_void, *mut i32, *mut i32) -> u32 = std::mem::transmute(initialize_sym);
+                        let init_fn: unsafe extern "C" fn(*mut c_void, *mut i32, *mut i32) -> u32 =
+                            std::mem::transmute(initialize_sym);
                         init_fn(egl_display, null_mut(), null_mut());
                     }
                 }
@@ -126,10 +126,13 @@ impl EglDmaBufImporter {
             }
 
             let create_image_ptr = get_proc_addr(b"eglCreateImageKHR\0".as_ptr() as *const c_char);
-            let destroy_image_ptr = get_proc_addr(b"eglDestroyImageKHR\0".as_ptr() as *const c_char);
-            let target_tex_ptr = get_proc_addr(b"glEGLImageTargetTexture2DOES\0".as_ptr() as *const c_char);
+            let destroy_image_ptr =
+                get_proc_addr(b"eglDestroyImageKHR\0".as_ptr() as *const c_char);
+            let target_tex_ptr =
+                get_proc_addr(b"glEGLImageTargetTexture2DOES\0".as_ptr() as *const c_char);
 
-            if create_image_ptr.is_null() || destroy_image_ptr.is_null() || target_tex_ptr.is_null() {
+            if create_image_ptr.is_null() || destroy_image_ptr.is_null() || target_tex_ptr.is_null()
+            {
                 tracing::warn!("Failed to resolve EGL DMA-BUF extensions (eglCreateImageKHR/glEGLImageTargetTexture2DOES)");
                 libc::dlclose(lib);
                 return None;
@@ -137,9 +140,13 @@ impl EglDmaBufImporter {
 
             let egl_create_image_khr: EglCreateImageKHR = std::mem::transmute(create_image_ptr);
             let egl_destroy_image_khr: EglDestroyImageKHR = std::mem::transmute(destroy_image_ptr);
-            let gl_egl_image_target_texture2d_oes: GlEGLImageTargetTexture2DOES = std::mem::transmute(target_tex_ptr);
+            let gl_egl_image_target_texture2d_oes: GlEGLImageTargetTexture2DOES =
+                std::mem::transmute(target_tex_ptr);
 
-            tracing::info!("EGL DMA-BUF texture importer successfully initialized (display: {:?})", egl_display);
+            tracing::info!(
+                "EGL DMA-BUF texture importer successfully initialized (display: {:?})",
+                egl_display
+            );
 
             Some(Self {
                 lib_handle: lib,
@@ -201,12 +208,18 @@ impl EglDmaBufImporter {
         }
 
         let mut attribs: Vec<i32> = vec![
-            0x3057, width as i32,      // EGL_WIDTH
-            0x3056, height as i32,     // EGL_HEIGHT
-            0x3271, drm_fourcc as i32, // EGL_LINUX_DRM_FOURCC_EXT
-            0x3272, fd,                // EGL_DMA_BUF_PLANE0_FD_EXT
-            0x3273, 0,                 // EGL_DMA_BUF_PLANE0_OFFSET_EXT
-            0x3274, stride as i32,     // EGL_DMA_BUF_PLANE0_PITCH_EXT
+            0x3057,
+            width as i32, // EGL_WIDTH
+            0x3056,
+            height as i32, // EGL_HEIGHT
+            0x3271,
+            drm_fourcc as i32, // EGL_LINUX_DRM_FOURCC_EXT
+            0x3272,
+            fd, // EGL_DMA_BUF_PLANE0_FD_EXT
+            0x3273,
+            0, // EGL_DMA_BUF_PLANE0_OFFSET_EXT
+            0x3274,
+            stride as i32, // EGL_DMA_BUF_PLANE0_PITCH_EXT
         ];
 
         // If a valid DRM modifier is provided, pass low and high 32-bit parts
@@ -230,7 +243,11 @@ impl EglDmaBufImporter {
         );
 
         if image.is_null() {
-            tracing::warn!("eglCreateImageKHR failed for DMA-BUF buffer_id {} fd {}", buffer_id, fd);
+            tracing::warn!(
+                "eglCreateImageKHR failed for DMA-BUF buffer_id {} fd {}",
+                buffer_id,
+                fd
+            );
             return None;
         }
 
@@ -239,10 +256,26 @@ impl EglDmaBufImporter {
         gl.bind_texture(glow::TEXTURE_2D, Some(tex));
         (self.gl_egl_image_target_texture2d_oes)(glow::TEXTURE_2D, image);
 
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_S,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_T,
+            glow::CLAMP_TO_EDGE as i32,
+        );
         gl.bind_texture(glow::TEXTURE_2D, None);
 
         // Once bound to the GL texture target, the EGLImage wrapper can be destroyed
@@ -250,7 +283,11 @@ impl EglDmaBufImporter {
 
         tracing::info!(
             "Imported new DMA-BUF texture to pool (buffer_id: {}, fd: {}, {}x{}, fourcc: 0x{:08x})",
-            buffer_id, fd, width, height, drm_fourcc
+            buffer_id,
+            fd,
+            width,
+            height,
+            drm_fourcc
         );
 
         self.current_texture = Some(tex);

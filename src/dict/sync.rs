@@ -118,8 +118,8 @@ fn run_sync_pipeline(
         .unwrap_or(38 * 1024 * 1024);
 
     let mut reader = resp.into_reader();
-    let mut temp_file = File::create(&temp_zip_path)
-        .map_err(|e| format!("Failed to create temp zip file: {e}"))?;
+    let mut temp_file =
+        File::create(&temp_zip_path).map_err(|e| format!("Failed to create temp zip file: {e}"))?;
 
     let mut downloaded: u64 = 0;
     let mut buffer = [0u8; 64 * 1024];
@@ -283,8 +283,8 @@ fn run_freq_sync_pipeline(
         .unwrap_or(8 * 1024 * 1024);
 
     let mut reader = resp.into_reader();
-    let mut temp_file = File::create(&temp_zip_path)
-        .map_err(|e| format!("Failed to create temp zip file: {e}"))?;
+    let mut temp_file =
+        File::create(&temp_zip_path).map_err(|e| format!("Failed to create temp zip file: {e}"))?;
 
     let mut downloaded: u64 = 0;
     let mut buffer = [0u8; 64 * 1024];
@@ -309,7 +309,10 @@ fn run_freq_sync_pipeline(
             let mb_done = downloaded as f64 / (1024.0 * 1024.0);
             let mb_total = total_bytes as f64 / (1024.0 * 1024.0);
             let _ = event_tx.send(DictEvent::FreqSyncProgress {
-                message: format!("Downloading Jiten frequency: {:.1}/{:.1} MB", mb_done, mb_total),
+                message: format!(
+                    "Downloading Jiten frequency: {:.1}/{:.1} MB",
+                    mb_done, mb_total
+                ),
                 progress,
             });
         }

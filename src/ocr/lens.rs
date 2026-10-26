@@ -89,9 +89,7 @@ pub fn execute_lens_ocr_with_agent(
                 }),
             }),
             image_data: Some(ImageData {
-                payload: Some(ImagePayload {
-                    image_bytes,
-                }),
+                payload: Some(ImagePayload { image_bytes }),
                 image_metadata: Some(ImageMetadata {
                     width: width as i32,
                     height: height as i32,
@@ -209,8 +207,11 @@ pub fn execute_lens_ocr_with_agent(
                                 (raw_w, raw_h)
                             };
 
-                            let raw_char_count: usize =
-                                line.words.iter().map(|w| w.plain_text.chars().count()).sum();
+                            let raw_char_count: usize = line
+                                .words
+                                .iter()
+                                .map(|w| w.plain_text.chars().count())
+                                .sum();
                             let writing_direction = if p_dir.is_vertical() {
                                 WritingDirection::TopToBottom
                             } else if is_rotated_vert || (h > 1.8 * w && raw_char_count >= 2) {
@@ -295,11 +296,11 @@ fn is_cjk_ideograph_or_kana(c: char) -> bool {
 /// word bounding box into individual character spans.
 pub fn char_natural_weight(c: char) -> f32 {
     match c {
-        '、' | '。' | '，' | '．' | '「' | '」' | '『' | '』' | '（' | '）'
-        | '【' | '】' | '〈' | '〉' | '《' | '》' | '〔' | '〕' | '［' | '］'
-        | '｛' | '｝' | '・' | '“' | '”' | '‘' | '’' => 0.4,
-        '.' | ',' | ':' | ';' | '\'' | '"' | '!' | '|' | '/' | '\\'
-        | '(' | ')' | '[' | ']' | '{' | '}' => 0.35,
+        '、' | '。' | '，' | '．' | '「' | '」' | '『' | '』' | '（' | '）' | '【' | '】'
+        | '〈' | '〉' | '《' | '》' | '〔' | '〕' | '［' | '］' | '｛' | '｝' | '・' | '“'
+        | '”' | '‘' | '’' => 0.4,
+        '.' | ',' | ':' | ';' | '\'' | '"' | '!' | '|' | '/' | '\\' | '(' | ')' | '[' | ']'
+        | '{' | '}' => 0.35,
         '\u{FF61}'..='\u{FF9F}' => 0.5,
         c if c.is_ascii() => 0.55,
         _ => 1.0,
@@ -649,8 +650,8 @@ pub fn merge_row_lines(lines: &[ParsedLine], sticky_distance: f32) -> Vec<Parsed
 
             // Vertical overlap: must be on the same horizontal row
             let overlap_y = prev_bottom.min(line_bottom) - prev_top.max(line_top);
-            let is_same_row = overlap_y >= 0.5 * min_h
-                || (prev.center_y - line.center_y).abs() <= 0.35 * min_h;
+            let is_same_row =
+                overlap_y >= 0.5 * min_h || (prev.center_y - line.center_y).abs() <= 0.35 * min_h;
 
             if !is_similar_height || !is_same_row {
                 continue;
@@ -702,7 +703,11 @@ pub fn merge_row_lines(lines: &[ParsedLine], sticky_distance: f32) -> Vec<Parsed
                     (Some(c1), Some(c2)) => !is_cjk(c1) && !is_cjk(c2) && c1 != '-',
                     _ => false,
                 };
-                if need_space { 1 } else { 0 }
+                if need_space {
+                    1
+                } else {
+                    0
+                }
             };
 
             let l_trimmed = left_box.text.trim_end();
@@ -794,7 +799,9 @@ fn merge_line_char_spans(
     let first_keep = first_trimmed.chars().count().min(first_spans.len());
     let second_total = second_box.text.chars().count();
     let second_keep = second_trimmed.chars().count().min(second_spans.len());
-    let second_skip = second_total.saturating_sub(second_keep).min(second_spans.len());
+    let second_skip = second_total
+        .saturating_sub(second_keep)
+        .min(second_spans.len());
 
     let mut out = Vec::with_capacity(first_keep + space_count + second_keep);
     out.extend_from_slice(&first_spans[..first_keep]);
@@ -820,7 +827,10 @@ fn merge_line_char_spans(
             .max(gap_start);
         let step = (gap_end - gap_start) / space_count as f32;
         for i in 0..space_count {
-            out.push((gap_start + i as f32 * step, gap_start + (i + 1) as f32 * step));
+            out.push((
+                gap_start + i as f32 * step,
+                gap_start + (i + 1) as f32 * step,
+            ));
         }
     }
 
@@ -868,8 +878,8 @@ pub fn merge_column_lines(lines: &[ParsedLine], sticky_distance: f32) -> Vec<Par
 
             // Horizontal overlap: must be on the same vertical column
             let overlap_x = prev_right.min(line_right) - prev_left.max(line_left);
-            let is_same_column = overlap_x >= 0.5 * min_w
-                || (prev.center_x - line.center_x).abs() <= 0.35 * min_w;
+            let is_same_column =
+                overlap_x >= 0.5 * min_w || (prev.center_x - line.center_x).abs() <= 0.35 * min_w;
 
             if !is_similar_width || !is_same_column {
                 continue;
@@ -921,7 +931,11 @@ pub fn merge_column_lines(lines: &[ParsedLine], sticky_distance: f32) -> Vec<Par
                     (Some(c1), Some(c2)) => !is_cjk(c1) && !is_cjk(c2) && c1 != '-',
                     _ => false,
                 };
-                if need_space { 1 } else { 0 }
+                if need_space {
+                    1
+                } else {
+                    0
+                }
             };
 
             let t_trimmed = top_box.text.trim_end();
@@ -945,14 +959,8 @@ pub fn merge_column_lines(lines: &[ParsedLine], sticky_distance: f32) -> Vec<Par
             let new_center_x = (new_min_x + new_max_x) / 2.0;
 
             let new_p_idx = top_box.paragraph_idx.min(bot_box.paragraph_idx);
-            let new_char_spans = merge_line_char_spans(
-                top_box,
-                bot_box,
-                t_trimmed,
-                b_trimmed,
-                space_count,
-                true,
-            );
+            let new_char_spans =
+                merge_line_char_spans(top_box, bot_box, t_trimmed, b_trimmed, space_count, true);
 
             merged[idx] = ParsedLine {
                 text: new_text,
@@ -984,16 +992,40 @@ fn merge_overlapping_blocks(
         let mut merge_pair = None;
 
         'outer: for i in 0..blocks.len() {
-            let min_x_i = blocks[i].iter().map(|l| l.center_x - l.width / 2.0).fold(f32::MAX, f32::min);
-            let max_x_i = blocks[i].iter().map(|l| l.center_x + l.width / 2.0).fold(f32::MIN, f32::max);
-            let min_y_i = blocks[i].iter().map(|l| l.center_y - l.height / 2.0).fold(f32::MAX, f32::min);
-            let max_y_i = blocks[i].iter().map(|l| l.center_y + l.height / 2.0).fold(f32::MIN, f32::max);
+            let min_x_i = blocks[i]
+                .iter()
+                .map(|l| l.center_x - l.width / 2.0)
+                .fold(f32::MAX, f32::min);
+            let max_x_i = blocks[i]
+                .iter()
+                .map(|l| l.center_x + l.width / 2.0)
+                .fold(f32::MIN, f32::max);
+            let min_y_i = blocks[i]
+                .iter()
+                .map(|l| l.center_y - l.height / 2.0)
+                .fold(f32::MAX, f32::min);
+            let max_y_i = blocks[i]
+                .iter()
+                .map(|l| l.center_y + l.height / 2.0)
+                .fold(f32::MIN, f32::max);
 
             for j in (i + 1)..blocks.len() {
-                let min_x_j = blocks[j].iter().map(|l| l.center_x - l.width / 2.0).fold(f32::MAX, f32::min);
-                let max_x_j = blocks[j].iter().map(|l| l.center_x + l.width / 2.0).fold(f32::MIN, f32::max);
-                let min_y_j = blocks[j].iter().map(|l| l.center_y - l.height / 2.0).fold(f32::MAX, f32::min);
-                let max_y_j = blocks[j].iter().map(|l| l.center_y + l.height / 2.0).fold(f32::MIN, f32::max);
+                let min_x_j = blocks[j]
+                    .iter()
+                    .map(|l| l.center_x - l.width / 2.0)
+                    .fold(f32::MAX, f32::min);
+                let max_x_j = blocks[j]
+                    .iter()
+                    .map(|l| l.center_x + l.width / 2.0)
+                    .fold(f32::MIN, f32::max);
+                let min_y_j = blocks[j]
+                    .iter()
+                    .map(|l| l.center_y - l.height / 2.0)
+                    .fold(f32::MAX, f32::min);
+                let max_y_j = blocks[j]
+                    .iter()
+                    .map(|l| l.center_y + l.height / 2.0)
+                    .fold(f32::MIN, f32::max);
 
                 let overlap_x = max_x_i.min(max_x_j) - min_x_i.max(min_x_j);
                 let overlap_y = max_y_i.min(max_y_j) - min_y_i.max(min_y_j);
@@ -1023,11 +1055,19 @@ fn merge_overlapping_blocks(
             if is_vertical {
                 blocks[i] = merge_column_lines(&combined, sticky_distance);
                 // Sort columns right to left
-                blocks[i].sort_by(|a, b| b.center_x.partial_cmp(&a.center_x).unwrap_or(std::cmp::Ordering::Equal));
+                blocks[i].sort_by(|a, b| {
+                    b.center_x
+                        .partial_cmp(&a.center_x)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
             } else {
                 blocks[i] = merge_row_lines(&combined, sticky_distance);
                 // Sort lines top to bottom
-                blocks[i].sort_by(|a, b| a.center_y.partial_cmp(&b.center_y).unwrap_or(std::cmp::Ordering::Equal));
+                blocks[i].sort_by(|a, b| {
+                    a.center_y
+                        .partial_cmp(&b.center_y)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
             }
             merged_any = true;
         }
@@ -1143,7 +1183,10 @@ fn group_horizontal_lines_into_blocks(lines: &[ParsedLine], sticky_distance: f32
         let height = (max_y - min_y).clamp(0.001, 1.0);
         let center_x = (min_x + width / 2.0).clamp(0.0, 1.0);
         let center_y = (min_y + height / 2.0).clamp(0.0, 1.0);
-        let dir = block.first().map(|l| l.writing_direction).unwrap_or(WritingDirection::LeftToRight);
+        let dir = block
+            .first()
+            .map(|l| l.writing_direction)
+            .unwrap_or(WritingDirection::LeftToRight);
 
         boxes.push(OcrBox {
             text: full_text,
@@ -1305,8 +1348,10 @@ pub fn group_lines_into_blocks(lines: &[ParsedLine], sticky_distance: f32) -> Ve
             .collect();
     }
 
-    let (vert_lines, horiz_lines): (Vec<ParsedLine>, Vec<ParsedLine>) =
-        lines.iter().cloned().partition(|l| l.writing_direction.is_vertical());
+    let (vert_lines, horiz_lines): (Vec<ParsedLine>, Vec<ParsedLine>) = lines
+        .iter()
+        .cloned()
+        .partition(|l| l.writing_direction.is_vertical());
 
     let mut boxes = group_horizontal_lines_into_blocks(&horiz_lines, sticky_distance);
     let vert_boxes = group_vertical_lines_into_blocks(&vert_lines, sticky_distance);
@@ -1314,7 +1359,6 @@ pub fn group_lines_into_blocks(lines: &[ParsedLine], sticky_distance: f32) -> Ve
 
     boxes
 }
-
 
 /// Calculates target dimensions to downscale a captured frame so that it fits
 /// within a 720p-equivalent bounding envelope (max 1280 on longer edge, max 720 on shorter edge)
@@ -1479,7 +1523,10 @@ mod tests {
         let result = execute_lens_ocr_and_group(logo_bytes.to_vec(), w, h, 0.6);
         match result {
             Ok(boxes) => {
-                assert!(!boxes.is_empty(), "Expected at least one OCR box for logo.png");
+                assert!(
+                    !boxes.is_empty(),
+                    "Expected at least one OCR box for logo.png"
+                );
                 let found_michadame = boxes.iter().any(|b| b.text.contains("見ちゃダメ"));
                 assert!(
                     found_michadame,
@@ -1546,7 +1593,11 @@ mod tests {
         let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_bytes, 85);
         encoder.encode_image(&rgb).expect("Failed to encode JPEG");
         let enc_elapsed = enc_start.elapsed();
-        println!("JPEG encoding (1024x1024) took: {:?}, size: {} bytes", enc_elapsed, jpeg_bytes.len());
+        println!(
+            "JPEG encoding (1024x1024) took: {:?}, size: {} bytes",
+            enc_elapsed,
+            jpeg_bytes.len()
+        );
 
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(20))
@@ -1568,7 +1619,8 @@ mod tests {
 
         let start = std::time::Instant::now();
         // Warmup with HEAD
-        let _ = agent.request("HEAD", LENS_ENDPOINT)
+        let _ = agent
+            .request("HEAD", LENS_ENDPOINT)
             .set("User-Agent", CHROME_USER_AGENT)
             .call();
         println!("HEAD warmup took: {:?}", start.elapsed());
@@ -1580,12 +1632,19 @@ mod tests {
 
         for quality in [70, 80, 85, 90] {
             let mut jpeg_bytes = Vec::new();
-            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_bytes, quality);
+            let mut encoder =
+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_bytes, quality);
             encoder.encode_image(&rgb).unwrap();
             let start = std::time::Instant::now();
             let lines = execute_lens_ocr_with_agent(&agent, jpeg_bytes.clone(), w, h).unwrap();
             let elapsed = start.elapsed();
-            println!("Quality {}: size {} bytes, time {:?}, lines: {}", quality, jpeg_bytes.len(), elapsed, lines.len());
+            println!(
+                "Quality {}: size {} bytes, time {:?}, lines: {}",
+                quality,
+                jpeg_bytes.len(),
+                elapsed,
+                lines.len()
+            );
         }
     }
 
@@ -1599,14 +1658,20 @@ mod tests {
         let start = std::time::Instant::now();
         convert_and_scale_gl_rgba_to_rgb(&dummy_rgba, src_w, src_h, 1280, 720, &mut out);
         let elapsed = start.elapsed();
-        println!("Downscale 1080p -> 720p with flip and RGB conversion took: {:?}", elapsed);
+        println!(
+            "Downscale 1080p -> 720p with flip and RGB conversion took: {:?}",
+            elapsed
+        );
         assert_eq!(out.len(), (1280 * 720 * 3) as usize);
 
         // Test identical size (no scale, only flip and strip alpha)
         let start_ident = std::time::Instant::now();
         convert_and_scale_gl_rgba_to_rgb(&dummy_rgba, 1280, 720, 1280, 720, &mut out);
         let elapsed_ident = start_ident.elapsed();
-        println!("Direct flip + strip alpha (1280x720) took: {:?}", elapsed_ident);
+        println!(
+            "Direct flip + strip alpha (1280x720) took: {:?}",
+            elapsed_ident
+        );
         assert_eq!(out.len(), (1280 * 720 * 3) as usize);
     }
 
@@ -1628,10 +1693,7 @@ mod tests {
         );
 
         // Hyphenated English: no space
-        assert_eq!(
-            join_lines_text(&["multi-", "line text"]),
-            "multi-line text"
-        );
+        assert_eq!(join_lines_text(&["multi-", "line text"]), "multi-line text");
     }
 
     #[test]
@@ -1671,7 +1733,11 @@ mod tests {
 
         // Zero sticky distance disables merging
         let separated = group_lines_into_blocks(&lines, 0.0);
-        assert_eq!(separated.len(), 2, "Expected 2 separate boxes when sticky distance is 0");
+        assert_eq!(
+            separated.len(),
+            2,
+            "Expected 2 separate boxes when sticky distance is 0"
+        );
     }
 
     #[test]
@@ -1702,7 +1768,11 @@ mod tests {
         ];
 
         let boxes = group_lines_into_blocks(&lines, 0.6);
-        assert_eq!(boxes.len(), 2, "Distant UI text must not be merged with dialogue");
+        assert_eq!(
+            boxes.len(),
+            2,
+            "Distant UI text must not be merged with dialogue"
+        );
         assert_eq!(boxes[0].text, "セリフの一行目");
         assert_eq!(boxes[1].text, "離れたボタン");
     }
@@ -1746,13 +1816,20 @@ mod tests {
         ];
 
         let boxes = group_lines_into_blocks(&lines, 0.6);
-        assert_eq!(boxes.len(), 1, "Expected all 3 lines to be merged into a single OCR box");
+        assert_eq!(
+            boxes.len(),
+            1,
+            "Expected all 3 lines to be merged into a single OCR box"
+        );
         assert_eq!(
             boxes[0].text,
             "北条   「その魔性に、我ら柳生一門の多く「が殺されたわけですね」"
         );
         assert_eq!(boxes[0].lines.len(), 2, "Expected 2 visual rows in the box");
-        assert_eq!(boxes[0].lines[0].text, "北条   「その魔性に、我ら柳生一門の多く");
+        assert_eq!(
+            boxes[0].lines[0].text,
+            "北条   「その魔性に、我ら柳生一門の多く"
+        );
         assert_eq!(
             boxes[0].lines[0].char_spans.len(),
             boxes[0].lines[0].text.chars().count()
@@ -1788,7 +1865,11 @@ mod tests {
         ];
 
         let merged = merge_column_lines(&lines, 0.6);
-        assert_eq!(merged.len(), 1, "Expected top and bottom column fragments to merge");
+        assert_eq!(
+            merged.len(),
+            1,
+            "Expected top and bottom column fragments to merge"
+        );
         assert_eq!(merged[0].text, "東京特許許可局");
         assert_eq!(merged[0].char_spans.len(), merged[0].text.chars().count());
         assert!(merged[0].writing_direction.is_vertical());
@@ -1822,7 +1903,11 @@ mod tests {
         // Pass in arbitrary order
         let lines = vec![col2, col1];
         let boxes = group_lines_into_blocks(&lines, 0.6);
-        assert_eq!(boxes.len(), 1, "Expected 2 vertical columns to merge into 1 block");
+        assert_eq!(
+            boxes.len(),
+            1,
+            "Expected 2 vertical columns to merge into 1 block"
+        );
         assert_eq!(boxes[0].writing_direction, WritingDirection::TopToBottom);
         // RTL reading order: col1 text first, then col2 text
         assert_eq!(boxes[0].text, "あの朝、無人の駅で彼女を見かけたときから");
@@ -1856,10 +1941,20 @@ mod tests {
 
         let lines = vec![horiz_dialogue, vert_sign];
         let boxes = group_lines_into_blocks(&lines, 0.6);
-        assert_eq!(boxes.len(), 2, "Horizontal dialogue and vertical sign must stay separate");
+        assert_eq!(
+            boxes.len(),
+            2,
+            "Horizontal dialogue and vertical sign must stay separate"
+        );
 
-        let h_box = boxes.iter().find(|b| !b.writing_direction.is_vertical()).unwrap();
-        let v_box = boxes.iter().find(|b| b.writing_direction.is_vertical()).unwrap();
+        let h_box = boxes
+            .iter()
+            .find(|b| !b.writing_direction.is_vertical())
+            .unwrap();
+        let v_box = boxes
+            .iter()
+            .find(|b| b.writing_direction.is_vertical())
+            .unwrap();
         assert_eq!(h_box.text, "これは横書きのセリフです。");
         assert_eq!(v_box.text, "立入禁止");
     }
@@ -1867,10 +1962,7 @@ mod tests {
     #[test]
     fn test_normalize_dot_leader_word_matches_grid_width() {
         // 4 ellipses "…………" spanning 2 kanji cells (char_em = 0.055, span = 0.118) -> "……" (2 cells)
-        assert_eq!(
-            normalize_dot_leader_word("…………", Some(0.118), 0.055),
-            "……"
-        );
+        assert_eq!(normalize_dot_leader_word("…………", Some(0.118), 0.055), "……");
         // 6 ellipses "………………" spanning 2 kanji cells (char_em = 0.015, span = 0.032) -> "……"
         assert_eq!(
             normalize_dot_leader_word("………………", Some(0.032), 0.015),
@@ -1887,10 +1979,7 @@ mod tests {
             "……"
         );
         // Single katakana middle dot separator "・" is untouched
-        assert_eq!(
-            normalize_dot_leader_word("・", Some(0.004), 0.015),
-            "・"
-        );
+        assert_eq!(normalize_dot_leader_word("・", Some(0.004), 0.015), "・");
         // Normal word is untouched
         assert_eq!(
             normalize_dot_leader_word("六盟傑", Some(0.165), 0.055),

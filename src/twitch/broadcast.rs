@@ -2,8 +2,8 @@
 
 use crate::config::models::StreamingVideoEncoder;
 use crate::replay::{
-    AudioBlock, AudioClock, AudioRoute, MixSource, TimelineMixer, VideoFrame,
-    AUDIO_BLOCKS, AUDIO_SAMPLES,
+    AudioBlock, AudioClock, AudioRoute, MixSource, TimelineMixer, VideoFrame, AUDIO_BLOCKS,
+    AUDIO_SAMPLES,
 };
 use anyhow::{bail, ensure, Context, Result};
 use crossbeam_channel::{bounded, Receiver, Sender};
@@ -66,7 +66,7 @@ pub enum BroadcastStatus {
 
 #[derive(Default)]
 pub struct BroadcastMetrics {
-    pub current_fps: AtomicU32,       // scaled x10 (e.g. 600 = 60.0 fps)
+    pub current_fps: AtomicU32, // scaled x10 (e.g. 600 = 60.0 fps)
     pub current_bitrate_kbps: AtomicU32,
     pub video_dropped: Arc<AtomicU64>,
     pub audio_dropped: Arc<AtomicU64>,
@@ -87,12 +87,24 @@ impl RgbaToYuv420pConverter {
             (*context.0).src_format = ffi::AVPixelFormat::AV_PIX_FMT_RGBA as i32;
             (*context.0).dst_format = ffi::AVPixelFormat::AV_PIX_FMT_YUV420P as i32;
             (*context.0).flags = ff::software::scaling::flag::Flags::BILINEAR.bits() as u32;
-            let threads = (std::thread::available_parallelism().map_or(1, |n| n.get()) / 2).clamp(1, 4);
+            let threads =
+                (std::thread::available_parallelism().map_or(1, |n| n.get()) / 2).clamp(1, 4);
             (*context.0).threads = threads as i32;
-            check(ffi::sws_init_context(context.0, ptr::null_mut(), ptr::null_mut()))?;
+            check(ffi::sws_init_context(
+                context.0,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            ))?;
             let coeff = ffi::sws_getCoefficients(ffi::SWS_CS_ITU709);
             check(ffi::sws_setColorspaceDetails(
-                context.0, coeff, 1, coeff, 0, 0, 1 << 16, 1 << 16,
+                context.0,
+                coeff,
+                1,
+                coeff,
+                0,
+                0,
+                1 << 16,
+                1 << 16,
             ))?;
             Ok(context)
         }
@@ -134,7 +146,10 @@ impl RgbaToNv12Converter {
     fn new(src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Result<Self> {
         unsafe {
             let context = Self(ffi::sws_alloc_context());
-            ensure!(!context.0.is_null(), "Cannot allocate broadcast NV12 converter");
+            ensure!(
+                !context.0.is_null(),
+                "Cannot allocate broadcast NV12 converter"
+            );
             (*context.0).src_w = src_w as i32;
             (*context.0).src_h = src_h as i32;
             (*context.0).dst_w = dst_w as i32;
@@ -142,12 +157,24 @@ impl RgbaToNv12Converter {
             (*context.0).src_format = ffi::AVPixelFormat::AV_PIX_FMT_RGBA as i32;
             (*context.0).dst_format = ffi::AVPixelFormat::AV_PIX_FMT_NV12 as i32;
             (*context.0).flags = ff::software::scaling::flag::Flags::BILINEAR.bits() as u32;
-            let threads = (std::thread::available_parallelism().map_or(1, |n| n.get()) / 2).clamp(1, 4);
+            let threads =
+                (std::thread::available_parallelism().map_or(1, |n| n.get()) / 2).clamp(1, 4);
             (*context.0).threads = threads as i32;
-            check(ffi::sws_init_context(context.0, ptr::null_mut(), ptr::null_mut()))?;
+            check(ffi::sws_init_context(
+                context.0,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            ))?;
             let coeff = ffi::sws_getCoefficients(ffi::SWS_CS_ITU709);
             check(ffi::sws_setColorspaceDetails(
-                context.0, coeff, 1, coeff, 0, 0, 1 << 16, 1 << 16,
+                context.0,
+                coeff,
+                1,
+                coeff,
+                0,
+                0,
+                1 << 16,
+                1 << 16,
             ))?;
             Ok(context)
         }
@@ -162,7 +189,13 @@ impl Drop for RgbaToNv12Converter {
 }
 
 impl LiveVideoEncoder {
-    fn new(config: &BroadcastConfig, src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Result<Self> {
+    fn new(
+        config: &BroadcastConfig,
+        src_w: u32,
+        src_h: u32,
+        dst_w: u32,
+        dst_h: u32,
+    ) -> Result<Self> {
         ff::init()?;
         match config.video_encoder {
             StreamingVideoEncoder::SoftwareX264 => {
@@ -191,7 +224,9 @@ impl LiveVideoEncoder {
                 options.set("g", "120");
                 options.set("keyint_min", "60");
 
-                let opened = enc.open_with(options).context("Failed to open libx264 encoder")?;
+                let opened = enc
+                    .open_with(options)
+                    .context("Failed to open libx264 encoder")?;
                 let scaler = RgbaToYuv420pConverter::new(src_w, src_h, dst_w, dst_h)?;
                 let yuv_frame = frame::Video::new(format::Pixel::YUV420P, dst_w, dst_h);
                 Ok(Self::Software {
@@ -232,7 +267,10 @@ impl LiveVideoEncoder {
                     ))
                     .context("Cannot initialize VAAPI hardware device for broadcast")?;
                     frames = BufferRef(ffi::av_hwframe_ctx_alloc(device.0));
-                    ensure!(!frames.0.is_null(), "Cannot allocate broadcast VAAPI frame pool");
+                    ensure!(
+                        !frames.0.is_null(),
+                        "Cannot allocate broadcast VAAPI frame pool"
+                    );
                     let pool = (*frames.0).data as *mut ffi::AVHWFramesContext;
                     (*pool).format = ffi::AVPixelFormat::AV_PIX_FMT_VAAPI;
                     (*pool).sw_format = ffi::AVPixelFormat::AV_PIX_FMT_NV12;
@@ -241,7 +279,10 @@ impl LiveVideoEncoder {
                     (*pool).initial_pool_size = 4;
                     check(ffi::av_hwframe_ctx_init(frames.0))?;
                     (*enc.as_mut_ptr()).hw_frames_ctx = ffi::av_buffer_ref(frames.0);
-                    ensure!(!(*enc.as_ptr()).hw_frames_ctx.is_null(), "Cannot retain VAAPI pool");
+                    ensure!(
+                        !(*enc.as_ptr()).hw_frames_ctx.is_null(),
+                        "Cannot retain VAAPI pool"
+                    );
                     (*enc.as_mut_ptr()).color_range = ffi::AVColorRange::AVCOL_RANGE_MPEG;
                     (*enc.as_mut_ptr()).colorspace = ffi::AVColorSpace::AVCOL_SPC_BT709;
                     (*enc.as_mut_ptr()).color_primaries = ffi::AVColorPrimaries::AVCOL_PRI_BT709;
@@ -257,7 +298,9 @@ impl LiveVideoEncoder {
                 options.set("maxrate", &bps);
                 options.set("bufsize", &bps);
 
-                let opened = enc.open_with(options).context("Hardware VAAPI encoder rejected settings")?;
+                let opened = enc
+                    .open_with(options)
+                    .context("Hardware VAAPI encoder rejected settings")?;
                 let scaler = RgbaToNv12Converter::new(src_w, src_h, dst_w, dst_h)?;
                 let sw = frame::Video::new(format::Pixel::NV12, dst_w, dst_h);
                 Ok(Self::Hardware {
@@ -338,8 +381,16 @@ impl LiveVideoEncoder {
                 }
                 let mut hardware = frame::Video::empty();
                 unsafe {
-                    check(ffi::av_hwframe_get_buffer(frames.0, hardware.as_mut_ptr(), 0))?;
-                    check(ffi::av_hwframe_transfer_data(hardware.as_mut_ptr(), sw.as_ptr(), 0))?;
+                    check(ffi::av_hwframe_get_buffer(
+                        frames.0,
+                        hardware.as_mut_ptr(),
+                        0,
+                    ))?;
+                    check(ffi::av_hwframe_transfer_data(
+                        hardware.as_mut_ptr(),
+                        sw.as_ptr(),
+                        0,
+                    ))?;
                 }
                 hardware.set_pts(Some(pts));
                 encoder.send_frame(&hardware)?;
@@ -442,7 +493,12 @@ impl LiveAudioEncoder {
         self.frame.set_rate(48000);
         self.frame.set_pts(Some(pts));
         for channel in 0..2 {
-            for (out, input) in self.frame.plane_mut::<f32>(channel).iter_mut().zip(samples.iter()) {
+            for (out, input) in self
+                .frame
+                .plane_mut::<f32>(channel)
+                .iter_mut()
+                .zip(samples.iter())
+            {
                 *out = input[channel];
             }
         }
@@ -528,7 +584,10 @@ pub fn start_broadcast(
     config: BroadcastConfig,
     audio_tap: Arc<crate::replay::AudioTap>,
 ) -> Result<BroadcastHandle> {
-    ensure!(!config.stream_key.trim().is_empty(), "Twitch stream key is required");
+    ensure!(
+        !config.stream_key.trim().is_empty(),
+        "Twitch stream key is required"
+    );
     let status = Arc::new(Mutex::new(BroadcastStatus::Connecting));
     let metrics = Arc::new(BroadcastMetrics::default());
     let stop = Arc::new(AtomicBool::new(false));
@@ -664,7 +723,8 @@ fn run_broadcast_loop(
     };
 
     let (dst_w, dst_h) = clamp_broadcast_resolution(first_frame.width, first_frame.height);
-    let mut video_encoder = LiveVideoEncoder::new(&config, first_frame.width, first_frame.height, dst_w, dst_h)?;
+    let mut video_encoder =
+        LiveVideoEncoder::new(&config, first_frame.width, first_frame.height, dst_w, dst_h)?;
     let mut audio_encoder = LiveAudioEncoder::new(config.audio_bitrate_kbps)?;
 
     // Format full RTMP/RTMPS URL
@@ -714,7 +774,12 @@ fn run_broadcast_loop(
 
     // Process the first frame
     let first_pts = 0i64;
-    let pkts = video_encoder.encode(&first_frame.rgba, first_frame.width, first_frame.height, first_pts)?;
+    let pkts = video_encoder.encode(
+        &first_frame.rgba,
+        first_frame.width,
+        first_frame.height,
+        first_pts,
+    )?;
     for mut pkt in pkts {
         let dts = pkt.dts().unwrap_or(first_pts).max(last_video_mux_dts + 1);
         let pkt_pts = pkt.pts().unwrap_or(first_pts).max(dts);
@@ -804,7 +869,9 @@ fn run_broadcast_loop(
             let kbps = ((bytes_this_sec as f32 * 8.0 / 1000.0) / elapsed).round() as u32;
             metrics.current_fps.store(fps, Ordering::Relaxed);
             metrics.current_bitrate_kbps.store(kbps, Ordering::Relaxed);
-            metrics.bytes_sent.fetch_add(bytes_this_sec, Ordering::Relaxed);
+            metrics
+                .bytes_sent
+                .fetch_add(bytes_this_sec, Ordering::Relaxed);
             frames_this_sec = 0;
             bytes_this_sec = 0;
             last_stat_time = Instant::now();
@@ -871,7 +938,10 @@ mod tests {
         assert_eq!(config.audio_bitrate_kbps, 160);
         assert_eq!(config.video_encoder, StreamingVideoEncoder::SoftwareX264);
         assert_eq!(config.encoder_preset, "veryfast");
-        assert_eq!(config.audio_encoder, crate::config::models::StreamingAudioEncoder::Aac);
+        assert_eq!(
+            config.audio_encoder,
+            crate::config::models::StreamingAudioEncoder::Aac
+        );
         assert_eq!(config.ingest_server, "rtmps://live.twitch.tv:443/app/");
         assert!(config.stream_key.is_empty());
     }
@@ -931,4 +1001,3 @@ mod tests {
         assert!((mixed[0][1] - 0.35).abs() < 1e-6);
     }
 }
-

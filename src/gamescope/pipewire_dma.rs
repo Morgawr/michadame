@@ -1,8 +1,8 @@
+use crossbeam_channel::{Receiver, Sender};
 use std::ffi::{c_char, c_void, CString};
 use std::os::unix::io::{FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use crossbeam_channel::{Receiver, Sender};
 
 #[repr(C)]
 struct GamescopeDmaStreamOpaque {
@@ -20,11 +20,8 @@ type DmaFrameCb = unsafe extern "C" fn(
     modifier: u64,
 );
 
-type DmaStateCb = unsafe extern "C" fn(
-    user_data: *mut c_void,
-    state_code: i32,
-    error_msg: *const c_char,
-);
+type DmaStateCb =
+    unsafe extern "C" fn(user_data: *mut c_void, state_code: i32, error_msg: *const c_char);
 
 extern "C" {
     fn gamescope_dma_stream_start(

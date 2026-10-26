@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use ffmpeg_next as ff;
 use ff::{format, frame};
+use ffmpeg_next as ff;
 use std::collections::VecDeque;
 
 #[derive(Clone, Debug)]
@@ -331,14 +331,19 @@ impl FfmpegAfftdnStream {
         let _ = ff::init();
         let mut graph = ff::filter::Graph::new();
         let abuffer = ff::filter::find("abuffer").context("abuffer filter not found")?;
-        let abuffersink = ff::filter::find("abuffersink").context("abuffersink filter not found")?;
+        let abuffersink =
+            ff::filter::find("abuffersink").context("abuffersink filter not found")?;
 
         let args = format!(
             "time_base=1/{}:sample_rate={}:sample_fmt=fltp:channel_layout=stereo",
             sample_rate, sample_rate
         );
-        graph.add(&abuffer, "in", &args).context("Failed to add abuffer source")?;
-        graph.add(&abuffersink, "out", "").context("Failed to add abuffersink sink")?;
+        graph
+            .add(&abuffer, "in", &args)
+            .context("Failed to add abuffer source")?;
+        graph
+            .add(&abuffersink, "out", "")
+            .context("Failed to add abuffersink sink")?;
 
         let nr = nr_db.clamp(1.0, 60.0);
         let nf = nf_db.clamp(-90.0, -20.0);
@@ -489,7 +494,7 @@ pub struct LiveAudioDsp {
     crossover: Option<Lr4Crossover>,
     high_delay_l: VecDeque<f32>,
     high_delay_r: VecDeque<f32>,
-    crt_notch: Option<Biquad>,   // 15.734 kHz flyback whine
+    crt_notch: Option<Biquad>, // 15.734 kHz flyback whine
     rnnoise: Option<RnnoiseStream>,
     afftdn: Option<FfmpegAfftdnStream>,
     expander: Option<DownwardExpander>,
@@ -517,7 +522,11 @@ impl LiveAudioDsp {
         dsp
     }
 
-    pub fn reconfigure(&mut self, config: &crate::replay::config::AudioFilterConfig, sample_rate: u32) {
+    pub fn reconfigure(
+        &mut self,
+        config: &crate::replay::config::AudioFilterConfig,
+        sample_rate: u32,
+    ) {
         if self.enabled == config.enabled
             && self.sample_rate == sample_rate
             && &self.current_config == config
@@ -589,13 +598,16 @@ impl LiveAudioDsp {
         };
 
         // Crossover for Treble Bypass / High-Frequency Retention
-        let has_denoiser = config.denoise_backend != crate::replay::config::DenoiseBackend::Disabled;
+        let has_denoiser =
+            config.denoise_backend != crate::replay::config::DenoiseBackend::Disabled;
         if config.treble_bypass && has_denoiser {
             let fc = config.treble_crossover_hz.clamp(1000.0, 16000.0);
             self.crossover = Some(Lr4Crossover::new(fc, fs));
             let delay_frames = match config.denoise_backend {
                 crate::replay::config::DenoiseBackend::Rnnoise => RnnoiseStream::DELAY_SAMPLES,
-                crate::replay::config::DenoiseBackend::Afftdn => FfmpegAfftdnStream::delay_samples_for(sample_rate),
+                crate::replay::config::DenoiseBackend::Afftdn => {
+                    FfmpegAfftdnStream::delay_samples_for(sample_rate)
+                }
                 crate::replay::config::DenoiseBackend::Disabled => 0,
             };
             self.high_delay_l.clear();
@@ -745,7 +757,9 @@ impl LiveAudioDsp {
             xo.reset();
             let delay_frames = match self.current_config.denoise_backend {
                 crate::replay::config::DenoiseBackend::Rnnoise => RnnoiseStream::DELAY_SAMPLES,
-                crate::replay::config::DenoiseBackend::Afftdn => FfmpegAfftdnStream::delay_samples_for(self.sample_rate),
+                crate::replay::config::DenoiseBackend::Afftdn => {
+                    FfmpegAfftdnStream::delay_samples_for(self.sample_rate)
+                }
                 crate::replay::config::DenoiseBackend::Disabled => 0,
             };
             self.high_delay_l.clear();
@@ -834,7 +848,8 @@ mod tests {
             assert!(
                 delta_db < 0.05,
                 "LR4 crossover at {:.0} Hz had delta {:.3} dB (expected < 0.05 dB)",
-                freq, delta_db
+                freq,
+                delta_db
             );
         }
     }
@@ -986,12 +1001,9 @@ mod tests {
             let delay = detected_at.unwrap() as i64 - spike_at as i64;
             let expected_delay = FfmpegAfftdnStream::delay_samples_for(48000);
             assert_eq!(
-                delay,
-                expected_delay as i64,
+                delay, expected_delay as i64,
                 "Afftdn spike at {} had delay {} (expected {})",
-                spike_at,
-                delay,
-                expected_delay
+                spike_at, delay, expected_delay
             );
         }
     }
@@ -1051,7 +1063,8 @@ mod tests {
         f.write_all(&1u16.to_le_bytes()).unwrap();
         f.write_all(&(channels as u16).to_le_bytes()).unwrap();
         f.write_all(&sample_rate.to_le_bytes()).unwrap();
-        f.write_all(&(sample_rate * channels as u32 * 2).to_le_bytes()).unwrap();
+        f.write_all(&(sample_rate * channels as u32 * 2).to_le_bytes())
+            .unwrap();
         f.write_all(&(channels as u16 * 2).to_le_bytes()).unwrap();
         f.write_all(&16u16.to_le_bytes()).unwrap();
         f.write_all(b"data").unwrap();
@@ -1135,7 +1148,12 @@ mod tests {
         for chunk in out_rnnoise.chunks_mut(1024 * 2) {
             dsp_rnnoise.process_interleaved(chunk, 2);
         }
-        write_wav_i16("/tmp/test-noise-rnnoise-treble-preserved.wav", &out_rnnoise, 2, 48000);
+        write_wav_i16(
+            "/tmp/test-noise-rnnoise-treble-preserved.wav",
+            &out_rnnoise,
+            2,
+            48000,
+        );
 
         // 2. Process with FFmpeg afftdn + Treble Bypass (4 kHz Crossover)
         let mut cfg_afftdn = AudioFilterConfig::default();
@@ -1150,6 +1168,11 @@ mod tests {
         for chunk in out_afftdn.chunks_mut(1024 * 2) {
             dsp_afftdn.process_interleaved(chunk, 2);
         }
-        write_wav_i16("/tmp/test-noise-afftdn-treble-preserved.wav", &out_afftdn, 2, 48000);
+        write_wav_i16(
+            "/tmp/test-noise-afftdn-treble-preserved.wav",
+            &out_afftdn,
+            2,
+            48000,
+        );
     }
 }

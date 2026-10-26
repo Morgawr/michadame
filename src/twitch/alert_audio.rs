@@ -178,14 +178,12 @@ pub const EMBEDDED_LIGHT_SWITCH_WAV: &[u8] = include_bytes!("../../assets/light_
 pub const EMBEDDED_LIGHT_SWITCH_ON_WAV: &[u8] = include_bytes!("../../assets/light_switch_on.wav");
 
 fn decode_embedded_wav_samples(wav_bytes: &[u8]) -> Vec<f32> {
-    let pcm_bytes = if wav_bytes.len() > 44
-        && &wav_bytes[0..4] == b"RIFF"
-        && &wav_bytes[8..12] == b"WAVE"
-    {
-        &wav_bytes[44..]
-    } else {
-        wav_bytes
-    };
+    let pcm_bytes =
+        if wav_bytes.len() > 44 && &wav_bytes[0..4] == b"RIFF" && &wav_bytes[8..12] == b"WAVE" {
+            &wav_bytes[44..]
+        } else {
+            wav_bytes
+        };
 
     let mut samples = Vec::with_capacity(pcm_bytes.len() / 2);
     for chunk in pcm_bytes.chunks_exact(2) {
@@ -231,7 +229,8 @@ impl AlertSoundPlayer {
 
         // Attempt to initialize Rodio playback. If unavailable (e.g. headless environment),
         // we safely retain None so execution never crashes.
-        let (stream, stream_handle, sink) = match crate::devices::audio::initialize_rodio_playback() {
+        let (stream, stream_handle, sink) = match crate::devices::audio::initialize_rodio_playback()
+        {
             Ok((guard, handle)) => match Sink::try_new(&handle) {
                 Ok(sink) => {
                     sink.set_volume(1.0);
@@ -263,7 +262,8 @@ impl AlertSoundPlayer {
     /// Sets the playback volume for local alert audio, matching the stream master volume.
     pub fn set_volume(&self, volume: f32) {
         let clamped = volume.clamp(0.0, 1.0);
-        self.volume.store(clamped.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        self.volume
+            .store(clamped.to_bits(), std::sync::atomic::Ordering::Relaxed);
         if let Some(sink) = &self.sink {
             sink.set_volume(clamped);
         }
@@ -394,7 +394,10 @@ mod tests {
     #[test]
     fn test_player_instantiation_does_not_panic() {
         let player = AlertSoundPlayer::new();
-        assert_eq!(player.chime_samples().len(), (48_000.0 * 2.20 * 2.0) as usize);
+        assert_eq!(
+            player.chime_samples().len(),
+            (48_000.0 * 2.20 * 2.0) as usize
+        );
         assert_eq!(
             player.light_switch_samples().len(),
             (48_000.0 * 0.350) as usize * 2

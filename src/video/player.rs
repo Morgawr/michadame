@@ -39,7 +39,12 @@ pub(crate) fn resample_audio_frame(
     rsm: &mut ffmpeg_next::software::resampling::context::Context,
     input: &ffmpeg_next::frame::Audio,
 ) -> Option<ffmpeg_next::frame::Audio> {
-    let in_rate = i64::from(if input.rate() > 0 { input.rate() } else { rsm.input().rate }).max(1);
+    let in_rate = i64::from(if input.rate() > 0 {
+        input.rate()
+    } else {
+        rsm.input().rate
+    })
+    .max(1);
     let pending = rsm.delay().map(|d| d.output).unwrap_or(0).max(0);
     let converted = (input.samples() as i64 * i64::from(AUDIO_OUTPUT_RATE) + in_rate - 1) / in_rate;
     let capacity = (pending + converted + 256) as usize;
@@ -409,10 +414,7 @@ pub fn video_file_thread_main(
     } else {
         30.0
     };
-    let replay_rate = crate::replay::config::Rate::new(
-        (framerate.round() as u32).max(1),
-        1,
-    );
+    let replay_rate = crate::replay::config::Rate::new((framerate.round() as u32).max(1), 1);
 
     // Compute duration in microseconds
     let container_duration = ictx.duration();
@@ -431,10 +433,11 @@ pub fn video_file_thread_main(
     };
     let duration_secs = file_duration_us as f64 / 1_000_000.0;
 
-    let mut video_decoder = ffmpeg_next::codec::context::Context::from_parameters(video_stream.parameters())?
-        .decoder()
-        .video()
-        .context("Failed to create video decoder")?;
+    let mut video_decoder =
+        ffmpeg_next::codec::context::Context::from_parameters(video_stream.parameters())?
+            .decoder()
+            .video()
+            .context("Failed to create video decoder")?;
     video_decoder.set_threading(ffmpeg_next::codec::threading::Config::default());
 
     let width = video_decoder.width();
@@ -457,7 +460,8 @@ pub fn video_file_thread_main(
                     } else {
                         decoder.channel_layout()
                     };
-                    let resampler = create_audio_resampler(decoder.format(), ch_layout, decoder.rate());
+                    let resampler =
+                        create_audio_resampler(decoder.format(), ch_layout, decoder.rate());
                     (Some(decoder), Some(idx), Some(time_base), resampler)
                 }
                 Err(e) => {
@@ -479,29 +483,27 @@ pub fn video_file_thread_main(
     let mut audio_sink = None;
     if has_audio {
         match crate::devices::audio::initialize_rodio_playback() {
-            Ok((guard, stream_handle)) => {
-                match Sink::try_new(&stream_handle) {
-                    Ok(sink) => {
-                        let audio_source = VideoFileAudioSource {
-                            queue: audio_queue.clone(),
-                            current_pts_shared: audio_clock_pts_us.clone(),
-                            seek_generation: seek_generation.clone(),
-                            peak_amplitude: peak_amplitude.clone(),
-                            audio_latency_ms: audio_latency_ms.clone(),
-                            replay_audio: replay_audio.clone(),
-                            local_batch: Vec::with_capacity(512),
-                            read_buf: VecDeque::with_capacity(512),
-                            local_gen: 0,
-                        };
-                        sink.append(audio_source);
-                        sink.set_volume(master_volume);
-                        sink.play();
-                        audio_sink = Some(sink);
-                        _audio_guard = Some(guard);
-                    }
-                    Err(e) => tracing::warn!("Failed to create audio sink: {}", e),
+            Ok((guard, stream_handle)) => match Sink::try_new(&stream_handle) {
+                Ok(sink) => {
+                    let audio_source = VideoFileAudioSource {
+                        queue: audio_queue.clone(),
+                        current_pts_shared: audio_clock_pts_us.clone(),
+                        seek_generation: seek_generation.clone(),
+                        peak_amplitude: peak_amplitude.clone(),
+                        audio_latency_ms: audio_latency_ms.clone(),
+                        replay_audio: replay_audio.clone(),
+                        local_batch: Vec::with_capacity(512),
+                        read_buf: VecDeque::with_capacity(512),
+                        local_gen: 0,
+                    };
+                    sink.append(audio_source);
+                    sink.set_volume(master_volume);
+                    sink.play();
+                    audio_sink = Some(sink);
+                    _audio_guard = Some(guard);
                 }
-            }
+                Err(e) => tracing::warn!("Failed to create audio sink: {}", e),
+            },
             Err(e) => tracing::warn!("Failed to initialize audio playback: {}", e),
         }
     }
@@ -515,7 +517,9 @@ pub fn video_file_thread_main(
     request_repaint();
 
     let (demux_cmd_tx, demux_cmd_rx) = crossbeam_channel::unbounded::<DemuxCommand>();
-    let video_queue = Arc::new(Mutex::new(VecDeque::<(i64, Arc<RawFrame>, u64)>::with_capacity(32)));
+    let video_queue = Arc::new(Mutex::new(
+        VecDeque::<(i64, Arc<RawFrame>, u64)>::with_capacity(32),
+    ));
     let is_demux_eof = Arc::new(AtomicBool::new(false));
     let demux_stop_flag = Arc::new(AtomicBool::new(false));
     let video_frame_interval_us = (1_000_000.0 / framerate.max(1.0)) as i64;
@@ -691,9 +695,9 @@ pub fn video_file_thread_main(
                                 && frame.width() == video_decoder.width()
                                 && frame.height() == video_decoder.height()
                             {
-                                copy_frame_tightly(&frame)
-                                    .ok()
-                                    .map(|data| (frame.width(), frame.height(), frame.format(), data))
+                                copy_frame_tightly(&frame).ok().map(|data| {
+                                    (frame.width(), frame.height(), frame.format(), data)
+                                })
                             } else if scaler.run(&frame, &mut normalized).is_ok() {
                                 copy_frame_tightly(&normalized).ok().map(|data| {
                                     (
@@ -715,7 +719,9 @@ pub fn video_file_thread_main(
                                     height: h,
                                     data,
                                     format: fmt,
-                                    color_range: crate::video::types::ColorRange::from_u8(range_val),
+                                    color_range: crate::video::types::ColorRange::from_u8(
+                                        range_val,
+                                    ),
                                 });
                                 let gen = seek_generation.load(Ordering::SeqCst);
                                 if let Ok(mut vq) = video_queue.lock() {
@@ -739,16 +745,19 @@ pub fn video_file_thread_main(
                 if stream_idx == video_stream_index {
                     if video_decoder.send_packet(&packet).is_ok() {
                         while video_decoder.receive_frame(&mut decoded).is_ok() {
-                            let frame_pts = decoded.pts().map(|pts| unsafe {
-                                ffmpeg_next::sys::av_rescale_q(
-                                    pts,
-                                    video_time_base.into(),
-                                    ffmpeg_next::Rational(1, 1_000_000).into(),
-                                )
-                            }).unwrap_or_else(|| {
-                                video_fallback_pts += video_frame_interval_us;
-                                video_fallback_pts
-                            });
+                            let frame_pts = decoded
+                                .pts()
+                                .map(|pts| unsafe {
+                                    ffmpeg_next::sys::av_rescale_q(
+                                        pts,
+                                        video_time_base.into(),
+                                        ffmpeg_next::Rational(1, 1_000_000).into(),
+                                    )
+                                })
+                                .unwrap_or_else(|| {
+                                    video_fallback_pts += video_frame_interval_us;
+                                    video_fallback_pts
+                                });
                             video_fallback_pts = frame_pts;
 
                             if let Some(target) = pending_video_seek_target_us {
@@ -768,12 +777,7 @@ pub fn video_file_thread_main(
                                 && decoded.height() == video_decoder.height()
                             {
                                 copy_frame_tightly(&decoded).ok().map(|data| {
-                                    (
-                                        decoded.width(),
-                                        decoded.height(),
-                                        decoded.format(),
-                                        data,
-                                    )
+                                    (decoded.width(), decoded.height(), decoded.format(), data)
                                 })
                             } else if scaler.run(&decoded, &mut normalized).is_ok() {
                                 copy_frame_tightly(&normalized).ok().map(|data| {
@@ -796,7 +800,9 @@ pub fn video_file_thread_main(
                                     height: h,
                                     data,
                                     format: fmt,
-                                    color_range: crate::video::types::ColorRange::from_u8(range_val),
+                                    color_range: crate::video::types::ColorRange::from_u8(
+                                        range_val,
+                                    ),
                                 });
 
                                 if let Ok(mut vq) = video_queue.lock() {
@@ -806,34 +812,52 @@ pub fn video_file_thread_main(
                         }
                     }
                 } else if Some(stream_idx) == audio_stream_index {
-                    if let (Some(ref mut dec), Some(ref mut rsm)) = (&mut audio_decoder, &mut resampler) {
+                    if let (Some(ref mut dec), Some(ref mut rsm)) =
+                        (&mut audio_decoder, &mut resampler)
+                    {
                         if dec.send_packet(&packet).is_ok() {
                             let mut audio_frame = ffmpeg_next::frame::Audio::empty();
                             while dec.receive_frame(&mut audio_frame).is_ok() {
                                 if resampler_needs_reset {
                                     resampler_needs_reset = false;
                                     let layout = if audio_frame.channel_layout().is_empty() {
-                                        ffmpeg_next::ChannelLayout::default(audio_frame.channels().max(1) as i32)
+                                        ffmpeg_next::ChannelLayout::default(
+                                            audio_frame.channels().max(1) as i32,
+                                        )
                                     } else {
                                         audio_frame.channel_layout()
                                     };
-                                    let rate = if audio_frame.rate() > 0 { audio_frame.rate() } else { rsm.input().rate };
-                                    if let Some(fresh) = create_audio_resampler(audio_frame.format(), layout, rate) {
+                                    let rate = if audio_frame.rate() > 0 {
+                                        audio_frame.rate()
+                                    } else {
+                                        rsm.input().rate
+                                    };
+                                    if let Some(fresh) =
+                                        create_audio_resampler(audio_frame.format(), layout, rate)
+                                    {
                                         *rsm = fresh;
                                     }
                                 }
-                                if let Some(resampled_frame) = resample_audio_frame(rsm, &audio_frame) {
+                                if let Some(resampled_frame) =
+                                    resample_audio_frame(rsm, &audio_frame)
+                                {
                                     let samples_count = resampled_frame.samples();
                                     if samples_count > 0 {
                                         let slice = resampled_frame.plane::<f32>(0);
-                                        let pts_us = audio_frame.pts().map(|pts| unsafe {
-                                            ffmpeg_next::sys::av_rescale_q(
-                                                pts,
-                                                audio_time_base.unwrap().into(),
-                                                ffmpeg_next::Rational(1, 1_000_000).into(),
-                                            )
-                                        }).unwrap_or(audio_fallback_pts);
-                                        let duration_us = (samples_count as f64 / AUDIO_OUTPUT_RATE as f64 * 1_000_000.0) as i64;
+                                        let pts_us = audio_frame
+                                            .pts()
+                                            .map(|pts| unsafe {
+                                                ffmpeg_next::sys::av_rescale_q(
+                                                    pts,
+                                                    audio_time_base.unwrap().into(),
+                                                    ffmpeg_next::Rational(1, 1_000_000).into(),
+                                                )
+                                            })
+                                            .unwrap_or(audio_fallback_pts);
+                                        let duration_us = (samples_count as f64
+                                            / AUDIO_OUTPUT_RATE as f64
+                                            * 1_000_000.0)
+                                            as i64;
                                         let frame_end_us = pts_us + duration_us;
                                         audio_fallback_pts = frame_end_us;
 
@@ -845,8 +869,12 @@ pub fn video_file_thread_main(
                                             if pts_us < target {
                                                 // Audio frame spans across target; trim leading samples
                                                 let skip_us = target - pts_us;
-                                                let skip_frames = (skip_us as f64 / 1_000_000.0 * AUDIO_OUTPUT_RATE as f64).round() as usize;
-                                                let skip_samples = (skip_frames * 2).min(slice.len());
+                                                let skip_frames = (skip_us as f64 / 1_000_000.0
+                                                    * AUDIO_OUTPUT_RATE as f64)
+                                                    .round()
+                                                    as usize;
+                                                let skip_samples =
+                                                    (skip_frames * 2).min(slice.len());
                                                 let trimmed_slice = &slice[skip_samples..];
                                                 if !trimmed_slice.is_empty() {
                                                     if let Ok(mut q) = audio_queue.lock() {
@@ -1195,7 +1223,11 @@ mod tests {
             expected
         );
         let backlog = rsm.delay().map(|d| d.output).unwrap_or(0);
-        assert!(backlog < 480, "swr is holding {} frames of stale audio", backlog);
+        assert!(
+            backlog < 480,
+            "swr is holding {} frames of stale audio",
+            backlog
+        );
     }
 
     #[test]
@@ -1364,7 +1396,8 @@ mod tests {
         assert!(pts_us < target_us && frame_end_us > target_us);
 
         let skip_us = target_us - pts_us;
-        let skip_frames = (skip_us as f64 / 1_000_000.0 * AUDIO_OUTPUT_RATE as f64).round() as usize;
+        let skip_frames =
+            (skip_us as f64 / 1_000_000.0 * AUDIO_OUTPUT_RATE as f64).round() as usize;
         let skip_samples = (skip_frames * 2).min(slice.len());
         let trimmed_slice = &slice[skip_samples..];
 
@@ -1372,5 +1405,3 @@ mod tests {
         assert_eq!(trimmed_slice.len(), 960);
     }
 }
-
-

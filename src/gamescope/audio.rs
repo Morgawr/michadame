@@ -45,7 +45,9 @@ pub fn ensure_gamescope_sink() -> Result<Option<String>> {
         anyhow::bail!("Failed to create Gamescope null-sink: {stderr}");
     }
 
-    let mod_id = String::from_utf8_lossy(&load_output.stdout).trim().to_string();
+    let mod_id = String::from_utf8_lossy(&load_output.stdout)
+        .trim()
+        .to_string();
     tracing::info!("Created Gamescope null-sink with module ID: {mod_id}");
     Ok(Some(mod_id))
 }

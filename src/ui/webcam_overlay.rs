@@ -61,8 +61,10 @@ pub fn calculate_resized_geometry(
 
     match corner {
         WebcamResizeCorner::BottomRight => {
-            let new_total_w = (current_p.x - outer_rect.left())
-                .clamp(MIN_CONTENT_WIDTH + FRAME_PADDING * 2.0, viewport_w - (outer_rect.left() - viewport_rect.min.x));
+            let new_total_w = (current_p.x - outer_rect.left()).clamp(
+                MIN_CONTENT_WIDTH + FRAME_PADDING * 2.0,
+                viewport_w - (outer_rect.left() - viewport_rect.min.x),
+            );
             let new_content_w = new_total_w - FRAME_PADDING * 2.0;
             let new_content_h = new_content_w / aspect_ratio;
             let new_total_h = new_content_h + FRAME_PADDING * 2.0;
@@ -74,8 +76,10 @@ pub fn calculate_resized_geometry(
             }
         }
         WebcamResizeCorner::TopLeft => {
-            let new_total_w = (outer_rect.right() - current_p.x)
-                .clamp(MIN_CONTENT_WIDTH + FRAME_PADDING * 2.0, outer_rect.right() - viewport_rect.min.x);
+            let new_total_w = (outer_rect.right() - current_p.x).clamp(
+                MIN_CONTENT_WIDTH + FRAME_PADDING * 2.0,
+                outer_rect.right() - viewport_rect.min.x,
+            );
             let new_content_w = new_total_w - FRAME_PADDING * 2.0;
             let new_content_h = new_content_w / aspect_ratio;
             let new_total_h = new_content_h + FRAME_PADDING * 2.0;
@@ -93,8 +97,10 @@ pub fn calculate_resized_geometry(
             }
         }
         WebcamResizeCorner::TopRight => {
-            let new_total_w = (current_p.x - outer_rect.left())
-                .clamp(MIN_CONTENT_WIDTH + FRAME_PADDING * 2.0, viewport_rect.max.x - outer_rect.left());
+            let new_total_w = (current_p.x - outer_rect.left()).clamp(
+                MIN_CONTENT_WIDTH + FRAME_PADDING * 2.0,
+                viewport_rect.max.x - outer_rect.left(),
+            );
             let new_content_w = new_total_w - FRAME_PADDING * 2.0;
             let new_content_h = new_content_w / aspect_ratio;
             let new_total_h = new_content_h + FRAME_PADDING * 2.0;
@@ -111,8 +117,10 @@ pub fn calculate_resized_geometry(
             }
         }
         WebcamResizeCorner::BottomLeft => {
-            let new_total_w = (outer_rect.right() - current_p.x)
-                .clamp(MIN_CONTENT_WIDTH + FRAME_PADDING * 2.0, outer_rect.right() - viewport_rect.min.x);
+            let new_total_w = (outer_rect.right() - current_p.x).clamp(
+                MIN_CONTENT_WIDTH + FRAME_PADDING * 2.0,
+                outer_rect.right() - viewport_rect.min.x,
+            );
             let new_content_w = new_total_w - FRAME_PADDING * 2.0;
             let new_content_h = new_content_w / aspect_ratio;
             let new_total_h = new_content_h + FRAME_PADDING * 2.0;
@@ -180,8 +188,10 @@ pub fn draw_webcam_overlay(
     let viewport_w = viewport_rect.width();
     let viewport_h = viewport_rect.height();
 
-    let target_content_w = (viewport_w * state.webcam.config.width_pct)
-        .clamp(MIN_CONTENT_WIDTH, (viewport_w - FRAME_PADDING * 2.0).max(MIN_CONTENT_WIDTH));
+    let target_content_w = (viewport_w * state.webcam.config.width_pct).clamp(
+        MIN_CONTENT_WIDTH,
+        (viewport_w - FRAME_PADDING * 2.0).max(MIN_CONTENT_WIDTH),
+    );
     let target_content_h = target_content_w / aspect_ratio;
 
     let total_w = target_content_w + FRAME_PADDING * 2.0;
@@ -190,8 +200,14 @@ pub fn draw_webcam_overlay(
     let mut min_x = viewport_rect.min.x + viewport_w * state.webcam.config.pos_x_pct;
     let mut min_y = viewport_rect.min.y + viewport_h * state.webcam.config.pos_y_pct;
 
-    min_x = min_x.clamp(viewport_rect.min.x, (viewport_rect.max.x - total_w).max(viewport_rect.min.x));
-    min_y = min_y.clamp(viewport_rect.min.y, (viewport_rect.max.y - total_h).max(viewport_rect.min.y));
+    min_x = min_x.clamp(
+        viewport_rect.min.x,
+        (viewport_rect.max.x - total_w).max(viewport_rect.min.x),
+    );
+    min_y = min_y.clamp(
+        viewport_rect.min.y,
+        (viewport_rect.max.y - total_h).max(viewport_rect.min.y),
+    );
 
     let outer_rect = Rect::from_min_size(egui::pos2(min_x, min_y), Vec2::new(total_w, total_h));
     let inner_rect = outer_rect.shrink(FRAME_PADDING);
@@ -219,7 +235,10 @@ pub fn draw_webcam_overlay(
         Vec2::splat(CORNER_HIT_SIZE),
     );
     let se_rect = Rect::from_min_size(
-        egui::pos2(outer_rect.right() - CORNER_HIT_SIZE, outer_rect.bottom() - CORNER_HIT_SIZE),
+        egui::pos2(
+            outer_rect.right() - CORNER_HIT_SIZE,
+            outer_rect.bottom() - CORNER_HIT_SIZE,
+        ),
         Vec2::splat(CORNER_HIT_SIZE),
     );
 
@@ -248,12 +267,14 @@ pub fn draw_webcam_overlay(
             state.webcam.resizing_corner = Some(corner);
             state.webcam.resize_start_pointer = pointer_pos;
             state.webcam.resize_start_width_pct = Some(state.webcam.config.width_pct);
-            state.webcam.resize_start_pos = Some([state.webcam.config.pos_x_pct, state.webcam.config.pos_y_pct]);
+            state.webcam.resize_start_pos =
+                Some([state.webcam.config.pos_x_pct, state.webcam.config.pos_y_pct]);
             state.webcam.is_dragging = false;
         } else if is_body_hovered {
             state.webcam.is_dragging = true;
             state.webcam.drag_start_pointer = pointer_pos;
-            state.webcam.drag_start_pos = Some([state.webcam.config.pos_x_pct, state.webcam.config.pos_y_pct]);
+            state.webcam.drag_start_pos =
+                Some([state.webcam.config.pos_x_pct, state.webcam.config.pos_y_pct]);
             state.webcam.resizing_corner = None;
         }
     }
@@ -270,9 +291,13 @@ pub fn draw_webcam_overlay(
                     ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeNeSw);
                 }
             }
-            if let Some((new_width_pct, new_pos_x, new_pos_y)) =
-                calculate_resized_geometry(corner, current_p, outer_rect, viewport_rect, aspect_ratio)
-            {
+            if let Some((new_width_pct, new_pos_x, new_pos_y)) = calculate_resized_geometry(
+                corner,
+                current_p,
+                outer_rect,
+                viewport_rect,
+                aspect_ratio,
+            ) {
                 state.webcam.config.width_pct = new_width_pct;
                 if let Some(pos_x) = new_pos_x {
                     state.webcam.config.pos_x_pct = pos_x;
@@ -293,10 +318,14 @@ pub fn draw_webcam_overlay(
                 let start_min_x = viewport_rect.min.x + viewport_w * start_pos[0];
                 let start_min_y = viewport_rect.min.y + viewport_h * start_pos[1];
 
-                let new_min_x = (start_min_x + delta.x)
-                    .clamp(viewport_rect.min.x, (viewport_rect.max.x - total_w).max(viewport_rect.min.x));
-                let new_min_y = (start_min_y + delta.y)
-                    .clamp(viewport_rect.min.y, (viewport_rect.max.y - total_h).max(viewport_rect.min.y));
+                let new_min_x = (start_min_x + delta.x).clamp(
+                    viewport_rect.min.x,
+                    (viewport_rect.max.x - total_w).max(viewport_rect.min.x),
+                );
+                let new_min_y = (start_min_y + delta.y).clamp(
+                    viewport_rect.min.y,
+                    (viewport_rect.max.y - total_h).max(viewport_rect.min.y),
+                );
 
                 state.webcam.config.pos_x_pct = (new_min_x - viewport_rect.min.x) / viewport_w;
                 state.webcam.config.pos_y_pct = (new_min_y - viewport_rect.min.y) / viewport_h;
@@ -347,30 +376,59 @@ pub fn draw_webcam_overlay(
     painter.rect_filled(outer_rect, egui::Rounding::ZERO, PC98_BEZEL_BG);
 
     // Outer chiseled contour layer 1 (outermost rim)
-    painter.line_segment([outer_rect.left_top(), outer_rect.right_top()], Stroke::new(1.0, PC98_OUTER_HIGHLIGHT));
-    painter.line_segment([outer_rect.left_top(), outer_rect.left_bottom()], Stroke::new(1.0, PC98_OUTER_HIGHLIGHT));
-    painter.line_segment([outer_rect.left_bottom(), outer_rect.right_bottom()], Stroke::new(1.0, PC98_OUTER_SHADOW));
-    painter.line_segment([outer_rect.right_top(), outer_rect.right_bottom()], Stroke::new(1.0, PC98_OUTER_SHADOW));
+    painter.line_segment(
+        [outer_rect.left_top(), outer_rect.right_top()],
+        Stroke::new(1.0, PC98_OUTER_HIGHLIGHT),
+    );
+    painter.line_segment(
+        [outer_rect.left_top(), outer_rect.left_bottom()],
+        Stroke::new(1.0, PC98_OUTER_HIGHLIGHT),
+    );
+    painter.line_segment(
+        [outer_rect.left_bottom(), outer_rect.right_bottom()],
+        Stroke::new(1.0, PC98_OUTER_SHADOW),
+    );
+    painter.line_segment(
+        [outer_rect.right_top(), outer_rect.right_bottom()],
+        Stroke::new(1.0, PC98_OUTER_SHADOW),
+    );
 
     // Outer chiseled contour layer 2 (inset line)
     let mid_rect = outer_rect.shrink(1.0);
-    painter.line_segment([mid_rect.left_top(), mid_rect.right_top()], Stroke::new(1.0, PC98_MID_HIGHLIGHT));
-    painter.line_segment([mid_rect.left_top(), mid_rect.left_bottom()], Stroke::new(1.0, PC98_MID_HIGHLIGHT));
-    painter.line_segment([mid_rect.left_bottom(), mid_rect.right_bottom()], Stroke::new(1.0, PC98_MID_SHADOW));
-    painter.line_segment([mid_rect.right_top(), mid_rect.right_bottom()], Stroke::new(1.0, PC98_MID_SHADOW));
+    painter.line_segment(
+        [mid_rect.left_top(), mid_rect.right_top()],
+        Stroke::new(1.0, PC98_MID_HIGHLIGHT),
+    );
+    painter.line_segment(
+        [mid_rect.left_top(), mid_rect.left_bottom()],
+        Stroke::new(1.0, PC98_MID_HIGHLIGHT),
+    );
+    painter.line_segment(
+        [mid_rect.left_bottom(), mid_rect.right_bottom()],
+        Stroke::new(1.0, PC98_MID_SHADOW),
+    );
+    painter.line_segment(
+        [mid_rect.right_top(), mid_rect.right_bottom()],
+        Stroke::new(1.0, PC98_MID_SHADOW),
+    );
 
     // Corner vintage brackets (L-shaped decorative accents at each corner)
     let bracket_len = 9.0;
     let bracket_thick = 2.0;
 
-    let draw_corner_bracket = |painter: &egui::Painter, corner: Pos2, dir_x: f32, dir_y: f32, active: bool| {
-        let color = if active { PC98_BRACKET_ACTIVE } else { PC98_BRACKET_COLOR };
-        let stroke = Stroke::new(bracket_thick, color);
-        let h_end = Pos2::new(corner.x + dir_x * bracket_len, corner.y);
-        let v_end = Pos2::new(corner.x, corner.y + dir_y * bracket_len);
-        painter.line_segment([corner, h_end], stroke);
-        painter.line_segment([corner, v_end], stroke);
-    };
+    let draw_corner_bracket =
+        |painter: &egui::Painter, corner: Pos2, dir_x: f32, dir_y: f32, active: bool| {
+            let color = if active {
+                PC98_BRACKET_ACTIVE
+            } else {
+                PC98_BRACKET_COLOR
+            };
+            let stroke = Stroke::new(bracket_thick, color);
+            let h_end = Pos2::new(corner.x + dir_x * bracket_len, corner.y);
+            let v_end = Pos2::new(corner.x, corner.y + dir_y * bracket_len);
+            painter.line_segment([corner, h_end], stroke);
+            painter.line_segment([corner, v_end], stroke);
+        };
 
     let b_offset = 2.0;
     draw_corner_bracket(
@@ -378,36 +436,55 @@ pub fn draw_webcam_overlay(
         Pos2::new(outer_rect.left() + b_offset, outer_rect.top() + b_offset),
         1.0,
         1.0,
-        hovered_corner == Some(WebcamResizeCorner::TopLeft) || state.webcam.resizing_corner == Some(WebcamResizeCorner::TopLeft),
+        hovered_corner == Some(WebcamResizeCorner::TopLeft)
+            || state.webcam.resizing_corner == Some(WebcamResizeCorner::TopLeft),
     );
     draw_corner_bracket(
         painter,
         Pos2::new(outer_rect.right() - b_offset, outer_rect.top() + b_offset),
         -1.0,
         1.0,
-        hovered_corner == Some(WebcamResizeCorner::TopRight) || state.webcam.resizing_corner == Some(WebcamResizeCorner::TopRight),
+        hovered_corner == Some(WebcamResizeCorner::TopRight)
+            || state.webcam.resizing_corner == Some(WebcamResizeCorner::TopRight),
     );
     draw_corner_bracket(
         painter,
         Pos2::new(outer_rect.left() + b_offset, outer_rect.bottom() - b_offset),
         1.0,
         -1.0,
-        hovered_corner == Some(WebcamResizeCorner::BottomLeft) || state.webcam.resizing_corner == Some(WebcamResizeCorner::BottomLeft),
+        hovered_corner == Some(WebcamResizeCorner::BottomLeft)
+            || state.webcam.resizing_corner == Some(WebcamResizeCorner::BottomLeft),
     );
     draw_corner_bracket(
         painter,
-        Pos2::new(outer_rect.right() - b_offset, outer_rect.bottom() - b_offset),
+        Pos2::new(
+            outer_rect.right() - b_offset,
+            outer_rect.bottom() - b_offset,
+        ),
         -1.0,
         -1.0,
-        hovered_corner == Some(WebcamResizeCorner::BottomRight) || state.webcam.resizing_corner == Some(WebcamResizeCorner::BottomRight),
+        hovered_corner == Some(WebcamResizeCorner::BottomRight)
+            || state.webcam.resizing_corner == Some(WebcamResizeCorner::BottomRight),
     );
 
     // Inner recessed bezel groove framing the video viewport
     let inner_recess = inner_rect.expand(1.0);
-    painter.line_segment([inner_recess.left_top(), inner_recess.right_top()], Stroke::new(1.0, PC98_INNER_SHADOW));
-    painter.line_segment([inner_recess.left_top(), inner_recess.left_bottom()], Stroke::new(1.0, PC98_INNER_SHADOW));
-    painter.line_segment([inner_recess.left_bottom(), inner_recess.right_bottom()], Stroke::new(1.0, PC98_INNER_HIGHLIGHT));
-    painter.line_segment([inner_recess.right_top(), inner_recess.right_bottom()], Stroke::new(1.0, PC98_INNER_HIGHLIGHT));
+    painter.line_segment(
+        [inner_recess.left_top(), inner_recess.right_top()],
+        Stroke::new(1.0, PC98_INNER_SHADOW),
+    );
+    painter.line_segment(
+        [inner_recess.left_top(), inner_recess.left_bottom()],
+        Stroke::new(1.0, PC98_INNER_SHADOW),
+    );
+    painter.line_segment(
+        [inner_recess.left_bottom(), inner_recess.right_bottom()],
+        Stroke::new(1.0, PC98_INNER_HIGHLIGHT),
+    );
+    painter.line_segment(
+        [inner_recess.right_top(), inner_recess.right_bottom()],
+        Stroke::new(1.0, PC98_INNER_HIGHLIGHT),
+    );
 
     // 7. Video image / Standby screen
     if let Some(texture) = &state.webcam.texture {
@@ -421,7 +498,10 @@ pub fn draw_webcam_overlay(
         let mut y = inner_rect.top() + step;
         while y < inner_rect.bottom() {
             painter.line_segment(
-                [Pos2::new(inner_rect.left(), y), Pos2::new(inner_rect.right(), y)],
+                [
+                    Pos2::new(inner_rect.left(), y),
+                    Pos2::new(inner_rect.right(), y),
+                ],
                 Stroke::new(1.0, Color32::from_rgb(26, 24, 22)),
             );
             y += step;

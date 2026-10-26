@@ -182,7 +182,8 @@ impl Readback {
         // Missing/stale capture timestamps cannot establish a new recording
         // epoch. Real stream restarts already disable replay. In particular,
         // never confuse an out-of-order frame with a backwards system clock.
-        let Some(resized) = self.observe_surface((capture_w, capture_h), at, super::now_us()) else {
+        let Some(resized) = self.observe_surface((capture_w, capture_h), at, super::now_us())
+        else {
             return;
         };
         if resized {
@@ -225,9 +226,10 @@ impl Readback {
                 .queue_bytes
                 .store(plan.queue_bytes, Ordering::Relaxed);
             if self.requested != Some(gen)
-                && runtime
-                    .queue
-                    .request(super::queue::PoolRequest { generation: gen, plan })
+                && runtime.queue.request(super::queue::PoolRequest {
+                    generation: gen,
+                    plan,
+                })
             {
                 self.requested = Some(gen);
             }
@@ -281,13 +283,17 @@ impl Readback {
                                     b_buf.resize(bytes, 0);
                                 }
                                 b_buf.copy_from_slice(&rgba);
-                                if bc.tx.try_send(VideoFrame {
-                                    rgba: b_buf,
-                                    width: capture_w,
-                                    height: capture_h,
-                                    at: slot.at,
-                                    generation: 0,
-                                }).is_err() {
+                                if bc
+                                    .tx
+                                    .try_send(VideoFrame {
+                                        rgba: b_buf,
+                                        width: capture_w,
+                                        height: capture_h,
+                                        at: slot.at,
+                                        generation: 0,
+                                    })
+                                    .is_err()
+                                {
                                     bc.dropped.fetch_add(1, Ordering::Relaxed);
                                 }
                             } else {
@@ -313,13 +319,17 @@ impl Readback {
                                 }
                                 gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(slot.buffer));
                                 gl.get_buffer_sub_data(glow::PIXEL_PACK_BUFFER, 0, &mut b_buf);
-                                if bc.tx.try_send(VideoFrame {
-                                    rgba: b_buf,
-                                    width: capture_w,
-                                    height: capture_h,
-                                    at: slot.at,
-                                    generation: 0,
-                                }).is_err() {
+                                if bc
+                                    .tx
+                                    .try_send(VideoFrame {
+                                        rgba: b_buf,
+                                        width: capture_w,
+                                        height: capture_h,
+                                        at: slot.at,
+                                        generation: 0,
+                                    })
+                                    .is_err()
+                                {
                                     bc.dropped.fetch_add(1, Ordering::Relaxed);
                                 }
                             } else {
@@ -335,13 +345,17 @@ impl Readback {
                         }
                         gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(slot.buffer));
                         gl.get_buffer_sub_data(glow::PIXEL_PACK_BUFFER, 0, &mut b_buf);
-                        if bc.tx.try_send(VideoFrame {
-                            rgba: b_buf,
-                            width: capture_w,
-                            height: capture_h,
-                            at: slot.at,
-                            generation: 0,
-                        }).is_err() {
+                        if bc
+                            .tx
+                            .try_send(VideoFrame {
+                                rgba: b_buf,
+                                width: capture_w,
+                                height: capture_h,
+                                at: slot.at,
+                                generation: 0,
+                            })
+                            .is_err()
+                        {
                             bc.dropped.fetch_add(1, Ordering::Relaxed);
                         }
                     } else {
@@ -395,7 +409,9 @@ impl Readback {
                     let mut read_issued = true;
                     let is_downscaling = capture_w != width || capture_h != height;
                     if is_downscaling {
-                        if self.downscale_size != (capture_w, capture_h) || self.downscale_fbo.is_none() {
+                        if self.downscale_size != (capture_w, capture_h)
+                            || self.downscale_fbo.is_none()
+                        {
                             if let Some(fbo) = self.downscale_fbo.take() {
                                 gl.delete_framebuffer(fbo);
                             }
@@ -404,7 +420,8 @@ impl Readback {
                             }
                             self.downscale_size = (0, 0);
 
-                            let old_tex = tex_from_param(gl.get_parameter_i32(glow::TEXTURE_BINDING_2D));
+                            let old_tex =
+                                tex_from_param(gl.get_parameter_i32(glow::TEXTURE_BINDING_2D));
                             if let Ok(tex) = gl.create_texture() {
                                 gl.bind_texture(glow::TEXTURE_2D, Some(tex));
                                 gl.tex_image_2d(
@@ -418,13 +435,31 @@ impl Readback {
                                     glow::UNSIGNED_BYTE,
                                     None,
                                 );
-                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
-                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-                                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+                                gl.tex_parameter_i32(
+                                    glow::TEXTURE_2D,
+                                    glow::TEXTURE_MIN_FILTER,
+                                    glow::LINEAR as i32,
+                                );
+                                gl.tex_parameter_i32(
+                                    glow::TEXTURE_2D,
+                                    glow::TEXTURE_MAG_FILTER,
+                                    glow::LINEAR as i32,
+                                );
+                                gl.tex_parameter_i32(
+                                    glow::TEXTURE_2D,
+                                    glow::TEXTURE_WRAP_S,
+                                    glow::CLAMP_TO_EDGE as i32,
+                                );
+                                gl.tex_parameter_i32(
+                                    glow::TEXTURE_2D,
+                                    glow::TEXTURE_WRAP_T,
+                                    glow::CLAMP_TO_EDGE as i32,
+                                );
 
                                 if let Ok(fbo) = gl.create_framebuffer() {
-                                    let old_draw = fbo_from_param(gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING));
+                                    let old_draw = fbo_from_param(
+                                        gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING),
+                                    );
                                     gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
                                     gl.framebuffer_texture_2d(
                                         glow::FRAMEBUFFER,
@@ -452,8 +487,12 @@ impl Readback {
                         }
 
                         if let Some(target_fbo) = self.downscale_fbo {
-                            let old_read_fbo = fbo_from_param(gl.get_parameter_i32(glow::READ_FRAMEBUFFER_BINDING));
-                            let old_draw_fbo = fbo_from_param(gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING));
+                            let old_read_fbo = fbo_from_param(
+                                gl.get_parameter_i32(glow::READ_FRAMEBUFFER_BINDING),
+                            );
+                            let old_draw_fbo = fbo_from_param(
+                                gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING),
+                            );
                             let scissor_enabled = gl.is_enabled(glow::SCISSOR_TEST);
                             if scissor_enabled {
                                 gl.disable(glow::SCISSOR_TEST);
@@ -515,11 +554,7 @@ impl Readback {
                     if read_issued {
                         match gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
                             Ok(fence) => {
-                                self.pending.push_back(Slot {
-                                    buffer,
-                                    fence,
-                                    at,
-                                });
+                                self.pending.push_back(Slot { buffer, fence, at });
                                 self.last_at = at;
                             }
                             Err(e) => {
@@ -541,7 +576,9 @@ impl Readback {
                 }
             }
             if let Some(r) = running_replay {
-                r.shared.gpu_pending.store(self.pending.len(), Ordering::Relaxed);
+                r.shared
+                    .gpu_pending
+                    .store(self.pending.len(), Ordering::Relaxed);
             }
             gl.bind_buffer(
                 glow::PIXEL_PACK_BUFFER,

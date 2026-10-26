@@ -35,8 +35,9 @@ pub fn draw_capture_and_webcam_selectors(ui: &mut egui::Ui, state: &mut AppState
                         state.hardware.selected_format_index = 0;
                         state.hardware.selected_resolution = (0, 0);
 
-                        match devices::video::find_video_formats(&state.hardware.selected_video_device)
-                        {
+                        match devices::video::find_video_formats(
+                            &state.hardware.selected_video_device,
+                        ) {
                             Ok(formats) => {
                                 state.info(format!(
                                     "Found {} formats for {}.",
@@ -317,8 +318,10 @@ pub fn draw_capture_and_webcam_selectors(ui: &mut egui::Ui, state: &mut AppState
                             if let Some(first_fmt) = state.webcam.supported_formats.first() {
                                 state.webcam.config.format_fourcc = Some(first_fmt.fourcc.clone());
                                 if let Some(first_res) = first_fmt.resolutions.first() {
-                                    state.webcam.config.resolution = Some((first_res.width, first_res.height));
-                                    state.webcam.config.framerate = first_res.framerates.first().cloned();
+                                    state.webcam.config.resolution =
+                                        Some((first_res.width, first_res.height));
+                                    state.webcam.config.framerate =
+                                        first_res.framerates.first().cloned();
                                 }
                             }
                         }
@@ -339,12 +342,7 @@ pub fn draw_capture_and_webcam_selectors(ui: &mut egui::Ui, state: &mut AppState
                     .color(egui::Color32::from_rgb(170, 170, 170)),
             );
 
-            let selected_dev_text = state
-                .webcam
-                .config
-                .device
-                .as_deref()
-                .unwrap_or("None");
+            let selected_dev_text = state.webcam.config.device.as_deref().unwrap_or("None");
 
             egui::ComboBox::from_id_source("webcam_device_selector")
                 .selected_text(selected_dev_text)
@@ -369,11 +367,15 @@ pub fn draw_capture_and_webcam_selectors(ui: &mut egui::Ui, state: &mut AppState
                             match crate::devices::video::find_video_formats(dev) {
                                 Ok(formats) => {
                                     state.webcam.supported_formats = formats;
-                                    if let Some(first_fmt) = state.webcam.supported_formats.first() {
-                                        state.webcam.config.format_fourcc = Some(first_fmt.fourcc.clone());
+                                    if let Some(first_fmt) = state.webcam.supported_formats.first()
+                                    {
+                                        state.webcam.config.format_fourcc =
+                                            Some(first_fmt.fourcc.clone());
                                         if let Some(first_res) = first_fmt.resolutions.first() {
-                                            state.webcam.config.resolution = Some((first_res.width, first_res.height));
-                                            state.webcam.config.framerate = first_res.framerates.first().cloned();
+                                            state.webcam.config.resolution =
+                                                Some((first_res.width, first_res.height));
+                                            state.webcam.config.framerate =
+                                                first_res.framerates.first().cloned();
                                         }
                                     }
                                 }
@@ -422,12 +424,8 @@ pub fn draw_capture_and_webcam_selectors(ui: &mut egui::Ui, state: &mut AppState
                     .webcam
                     .selected_format_index
                     .min(formats.len().saturating_sub(1));
-                let selected_format_desc = formats[fmt_idx]
-                    .description
-                    .clone();
-                let resolutions = formats[fmt_idx]
-                    .resolutions
-                    .clone();
+                let selected_format_desc = formats[fmt_idx].description.clone();
+                let resolutions = formats[fmt_idx].resolutions.clone();
 
                 ui.label(
                     egui::RichText::new("Format:")
@@ -441,10 +439,7 @@ pub fn draw_capture_and_webcam_selectors(ui: &mut egui::Ui, state: &mut AppState
                     .show_ui(ui, |ui| {
                         for (i, f) in formats.iter().enumerate() {
                             let is_selected = state.webcam.selected_format_index == i;
-                            if ui
-                                .selectable_label(is_selected, &f.description)
-                                .clicked()
-                            {
+                            if ui.selectable_label(is_selected, &f.description).clicked() {
                                 state.webcam.selected_format_index = i;
                                 state.webcam.config.format_fourcc = Some(f.fourcc.clone());
                                 if let Some(res) = f.resolutions.first() {
@@ -481,7 +476,10 @@ pub fn draw_capture_and_webcam_selectors(ui: &mut egui::Ui, state: &mut AppState
                         for res in &resolutions {
                             let is_selected = current_res == (res.width, res.height);
                             if ui
-                                .selectable_label(is_selected, format!("{}x{}", res.width, res.height))
+                                .selectable_label(
+                                    is_selected,
+                                    format!("{}x{}", res.width, res.height),
+                                )
                                 .clicked()
                             {
                                 state.webcam.config.resolution = Some((res.width, res.height));
@@ -562,7 +560,11 @@ pub fn draw_capture_and_webcam_selectors(ui: &mut egui::Ui, state: &mut AppState
                 let max_l = max_x.saturating_sub(state.webcam.config.cutout.right);
                 let mut cut_l = state.webcam.config.cutout.left;
                 if ui
-                    .add(egui::DragValue::new(&mut cut_l).clamp_range(0..=max_l).speed(1.0))
+                    .add(
+                        egui::DragValue::new(&mut cut_l)
+                            .clamp_range(0..=max_l)
+                            .speed(1.0),
+                    )
                     .changed()
                 {
                     state.webcam.config.cutout.left = cut_l;
@@ -581,7 +583,11 @@ pub fn draw_capture_and_webcam_selectors(ui: &mut egui::Ui, state: &mut AppState
                 let max_r = max_x.saturating_sub(state.webcam.config.cutout.left);
                 let mut cut_r = state.webcam.config.cutout.right;
                 if ui
-                    .add(egui::DragValue::new(&mut cut_r).clamp_range(0..=max_r).speed(1.0))
+                    .add(
+                        egui::DragValue::new(&mut cut_r)
+                            .clamp_range(0..=max_r)
+                            .speed(1.0),
+                    )
                     .changed()
                 {
                     state.webcam.config.cutout.right = cut_r;
@@ -600,7 +606,11 @@ pub fn draw_capture_and_webcam_selectors(ui: &mut egui::Ui, state: &mut AppState
                 let max_t = max_y.saturating_sub(state.webcam.config.cutout.bottom);
                 let mut cut_t = state.webcam.config.cutout.top;
                 if ui
-                    .add(egui::DragValue::new(&mut cut_t).clamp_range(0..=max_t).speed(1.0))
+                    .add(
+                        egui::DragValue::new(&mut cut_t)
+                            .clamp_range(0..=max_t)
+                            .speed(1.0),
+                    )
                     .changed()
                 {
                     state.webcam.config.cutout.top = cut_t;
@@ -619,7 +629,11 @@ pub fn draw_capture_and_webcam_selectors(ui: &mut egui::Ui, state: &mut AppState
                 let max_b = max_y.saturating_sub(state.webcam.config.cutout.top);
                 let mut cut_b = state.webcam.config.cutout.bottom;
                 if ui
-                    .add(egui::DragValue::new(&mut cut_b).clamp_range(0..=max_b).speed(1.0))
+                    .add(
+                        egui::DragValue::new(&mut cut_b)
+                            .clamp_range(0..=max_b)
+                            .speed(1.0),
+                    )
                     .changed()
                 {
                     state.webcam.config.cutout.bottom = cut_b;

@@ -159,7 +159,9 @@ impl DictDatabase {
             .unwrap_or(0);
 
         Ok(DictMetadata {
-            title: map.remove("title").unwrap_or_else(|| "Unknown Dictionary".to_string()),
+            title: map
+                .remove("title")
+                .unwrap_or_else(|| "Unknown Dictionary".to_string()),
             revision: map.remove("revision").unwrap_or_default(),
             author: map.remove("author"),
             description: map.remove("description"),
@@ -247,7 +249,10 @@ impl DictDatabase {
             match (a_verbatim, b_verbatim) {
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
-                _ => b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal),
+                _ => b
+                    .score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal),
             }
         });
 
@@ -269,8 +274,8 @@ impl DictDatabase {
         let tmp_db_path = format!("{}.tmp", db_path.as_ref().display());
         let _ = std::fs::remove_file(&tmp_db_path);
 
-        let mut conn = Connection::open(&tmp_db_path)
-            .context("Failed to create temporary SQLite database")?;
+        let mut conn =
+            Connection::open(&tmp_db_path).context("Failed to create temporary SQLite database")?;
 
         // Optimization pragmas during bulk import
         conn.execute_batch(
@@ -291,9 +296,8 @@ impl DictDatabase {
             if let Ok(val) = serde_json::from_reader::<_, serde_json::Value>(&mut index_file) {
                 let tx = conn.transaction()?;
                 {
-                    let mut stmt = tx.prepare(
-                        "INSERT OR REPLACE INTO metadata (key, value) VALUES (?1, ?2)",
-                    )?;
+                    let mut stmt =
+                        tx.prepare("INSERT OR REPLACE INTO metadata (key, value) VALUES (?1, ?2)")?;
                     if let Some(obj) = val.as_object() {
                         for (k, v) in obj {
                             let val_str = if let Some(s) = v.as_str() {
@@ -355,7 +359,11 @@ impl DictDatabase {
                             let score = fields[4].as_f64().unwrap_or(0.0);
                             let glossary = serde_json::to_string(&fields[5]).unwrap_or_default();
                             let seq = fields.get(6).and_then(|v| v.as_i64()).unwrap_or(0);
-                            let term_tags = fields.get(7).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let term_tags = fields
+                                .get(7)
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
 
                             insert_batch.push((
                                 term, reading, def_tags, rules, score, glossary, seq, term_tags,

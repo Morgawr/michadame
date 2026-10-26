@@ -78,19 +78,18 @@ fn build_alert_shapes(
 
     // Unified PC-98 system / office palette: mellowed brown, warm gray, beige, and dark CRT slate
     let frame_color = Color32::from_rgb(186, 174, 158).linear_multiply(alpha); // PC-98 computer beige / warm gray
-    let hairline_color = Color32::from_rgb(76, 70, 64).linear_multiply(alpha);  // Muted dark stone
+    let hairline_color = Color32::from_rgb(76, 70, 64).linear_multiply(alpha); // Muted dark stone
     let bg_color = Color32::from_rgba_premultiplied(22, 20, 18, (alpha * 242.0) as u8); // Deep charcoal-brown CRT slate
     let header_bg = Color32::from_rgba_premultiplied(36, 32, 28, (alpha * 220.0) as u8); // Muted dark sepia-charcoal banner
-    let rule_color = Color32::from_rgb(126, 116, 104).linear_multiply(alpha);  // Muted beige divider rule
+    let rule_color = Color32::from_rgb(126, 116, 104).linear_multiply(alpha); // Muted beige divider rule
     let header_text_color = Color32::from_rgb(216, 206, 192).linear_multiply(alpha); // Mellow warm ivory
     let primary_text_color = Color32::from_rgb(246, 242, 236).linear_multiply(alpha); // Crisp warm cream
     let detail_text_color = Color32::from_rgb(164, 154, 142).linear_multiply(alpha); // Muted stone gray
-    let msg_text_color = Color32::from_rgb(136, 126, 114).linear_multiply(alpha);    // Soft warm taupe
+    let msg_text_color = Color32::from_rgb(136, 126, 114).linear_multiply(alpha); // Soft warm taupe
     let gauge_bg = Color32::from_rgba_premultiplied(30, 27, 24, (alpha * 180.0) as u8);
-    let gauge_fill = Color32::from_rgb(168, 156, 140).linear_multiply(alpha);  // Muted parchment fill
+    let gauge_fill = Color32::from_rgb(168, 156, 140).linear_multiply(alpha); // Muted parchment fill
 
-    let (header_text, primary_text, detail_text, user_msg) =
-        format_alert_text(&active.event.kind);
+    let (header_text, primary_text, detail_text, user_msg) = format_alert_text(&active.event.kind);
 
     let has_detail = detail_text.is_some();
     let has_msg = user_msg.is_some();
@@ -271,25 +270,15 @@ fn build_alert_shapes(
     let gauge_h = 4.0;
     let gauge_pad = 8.0;
     let gauge_bg_rect = Rect::from_min_max(
-        Pos2::new(
-            card_rect.min.x + gauge_pad,
-            card_rect.max.y - gauge_h - 4.0,
-        ),
+        Pos2::new(card_rect.min.x + gauge_pad, card_rect.max.y - gauge_h - 4.0),
         Pos2::new(card_rect.max.x - gauge_pad, card_rect.max.y - 4.0),
     );
-    shapes.push(Shape::rect_filled(
-        gauge_bg_rect,
-        Rounding::ZERO,
-        gauge_bg,
-    ));
+    shapes.push(Shape::rect_filled(gauge_bg_rect, Rounding::ZERO, gauge_bg));
 
     let remaining_frac = 1.0 - (elapsed / total).clamp(0.0, 1.0);
     let fill_w = gauge_bg_rect.width() * remaining_frac;
     if fill_w > 0.0 {
-        let gauge_fill_rect = Rect::from_min_size(
-            gauge_bg_rect.min,
-            Vec2::new(fill_w, gauge_h),
-        );
+        let gauge_fill_rect = Rect::from_min_size(gauge_bg_rect.min, Vec2::new(fill_w, gauge_h));
         shapes.push(Shape::rect_filled(
             gauge_fill_rect,
             Rounding::ZERO,
@@ -303,9 +292,7 @@ fn build_alert_shapes(
     }]
 }
 
-fn format_alert_text(
-    kind: &AlertKind,
-) -> (String, String, Option<String>, Option<String>) {
+fn format_alert_text(kind: &AlertKind) -> (String, String, Option<String>, Option<String>) {
     match kind {
         AlertKind::Follow { user } => (
             "[ SYSTEM NOTICE // NEW FOLLOWER ]".to_string(),

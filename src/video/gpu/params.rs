@@ -308,8 +308,12 @@ impl GlassShaderParams {
             enabled: crt_active && state.video.crt_glass_enabled,
             intensity: state.video.crt_glass_intensity,
             glossiness: state.video.crt_glass_glossiness,
-            ceiling_light_enabled: crt_active && !night_mode && state.video.crt_glass_ceiling_light_enabled,
-            photographer_enabled: crt_active && !night_mode && state.video.crt_glass_photographer_enabled,
+            ceiling_light_enabled: crt_active
+                && !night_mode
+                && state.video.crt_glass_ceiling_light_enabled,
+            photographer_enabled: crt_active
+                && !night_mode
+                && state.video.crt_glass_photographer_enabled,
             photographer_intensity: state.video.crt_glass_photographer_intensity,
             flash_enabled: crt_active && !night_mode && state.video.crt_glass_flash_enabled,
             flash_intensity: state.video.crt_glass_flash_intensity,
@@ -699,21 +703,18 @@ mod tests {
         assert!(!params_start.ceiling_light_enabled);
 
         // During Strike 1 (t = 0.10s), ceiling light flashes ON
-        state.video.light_switch_flicker_start =
-            Some(Instant::now() - Duration::from_millis(100));
+        state.video.light_switch_flicker_start = Some(Instant::now() - Duration::from_millis(100));
         let params_strike1 = GlassShaderParams::from_state(&state, [0.031, 0.041], 0.05, 1);
         assert!(params_strike1.ceiling_light_enabled);
 
         // During Dropout 1 (t = 0.20s), ceiling light drops back OFF
-        state.video.light_switch_flicker_start =
-            Some(Instant::now() - Duration::from_millis(200));
+        state.video.light_switch_flicker_start = Some(Instant::now() - Duration::from_millis(200));
         let params_dropout1 = GlassShaderParams::from_state(&state, [0.031, 0.041], 0.05, 1);
         assert!(!params_dropout1.ceiling_light_enabled);
 
         // Once duration has elapsed, ceiling light stabilizes ON and clears flicker_start
         state.video.light_switch_flicker_start = Some(
-            Instant::now()
-                - Duration::from_secs_f32(LIGHT_SWITCH_FLICKER_DURATION_SECS + 0.10),
+            Instant::now() - Duration::from_secs_f32(LIGHT_SWITCH_FLICKER_DURATION_SECS + 0.10),
         );
         let params_stable = GlassShaderParams::from_state(&state, [0.031, 0.041], 0.05, 1);
         assert!(params_stable.ceiling_light_enabled);
@@ -731,7 +732,10 @@ mod tests {
     #[test]
     fn test_night_mode_preserves_brightboost() {
         let mut state = AppState::default();
-        state.crt_filter.store(crate::devices::filter_type::CrtFilter::Lottes as u8, Ordering::Relaxed);
+        state.crt_filter.store(
+            crate::devices::filter_type::CrtFilter::Lottes as u8,
+            Ordering::Relaxed,
+        );
         state.crt.brightboost = 1.0;
         state.halo.brightboost = 1.30;
         state.halo.brightboost1 = 1.65;
@@ -752,7 +756,10 @@ mod tests {
         assert_eq!(hp_night.brightboost1, 1.65);
 
         // If CRT filter is turned off, values remain clean
-        state.crt_filter.store(crate::devices::filter_type::CrtFilter::Off as u8, Ordering::Relaxed);
+        state.crt_filter.store(
+            crate::devices::filter_type::CrtFilter::Off as u8,
+            Ordering::Relaxed,
+        );
         let p_off = ShaderParams::from_state(&state);
         let hp_off = HaloShaderParams::from_state(&state);
         assert_eq!(p_off.brightboost, 1.0);

@@ -406,11 +406,7 @@ static mut NP2_PCM_CHANNELS: [Np2PcmChannel; 3] = [
     },
 ];
 
-unsafe extern "C" fn np2_snddrv_pcmplay(
-    _cookie: *mut c_void,
-    num: c_uint,
-    loop_flag: c_int,
-) {
+unsafe extern "C" fn np2_snddrv_pcmplay(_cookie: *mut c_void, num: c_uint, loop_flag: c_int) {
     if let Ok(mut guard) = ACTIVE_BRIDGE.lock() {
         if let Some(ctx) = guard.as_mut() {
             ctx.seek_mixer.play(num as usize, loop_flag != 0);
@@ -426,11 +422,7 @@ unsafe extern "C" fn np2_snddrv_pcmstop(_cookie: *mut c_void, num: c_uint) {
     }
 }
 
-unsafe extern "C" fn np2_snddrv_pcmvolume(
-    _cookie: *mut c_void,
-    num: c_uint,
-    volume: c_int,
-) {
+unsafe extern "C" fn np2_snddrv_pcmvolume(_cookie: *mut c_void, num: c_uint, volume: c_int) {
     if let Ok(mut guard) = ACTIVE_BRIDGE.lock() {
         if let Some(ctx) = guard.as_mut() {
             ctx.seek_mixer.set_channel_volume(num as usize, volume);
@@ -520,10 +512,7 @@ pub fn build_core_variables(cfg: &Pc98Config) -> BTreeMap<String, CString> {
         "np2kai_Seek_Vol",
         &cfg.floppy_seek_volume.clamp(0, 100).to_string(),
     );
-    insert(
-        "np2kai_BEEP_vol",
-        &cfg.beep_volume.clamp(0, 3).to_string(),
-    );
+    insert("np2kai_BEEP_vol", &cfg.beep_volume.clamp(0, 3).to_string());
     insert("np2kai_PEGC", "ON");
     insert("np2kai_inputmouse", "ON");
     insert("np2kai_joymode", "OFF");
@@ -532,12 +521,7 @@ pub fn build_core_variables(cfg: &Pc98Config) -> BTreeMap<String, CString> {
     vars
 }
 
-pub fn convert_rgb565_to_rgba(
-    src_bytes: &[u8],
-    width: u32,
-    height: u32,
-    pitch: usize,
-) -> Vec<u8> {
+pub fn convert_rgb565_to_rgba(src_bytes: &[u8], width: u32, height: u32, pitch: usize) -> Vec<u8> {
     let w = width as usize;
     let h = height as usize;
     let mut out = vec![0u8; w * h * 4];
@@ -591,12 +575,7 @@ pub fn convert_xrgb8888_to_rgba(
     out
 }
 
-pub fn convert_rgb1555_to_rgba(
-    src_bytes: &[u8],
-    width: u32,
-    height: u32,
-    pitch: usize,
-) -> Vec<u8> {
+pub fn convert_rgb1555_to_rgba(src_bytes: &[u8], width: u32, height: u32, pitch: usize) -> Vec<u8> {
     let w = width as usize;
     let h = height as usize;
     let mut out = vec![0u8; w * h * 4];
@@ -761,7 +740,10 @@ unsafe extern "C" fn retro_video_refresh_cb(
         format: ffmpeg_next::format::Pixel::RGBA,
         color_range: ColorRange::Full,
         captured_at: crate::replay::now_us(),
-        rate: crate::replay::config::Rate { num: 5642, den: 100 },
+        rate: crate::replay::config::Rate {
+            num: 5642,
+            den: 100,
+        },
     });
 
     if let Ok(mut guard) = ACTIVE_BRIDGE.lock() {
@@ -989,10 +971,10 @@ pub fn run_pc98_worker(params: Pc98WorkerParams) -> Result<()> {
         }
     };
 
-    let sys_dir_cstr = CString::new(sys_dir.to_string_lossy().as_bytes())
-        .context("Invalid system dir path")?;
-    let save_dir_cstr = CString::new(save_dir.to_string_lossy().as_bytes())
-        .context("Invalid save dir path")?;
+    let sys_dir_cstr =
+        CString::new(sys_dir.to_string_lossy().as_bytes()).context("Invalid system dir path")?;
+    let save_dir_cstr =
+        CString::new(save_dir.to_string_lossy().as_bytes()).context("Invalid save dir path")?;
 
     {
         let mut guard = ACTIVE_BRIDGE.lock().unwrap();
@@ -1143,19 +1125,16 @@ unsafe fn run_loaded_core(
         lib.get(b"retro_load_game\0")?;
     let retro_unload_game: libloading::Symbol<unsafe extern "C" fn()> =
         lib.get(b"retro_unload_game\0")?;
-    let retro_get_system_av_info: libloading::Symbol<
-        unsafe extern "C" fn(*mut RetroSystemAvInfo),
-    > = lib.get(b"retro_get_system_av_info\0")?;
+    let retro_get_system_av_info: libloading::Symbol<unsafe extern "C" fn(*mut RetroSystemAvInfo)> =
+        lib.get(b"retro_get_system_av_info\0")?;
     let retro_run: libloading::Symbol<unsafe extern "C" fn()> = lib.get(b"retro_run\0")?;
     let retro_reset: libloading::Symbol<unsafe extern "C" fn()> = lib.get(b"retro_reset\0")?;
     let retro_serialize_size: libloading::Symbol<unsafe extern "C" fn() -> usize> =
         lib.get(b"retro_serialize_size\0")?;
-    let retro_serialize: libloading::Symbol<
-        unsafe extern "C" fn(*mut c_void, usize) -> bool,
-    > = lib.get(b"retro_serialize\0")?;
-    let retro_unserialize: libloading::Symbol<
-        unsafe extern "C" fn(*const c_void, usize) -> bool,
-    > = lib.get(b"retro_unserialize\0")?;
+    let retro_serialize: libloading::Symbol<unsafe extern "C" fn(*mut c_void, usize) -> bool> =
+        lib.get(b"retro_serialize\0")?;
+    let retro_unserialize: libloading::Symbol<unsafe extern "C" fn(*const c_void, usize) -> bool> =
+        lib.get(b"retro_unserialize\0")?;
     let retro_get_memory_data: Option<
         libloading::Symbol<unsafe extern "C" fn(c_uint) -> *mut c_void>,
     > = lib.get(b"retro_get_memory_data\0").ok();
@@ -1259,8 +1238,7 @@ unsafe fn run_loaded_core(
     // When HDD1 is the boot drive, wait until the PC-98 BIOS finishes its RAM check and selects
     // SASI HDD #0 (`mem[0x00584] == 0x80` + 20 frames, or 520 frames fallback) before inserting
     // FDD1/FDD2 so a non-system floppy never hijacks the boot order.
-    let mut deferred_fdd_pending =
-        defer_fdd && (current_fdd1.is_some() || current_fdd2.is_some());
+    let mut deferred_fdd_pending = defer_fdd && (current_fdd1.is_some() || current_fdd2.is_some());
     let mut hdd_boot_detected_frames: u32 = 0;
     let mut frames_since_boot: u32 = 0;
 
@@ -1305,9 +1283,7 @@ unsafe fn run_loaded_core(
         } else if !startup_cmd_sent {
             if let (Some(ref cmd_str), Some(base)) = (&startup_cmd, pc98_mem_base) {
                 let tvram = std::slice::from_raw_parts(base.add(0xA0000), 0x1E00);
-                let has_idle_prompt = tvram
-                    .windows(14)
-                    .any(|w| w == b"A\0:\0\\\0>\0 \0 \0 \0")
+                let has_idle_prompt = tvram.windows(14).any(|w| w == b"A\0:\0\\\0>\0 \0 \0 \0")
                     || tvram.windows(10).any(|w| w == b"A\0>\0 \0 \0 \0");
                 if has_idle_prompt {
                     dos_prompt_frames += 1;
@@ -1380,8 +1356,7 @@ unsafe fn run_loaded_core(
                             )));
                         }
                     } else if mount_fdd_via_disk_control(drive, None) {
-                        let _ =
-                            event_tx.send(Pc98Event::Info(format!("Ejected FDD{}", drive + 1)));
+                        let _ = event_tx.send(Pc98Event::Info(format!("Ejected FDD{}", drive + 1)));
                     }
                 }
                 Pc98Command::TriggerMenu => {
@@ -1398,10 +1373,8 @@ unsafe fn run_loaded_core(
                                 ctx.variables.insert("np2kai_drive".to_string(), drv);
                             }
                             ctx.variables_dirty = true;
-                            ctx.seek_mixer.set_config(
-                                new_cfg.floppy_seek_sound,
-                                new_cfg.floppy_seek_volume,
-                            );
+                            ctx.seek_mixer
+                                .set_config(new_cfg.floppy_seek_sound, new_cfg.floppy_seek_volume);
                         }
                     }
                     active_config = new_cfg;
@@ -1420,9 +1393,8 @@ unsafe fn run_loaded_core(
                                 .lock()
                                 .ok()
                                 .and_then(|g| {
-                                    g.as_ref().map(|ctx| {
-                                        (ctx.last_frame.clone(), ctx.last_resolution)
-                                    })
+                                    g.as_ref()
+                                        .map(|ctx| (ctx.last_frame.clone(), ctx.last_resolution))
                                 })
                                 .unwrap_or((None, (width, height)));
                             let (game_key, game_title) =

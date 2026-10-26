@@ -99,10 +99,18 @@ impl ClipManager {
                 let result = create_and_poll_clip(&broadcaster_id, &title, &token);
                 match result {
                     Ok(clip_url) => {
-                        let _ = tx.send(ClipEvent::Ready { title: clip_title, clip_url, mined_created_at });
+                        let _ = tx.send(ClipEvent::Ready {
+                            title: clip_title,
+                            clip_url,
+                            mined_created_at,
+                        });
                     }
                     Err(error) => {
-                        let _ = tx.send(ClipEvent::Failed { title: clip_title, error, mined_created_at });
+                        let _ = tx.send(ClipEvent::Failed {
+                            title: clip_title,
+                            error,
+                            mined_created_at,
+                        });
                     }
                 }
                 ctx.request_repaint();
@@ -132,7 +140,9 @@ fn post_create_clip(
     title: &str,
     token: &mut StoredToken,
 ) -> Result<String, String> {
-    tracing::info!("Requesting Twitch clip for broadcaster '{broadcaster_id}' with title: '{title}'");
+    tracing::info!(
+        "Requesting Twitch clip for broadcaster '{broadcaster_id}' with title: '{title}'"
+    );
     let resp = match call_post_clip(agent, broadcaster_id, title, token) {
         Err(ureq::Error::Status(401, resp)) => {
             let msg = resp.into_string().unwrap_or_default();
@@ -170,7 +180,9 @@ fn post_create_clip(
         Err(ureq::Error::Status(404, resp)) => {
             let msg = resp.into_string().unwrap_or_default();
             tracing::error!("Twitch clip creation failed (404): {msg}");
-            return Err("Twitch reports the channel is offline or cannot be clipped right now.".into());
+            return Err(
+                "Twitch reports the channel is offline or cannot be clipped right now.".into(),
+            );
         }
         Err(ureq::Error::Status(code, resp)) => {
             let msg = resp.into_string().unwrap_or_default();
@@ -359,10 +371,7 @@ mod tests {
             format_clip_title("スプーン", "", Some("二重影")),
             "スプーン - 二重影"
         );
-        assert_eq!(
-            format_clip_title("スプーン", "スプーン", None),
-            "スプーン"
-        );
+        assert_eq!(format_clip_title("スプーン", "スプーン", None), "スプーン");
     }
 
     #[test]

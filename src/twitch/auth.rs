@@ -120,7 +120,10 @@ pub fn validate(access_token: &str) -> Result<Validation, AuthError> {
     match result {
         Ok(resp) => {
             let body = read_json(resp);
-            let login = body.get("login").and_then(|v| v.as_str()).unwrap_or_default();
+            let login = body
+                .get("login")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             if login.is_empty() {
                 return Err(AuthError::Invalid("token has no user".into()));
             }
@@ -133,7 +136,9 @@ pub fn validate(access_token: &str) -> Result<Validation, AuthError> {
                     .to_string(),
             })
         }
-        Err(ureq::Error::Status(401, _)) => Err(AuthError::Invalid("token expired or revoked".into())),
+        Err(ureq::Error::Status(401, _)) => {
+            Err(AuthError::Invalid("token expired or revoked".into()))
+        }
         Err(ureq::Error::Status(code, resp)) => Err(AuthError::Network(format!(
             "validate failed ({code}): {}",
             message_of(&read_json(resp))
@@ -169,7 +174,10 @@ fn refresh(client_id: &str, refresh_token: &str) -> Result<Tokens, AuthError> {
     if status == 200 {
         parse_tokens(&body).ok_or_else(|| AuthError::Network("malformed token response".into()))
     } else if status == 400 || status == 401 {
-        Err(AuthError::Invalid(format!("refresh rejected: {}", message_of(&body))))
+        Err(AuthError::Invalid(format!(
+            "refresh rejected: {}",
+            message_of(&body)
+        )))
     } else {
         Err(AuthError::Network(format!("refresh failed ({status})")))
     }
@@ -190,9 +198,7 @@ where
     P: FnOnce(&StoredToken),
 {
     let (mut candidate, upgraded) = match &state.latest {
-        Some(latest) if latest.access_token != caller_token.access_token => {
-            (latest.clone(), true)
-        }
+        Some(latest) if latest.access_token != caller_token.access_token => (latest.clone(), true),
         _ => (caller_token.clone(), false),
     };
 
@@ -229,11 +235,7 @@ where
         }
     }
 
-    let Some(rt) = candidate
-        .refresh_token
-        .as_deref()
-        .filter(|s| !s.is_empty())
-    else {
+    let Some(rt) = candidate.refresh_token.as_deref().filter(|s| !s.is_empty()) else {
         let msg = "token expired and no refresh token is available".to_string();
         state.latest = None;
         state.validated_at = None;
@@ -375,13 +377,11 @@ pub fn latest_token() -> Option<StoredToken> {
 pub fn revalidate_in_background(token: StoredToken, ctx: egui::Context) {
     let _ = std::thread::Builder::new()
         .name("twitch-token-revalidate".into())
-        .spawn(move || {
-            match revalidate(&token) {
-                Ok(Some(_)) | Err(AuthError::Invalid(_)) => {
-                    ctx.request_repaint();
-                }
-                _ => {}
+        .spawn(move || match revalidate(&token) {
+            Ok(Some(_)) | Err(AuthError::Invalid(_)) => {
+                ctx.request_repaint();
             }
+            _ => {}
         });
 }
 
@@ -416,7 +416,9 @@ pub fn fetch_stream_key(token: &StoredToken) -> Result<String, AuthError> {
         Err(AuthError::Network(_)) => token.clone(),
     };
     if active_token.user_id.is_empty() {
-        return Err(AuthError::Invalid("User ID is missing from login token".into()));
+        return Err(AuthError::Invalid(
+            "User ID is missing from login token".into(),
+        ));
     }
     let result = match call_stream_key_api(&active_token) {
         Err(ureq::Error::Status(401, resp)) => {
@@ -449,7 +451,9 @@ pub fn fetch_stream_key(token: &StoredToken) -> Result<String, AuthError> {
                 .and_then(|k| k.as_str())
                 .unwrap_or_default();
             if key.is_empty() {
-                return Err(AuthError::Network("Twitch did not return a stream key".into()));
+                return Err(AuthError::Network(
+                    "Twitch did not return a stream key".into(),
+                ));
             }
             Ok(key.to_string())
         }
@@ -461,7 +465,9 @@ pub fn fetch_stream_key(token: &StoredToken) -> Result<String, AuthError> {
                     "Missing permission: your login was created before stream key support was added. Please click 'Log out' and 'Log in with Twitch' under 'Twitch Account' to re-authorize.".into(),
                 ))
             } else {
-                Err(AuthError::Invalid(format!("Twitch login expired or unauthorized ({msg})")))
+                Err(AuthError::Invalid(format!(
+                    "Twitch login expired or unauthorized ({msg})"
+                )))
             }
         }
         Err(ureq::Error::Status(code, resp)) => Err(AuthError::Network(format!(
@@ -511,10 +517,11 @@ fn device_flow(
     cancel: &AtomicBool,
     mut emit: impl FnMut(DeviceFlowEvent),
 ) -> Option<DeviceFlowEvent> {
-    let (status, body) = match post_form(DEVICE_URL, &[("client_id", client_id), ("scopes", SCOPES)]) {
-        Ok(r) => r,
-        Err(e) => return Some(DeviceFlowEvent::Failed(e.to_string())),
-    };
+    let (status, body) =
+        match post_form(DEVICE_URL, &[("client_id", client_id), ("scopes", SCOPES)]) {
+            Ok(r) => r,
+            Err(e) => return Some(DeviceFlowEvent::Failed(e.to_string())),
+        };
     if status != 200 {
         return Some(DeviceFlowEvent::Failed(format!(
             "Twitch refused the login request ({status}): {}",
@@ -522,13 +529,26 @@ fn device_flow(
         )));
     }
     let field = |k: &str| body.get(k).and_then(|v| v.as_str()).map(str::to_string);
-    let (Some(device_code), Some(user_code), Some(verification_uri)) =
-        (field("device_code"), field("user_code"), field("verification_uri"))
-    else {
-        return Some(DeviceFlowEvent::Failed("malformed device code response".into()));
+    let (Some(device_code), Some(user_code), Some(verification_uri)) = (
+        field("device_code"),
+        field("user_code"),
+        field("verification_uri"),
+    ) else {
+        return Some(DeviceFlowEvent::Failed(
+            "malformed device code response".into(),
+        ));
     };
-    let expires_in = Duration::from_secs(body.get("expires_in").and_then(|v| v.as_u64()).unwrap_or(1800));
-    let mut interval = Duration::from_secs(body.get("interval").and_then(|v| v.as_u64()).unwrap_or(5).max(1));
+    let expires_in = Duration::from_secs(
+        body.get("expires_in")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1800),
+    );
+    let mut interval = Duration::from_secs(
+        body.get("interval")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5)
+            .max(1),
+    );
     emit(DeviceFlowEvent::Code {
         user_code,
         verification_uri,
@@ -761,8 +781,16 @@ mod tests {
         )
         .expect("second caller should receive already-refreshed token");
         assert_eq!(res2, Some(refreshed.clone()));
-        assert_eq!(refresh_calls.load(Ordering::SeqCst), 1, "must not reuse consumed refresh token");
-        assert_eq!(validate_calls.load(Ordering::SeqCst), calls_before, "cached validation reused");
+        assert_eq!(
+            refresh_calls.load(Ordering::SeqCst),
+            1,
+            "must not reuse consumed refresh token"
+        );
+        assert_eq!(
+            validate_calls.load(Ordering::SeqCst),
+            calls_before,
+            "cached validation reused"
+        );
 
         // 3. Even if a third worker got HTTP 401 with `expired_token` and calls force_refresh,
         // it sees `state.latest` already moved to `fresh_access_2` and upgrades without refreshing again.

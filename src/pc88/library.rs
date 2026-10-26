@@ -8,9 +8,7 @@ use std::path::{Path, PathBuf};
 
 /// Supported PC-88 floppy image extensions (lowercase).
 /// Also handles fullwidth `.ｄ88` via `normalized_extension`.
-pub const PC88_FLOPPY_EXTENSIONS: &[&str] = &[
-    "d88", "88d", "2hd", "2dd", "fdi", "dsk", "dup",
-];
+pub const PC88_FLOPPY_EXTENSIONS: &[&str] = &["d88", "88d", "2hd", "2dd", "fdi", "dsk", "dup"];
 
 /// Supported PC-88 cassette tape image extensions (lowercase).
 pub const PC88_TAPE_EXTENSIONS: &[&str] = &["t88", "cmt"];
@@ -107,9 +105,15 @@ pub fn normalized_extension(path: &Path) -> Option<String> {
     let mut out = String::with_capacity(ext.len());
     for ch in ext.chars() {
         let mapped = match ch {
-            '\u{FF21}'..='\u{FF3A}' => char::from_u32(ch as u32 - 0xFF21 + b'a' as u32).unwrap_or(ch),
-            '\u{FF41}'..='\u{FF5A}' => char::from_u32(ch as u32 - 0xFF41 + b'a' as u32).unwrap_or(ch),
-            '\u{FF10}'..='\u{FF19}' => char::from_u32(ch as u32 - 0xFF10 + b'0' as u32).unwrap_or(ch),
+            '\u{FF21}'..='\u{FF3A}' => {
+                char::from_u32(ch as u32 - 0xFF21 + b'a' as u32).unwrap_or(ch)
+            }
+            '\u{FF41}'..='\u{FF5A}' => {
+                char::from_u32(ch as u32 - 0xFF41 + b'a' as u32).unwrap_or(ch)
+            }
+            '\u{FF10}'..='\u{FF19}' => {
+                char::from_u32(ch as u32 - 0xFF10 + b'0' as u32).unwrap_or(ch)
+            }
             _ => ch.to_ascii_lowercase(),
         };
         out.push(mapped);
@@ -118,13 +122,11 @@ pub fn normalized_extension(path: &Path) -> Option<String> {
 }
 
 pub fn is_pc88_floppy_path(path: &Path) -> bool {
-    normalized_extension(path)
-        .is_some_and(|ext| PC88_FLOPPY_EXTENSIONS.contains(&ext.as_str()))
+    normalized_extension(path).is_some_and(|ext| PC88_FLOPPY_EXTENSIONS.contains(&ext.as_str()))
 }
 
 pub fn is_pc88_tape_path(path: &Path) -> bool {
-    normalized_extension(path)
-        .is_some_and(|ext| PC88_TAPE_EXTENSIONS.contains(&ext.as_str()))
+    normalized_extension(path).is_some_and(|ext| PC88_TAPE_EXTENSIONS.contains(&ext.as_str()))
 }
 
 /// Inspects a `.d88` / `.88d` file and returns the list of disk image slices contained inside it.
@@ -541,13 +543,7 @@ fn scan_dir_recursive(
         } else {
             category.map(|s| s.to_string())
         };
-        scan_dir_recursive(
-            root_dir,
-            &sub,
-            next_category.as_deref(),
-            depth + 1,
-            out,
-        )?;
+        scan_dir_recursive(root_dir, &sub, next_category.as_deref(), depth + 1, out)?;
     }
 
     Ok(())
@@ -616,7 +612,9 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
                     let mut na = 0u64;
                     while let Some(&d) = ia.peek() {
                         if d.is_ascii_digit() {
-                            na = na.saturating_mul(10).saturating_add((d as u8 - b'0') as u64);
+                            na = na
+                                .saturating_mul(10)
+                                .saturating_add((d as u8 - b'0') as u64);
                             ia.next();
                         } else {
                             break;
@@ -625,7 +623,9 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
                     let mut nb = 0u64;
                     while let Some(&d) = ib.peek() {
                         if d.is_ascii_digit() {
-                            nb = nb.saturating_mul(10).saturating_add((d as u8 - b'0') as u64);
+                            nb = nb
+                                .saturating_mul(10)
+                                .saturating_add((d as u8 - b'0') as u64);
                             ib.next();
                         } else {
                             break;
@@ -661,7 +661,8 @@ mod tests {
 
     #[test]
     fn test_multi_d88_materialize_and_sync_back() {
-        let tmp = std::env::temp_dir().join(format!("michadame_pc88_d88_test_{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("michadame_pc88_d88_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
 
@@ -698,7 +699,13 @@ mod tests {
             floppies: vec![d88_path.clone()],
             tapes: Vec::new(),
             boot_mode: Pc88BootMode::Floppy,
-            search_index: Pc98SearchIndex::build("testgame", Some("T"), &[d88_path.clone()], &[], &[]),
+            search_index: Pc98SearchIndex::build(
+                "testgame",
+                Some("T"),
+                &[d88_path.clone()],
+                &[],
+                &[],
+            ),
         };
 
         let (paths, labels) = materialize_game_floppies(&entry).unwrap();
@@ -726,13 +733,16 @@ mod tests {
         if !real_path.is_dir() {
             return;
         }
-        let games = scan_games_directory(real_path).expect("Failed to scan /home/morg/Games/PC88/GameList");
+        let games =
+            scan_games_directory(real_path).expect("Failed to scan /home/morg/Games/PC88/GameList");
         assert!(
             games.len() > 500,
             "Expected > 500 games in /home/morg/Games/PC88/GameList, found {}",
             games.len()
         );
         // Utility ROM-only folders like R/rom_88fa or K/kanji_88 should not be listed as games
-        assert!(!games.iter().any(|g| g.title == "rom_88fa" || g.title == "kanji_88"));
+        assert!(!games
+            .iter()
+            .any(|g| g.title == "rom_88fa" || g.title == "kanji_88"));
     }
 }
