@@ -177,6 +177,7 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         retro_pc_ambient_glow: Some(state.video.retro_pc_ambient_glow),
         retro_software_mouse: Some(state.video.retro_software_mouse),
         lights_off_night_mode: Some(state.video.lights_off_night_mode),
+        realistic_light_switch: Some(state.video.realistic_light_switch),
         night_mode_glow_intensity: Some(state.video.night_mode_glow_intensity),
         crt_glass_enabled: Some(state.video.crt_glass_enabled),
         crt_glass_intensity: Some(state.video.crt_glass_intensity),
@@ -454,6 +455,8 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) -> bool {
     state.video.retro_pc_ambient_glow = profile.retro_pc_ambient_glow.unwrap_or(0.55);
     state.video.retro_software_mouse = profile.retro_software_mouse.unwrap_or(false);
     state.video.lights_off_night_mode = profile.lights_off_night_mode.unwrap_or(false);
+    state.video.realistic_light_switch = profile.realistic_light_switch.unwrap_or(false);
+    state.video.light_switch_flicker_start = None;
     state.video.night_mode_glow_intensity = profile.night_mode_glow_intensity.unwrap_or(0.0);
 
     state.video.crt_glass_enabled = profile.crt_glass_enabled.unwrap_or(false);
@@ -1229,6 +1232,20 @@ mod tests {
         assert_eq!(new_state.video.retro_pc_ambient_glow, 0.0);
         assert!(!new_state.video.lights_off_night_mode);
         assert_eq!(new_state.video.night_mode_glow_intensity, 0.0);
+
+        // Realistic light switch persistence roundtrip
+        assert!(!state.video.realistic_light_switch);
+        state.video.realistic_light_switch = true;
+        let profile = build_profile_from_state(&state);
+        assert_eq!(profile.realistic_light_switch, Some(true));
+        apply_profile_to_state(&mut new_state, &profile);
+        assert!(new_state.video.realistic_light_switch);
+
+        state.video.realistic_light_switch = false;
+        let profile = build_profile_from_state(&state);
+        assert_eq!(profile.realistic_light_switch, Some(false));
+        apply_profile_to_state(&mut new_state, &profile);
+        assert!(!new_state.video.realistic_light_switch);
     }
 
     #[test]

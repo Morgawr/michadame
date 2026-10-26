@@ -86,6 +86,8 @@ impl Default for AppState {
                 retro_pc_ambient_glow: 0.55,
                 retro_software_mouse: false,
                 lights_off_night_mode: false,
+                realistic_light_switch: false,
+                light_switch_flicker_start: None,
                 night_mode_glow_intensity: 0.0,
                 crt_glass_enabled: false,
                 crt_glass_intensity: 0.25,
@@ -250,6 +252,29 @@ impl AppState {
         } else {
             self.info("Audio-Reactive CRT Interference disabled.");
         }
+    }
+
+    /// Handles audio and visual transition effects when `lights_off_night_mode` is flipped.
+    pub fn on_lights_off_night_mode_changed(&mut self) {
+        if self.video.realistic_light_switch {
+            let turning_lights_on = !self.video.lights_off_night_mode;
+            self.twitch.play_light_switch_sound(turning_lights_on);
+            if turning_lights_on {
+                // Dark -> Light (lights off -> lights on): trigger ceiling tube ignition flicker
+                self.video.light_switch_flicker_start = Some(std::time::Instant::now());
+            } else {
+                // Light -> Dark (lights on -> lights off): extinguish immediately
+                self.video.light_switch_flicker_start = None;
+            }
+        } else {
+            self.video.light_switch_flicker_start = None;
+        }
+    }
+
+    /// Flips `lights_off_night_mode` and triggers the realistic light switch sound/flicker if enabled.
+    pub fn toggle_lights_off_night_mode(&mut self) {
+        self.video.lights_off_night_mode = !self.video.lights_off_night_mode;
+        self.on_lights_off_night_mode_changed();
     }
 
     /// If live and configured, shares newly mined vocabulary to Twitch chat as two messages:
@@ -671,7 +696,7 @@ impl eframe::App for AppState {
             {
                 let current_filter = CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed));
                 if current_filter != CrtFilter::Off {
-                    self.video.lights_off_night_mode = !self.video.lights_off_night_mode;
+                    self.toggle_lights_off_night_mode();
                     config::save_config(self);
                     ctx.request_repaint();
                 }

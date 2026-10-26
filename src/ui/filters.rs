@@ -1088,6 +1088,7 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                 )
                 .changed()
             {
+                state.on_lights_off_night_mode_changed();
                 crate::config::save_config(state);
                 changed = true;
             }
@@ -1123,7 +1124,7 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
             }
         });
 
-        two_columns(ui, |c1, _c2| {
+        two_columns(ui, |c1, c2| {
             if c1
                 .checkbox(
                     &mut state.video.use_magenta_background,
@@ -1132,6 +1133,23 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                 .on_hover_text("Uses a magenta background around the video stream instead of black.")
                 .changed()
             {
+                crate::config::save_config(state);
+                changed = true;
+            }
+
+            if c2
+                .checkbox(
+                    &mut state.video.realistic_light_switch,
+                    "Realistic Light Switch",
+                )
+                .on_hover_text(
+                    "Plays an audible mechanical switch clack when toggling room lights (K) and simulates overhead ceiling tube flickering when turning lights back on.",
+                )
+                .changed()
+            {
+                if !state.video.realistic_light_switch {
+                    state.video.light_switch_flicker_start = None;
+                }
                 crate::config::save_config(state);
                 changed = true;
             }

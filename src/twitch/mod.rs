@@ -232,6 +232,20 @@ impl TwitchState {
             tap.play_alert(self.alert_player.chime_samples());
         }
     }
+
+    /// Plays the mechanical light switch clack sound (plus ceiling tube charging hum when `turning_on` is true)
+    /// both locally on PC and into the broadcast / replay audio stream.
+    pub fn play_light_switch_sound(&self, turning_on: bool) {
+        self.alert_player.play_light_switch_local(turning_on);
+        if let Some(tap) = &self.audio_tap {
+            let samples = if turning_on {
+                self.alert_player.light_switch_on_samples()
+            } else {
+                self.alert_player.light_switch_samples()
+            };
+            tap.play_alert(samples);
+        }
+    }
 }
 
 /// Normalize user input (`Name`, `#name`, `twitch.tv/name`, full URL) to a channel login.

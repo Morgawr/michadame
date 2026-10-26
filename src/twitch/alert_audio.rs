@@ -170,11 +170,50 @@ pub fn generate_retro_chime_samples() -> Vec<f32> {
     samples
 }
 
-/// Manages local audio playback for Twitch alerts through Rodio.
+/// Embedded 48 kHz 16-bit stereo PCM recording of a heavy mechanical wall light switch clack (lights off).
+pub const EMBEDDED_LIGHT_SWITCH_WAV: &[u8] = include_bytes!("../../assets/light_switch.wav");
+
+/// Embedded 48 kHz 16-bit stereo PCM recording of a mechanical wall light switch clack followed by
+/// ceiling tube ballast charging hum and synchronized starter ignition surges (lights on).
+pub const EMBEDDED_LIGHT_SWITCH_ON_WAV: &[u8] = include_bytes!("../../assets/light_switch_on.wav");
+
+fn decode_embedded_wav_samples(wav_bytes: &[u8]) -> Vec<f32> {
+    let pcm_bytes = if wav_bytes.len() > 44
+        && &wav_bytes[0..4] == b"RIFF"
+        && &wav_bytes[8..12] == b"WAVE"
+    {
+        &wav_bytes[44..]
+    } else {
+        wav_bytes
+    };
+
+    let mut samples = Vec::with_capacity(pcm_bytes.len() / 2);
+    for chunk in pcm_bytes.chunks_exact(2) {
+        let s = i16::from_le_bytes([chunk[0], chunk[1]]);
+        samples.push((s as f32 / 32768.0).clamp(-1.0, 1.0));
+    }
+    samples
+}
+
+/// Decodes the embedded 48 kHz 16-bit stereo PCM mechanical light switch WAV into normalized `f32` samples.
+pub fn generate_light_switch_clack_samples() -> Vec<f32> {
+    decode_embedded_wav_samples(EMBEDDED_LIGHT_SWITCH_WAV)
+}
+
+/// Decodes the embedded 48 kHz 16-bit stereo PCM light switch + ceiling tube charging hum WAV into normalized `f32` samples.
+pub fn generate_light_switch_on_samples() -> Vec<f32> {
+    decode_embedded_wav_samples(EMBEDDED_LIGHT_SWITCH_ON_WAV)
+}
+
+/// Manages local audio playback for Twitch alerts and UI sound effects through Rodio.
 pub struct AlertSoundPlayer {
     _stream: Option<OutputStream>,
+    stream_handle: Option<rodio::OutputStreamHandle>,
     sink: Option<Sink>,
+    active_switch_sink: std::sync::Mutex<Option<Sink>>,
     chime_samples: Arc<Vec<f32>>,
+    light_switch_samples: Arc<Vec<f32>>,
+    light_switch_on_samples: Arc<Vec<f32>>,
     volume: std::sync::atomic::AtomicU32,
 }
 
@@ -187,30 +226,36 @@ impl Default for AlertSoundPlayer {
 impl AlertSoundPlayer {
     pub fn new() -> Self {
         let chime_samples = Arc::new(generate_retro_chime_samples());
+        let light_switch_samples = Arc::new(generate_light_switch_clack_samples());
+        let light_switch_on_samples = Arc::new(generate_light_switch_on_samples());
 
         // Attempt to initialize Rodio playback. If unavailable (e.g. headless environment),
         // we safely retain None so execution never crashes.
-        let (stream, sink) = match crate::devices::audio::initialize_rodio_playback() {
+        let (stream, stream_handle, sink) = match crate::devices::audio::initialize_rodio_playback() {
             Ok((guard, handle)) => match Sink::try_new(&handle) {
                 Ok(sink) => {
                     sink.set_volume(1.0);
-                    (Some(guard), Some(sink))
+                    (Some(guard), Some(handle), Some(sink))
                 }
                 Err(e) => {
                     tracing::warn!("Failed to create Rodio sink for alert audio: {e}");
-                    (Some(guard), None)
+                    (Some(guard), Some(handle), None)
                 }
             },
             Err(e) => {
                 tracing::debug!("Rodio output stream not available for alert audio: {e}");
-                (None, None)
+                (None, None, None)
             }
         };
 
         Self {
             _stream: stream,
+            stream_handle,
             sink,
+            active_switch_sink: std::sync::Mutex::new(None),
             chime_samples,
+            light_switch_samples,
+            light_switch_on_samples,
             volume: std::sync::atomic::AtomicU32::new(1.0f32.to_bits()),
         }
     }
@@ -221,6 +266,11 @@ impl AlertSoundPlayer {
         self.volume.store(clamped.to_bits(), std::sync::atomic::Ordering::Relaxed);
         if let Some(sink) = &self.sink {
             sink.set_volume(clamped);
+        }
+        if let Ok(guard) = self.active_switch_sink.lock() {
+            if let Some(sink) = guard.as_ref() {
+                sink.set_volume(clamped);
+            }
         }
     }
 
@@ -243,9 +293,52 @@ impl AlertSoundPlayer {
         }
     }
 
+    /// Plays the mechanical light switch sound locally on the PC through Rodio immediately.
+    ///
+    /// When `turning_on` is `true`, plays the switch clack + ceiling tube ballast charging hum.
+    /// When `turning_on` is `false`, stops any in-progress tube charging hum and plays the switch clack.
+    pub fn play_light_switch_local(&self, turning_on: bool) {
+        let vol = self.volume();
+        let samples = if turning_on {
+            self.light_switch_on_samples.as_ref().clone()
+        } else {
+            self.light_switch_samples.as_ref().clone()
+        };
+        let buffer = SamplesBuffer::new(ALERT_CHANNELS, ALERT_SAMPLE_RATE, samples);
+        if let Some(handle) = &self.stream_handle {
+            if let Ok(sink) = Sink::try_new(handle) {
+                sink.set_volume(vol);
+                sink.append(buffer);
+                if let Ok(mut guard) = self.active_switch_sink.lock() {
+                    if let Some(prev) = guard.take() {
+                        prev.stop();
+                    }
+                    *guard = Some(sink);
+                } else {
+                    sink.detach();
+                }
+                return;
+            }
+        }
+        if let Some(sink) = &self.sink {
+            sink.set_volume(vol);
+            sink.append(buffer);
+        }
+    }
+
     /// Returns a reference to the precomputed 48 kHz stereo chime samples.
     pub fn chime_samples(&self) -> &Arc<Vec<f32>> {
         &self.chime_samples
+    }
+
+    /// Returns a reference to the precomputed 48 kHz stereo light switch clack samples (lights off).
+    pub fn light_switch_samples(&self) -> &Arc<Vec<f32>> {
+        &self.light_switch_samples
+    }
+
+    /// Returns a reference to the precomputed 48 kHz stereo light switch + tube charging hum samples (lights on).
+    pub fn light_switch_on_samples(&self) -> &Arc<Vec<f32>> {
+        &self.light_switch_on_samples
     }
 }
 
@@ -270,9 +363,48 @@ mod tests {
     }
 
     #[test]
+    fn test_light_switch_clack_generation() {
+        let samples = generate_light_switch_clack_samples();
+        assert!(!samples.is_empty());
+        assert_eq!(samples.len(), (48_000.0 * 0.350) as usize * 2);
+
+        let mut max_val = 0.0f32;
+        for &s in &samples {
+            assert!(s >= -1.0 && s <= 1.0, "Sample out of bounds: {s}");
+            max_val = max_val.max(s.abs());
+        }
+        assert!(
+            max_val > 0.4 && max_val < 0.7,
+            "Light switch clack should produce a comfortable audible signal, got {max_val}"
+        );
+
+        let on_samples = generate_light_switch_on_samples();
+        assert_eq!(on_samples.len(), (48_000.0 * 2.600) as usize * 2);
+        let mut max_on = 0.0f32;
+        for &s in &on_samples {
+            assert!(s >= -1.0 && s <= 1.0, "Sample out of bounds: {s}");
+            max_on = max_on.max(s.abs());
+        }
+        assert!(
+            max_on > 0.4 && max_on < 0.7,
+            "Light switch on + ballast hum should produce a comfortable audible signal, got {max_on}"
+        );
+    }
+
+    #[test]
     fn test_player_instantiation_does_not_panic() {
         let player = AlertSoundPlayer::new();
         assert_eq!(player.chime_samples().len(), (48_000.0 * 2.20 * 2.0) as usize);
+        assert_eq!(
+            player.light_switch_samples().len(),
+            (48_000.0 * 0.350) as usize * 2
+        );
+        assert_eq!(
+            player.light_switch_on_samples().len(),
+            (48_000.0 * 2.600) as usize * 2
+        );
         player.play_local();
+        player.play_light_switch_local(true);
+        player.play_light_switch_local(false);
     }
 }

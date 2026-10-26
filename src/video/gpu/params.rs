@@ -303,7 +303,7 @@ impl GlassShaderParams {
         filter_type: i32,
     ) -> Self {
         let crt_active = filter_type != 0;
-        let night_mode = crt_active && state.video.lights_off_night_mode;
+        let night_mode = crt_active && state.video.effective_lights_off_night_mode();
         Self {
             enabled: crt_active && state.video.crt_glass_enabled,
             intensity: state.video.crt_glass_intensity,
@@ -654,6 +654,78 @@ mod tests {
         assert!(!params_off.ceiling_light_enabled);
         assert!(!params_off.photographer_enabled);
         assert!(!params_off.flash_enabled);
+    }
+
+    #[test]
+    fn test_realistic_light_switch_flicker_timeline_and_params() {
+        use crate::app::models::{VideoSettings, LIGHT_SWITCH_FLICKER_DURATION_SECS};
+        use std::time::{Duration, Instant};
+
+        // Verify multiple distinct dark/light flicker transitions occur before stabilization
+        let sample_times = [
+            (0.02, true),  // Initial starter pre-heat (dark)
+            (0.10, false), // Strike 1 ON
+            (0.20, true),  // Dropout 1 (dark)
+            (0.31, false), // Strike 2 ON
+            (0.37, true),  // Dropout 2 (dark)
+            (0.46, false), // Strike 3 ON
+            (0.56, true),  // Dropout 3 (dark)
+            (0.65, false), // Strike 4 ON
+            (0.70, true),  // Final micro-blink (dark)
+            (0.75, false), // Stabilized ON
+        ];
+        for (t, expected_dark) in sample_times {
+            assert_eq!(
+                VideoSettings::evaluate_light_switch_flicker_is_dark(t),
+                expected_dark,
+                "Unexpected flicker state at t={t}s"
+            );
+        }
+
+        let mut state = AppState::default();
+        state.video.crt_glass_enabled = true;
+        state.video.crt_glass_ceiling_light_enabled = true;
+        state.video.realistic_light_switch = true;
+        state.video.lights_off_night_mode = true;
+
+        // Toggling from dark -> light starts the flicker sequence
+        state.toggle_lights_off_night_mode();
+        assert!(!state.video.lights_off_night_mode);
+        assert!(state.video.light_switch_flicker_start.is_some());
+        assert!(state.video.advance_light_switch_flicker());
+
+        // Immediately after flipping on (t ~ 0.0s), ceiling light is in starter pre-heat (dark)
+        let params_start = GlassShaderParams::from_state(&state, [0.031, 0.041], 0.05, 1);
+        assert!(!params_start.ceiling_light_enabled);
+
+        // During Strike 1 (t = 0.10s), ceiling light flashes ON
+        state.video.light_switch_flicker_start =
+            Some(Instant::now() - Duration::from_millis(100));
+        let params_strike1 = GlassShaderParams::from_state(&state, [0.031, 0.041], 0.05, 1);
+        assert!(params_strike1.ceiling_light_enabled);
+
+        // During Dropout 1 (t = 0.20s), ceiling light drops back OFF
+        state.video.light_switch_flicker_start =
+            Some(Instant::now() - Duration::from_millis(200));
+        let params_dropout1 = GlassShaderParams::from_state(&state, [0.031, 0.041], 0.05, 1);
+        assert!(!params_dropout1.ceiling_light_enabled);
+
+        // Once duration has elapsed, ceiling light stabilizes ON and clears flicker_start
+        state.video.light_switch_flicker_start = Some(
+            Instant::now()
+                - Duration::from_secs_f32(LIGHT_SWITCH_FLICKER_DURATION_SECS + 0.10),
+        );
+        let params_stable = GlassShaderParams::from_state(&state, [0.031, 0.041], 0.05, 1);
+        assert!(params_stable.ceiling_light_enabled);
+        assert!(state.video.advance_light_switch_flicker()); // Final stabilizing repaint
+        assert!(state.video.light_switch_flicker_start.is_none());
+        assert!(!state.video.advance_light_switch_flicker());
+
+        // Toggling from light -> dark extinguishes immediately without flickering
+        state.toggle_lights_off_night_mode();
+        assert!(state.video.lights_off_night_mode);
+        assert!(state.video.light_switch_flicker_start.is_none());
+        assert!(!state.video.advance_light_switch_flicker());
     }
 
     #[test]

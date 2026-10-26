@@ -529,6 +529,8 @@ impl AudioReactiveRuntime {
     }
 }
 
+pub const LIGHT_SWITCH_FLICKER_DURATION_SECS: f32 = 0.73;
+
 pub struct VideoSettings {
     pub pixelate_filter_enabled: bool,
     pub use_magenta_background: bool,
@@ -537,6 +539,8 @@ pub struct VideoSettings {
     pub retro_pc_ambient_glow: f32,
     pub retro_software_mouse: bool,
     pub lights_off_night_mode: bool,
+    pub realistic_light_switch: bool,
+    pub light_switch_flicker_start: Option<std::time::Instant>,
     pub night_mode_glow_intensity: f32,
     pub crt_glass_enabled: bool,
     pub crt_glass_intensity: f32,
@@ -566,6 +570,74 @@ pub struct VideoSettings {
     pub border_crop_bottom: f32,
     pub fft_filter_enabled: bool,
     pub fft_mask_window_open: bool,
+}
+
+impl VideoSettings {
+    /// Evaluates whether the ceiling light is in a dark (off) phase at `elapsed_secs` seconds
+    /// into a dark-to-light (`lights_off_night_mode`: `true` -> `false`) transition.
+    ///
+    /// Simulates the starter/ballast ignition strikes of an overhead ceiling tube flickering
+    /// on and off several times before stabilizing fully ON.
+    #[inline]
+    pub fn evaluate_light_switch_flicker_is_dark(elapsed_secs: f32) -> bool {
+        if elapsed_secs < 0.0 || elapsed_secs >= LIGHT_SWITCH_FLICKER_DURATION_SECS {
+            return false;
+        }
+        // Ignition strike timeline (0.73s total, 4 distinct flashes before catching):
+        //   0.00..0.07s: Dark (starter pre-heat delay right after switch clack)
+        //   0.07..0.14s: Strike 1 ON
+        //   0.14..0.28s: Dark (arc drops out)
+        //   0.28..0.34s: Strike 2 ON (quick stutter flash)
+        //   0.34..0.41s: Dark (sputter gap)
+        //   0.41..0.51s: Strike 3 ON (longer warm strike)
+        //   0.51..0.62s: Dark (brief dropout before catch)
+        //   0.62..0.68s: Strike 4 ON (rapid catch flash)
+        //   0.68..0.73s: Dark (final quick blink)
+        //   >= 0.73s:    Stabilized ON (false)
+        matches!(
+            elapsed_secs,
+            t if t < 0.07
+                || (0.14..0.28).contains(&t)
+                || (0.34..0.41).contains(&t)
+                || (0.51..0.62).contains(&t)
+                || (0.68..LIGHT_SWITCH_FLICKER_DURATION_SECS).contains(&t)
+        )
+    }
+
+    /// Advances the dark-to-light ceiling tube flicker animation state and returns true
+    /// if the viewport should schedule a 60Hz repaint for the transition.
+    #[inline]
+    pub fn advance_light_switch_flicker(&mut self) -> bool {
+        if let Some(start) = self.light_switch_flicker_start {
+            if !self.realistic_light_switch || self.lights_off_night_mode {
+                self.light_switch_flicker_start = None;
+                false
+            } else if start.elapsed().as_secs_f32() < LIGHT_SWITCH_FLICKER_DURATION_SECS {
+                true
+            } else {
+                self.light_switch_flicker_start = None;
+                true
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Returns the effective `lights_off_night_mode` state for rendering, accounting for
+    /// transient ceiling tube flickering during a dark-to-light transition when
+    /// `realistic_light_switch` is enabled.
+    #[inline]
+    pub fn effective_lights_off_night_mode(&self) -> bool {
+        if self.lights_off_night_mode {
+            return true;
+        }
+        if self.realistic_light_switch {
+            if let Some(start) = self.light_switch_flicker_start {
+                return Self::evaluate_light_switch_flicker_is_dark(start.elapsed().as_secs_f32());
+            }
+        }
+        false
+    }
 }
 
 pub struct PendingAudioStream {

@@ -412,7 +412,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         let cathode_params = video::gpu::CathodeInterferenceShaderParams::from_state(state);
         let time = ui.input(|i| i.time) as f32;
         let is_crt_on = !is_showing_roll && filter != CrtFilter::Off;
-        let night_mode_active = is_crt_on && state.video.lights_off_night_mode;
+        let light_switch_flicker_active = state.video.advance_light_switch_flicker();
+        let night_mode_active = is_crt_on && state.video.effective_lights_off_night_mode();
         let retro_pc_frame = is_crt_on && state.video.retro_pc_frame;
         let effective_dark_mode =
             is_crt_on && (state.video.retro_pc_frame_dark_mode || night_mode_active);
@@ -497,6 +498,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             || state.audio_reactive.enabled
             || retro_pc_frame
             || (night_mode_glow_intensity > 0.001)
+            || light_switch_flicker_active
             || is_roll_active
         {
             ui.ctx().request_repaint_after(std::time::Duration::from_nanos(1_000_000_000 / 60));
