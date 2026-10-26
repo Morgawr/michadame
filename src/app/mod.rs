@@ -884,6 +884,7 @@ impl eframe::App for AppState {
         if let Some(rx) = &self.ocr.result_receiver {
             if let Ok(result) = rx.try_recv() {
                 self.ocr.is_processing.store(false, Ordering::Release);
+                let model_name = self.ocr.backend.short_name();
                 match result {
                     Ok(lines) => {
                         self.ocr.raw_lines = lines;
@@ -893,11 +894,12 @@ impl eframe::App for AppState {
                         self.ocr.last_error = None;
                         if count == 0 {
                             self.ocr.last_scan_time = None;
-                            self.info("Google Lens OCR: No Japanese text detected.");
+                            self.info(format!("{}: No Japanese text detected.", model_name));
                         } else {
                             self.ocr.last_scan_time = Some(Instant::now());
                             self.info(format!(
-                                "Google Lens OCR: Found {} text box{}.",
+                                "{}: Found {} text box{}.",
+                                model_name,
                                 count,
                                 if count == 1 { "" } else { "es" }
                             ));
@@ -905,10 +907,63 @@ impl eframe::App for AppState {
                     }
                     Err(e) => {
                         self.ocr.last_error = Some(e.clone());
-                        self.error(format!("OCR error: {}", e));
+                        self.error(format!("OCR error ({}): {}", model_name, e));
                     }
                 }
                 repaint_requested = true;
+            }
+        }
+
+        let screen_ai_events: Vec<crate::ocr::ScreenAiEvent> =
+            if let Some(rx) = &self.ocr.screen_ai_event_rx {
+                let mut events = Vec::new();
+                while let Ok(ev) = rx.try_recv() {
+                    events.push(ev);
+                }
+                events
+            } else {
+                Vec::new()
+            };
+
+        for event in screen_ai_events {
+            match event {
+                crate::ocr::ScreenAiEvent::UpdateCheckFinished {
+                    update_available,
+                    remote_metadata,
+                } => {
+                    self.ocr.screen_ai_update_available = update_available;
+                    self.ocr.screen_ai_remote_metadata = remote_metadata;
+                    repaint_requested = true;
+                }
+                crate::ocr::ScreenAiEvent::SyncProgress { message, progress } => {
+                    if let Ok(mut lock) = self.ocr.screen_ai_sync_progress.lock() {
+                        *lock = Some((message, progress));
+                    }
+                    repaint_requested = true;
+                }
+                crate::ocr::ScreenAiEvent::SyncFinished(result) => {
+                    if let Ok(mut lock) = self.ocr.screen_ai_sync_progress.lock() {
+                        *lock = None;
+                    }
+                    match result {
+                        Ok(meta) => {
+                            self.ocr.screen_ai_installed_metadata = Some(meta.clone());
+                            self.ocr.screen_ai_update_available = false;
+                            let dir = self.ocr.screen_ai_dir.clone();
+                            std::thread::spawn(move || {
+                                let _ = crate::ocr::screen_ai::warmup_screen_ai(&dir);
+                            });
+                            self.info(format!(
+                                "Chrome Screen AI local OCR model updated to {}!",
+                                meta.version
+                            ));
+                        }
+                        Err(e) => {
+                            self.error(format!("Chrome Screen AI model sync failed: {e}"));
+                        }
+                    }
+                    repaint_requested = true;
+                }
             }
         }
 

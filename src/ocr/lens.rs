@@ -329,7 +329,7 @@ pub fn subdivide_span_weighted(text: &str, min_pos: f32, max_pos: f32) -> Vec<(f
     out
 }
 
-fn is_dot_leader_char(c: char) -> bool {
+pub(crate) fn is_dot_leader_char(c: char) -> bool {
     matches!(c, '…' | '‥' | '⋮' | '︙' | '･' | '・' | '.' | '．' | '·')
 }
 
@@ -411,7 +411,7 @@ pub fn normalize_dot_leader_word(plain_text: &str, word_span: Option<f32>, char_
 }
 
 /// Estimates the normalized size of 1 fullwidth CJK character (`1 em`) along the line's reading axis.
-fn estimate_line_char_em(
+pub(crate) fn estimate_line_char_em(
     words: &[TextLayoutWord],
     line_w: f32,
     line_h: f32,
@@ -455,7 +455,7 @@ fn estimate_line_char_em(
 }
 
 /// Builds the line text and per-character normalized `[start, end]` spans from Lens word boxes.
-fn build_line_text_and_spans(
+pub(crate) fn build_line_text_and_spans(
     words: &[TextLayoutWord],
     line_min: f32,
     line_max: f32,

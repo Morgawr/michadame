@@ -638,7 +638,152 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 }
 
 fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool) {
-    technical_group(ui, "Quick OCR (Google Lens):", |ui| {
+    technical_group(ui, "Quick OCR:", |ui| {
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [130.0, 18.0],
+                egui::Label::new(
+                    egui::RichText::new("OCR Model:")
+                        .monospace()
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(153, 153, 153)),
+                ),
+            )
+            .on_hover_text(
+                "Select whether on-demand OCR (Spacebar) uses the remote Google Lens API or the local Chrome Screen AI model.",
+            );
+
+            let mut selected_backend = state.ocr.backend;
+            egui::ComboBox::from_id_source("ocr_backend_selector")
+                .width(220.0)
+                .selected_text(
+                    egui::RichText::new(selected_backend.label())
+                        .monospace()
+                        .size(11.0),
+                )
+                .show_ui(ui, |ui| {
+                    for candidate in [
+                        crate::ocr::OcrBackend::GoogleLens,
+                        crate::ocr::OcrBackend::LocalScreenAi,
+                    ] {
+                        ui.selectable_value(
+                            &mut selected_backend,
+                            candidate,
+                            egui::RichText::new(candidate.label())
+                                .monospace()
+                                .size(11.0),
+                        );
+                    }
+                });
+
+            if selected_backend != state.ocr.backend {
+                state.ocr.set_backend(selected_backend);
+                if selected_backend == crate::ocr::OcrBackend::LocalScreenAi {
+                    if state.ocr.screen_ai_installed_metadata.is_none() {
+                        state.ocr.trigger_screen_ai_sync();
+                    } else {
+                        let dir = state.ocr.screen_ai_dir.clone();
+                        std::thread::spawn(move || {
+                            let _ = crate::ocr::screen_ai::warmup_screen_ai(&dir);
+                        });
+                    }
+                }
+                crate::config::save_config(state);
+                *changed = true;
+            }
+        });
+
+        let is_syncing_sa = state.ocr.is_syncing_screen_ai.load(Ordering::Relaxed);
+        if state.ocr.backend == crate::ocr::OcrBackend::LocalScreenAi || is_syncing_sa {
+            ui.add_space(4.0);
+            if state.ocr.screen_ai_update_available
+                && state.ocr.screen_ai_installed_metadata.is_some()
+            {
+                ui.label(
+                    egui::RichText::new("(!) An update is available for Chrome Screen AI!")
+                        .color(egui::Color32::from_rgb(251, 191, 36))
+                        .monospace()
+                        .size(11.0),
+                );
+            }
+
+            if let Some(meta) = &state.ocr.screen_ai_installed_metadata {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Local Model: Installed (version {})",
+                        meta.version
+                    ))
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(136, 136, 136)),
+                );
+            } else {
+                ui.label(
+                    egui::RichText::new(
+                        "Local Model: Not installed - click Download to install (~75 MB)",
+                    )
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(251, 191, 36)),
+                );
+            }
+
+            ui.add_space(2.0);
+
+            if is_syncing_sa {
+                let (msg, prog) = if let Ok(lock) = state.ocr.screen_ai_sync_progress.lock() {
+                    lock.clone()
+                        .unwrap_or(("Downloading Chrome Screen AI model...".into(), 0.0))
+                } else {
+                    ("Downloading Chrome Screen AI model...".into(), 0.0)
+                };
+                ui.add(egui::ProgressBar::new(prog).text(msg).animate(true));
+            } else {
+                ui.horizontal(|ui| {
+                    let button_text = if state.ocr.screen_ai_installed_metadata.is_none() {
+                        "Download Local OCR Model (!)"
+                    } else if state.ocr.screen_ai_update_available {
+                        "Update Local OCR Model (!)"
+                    } else {
+                        "Sync Local OCR Model"
+                    };
+
+                    let highlight = state.ocr.screen_ai_installed_metadata.is_none()
+                        || state.ocr.screen_ai_update_available;
+                    let sync_btn = egui::Button::new(egui::RichText::new(button_text).color(
+                        if highlight {
+                            egui::Color32::from_rgb(251, 191, 36)
+                        } else {
+                            ui.visuals().text_color()
+                        },
+                    ));
+
+                    if ui
+                        .add(sync_btn)
+                        .on_hover_text(
+                            "Download and install the latest Chrome Screen AI OCR model package from Chromium CIPD",
+                        )
+                        .clicked()
+                    {
+                        state.ocr.trigger_screen_ai_sync();
+                    }
+
+                    if state
+                        .ocr
+                        .is_checking_screen_ai_update
+                        .load(Ordering::Relaxed)
+                    {
+                        ui.spinner();
+                        ui.label(egui::RichText::new("Checking...").weak().small());
+                    } else if ui.small_button("Check Updates").clicked() {
+                        state.ocr.trigger_check_screen_ai_version();
+                    }
+                });
+            }
+        }
+
+        technical_separator(ui);
+
         two_columns(ui, |col1, col2| {
             let slider = egui::Slider::new(&mut state.ocr.sticky_distance, 0.0..=2.0)
                 .step_by(0.05)
@@ -722,7 +867,10 @@ fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool
         if state.ocr.is_processing.load(Ordering::Relaxed) {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Processing OCR with Google Lens...");
+                ui.label(format!(
+                    "Processing OCR with {}...",
+                    state.ocr.backend.short_name()
+                ));
             });
         }
     });

@@ -142,11 +142,18 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
                     .is_processing
                     .load(std::sync::atomic::Ordering::Relaxed)
                 {
+                    state.ocr.backend_shared.store(
+                        state.ocr.backend.as_u8(),
+                        std::sync::atomic::Ordering::Release,
+                    );
                     state
                         .ocr
                         .capture_requested
                         .store(true, std::sync::atomic::Ordering::Release);
-                    state.info("Capturing screen for Google Lens OCR...");
+                    state.info(format!(
+                        "Capturing screen for {} OCR...",
+                        state.ocr.backend.short_name()
+                    ));
                     ctx.request_repaint();
                 }
                 send_ws_command(serde_json::json!({"command": "manual_ocr"}));

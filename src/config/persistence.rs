@@ -365,6 +365,7 @@ pub fn save_global_hardware_config_at(path: &Path, state: &AppState) -> Result<(
     cfg.audio_sample_rate = Some(state.hardware.audio_sample_rate);
     cfg.audio_sample_format = Some(state.hardware.audio_sample_format.clone());
     cfg.master_volume = Some(state.hardware.master_volume);
+    cfg.ocr_backend = Some(state.ocr.backend);
     cfg.ocr_sticky_distance = Some(state.ocr.sticky_distance);
     cfg.ocr_hide_overlay = Some(state.ocr.hide_overlay);
     cfg.ocr_timeout_seconds = Some(state.ocr.timeout_seconds);
@@ -760,6 +761,9 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     if !cfg.has_shown_first_run_warning.unwrap_or(false) {
         state.ui.show_first_run_dialog = true;
     }
+    state
+        .ocr
+        .set_backend(cfg.ocr_backend.unwrap_or_default());
     state.ocr.sticky_distance = cfg.ocr_sticky_distance.unwrap_or(0.6);
     state.ocr.hide_overlay = cfg.ocr_hide_overlay.unwrap_or(false);
     state.ocr.timeout_seconds = cfg.ocr_timeout_seconds.unwrap_or(45);
@@ -1125,6 +1129,34 @@ mod tests {
         let mut state = AppState::default();
         apply_config(&mut state, &loaded);
         assert_eq!(state.ocr.timeout_seconds, 30);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_ocr_backend_toml_roundtrip() {
+        let path = std::env::temp_dir().join(format!(
+            "michadame-ocr-backend-config-{}-{}.toml",
+            std::process::id(),
+            crate::replay::now_us()
+        ));
+        let cfg = MichadameConfig {
+            ocr_backend: Some(crate::ocr::OcrBackend::LocalScreenAi),
+            ..Default::default()
+        };
+        confy::store_path(&path, &cfg).unwrap();
+        let loaded: MichadameConfig = confy::load_path(&path).unwrap();
+        assert_eq!(
+            loaded.ocr_backend,
+            Some(crate::ocr::OcrBackend::LocalScreenAi)
+        );
+
+        let mut state = AppState::default();
+        apply_config(&mut state, &loaded);
+        assert_eq!(state.ocr.backend, crate::ocr::OcrBackend::LocalScreenAi);
+        assert_eq!(
+            crate::ocr::OcrBackend::from_u8(state.ocr.backend_shared.load(Ordering::Acquire)),
+            crate::ocr::OcrBackend::LocalScreenAi
+        );
         let _ = std::fs::remove_file(&path);
     }
 

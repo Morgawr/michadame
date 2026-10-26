@@ -1,6 +1,49 @@
 use prost::Message;
-use std::sync::{atomic::AtomicBool, Arc};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicBool, AtomicU8, Ordering},
+    Arc, Mutex,
+};
 use std::time::Instant;
+
+/// Selection of OCR engine backend.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum OcrBackend {
+    #[default]
+    GoogleLens,
+    LocalScreenAi,
+}
+
+impl OcrBackend {
+    pub fn as_u8(self) -> u8 {
+        match self {
+            OcrBackend::GoogleLens => 0,
+            OcrBackend::LocalScreenAi => 1,
+        }
+    }
+
+    pub fn from_u8(val: u8) -> Self {
+        match val {
+            1 => OcrBackend::LocalScreenAi,
+            _ => OcrBackend::GoogleLens,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            OcrBackend::GoogleLens => "Google Lens (Remote)",
+            OcrBackend::LocalScreenAi => "Chrome Screen AI (Local)",
+        }
+    }
+
+    pub fn short_name(self) -> &'static str {
+        match self {
+            OcrBackend::GoogleLens => "Google Lens",
+            OcrBackend::LocalScreenAi => "Chrome Screen AI (Local)",
+        }
+    }
+}
 
 /// The text reading and writing direction detected by OCR.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -67,6 +110,28 @@ pub struct OcrCaptureRequest {
 
 /// State of the OCR system in the application.
 pub struct OcrState {
+    /// Selected OCR backend (remote Google Lens or local Chrome Screen AI).
+    pub backend: OcrBackend,
+    /// Atomic representation of `backend` shared with the persistent background worker thread.
+    pub backend_shared: Arc<AtomicU8>,
+    /// Local directory where Chrome Screen AI model files and library are stored.
+    pub screen_ai_dir: PathBuf,
+    /// Installed local Chrome Screen AI metadata, if present on disk.
+    pub screen_ai_installed_metadata: Option<crate::ocr::screen_ai::ScreenAiMetadata>,
+    /// Latest remote Chrome Screen AI metadata checked from CIPD.
+    pub screen_ai_remote_metadata: Option<crate::ocr::screen_ai::ScreenAiMetadata>,
+    /// Whether an update is available (or local model is not yet installed).
+    pub screen_ai_update_available: bool,
+    /// Atomic flag indicating a Screen AI version check is running.
+    pub is_checking_screen_ai_update: Arc<AtomicBool>,
+    /// Atomic flag indicating a Screen AI model download/extraction is running.
+    pub is_syncing_screen_ai: Arc<AtomicBool>,
+    /// Current Screen AI download/sync progress: (Status message, fraction 0.0..1.0).
+    pub screen_ai_sync_progress: Arc<Mutex<Option<(String, f32)>>>,
+    /// Channel sender for Screen AI sync/update worker events.
+    pub screen_ai_event_tx: crossbeam_channel::Sender<crate::ocr::screen_ai::ScreenAiEvent>,
+    /// Channel receiver for Screen AI sync/update worker events.
+    pub screen_ai_event_rx: Option<crossbeam_channel::Receiver<crate::ocr::screen_ai::ScreenAiEvent>>,
     /// Atomic flag set by the UI when an OCR screenshot capture is requested.
     /// Polled and cleared by the OpenGL paint callback.
     pub capture_requested: Arc<AtomicBool>,
@@ -102,12 +167,56 @@ pub struct OcrState {
 }
 
 impl OcrState {
+    /// Updates the selected OCR backend and synchronizes the atomic value read by the worker thread.
+    pub fn set_backend(&mut self, backend: OcrBackend) {
+        self.backend = backend;
+        self.backend_shared.store(backend.as_u8(), Ordering::Release);
+    }
+
+    /// Triggers a background version check for the Chrome Screen AI model on CIPD.
+    pub fn trigger_check_screen_ai_version(&mut self) {
+        let current_digest = self
+            .screen_ai_installed_metadata
+            .as_ref()
+            .map(|m| m.instance_digest.clone());
+        crate::ocr::screen_ai::spawn_check_screen_ai_version(
+            current_digest,
+            self.is_checking_screen_ai_update.clone(),
+            self.screen_ai_event_tx.clone(),
+        );
+    }
+
+    /// Triggers a background download and installation of the Chrome Screen AI model.
+    pub fn trigger_screen_ai_sync(&mut self) {
+        if self.is_syncing_screen_ai.load(Ordering::Relaxed) {
+            return;
+        }
+        crate::ocr::screen_ai::spawn_sync_screen_ai(
+            self.screen_ai_dir.clone(),
+            self.is_syncing_screen_ai.clone(),
+            self.screen_ai_event_tx.clone(),
+        );
+    }
+
     /// Starts the persistent background worker thread if not already running.
     /// The worker manages connection pooling, warmup keep-alives, single-pass downscaling,
-    /// fast JPEG compression, and direct UI notification upon result readiness.
+    /// fast JPEG compression (for Google Lens), local Screen AI inference, and direct UI
+    /// notification upon result readiness.
     pub fn start_worker(&mut self, egui_ctx: Option<eframe::egui::Context>) {
+        self.backend_shared
+            .store(self.backend.as_u8(), Ordering::Release);
+
         if self.ocr_request_sender.is_some() {
             return;
+        }
+
+        if egui_ctx.is_some() {
+            self.trigger_check_screen_ai_version();
+            if self.backend == OcrBackend::LocalScreenAi
+                && self.screen_ai_installed_metadata.is_none()
+            {
+                self.trigger_screen_ai_sync();
+            }
         }
 
         let (req_tx, req_rx) = crossbeam_channel::unbounded::<OcrCaptureRequest>();
@@ -115,52 +224,142 @@ impl OcrState {
 
         let res_tx = self.ocr_sender.as_ref().unwrap().clone();
         let is_processing = self.is_processing.clone();
+        let backend_shared = self.backend_shared.clone();
+        let screen_ai_dir = self.screen_ai_dir.clone();
+        let is_syncing_screen_ai = self.is_syncing_screen_ai.clone();
+        let screen_ai_event_tx = self.screen_ai_event_tx.clone();
 
         let _ = std::thread::Builder::new()
-            .name("lens-ocr-worker".into())
+            .name("ocr-worker".into())
             .spawn(move || {
                 let agent = crate::ocr::lens::create_lens_agent();
-                // Initial background warmup to establish TCP+TLS connection early
-                crate::ocr::lens::ping_warmup(&agent);
+                let initial_backend =
+                    OcrBackend::from_u8(backend_shared.load(Ordering::Acquire));
+                match initial_backend {
+                    OcrBackend::GoogleLens => {
+                        // Initial background warmup to establish TCP+TLS connection early
+                        crate::ocr::lens::ping_warmup(&agent);
+                    }
+                    OcrBackend::LocalScreenAi => {
+                        if crate::ocr::screen_ai::is_screen_ai_installed(&screen_ai_dir) {
+                            let _ = crate::ocr::screen_ai::warmup_screen_ai(&screen_ai_dir);
+                        }
+                    }
+                }
 
                 let mut rgb_buffer = Vec::new();
                 let mut jpeg_buffer = Vec::new();
+                let mut bgra_buffer = Vec::new();
 
                 loop {
                     // Wait for capture request or send periodic keep-alive probe after 45s
                     match req_rx.recv_timeout(std::time::Duration::from_secs(45)) {
                         Ok(req) => {
-                            is_processing.store(true, std::sync::atomic::Ordering::Release);
+                            is_processing.store(true, Ordering::Release);
+                            let active_backend =
+                                OcrBackend::from_u8(backend_shared.load(Ordering::Acquire));
 
-                            let (target_w, target_h) =
-                                crate::ocr::lens::calculate_720p_target_dimensions(req.width, req.height);
+                            let result = match active_backend {
+                                OcrBackend::GoogleLens => {
+                                    let (target_w, target_h) =
+                                        crate::ocr::lens::calculate_720p_target_dimensions(
+                                            req.width, req.height,
+                                        );
 
-                            crate::ocr::lens::convert_and_scale_gl_rgba_to_rgb(
-                                &req.raw_rgba,
-                                req.width,
-                                req.height,
-                                target_w,
-                                target_h,
-                                &mut rgb_buffer,
-                            );
-
-                            let enc_res = crate::ocr::lens::encode_jpeg_for_ocr(
-                                &rgb_buffer,
-                                target_w,
-                                target_h,
-                                &mut jpeg_buffer,
-                            );
-
-                            let result = match enc_res {
-                                Ok(()) => {
-                                    crate::ocr::lens::execute_lens_ocr_with_agent(
-                                        &agent,
-                                        jpeg_buffer.clone(),
+                                    crate::ocr::lens::convert_and_scale_gl_rgba_to_rgb(
+                                        &req.raw_rgba,
+                                        req.width,
+                                        req.height,
                                         target_w,
                                         target_h,
-                                    )
+                                        &mut rgb_buffer,
+                                    );
+
+                                    let enc_res = crate::ocr::lens::encode_jpeg_for_ocr(
+                                        &rgb_buffer,
+                                        target_w,
+                                        target_h,
+                                        &mut jpeg_buffer,
+                                    );
+
+                                    match enc_res {
+                                        Ok(()) => crate::ocr::lens::execute_lens_ocr_with_agent(
+                                            &agent,
+                                            jpeg_buffer.clone(),
+                                            target_w,
+                                            target_h,
+                                        ),
+                                        Err(e) => Err(e),
+                                    }
                                 }
-                                Err(e) => Err(e),
+                                OcrBackend::LocalScreenAi => {
+                                    // Wait if a background sync is already in progress
+                                    while is_syncing_screen_ai.load(Ordering::Acquire) {
+                                        std::thread::sleep(std::time::Duration::from_millis(100));
+                                    }
+
+                                    // Auto-download on demand if not yet installed
+                                    let install_res = if !crate::ocr::screen_ai::is_screen_ai_installed(&screen_ai_dir) {
+                                        is_syncing_screen_ai.store(true, Ordering::Release);
+                                        let tx_prog = screen_ai_event_tx.clone();
+                                        let ctx_prog = egui_ctx.clone();
+                                        let dl_res = crate::ocr::screen_ai::download_and_install_screen_ai(
+                                            &screen_ai_dir,
+                                            move |message, progress| {
+                                                let _ = tx_prog.send(
+                                                    crate::ocr::screen_ai::ScreenAiEvent::SyncProgress {
+                                                        message,
+                                                        progress,
+                                                    },
+                                                );
+                                                if let Some(ctx) = &ctx_prog {
+                                                    ctx.request_repaint();
+                                                }
+                                            },
+                                        );
+                                        is_syncing_screen_ai.store(false, Ordering::Release);
+                                        let _ = screen_ai_event_tx.send(
+                                            crate::ocr::screen_ai::ScreenAiEvent::SyncFinished(
+                                                dl_res.clone(),
+                                            ),
+                                        );
+                                        dl_res.map(|_| ())
+                                    } else {
+                                        Ok(())
+                                    };
+
+                                    match install_res {
+                                        Ok(()) => {
+                                            let max_dim = crate::ocr::screen_ai::warmup_screen_ai(
+                                                &screen_ai_dir,
+                                            )
+                                            .unwrap_or(
+                                                crate::ocr::screen_ai::DEFAULT_MAX_DIMENSION,
+                                            );
+                                            let (target_w, target_h) =
+                                                crate::ocr::screen_ai::calculate_screen_ai_target_dimensions(
+                                                    req.width, req.height, max_dim,
+                                                );
+
+                                            crate::ocr::screen_ai::convert_and_scale_gl_rgba_to_bgra(
+                                                &req.raw_rgba,
+                                                req.width,
+                                                req.height,
+                                                target_w,
+                                                target_h,
+                                                &mut bgra_buffer,
+                                            );
+
+                                            crate::ocr::screen_ai::execute_screen_ai_ocr_bgra(
+                                                &screen_ai_dir,
+                                                &bgra_buffer,
+                                                target_w,
+                                                target_h,
+                                            )
+                                        }
+                                        Err(e) => Err(e),
+                                    }
+                                }
                             };
 
                             let _ = res_tx.send(result);
@@ -169,8 +368,12 @@ impl OcrState {
                             }
                         }
                         Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                            // Maintain keepalive on idle connection
-                            crate::ocr::lens::ping_warmup(&agent);
+                            // Maintain keepalive on idle connection when using remote Google Lens
+                            if OcrBackend::from_u8(backend_shared.load(Ordering::Acquire))
+                                == OcrBackend::GoogleLens
+                            {
+                                crate::ocr::lens::ping_warmup(&agent);
+                            }
                         }
                         Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                             break;
@@ -221,7 +424,24 @@ impl OcrState {
 impl Default for OcrState {
     fn default() -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
+        let (sa_tx, sa_rx) = crossbeam_channel::unbounded();
+        let screen_ai_dir = crate::ocr::screen_ai::resolve_screen_ai_directory();
+        let screen_ai_installed_metadata =
+            crate::ocr::screen_ai::load_installed_metadata(&screen_ai_dir);
+        let screen_ai_update_available = screen_ai_installed_metadata.is_none();
+
         Self {
+            backend: OcrBackend::default(),
+            backend_shared: Arc::new(AtomicU8::new(OcrBackend::default().as_u8())),
+            screen_ai_dir,
+            screen_ai_installed_metadata,
+            screen_ai_remote_metadata: None,
+            screen_ai_update_available,
+            is_checking_screen_ai_update: Arc::new(AtomicBool::new(false)),
+            is_syncing_screen_ai: Arc::new(AtomicBool::new(false)),
+            screen_ai_sync_progress: Arc::new(Mutex::new(None)),
+            screen_ai_event_tx: sa_tx,
+            screen_ai_event_rx: Some(sa_rx),
             capture_requested: Arc::new(AtomicBool::new(false)),
             is_processing: Arc::new(AtomicBool::new(false)),
             boxes: Vec::new(),

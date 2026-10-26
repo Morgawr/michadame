@@ -183,8 +183,15 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             }
         } else {
             if !state.ocr.is_processing.load(Ordering::Relaxed) {
+                state
+                    .ocr
+                    .backend_shared
+                    .store(state.ocr.backend.as_u8(), Ordering::Release);
                 state.ocr.capture_requested.store(true, Ordering::Release);
-                state.info("Capturing screen for Google Lens OCR...");
+                state.info(format!(
+                    "Capturing screen for {} OCR...",
+                    state.ocr.backend.short_name()
+                ));
                 ctx.request_repaint();
             }
             send_ws_command(serde_json::json!({"command": "manual_ocr"}));
@@ -221,6 +228,10 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             None
         };
 
+        state
+            .ocr
+            .backend_shared
+            .store(state.ocr.backend.as_u8(), Ordering::Release);
         let ocr_capture = state.ocr.capture_requested.clone();
         let ocr_req_sender = state.ocr.ocr_request_sender.clone();
         let mining_capture_this_frame = state.bank.has_pending();
