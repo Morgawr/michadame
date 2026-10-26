@@ -380,6 +380,10 @@ pub fn save_global_hardware_config_at(
     cfg.ocr_sticky_distance = Some(state.ocr.sticky_distance);
     cfg.ocr_hide_overlay = Some(state.ocr.hide_overlay);
     cfg.ocr_timeout_seconds = Some(state.ocr.timeout_seconds);
+    cfg.ocr_constant_scanning = Some(state.ocr.constant_scanning);
+    cfg.ocr_scan_interval_secs = Some(state.ocr.scan_interval_secs);
+    cfg.ocr_max_dropoff_secs = Some(state.ocr.max_dropoff_secs);
+    cfg.ocr_jitter_tolerance = Some(state.ocr.jitter_tolerance);
     cfg.bank_current_tag = crate::bank::tags::normalize_tag(&state.bank.current_tag);
     cfg.bank_compact_mode = Some(state.bank.compact_mode);
     cfg.default_halo = Some(state.halo_defaults.clone());
@@ -781,6 +785,30 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     state.ocr.sticky_distance = cfg.ocr_sticky_distance.unwrap_or(0.6);
     state.ocr.hide_overlay = cfg.ocr_hide_overlay.unwrap_or(false);
     state.ocr.timeout_seconds = cfg.ocr_timeout_seconds.unwrap_or(45);
+    state.ocr.constant_scanning = cfg.ocr_constant_scanning.unwrap_or(false);
+    state.ocr.scan_interval_secs = cfg
+        .ocr_scan_interval_secs
+        .unwrap_or(crate::ocr::models::DEFAULT_SCAN_INTERVAL_SECS)
+        .clamp(
+            crate::ocr::models::MIN_SCAN_INTERVAL_SECS,
+            crate::ocr::models::MAX_SCAN_INTERVAL_SECS,
+        );
+    state.ocr.max_dropoff_secs = cfg
+        .ocr_max_dropoff_secs
+        .unwrap_or(crate::ocr::models::DEFAULT_MAX_DROPOFF_SECS)
+        .clamp(
+            crate::ocr::models::MIN_MAX_DROPOFF_SECS,
+            crate::ocr::models::MAX_MAX_DROPOFF_SECS,
+        )
+        .max(state.ocr.scan_interval_secs);
+    state.ocr.jitter_tolerance = cfg
+        .ocr_jitter_tolerance
+        .unwrap_or(crate::ocr::models::DEFAULT_JITTER_TOLERANCE)
+        .clamp(
+            crate::ocr::models::MIN_JITTER_TOLERANCE,
+            crate::ocr::models::MAX_JITTER_TOLERANCE,
+        );
+    state.ocr.reset_constant_scan_backoff();
     state.dict.popup_under_crt = cfg.popup_under_crt.unwrap_or(false);
     state.bank.current_tag = cfg.bank_current_tag.clone().unwrap_or_default();
     state.bank.saved_current_tag = state.bank.current_tag.clone();
@@ -2108,6 +2136,48 @@ crt_brightboost = 1.6
             "/custom/path/michadame-gamescope-steam.sh"
         );
         assert_eq!(fresh_state.selected_steam_game.as_deref(), Some("3259780"));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("toml.bak"));
+    }
+
+    #[test]
+    fn test_ocr_constant_scanning_persistence_roundtrip() {
+        let path = std::env::temp_dir().join(format!(
+            "michadame_ocr_constant_scan_test_{}_{}.toml",
+            std::process::id(),
+            crate::replay::now_us()
+        ));
+        let mut state = AppState::default();
+        state.ocr.set_backend(crate::ocr::OcrBackend::LocalScreenAi);
+        state.ocr.constant_scanning = true;
+        state.ocr.scan_interval_secs = 0.7;
+        state.ocr.max_dropoff_secs = 4.5;
+        state.ocr.jitter_tolerance = 0.25;
+
+        save_global_hardware_config_at(&path, &state).unwrap();
+
+        let loaded: MichadameConfig = confy::load_path(&path).unwrap();
+        assert_eq!(
+            loaded.ocr_backend,
+            Some(crate::ocr::OcrBackend::LocalScreenAi)
+        );
+        assert_eq!(loaded.ocr_constant_scanning, Some(true));
+        assert!((loaded.ocr_scan_interval_secs.unwrap() - 0.7).abs() < 1e-4);
+        assert!((loaded.ocr_max_dropoff_secs.unwrap() - 4.5).abs() < 1e-4);
+        assert!((loaded.ocr_jitter_tolerance.unwrap() - 0.25).abs() < 1e-4);
+
+        let mut fresh_state = AppState::default();
+        apply_config(&mut fresh_state, &loaded);
+        assert_eq!(
+            fresh_state.ocr.backend,
+            crate::ocr::OcrBackend::LocalScreenAi
+        );
+        assert!(fresh_state.ocr.constant_scanning);
+        assert!(fresh_state.ocr.is_constant_scanning_active());
+        assert!((fresh_state.ocr.scan_interval_secs - 0.7).abs() < 1e-4);
+        assert!((fresh_state.ocr.max_dropoff_secs - 4.5).abs() < 1e-4);
+        assert!((fresh_state.ocr.jitter_tolerance - 0.25).abs() < 1e-4);
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("toml.bak"));

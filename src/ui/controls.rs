@@ -802,10 +802,117 @@ fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool
                     }
                 });
             }
+
+            if state.ocr.backend == crate::ocr::OcrBackend::LocalScreenAi {
+                ui.add_space(4.0);
+                if ui
+                    .checkbox(
+                        &mut state.ocr.constant_scanning,
+                        "Enable persistent background scanning",
+                    )
+                    .on_hover_text(
+                        "Automatically scans the screen in the background at a regular interval using the local model.\nScanning pauses while hovering an OCR box, viewing the dictionary popup, or using the drawing whiteboard.",
+                    )
+                    .changed()
+                {
+                    state.ocr.reset_constant_scan_backoff();
+                    crate::config::save_config(state);
+                    *changed = true;
+                }
+
+                ui.add_enabled_ui(state.ocr.constant_scanning, |ui| {
+                    two_columns(ui, |col1, col2| {
+                        let interval_slider = egui::Slider::new(
+                            &mut state.ocr.scan_interval_secs,
+                            crate::ocr::models::MIN_SCAN_INTERVAL_SECS
+                                ..=crate::ocr::models::MAX_SCAN_INTERVAL_SECS,
+                        )
+                        .step_by(0.1)
+                        .custom_formatter(|n, _| format!("{:.1}s", n));
+                        if slider_item(
+                            col1,
+                            "Scan Interval:",
+                            interval_slider,
+                            Some(
+                                "Base wait time after each background OCR scan finishes before starting the next scan.",
+                            ),
+                        )
+                        .changed()
+                        {
+                            state.ocr.scan_interval_secs =
+                                (state.ocr.scan_interval_secs * 10.0).round() / 10.0;
+                            if state.ocr.scan_interval_secs > state.ocr.max_dropoff_secs {
+                                state.ocr.max_dropoff_secs = state.ocr.scan_interval_secs;
+                            }
+                            crate::config::save_config(state);
+                            *changed = true;
+                        }
+
+                        let dropoff_slider = egui::Slider::new(
+                            &mut state.ocr.max_dropoff_secs,
+                            crate::ocr::models::MIN_MAX_DROPOFF_SECS
+                                ..=crate::ocr::models::MAX_MAX_DROPOFF_SECS,
+                        )
+                        .step_by(0.1)
+                        .custom_formatter(|n, _| format!("{:.1}s", n));
+                        if slider_item(
+                            col2,
+                            "Max Drop-off Delay:",
+                            dropoff_slider,
+                            Some(
+                                "Maximum cooldown delay when consecutive scans return identical text or no Japanese text.\nRepeated identical scans gradually step up (+0.2s per repeat) up to this ceiling.",
+                            ),
+                        )
+                        .changed()
+                        {
+                            state.ocr.max_dropoff_secs =
+                                (state.ocr.max_dropoff_secs * 10.0).round() / 10.0;
+                            if state.ocr.max_dropoff_secs < state.ocr.scan_interval_secs {
+                                state.ocr.max_dropoff_secs = state.ocr.scan_interval_secs;
+                            }
+                            crate::config::save_config(state);
+                            *changed = true;
+                        }
+                    });
+
+                    two_columns(ui, |col1, _col2| {
+                        let jitter_slider = egui::Slider::new(
+                            &mut state.ocr.jitter_tolerance,
+                            crate::ocr::models::MIN_JITTER_TOLERANCE
+                                ..=crate::ocr::models::MAX_JITTER_TOLERANCE,
+                        )
+                        .step_by(0.01)
+                        .custom_formatter(|n, _| format!("{:.0}%", n * 100.0))
+                        .custom_parser(|s| {
+                            s.trim_end_matches('%')
+                                .trim()
+                                .parse::<f64>()
+                                .ok()
+                                .map(|v| v / 100.0)
+                        });
+                        if slider_item(
+                            col1,
+                            "Jitter Tolerance:",
+                            jitter_slider,
+                            Some(
+                                "Maximum bounding-box position/size difference (as % of screen dimensions) ignored when text contents are unchanged.\nHigher values prevent box flickering and keep drop-off cooldown active across noisy frames.",
+                            ),
+                        )
+                        .changed()
+                        {
+                            state.ocr.jitter_tolerance =
+                                (state.ocr.jitter_tolerance * 100.0).round() / 100.0;
+                            crate::config::save_config(state);
+                            *changed = true;
+                        }
+                    });
+                });
+            }
         }
 
         technical_separator(ui);
 
+        let constant_scan_active = state.ocr.is_constant_scanning_active();
         two_columns(ui, |col1, col2| {
             let slider = egui::Slider::new(&mut state.ocr.sticky_distance, 0.0..=2.0)
                 .step_by(0.05)
@@ -825,20 +932,22 @@ fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool
                 *changed = true;
             }
 
-            let slider = egui::Slider::new(&mut state.ocr.timeout_seconds, 0..=300).suffix("s");
-            if slider_item(
-                col2,
-                "Auto-clear Timeout:",
-                slider,
-                Some(
-                    "Time in seconds before OCR scan results automatically disappear.\n• 0s: Disabled (keep until Shift+Space or dismissed)\n• 45s: Default",
-                ),
-            )
-            .changed()
-            {
-                crate::config::save_config(state);
-                *changed = true;
-            }
+            col2.add_enabled_ui(!constant_scan_active, |col2| {
+                let slider = egui::Slider::new(&mut state.ocr.timeout_seconds, 0..=300).suffix("s");
+                if slider_item(
+                    col2,
+                    "Auto-clear Timeout:",
+                    slider,
+                    Some(
+                        "Time in seconds before OCR scan results automatically disappear.\n• 0s: Disabled (keep until Shift+Space or dismissed)\n• 45s: Default",
+                    ),
+                )
+                .changed()
+                {
+                    crate::config::save_config(state);
+                    *changed = true;
+                }
+            });
         });
 
         ui.add_space(4.0);
@@ -886,7 +995,7 @@ fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool
             }
         });
 
-        if state.ocr.is_processing.load(Ordering::Relaxed) {
+        if !constant_scan_active && state.ocr.is_processing.load(Ordering::Relaxed) {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.label(format!(

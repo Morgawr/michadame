@@ -334,6 +334,10 @@ impl AppState {
         }
         self.ocr.last_pause_tick = None;
 
+        if self.ocr.is_constant_scanning_active() {
+            return false;
+        }
+
         if self.dict.popup.is_none() {
             if self.ocr.is_expired() {
                 self.clear_ocr();
@@ -343,6 +347,71 @@ impl AppState {
             }
         }
         repaint_requested
+    }
+
+    /// Drives persistent background OCR scanning when `LocalScreenAi` and `constant_scanning` are enabled.
+    ///
+    /// Automatically pauses when:
+    /// - The dictionary popup is open (`self.dict.popup.is_some()`)
+    /// - The cursor is hovering over an OCR box (`self.ocr.is_box_hovered`)
+    /// - The drawing whiteboard is open (`self.whiteboard.open`)
+    pub fn handle_constant_ocr_scanning(&mut self, ctx: &egui::Context) -> bool {
+        if !self.ocr.is_constant_scanning_active() || !self.ui.video_window_open {
+            self.ocr.next_constant_scan_time = None;
+            self.ocr.was_constant_scan_paused = false;
+            return false;
+        }
+
+        // Wait if local model is not installed or is currently syncing
+        if self.ocr.screen_ai_installed_metadata.is_none()
+            || self.ocr.is_syncing_screen_ai.load(Ordering::Relaxed)
+        {
+            self.ocr.next_constant_scan_time = None;
+            return false;
+        }
+
+        let is_paused =
+            self.dict.popup.is_some() || self.ocr.is_box_hovered || self.whiteboard.open;
+        if is_paused {
+            self.ocr.was_constant_scan_paused = true;
+            self.ocr.next_constant_scan_time = None;
+            return false;
+        }
+
+        // If we just resumed from a pause (popup closed / unhovered / whiteboard closed),
+        // reset backoff and schedule the next scan after the base interval.
+        if self.ocr.was_constant_scan_paused {
+            self.ocr.was_constant_scan_paused = false;
+            self.ocr.consecutive_same_scans = 0;
+            let delay = std::time::Duration::from_secs_f32(self.ocr.scan_interval_secs.clamp(
+                crate::ocr::models::MIN_SCAN_INTERVAL_SECS,
+                crate::ocr::models::MAX_SCAN_INTERVAL_SECS,
+            ));
+            self.ocr.next_constant_scan_time = Some(Instant::now() + delay);
+        }
+
+        // Do not schedule or trigger while a capture or worker scan is already in flight
+        if self.ocr.is_processing.load(Ordering::Acquire)
+            || self.ocr.capture_requested.load(Ordering::Acquire)
+        {
+            return false;
+        }
+
+        let now = Instant::now();
+        match self.ocr.next_constant_scan_time {
+            Some(target) if now < target => {
+                ctx.request_repaint_after(target.saturating_duration_since(now));
+                false
+            }
+            _ => {
+                self.ocr.next_constant_scan_time = None;
+                self.ocr
+                    .backend_shared
+                    .store(self.ocr.backend.as_u8(), Ordering::Release);
+                self.ocr.capture_requested.store(true, Ordering::Release);
+                true
+            }
+        }
     }
 
     pub fn update_fps_counters(&mut self, ctx: &egui::Context) {
@@ -880,12 +949,34 @@ impl eframe::App for AppState {
             repaint_requested = true;
         }
 
-        if let Some(rx) = &self.ocr.result_receiver {
-            if let Ok(result) = rx.try_recv() {
-                self.ocr.is_processing.store(false, Ordering::Release);
-                let model_name = self.ocr.backend.short_name();
-                match result {
-                    Ok(lines) => {
+        let ocr_result = self
+            .ocr
+            .result_receiver
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok());
+        if let Some(result) = ocr_result {
+            self.ocr.is_processing.store(false, Ordering::Release);
+            let model_name = self.ocr.backend.short_name();
+            let constant_active = self.ocr.is_constant_scanning_active();
+            match result {
+                Ok(lines) => {
+                    if constant_active {
+                        let is_paused = self.dict.popup.is_some()
+                            || self.ocr.is_box_hovered
+                            || self.whiteboard.open;
+                        if !is_paused {
+                            let updated = self.ocr.apply_constant_scan_lines(lines);
+                            let delay = self.ocr.current_constant_scan_delay();
+                            self.ocr.next_constant_scan_time = Some(Instant::now() + delay);
+                            ctx.request_repaint_after(delay);
+                            if updated {
+                                repaint_requested = true;
+                            }
+                        } else {
+                            self.ocr.was_constant_scan_paused = true;
+                            self.ocr.next_constant_scan_time = None;
+                        }
+                    } else {
                         self.ocr.raw_lines = lines;
                         self.ocr.recompute_boxes();
                         let count = self.ocr.boxes.len();
@@ -903,13 +994,24 @@ impl eframe::App for AppState {
                                 if count == 1 { "" } else { "es" }
                             ));
                         }
-                    }
-                    Err(e) => {
-                        self.ocr.last_error = Some(e.clone());
-                        self.error(format!("OCR error ({}): {}", model_name, e));
+                        repaint_requested = true;
                     }
                 }
-                repaint_requested = true;
+                Err(e) => {
+                    let is_same_error = self.ocr.last_error.as_deref() == Some(e.as_str());
+                    self.ocr.last_error = Some(e.clone());
+                    if !constant_active || !is_same_error {
+                        self.error(format!("OCR error ({}): {}", model_name, e));
+                    }
+                    if constant_active {
+                        self.ocr.consecutive_same_scans =
+                            self.ocr.consecutive_same_scans.saturating_add(1);
+                        let delay = self.ocr.current_constant_scan_delay();
+                        self.ocr.next_constant_scan_time = Some(Instant::now() + delay);
+                        ctx.request_repaint_after(delay);
+                    }
+                    repaint_requested = true;
+                }
             }
         }
 
@@ -971,6 +1073,7 @@ impl eframe::App for AppState {
         }
 
         repaint_requested |= self.handle_ocr_timeout(ctx);
+        repaint_requested |= self.handle_constant_ocr_scanning(ctx);
 
         let dict_events: Vec<crate::dict::DictEvent> = if let Some(rx) = &self.dict.event_rx {
             let mut events = Vec::new();
@@ -1453,5 +1556,48 @@ mod tests {
 
         assert!(!wants_kbd);
         assert!(c_pressed);
+    }
+
+    #[test]
+    fn test_handle_constant_ocr_scanning_and_pause_conditions() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::default();
+        state.ui.video_window_open = true;
+        state.ocr.set_backend(crate::ocr::OcrBackend::LocalScreenAi);
+        state.ocr.constant_scanning = true;
+        state.ocr.scan_interval_secs = 0.5;
+        state.ocr.screen_ai_installed_metadata = Some(crate::ocr::screen_ai::ScreenAiMetadata {
+            version: "148.1".to_string(),
+            instance_digest: "test".to_string(),
+        });
+
+        // 1. Triggers immediate capture when ready
+        let triggered = state.handle_constant_ocr_scanning(&ctx);
+        assert!(triggered);
+        assert!(state.ocr.capture_requested.load(Ordering::Acquire));
+
+        // 2. Does not re-trigger while capture_requested or is_processing is true
+        assert!(!state.handle_constant_ocr_scanning(&ctx));
+        state.ocr.capture_requested.store(false, Ordering::Release);
+        state.ocr.is_processing.store(true, Ordering::Release);
+        assert!(!state.handle_constant_ocr_scanning(&ctx));
+        state.ocr.is_processing.store(false, Ordering::Release);
+
+        // 3. Pauses when hovering over an OCR box, dictionary popup is open, or whiteboard is open
+        state.ocr.is_box_hovered = true;
+        assert!(!state.handle_constant_ocr_scanning(&ctx));
+        assert!(state.ocr.was_constant_scan_paused);
+        assert!(!state.ocr.capture_requested.load(Ordering::Acquire));
+
+        // 4. Unhovering schedules next scan after base interval rather than firing on the exact unhover frame
+        state.ocr.is_box_hovered = false;
+        assert!(!state.handle_constant_ocr_scanning(&ctx));
+        assert!(!state.ocr.was_constant_scan_paused);
+        assert!(state.ocr.next_constant_scan_time.is_some());
+
+        // 5. Remote model never triggers constant scanning
+        state.ocr.set_backend(crate::ocr::OcrBackend::GoogleLens);
+        assert!(!state.handle_constant_ocr_scanning(&ctx));
+        assert!(state.ocr.next_constant_scan_time.is_none());
     }
 }

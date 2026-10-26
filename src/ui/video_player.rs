@@ -189,8 +189,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         }
     }
 
-    // Space to capture OCR; Shift+Space to clear OCR boxes (suppressed when passthrough is active)
+    // Space to capture OCR; Shift+Space to clear OCR boxes (suppressed when passthrough or constant scanning is active)
     if !passthrough_active
+        && !state.ocr.is_constant_scanning_active()
         && !ctx.wants_keyboard_input()
         && ctx.input(|i| i.key_pressed(egui::Key::Space))
     {
@@ -598,6 +599,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     .map(crate::replay::gpu::RuntimeView::new);
 
                 let ocr_capture_cb = ocr_capture.clone();
+                let ocr_is_processing_cb = state.ocr.is_processing.clone();
                 let ocr_req_sender_cb = ocr_req_sender.clone();
                 let bank_capture_cb = bank_capture.clone();
 
@@ -711,12 +713,17 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                     capture_frame_pixels_raw(painter.gl(), rendered_area)
                                 {
                                     if let Some(req_tx) = &ocr_req_sender_cb {
-                                        let _ =
-                                            req_tx.send(crate::ocr::models::OcrCaptureRequest {
+                                        ocr_is_processing_cb.store(true, Ordering::Release);
+                                        if req_tx
+                                            .send(crate::ocr::models::OcrCaptureRequest {
                                                 raw_rgba: pixels,
                                                 width: w,
                                                 height: h,
-                                            });
+                                            })
+                                            .is_err()
+                                        {
+                                            ocr_is_processing_cb.store(false, Ordering::Release);
+                                        }
                                     }
                                 }
                             }
@@ -944,6 +951,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 .map(crate::replay::gpu::RuntimeView::new);
 
             let ocr_capture_cb = ocr_capture.clone();
+            let ocr_is_processing_cb = state.ocr.is_processing.clone();
             let ocr_req_sender_cb = ocr_req_sender.clone();
             let bank_capture_cb = bank_capture.clone();
 
@@ -1061,11 +1069,17 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                             capture_frame_pixels_raw(painter.gl(), rendered_area)
                         {
                             if let Some(req_tx) = &ocr_req_sender_cb {
-                                let _ = req_tx.send(crate::ocr::models::OcrCaptureRequest {
-                                    raw_rgba: pixels,
-                                    width: w,
-                                    height: h,
-                                });
+                                ocr_is_processing_cb.store(true, Ordering::Release);
+                                if req_tx
+                                    .send(crate::ocr::models::OcrCaptureRequest {
+                                        raw_rgba: pixels,
+                                        width: w,
+                                        height: h,
+                                    })
+                                    .is_err()
+                                {
+                                    ocr_is_processing_cb.store(false, Ordering::Release);
+                                }
                             }
                         }
                     }
@@ -1119,6 +1133,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         // Draw interactive OCR bounding box overlay on top of the video image
         if !is_roll_active && !passthrough_active {
             crate::ocr::overlay::draw_ocr_overlay(ui, state, video_rect);
+        } else {
+            state.ocr.is_box_hovered = false;
         }
 
         // Niconico chat comments, drawn by the renderer under the CRT effects.

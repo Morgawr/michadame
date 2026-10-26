@@ -272,6 +272,7 @@ impl AppState {
         self.video_frames_since_last_check = 0;
         self.fullscreen_toggle_frame_count = None;
         self.ui.video_window_open = false;
+        self.clear_ocr();
     }
 
     pub fn stop_video_file(&mut self) {

@@ -66,15 +66,17 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
 
 /// `T` (no modifiers, window focused, not typing), same rules as the Debug `D` key.
 fn toggle_pressed(ctx: &egui::Context) -> bool {
-    !ctx.wants_keyboard_input() && ctx.input(|i| i.focused) && ctx.input_mut(|i| {
-        let pressed = i.events.iter().any(|event| {
+    !ctx.wants_keyboard_input()
+        && ctx.input(|i| i.focused)
+        && ctx.input_mut(|i| {
+            let pressed = i.events.iter().any(|event| {
             matches!(event,
                 egui::Event::Key { key: egui::Key::T, pressed: true, repeat: false, modifiers, .. }
                 if modifiers.is_none()
             )
         });
-        pressed && i.consume_key(egui::Modifiers::NONE, egui::Key::T)
-    })
+            pressed && i.consume_key(egui::Modifiers::NONE, egui::Key::T)
+        })
 }
 
 fn draw_contents(ui: &mut egui::Ui, tw: &mut TwitchState, rect: egui::Rect, now: Instant) {

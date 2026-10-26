@@ -61,6 +61,10 @@ pub fn execute_popup_mine_action(
 /// Draws the interactive OCR bounding boxes and floating controls on top of the video feed.
 pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egui::Rect) {
     if video_rect.width() <= 10.0 || video_rect.height() <= 10.0 || state.ocr.boxes.is_empty() {
+        state.ocr.is_box_hovered = false;
+        if state.ocr.boxes.is_empty() {
+            state.dict.popup = None;
+        }
         if let Some(ref r) = state.crt_renderer {
             r.lock().unwrap().popup_primitives.clear();
         }
@@ -137,8 +141,12 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
             }
         }
 
-        // Right-click dismisses the OCR box from the UI
-        if response.secondary_clicked() && !pointer_in_popup && !whiteboard_open {
+        // Right-click dismisses the OCR box from the UI (disabled when constant scanning is active)
+        if !state.ocr.is_constant_scanning_active()
+            && response.secondary_clicked()
+            && !pointer_in_popup
+            && !whiteboard_open
+        {
             dismissed_box_idx = Some(idx);
         }
 
@@ -219,16 +227,19 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
 
         // Fallback tooltip only if no dictionary is installed
         if state.dict.installed_metadata.is_none() && !whiteboard_open {
+            let hint_label = if state.ocr.is_constant_scanning_active() {
+                "📋 Click to copy"
+            } else {
+                "📋 Click to copy | Right-click to dismiss"
+            };
             response.on_hover_ui(|ui| {
                 ui.label(egui::RichText::new(&ocr_box.text).size(16.0).strong());
-                ui.label(
-                    egui::RichText::new("📋 Click to copy | Right-click to dismiss")
-                        .italics()
-                        .weak(),
-                );
+                ui.label(egui::RichText::new(hint_label).italics().weak());
             });
         }
     }
+
+    state.ocr.is_box_hovered = hovered_any_box;
 
     // Handle right-click dismissal
     if let Some(dismiss_idx) = dismissed_box_idx {

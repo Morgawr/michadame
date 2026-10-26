@@ -108,12 +108,144 @@ pub struct OcrCaptureRequest {
     pub height: u32,
 }
 
+/// Minimum base scan interval (in seconds) for constant background scanning.
+pub const MIN_SCAN_INTERVAL_SECS: f32 = 0.3;
+/// Maximum base scan interval (in seconds) for constant background scanning.
+pub const MAX_SCAN_INTERVAL_SECS: f32 = 3.0;
+/// Default base scan interval (in seconds) for constant background scanning.
+pub const DEFAULT_SCAN_INTERVAL_SECS: f32 = 0.5;
+/// Minimum configurable maximum drop-off delay (in seconds).
+pub const MIN_MAX_DROPOFF_SECS: f32 = 1.0;
+/// Maximum configurable maximum drop-off delay (in seconds).
+pub const MAX_MAX_DROPOFF_SECS: f32 = 10.0;
+/// Default maximum drop-off delay (in seconds).
+pub const DEFAULT_MAX_DROPOFF_SECS: f32 = 3.0;
+/// Delay increment (in seconds) per consecutive unchanged/empty scan along the harmonic rate curve.
+pub const DROPOFF_STEP_SECS: f32 = 0.2;
+/// Minimum configurable bounding-box jitter tolerance (1% of screen dimension).
+pub const MIN_JITTER_TOLERANCE: f32 = 0.01;
+/// Maximum configurable bounding-box jitter tolerance (50% of screen dimension).
+pub const MAX_JITTER_TOLERANCE: f32 = 0.50;
+/// Default bounding-box jitter tolerance (15% of screen dimension).
+pub const DEFAULT_JITTER_TOLERANCE: f32 = 0.15;
+
+fn is_ignorable_ocr_punctuation(c: char) -> bool {
+    c.is_whitespace()
+        || c.is_ascii_punctuation()
+        || matches!(
+            c,
+            '、' | '。'
+                | '，'
+                | '．'
+                | '・'
+                | '：'
+                | '；'
+                | '？'
+                | '！'
+                | '「'
+                | '」'
+                | '『'
+                | '』'
+                | '（'
+                | '）'
+                | '〔'
+                | '〕'
+                | '［'
+                | '］'
+                | '｛'
+                | '｝'
+                | '〈'
+                | '〉'
+                | '《'
+                | '》'
+                | '【'
+                | '】'
+                | '…'
+                | '‥'
+                | '―'
+                | '—'
+                | '〜'
+                | '～'
+                | '“'
+                | '”'
+                | '‘'
+                | '’'
+        )
+}
+
+fn normalize_box_text_for_comparison(text: &str) -> String {
+    let core: String = text
+        .chars()
+        .filter(|c| !is_ignorable_ocr_punctuation(*c))
+        .collect();
+    if core.is_empty() {
+        text.chars().filter(|c| !c.is_whitespace()).collect()
+    } else {
+        core
+    }
+}
+
+/// Returns `true` if two `OcrBox` instances represent the same text block within `jitter_tolerance`.
+pub fn is_same_ocr_box(a: &OcrBox, b: &OcrBox, jitter_tolerance: f32) -> bool {
+    let tol = jitter_tolerance.clamp(MIN_JITTER_TOLERANCE, MAX_JITTER_TOLERANCE);
+    (a.center_x - b.center_x).abs() <= tol
+        && (a.center_y - b.center_y).abs() <= tol
+        && (a.width - b.width).abs() <= tol
+        && (a.height - b.height).abs() <= tol
+        && normalize_box_text_for_comparison(&a.text) == normalize_box_text_for_comparison(&b.text)
+}
+
+/// Returns `true` if `prev` and `next` represent the same OCR scan outcome within `jitter_tolerance`:
+/// - Both are empty ("no text"), OR
+/// - Both have the same number of boxes, and each box in `prev` matches a unique box in `next`
+///   with identical normalized text and bounding box coordinates (`center_x`, `center_y`,
+///   `width`, `height`) within `jitter_tolerance`.
+pub fn are_ocr_boxes_equivalent(prev: &[OcrBox], next: &[OcrBox], jitter_tolerance: f32) -> bool {
+    if prev.len() != next.len() {
+        return false;
+    }
+    if prev.is_empty() {
+        return true;
+    }
+
+    let mut matched_next = vec![false; next.len()];
+    for a in prev {
+        let found = next
+            .iter()
+            .enumerate()
+            .position(|(j, b)| !matched_next[j] && is_same_ocr_box(a, b, jitter_tolerance));
+        match found {
+            Some(j) => matched_next[j] = true,
+            None => return false,
+        }
+    }
+    true
+}
+
 /// State of the OCR system in the application.
 pub struct OcrState {
     /// Selected OCR backend (remote Google Lens or local Chrome Screen AI).
     pub backend: OcrBackend,
     /// Atomic representation of `backend` shared with the persistent background worker thread.
     pub backend_shared: Arc<AtomicU8>,
+    /// Whether persistent background OCR scanning is enabled (only active when `backend` is `LocalScreenAi`).
+    pub constant_scanning: bool,
+    /// Base interval (in seconds, >= 0.3s in 0.1s steps) between completed constant OCR scans.
+    pub scan_interval_secs: f32,
+    /// Maximum cooldown delay (in seconds) reached when consecutive scans return identical or empty results.
+    pub max_dropoff_secs: f32,
+    /// Normalized coordinate/size jitter tolerance (0.01..=0.50) for treating boxes across frames as identical.
+    pub jitter_tolerance: f32,
+    /// Number of consecutive constant scans that returned the same text/boxes (or no text).
+    pub consecutive_same_scans: u32,
+    /// Whether at least one constant scan has completed in the current session/backoff cycle.
+    pub has_previous_constant_scan: bool,
+    /// Scheduled timestamp for triggering the next constant OCR scan after the previous scan completed.
+    pub next_constant_scan_time: Option<Instant>,
+    /// Whether the mouse cursor is currently hovering inside any rendered OCR box on the video feed.
+    pub is_box_hovered: bool,
+    /// Whether constant scanning was paused on the previous frame (e.g. popup open, box hovered, or whiteboard open).
+    pub was_constant_scan_paused: bool,
     /// Local directory where Chrome Screen AI model files and library are stored.
     pub screen_ai_dir: PathBuf,
     /// Installed local Chrome Screen AI metadata, if present on disk.
@@ -168,8 +300,107 @@ pub struct OcrState {
 }
 
 impl OcrState {
+    /// Returns `true` if constant background scanning is currently active.
+    /// Constant scanning is only supported when the local Chrome Screen AI model is selected.
+    #[inline]
+    pub fn is_constant_scanning_active(&self) -> bool {
+        self.backend == OcrBackend::LocalScreenAi && self.constant_scanning
+    }
+
+    /// Computes the scan delay in seconds using a harmonic frequency drop-off curve
+    /// (`rate(n) = 1 / (base + 0.2 * n)` -> `delay(n) = base + 0.2 * n`, clamped to `max_dropoff`).
+    /// For a `0.3s` base interval, this progresses as `0.3s -> 0.5s -> 0.7s -> ... -> max_dropoff`.
+    pub fn calculate_dropoff_delay_secs(
+        scan_interval_secs: f32,
+        max_dropoff_secs: f32,
+        consecutive_same_scans: u32,
+    ) -> f32 {
+        let base = scan_interval_secs.clamp(MIN_SCAN_INTERVAL_SECS, MAX_SCAN_INTERVAL_SECS);
+        let max_delay = max_dropoff_secs
+            .clamp(MIN_MAX_DROPOFF_SECS, MAX_MAX_DROPOFF_SECS)
+            .max(base);
+        let raw = (base + DROPOFF_STEP_SECS * (consecutive_same_scans as f32)).min(max_delay);
+        (raw * 1000.0).round() / 1000.0
+    }
+
+    /// Returns the `Duration` to wait before the next constant scan, accounting for drop-off backoff.
+    pub fn current_constant_scan_delay(&self) -> std::time::Duration {
+        std::time::Duration::from_secs_f32(Self::calculate_dropoff_delay_secs(
+            self.scan_interval_secs,
+            self.max_dropoff_secs,
+            self.consecutive_same_scans,
+        ))
+    }
+
+    /// Resets the constant scan drop-off counter and scheduled timer.
+    pub fn reset_constant_scan_backoff(&mut self) {
+        self.consecutive_same_scans = 0;
+        self.has_previous_constant_scan = false;
+        self.next_constant_scan_time = None;
+        self.was_constant_scan_paused = false;
+        self.capture_requested.store(false, Ordering::Release);
+    }
+
+    /// Processes a completed constant OCR scan result (`lines`).
+    ///
+    /// - If the resulting boxes match the previous scan within `self.jitter_tolerance` (or both are
+    ///   empty "no text"), the outcome is discarded without updating `boxes`, the drop-off counter
+    ///   is incremented, and this method returns `false`.
+    /// - If the resulting boxes differ from the previous scan (or this is the first scan), `boxes`
+    ///   and `raw_lines` are updated (preserving stationary boxes' coordinates so unchanged regions
+    ///   do not flicker), the drop-off counter is reset to `0`, and this method returns `true`.
+    pub fn apply_constant_scan_lines(&mut self, lines: Vec<ParsedLine>) -> bool {
+        let now = Instant::now();
+        let new_boxes = crate::ocr::lens::group_lines_into_blocks(&lines, self.sticky_distance);
+        let tol = self.jitter_tolerance;
+        if self.has_previous_constant_scan && are_ocr_boxes_equivalent(&self.boxes, &new_boxes, tol)
+        {
+            self.consecutive_same_scans = self.consecutive_same_scans.saturating_add(1);
+            self.next_constant_scan_time = Some(now + self.current_constant_scan_delay());
+            return false;
+        }
+
+        let changed = !are_ocr_boxes_equivalent(&self.boxes, &new_boxes, tol);
+        let mut used_prev = vec![false; self.boxes.len()];
+        let stabilized_boxes: Vec<OcrBox> = new_boxes
+            .into_iter()
+            .map(|nb| {
+                if let Some((idx, prev_box)) = self
+                    .boxes
+                    .iter()
+                    .enumerate()
+                    .find(|(i, pb)| !used_prev[*i] && is_same_ocr_box(pb, &nb, tol))
+                {
+                    used_prev[idx] = true;
+                    prev_box.clone()
+                } else {
+                    nb
+                }
+            })
+            .collect();
+
+        self.has_previous_constant_scan = true;
+        self.consecutive_same_scans = 0;
+        self.raw_lines = lines;
+        self.boxes = stabilized_boxes;
+        self.last_copied_index = None;
+        self.copy_feedback_time = None;
+        self.last_error = None;
+        if self.boxes.is_empty() {
+            self.last_scan_time = None;
+            self.is_box_hovered = false;
+        } else {
+            self.last_scan_time = Some(now);
+        }
+        self.next_constant_scan_time = Some(now + self.current_constant_scan_delay());
+        changed
+    }
+
     /// Updates the selected OCR backend and synchronizes the atomic value read by the worker thread.
     pub fn set_backend(&mut self, backend: OcrBackend) {
+        if self.backend != backend {
+            self.reset_constant_scan_backoff();
+        }
         self.backend = backend;
         self.backend_shared
             .store(backend.as_u8(), Ordering::Release);
@@ -397,13 +628,19 @@ impl OcrState {
         self.boxes.clear();
         self.raw_lines.clear();
         self.last_copied_index = None;
+        self.copy_feedback_time = None;
         self.last_scan_time = None;
         self.last_pause_tick = None;
+        self.is_box_hovered = false;
+        self.reset_constant_scan_backoff();
     }
 
     /// Returns true if the OCR boxes have expired according to `timeout_seconds`.
+    /// When constant scanning is active, boxes do not expire on a timer (they update/clear
+    /// automatically when on-screen text changes or disappears).
     pub fn is_expired(&self) -> bool {
-        if self.timeout_seconds == 0 || self.boxes.is_empty() {
+        if self.is_constant_scanning_active() || self.timeout_seconds == 0 || self.boxes.is_empty()
+        {
             return false;
         }
         if let Some(scan_time) = self.last_scan_time {
@@ -415,7 +652,8 @@ impl OcrState {
 
     /// Returns the remaining duration until the OCR boxes expire, or None if expired or disabled.
     pub fn remaining_time(&self) -> Option<std::time::Duration> {
-        if self.timeout_seconds == 0 || self.boxes.is_empty() {
+        if self.is_constant_scanning_active() || self.timeout_seconds == 0 || self.boxes.is_empty()
+        {
             return None;
         }
         let scan_time = self.last_scan_time?;
@@ -436,6 +674,15 @@ impl Default for OcrState {
         Self {
             backend: OcrBackend::default(),
             backend_shared: Arc::new(AtomicU8::new(OcrBackend::default().as_u8())),
+            constant_scanning: false,
+            scan_interval_secs: DEFAULT_SCAN_INTERVAL_SECS,
+            max_dropoff_secs: DEFAULT_MAX_DROPOFF_SECS,
+            jitter_tolerance: DEFAULT_JITTER_TOLERANCE,
+            consecutive_same_scans: 0,
+            has_previous_constant_scan: false,
+            next_constant_scan_time: None,
+            is_box_hovered: false,
+            was_constant_scan_paused: false,
             screen_ai_dir,
             screen_ai_installed_metadata,
             screen_ai_remote_metadata: None,
@@ -801,5 +1048,178 @@ mod tests {
         // Calling start_worker again is idempotent
         state.start_worker(None);
         assert!(state.ocr_request_sender.is_some());
+    }
+
+    #[test]
+    fn test_constant_scanning_active_only_for_local_backend() {
+        let mut state = OcrState::default();
+        state.constant_scanning = true;
+        state.set_backend(OcrBackend::GoogleLens);
+        assert!(!state.is_constant_scanning_active());
+
+        state.set_backend(OcrBackend::LocalScreenAi);
+        assert!(state.is_constant_scanning_active());
+
+        state.constant_scanning = false;
+        assert!(!state.is_constant_scanning_active());
+    }
+
+    #[test]
+    fn test_dropoff_delay_progression_and_clamping() {
+        assert!(
+            (OcrState::calculate_dropoff_delay_secs(0.3, 3.0, 0) - 0.3).abs() < 1e-5,
+            "0 consecutive same scans should use base interval 0.3s"
+        );
+        assert!(
+            (OcrState::calculate_dropoff_delay_secs(0.3, 3.0, 1) - 0.5).abs() < 1e-5,
+            "1 consecutive same scan -> 0.5s"
+        );
+        assert!(
+            (OcrState::calculate_dropoff_delay_secs(0.3, 3.0, 2) - 0.7).abs() < 1e-5,
+            "2 consecutive same scans -> 0.7s"
+        );
+        assert!(
+            (OcrState::calculate_dropoff_delay_secs(0.3, 3.0, 100) - 3.0).abs() < 1e-5,
+            "High consecutive count clamps to max_dropoff 3.0s"
+        );
+    }
+
+    #[test]
+    fn test_are_ocr_boxes_equivalent_jitter_and_text() {
+        let empty: Vec<OcrBox> = Vec::new();
+        assert!(are_ocr_boxes_equivalent(
+            &empty,
+            &empty,
+            DEFAULT_JITTER_TOLERANCE
+        ));
+
+        let box_a = OcrBox {
+            text: "日本語 テスト".to_string(),
+            center_x: 0.50,
+            center_y: 0.80,
+            width: 0.40,
+            height: 0.10,
+            lines: Vec::new(),
+            writing_direction: WritingDirection::LeftToRight,
+        };
+        let box_jitter = OcrBox {
+            text: "「日本語　テスト！」".to_string(), // full-width space & punctuation normalize the same
+            center_x: 0.62,                           // 12% shift (within 15% tolerance)
+            center_y: 0.68,                           // 12% shift (within 15% tolerance)
+            width: 0.50,                              // 10% shift (within 15% tolerance)
+            height: 0.18,                             // 8% shift (within 15% tolerance)
+            lines: Vec::new(),
+            writing_direction: WritingDirection::LeftToRight,
+        };
+        assert!(are_ocr_boxes_equivalent(
+            &[box_a.clone()],
+            &[box_jitter],
+            DEFAULT_JITTER_TOLERANCE
+        ));
+
+        let box_moved = OcrBox {
+            center_x: 0.70, // 20% difference (> 0.15 default tolerance, but <= 0.25 custom tolerance)
+            ..box_a.clone()
+        };
+        assert!(!are_ocr_boxes_equivalent(
+            &[box_a.clone()],
+            &[box_moved.clone()],
+            DEFAULT_JITTER_TOLERANCE
+        ));
+        assert!(are_ocr_boxes_equivalent(
+            &[box_a.clone()],
+            &[box_moved],
+            0.25
+        ));
+
+        let box_diff_text = OcrBox {
+            text: "別のテキスト".to_string(),
+            ..box_a.clone()
+        };
+        assert!(!are_ocr_boxes_equivalent(
+            &[box_a],
+            &[box_diff_text],
+            DEFAULT_JITTER_TOLERANCE
+        ));
+    }
+
+    #[test]
+    fn test_apply_constant_scan_lines_same_and_no_text_backoff() {
+        let mut state = OcrState::default();
+        state.set_backend(OcrBackend::LocalScreenAi);
+        state.constant_scanning = true;
+        state.scan_interval_secs = 0.3;
+        state.max_dropoff_secs = 3.0;
+
+        // 1. First empty scan: establishes baseline (no backoff yet)
+        let updated = state.apply_constant_scan_lines(Vec::new());
+        assert!(!updated);
+        assert!(state.has_previous_constant_scan);
+        assert_eq!(state.consecutive_same_scans, 0);
+
+        // 2. Second empty scan ("no text" treated same as "same text"): increments backoff
+        let updated = state.apply_constant_scan_lines(Vec::new());
+        assert!(!updated);
+        assert_eq!(state.consecutive_same_scans, 1);
+        assert!((state.current_constant_scan_delay().as_secs_f32() - 0.5).abs() < 1e-4);
+
+        // 3. New Japanese text appears: updates boxes and resets backoff to 0
+        let line = ParsedLine {
+            text: "こんにちは".to_string(),
+            center_x: 0.5,
+            center_y: 0.8,
+            width: 0.3,
+            height: 0.08,
+            paragraph_idx: 0,
+            writing_direction: WritingDirection::LeftToRight,
+            char_spans: Vec::new(),
+        };
+        let updated = state.apply_constant_scan_lines(vec![line.clone()]);
+        assert!(updated);
+        assert_eq!(state.boxes.len(), 1);
+        assert_eq!(state.consecutive_same_scans, 0);
+
+        // 4. Same text on next scan (with tiny jitter): discarded, boxes untouched, backoff increments
+        let jittered_line = ParsedLine {
+            center_x: 0.505,
+            ..line
+        };
+        let prev_scan_time = state.last_scan_time;
+        let updated = state.apply_constant_scan_lines(vec![jittered_line]);
+        assert!(!updated);
+        assert_eq!(state.consecutive_same_scans, 1);
+        assert_eq!(state.last_scan_time, prev_scan_time);
+        assert!((state.boxes[0].center_x - 0.5).abs() < 1e-6);
+
+        // 5. Text disappears (empty scan after non-empty): clears boxes and resets backoff
+        let updated = state.apply_constant_scan_lines(Vec::new());
+        assert!(updated);
+        assert!(state.boxes.is_empty());
+        assert_eq!(state.consecutive_same_scans, 0);
+    }
+
+    #[test]
+    fn test_constant_scanning_disables_box_expiration() {
+        let mut state = OcrState::default();
+        state.timeout_seconds = 10;
+        state.boxes.push(OcrBox {
+            text: "テスト".to_string(),
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.2,
+            height: 0.1,
+            lines: Vec::new(),
+            writing_direction: WritingDirection::LeftToRight,
+        });
+        state.last_scan_time = Some(Instant::now() - std::time::Duration::from_secs(60));
+
+        // Expired when constant scanning is off
+        assert!(state.is_expired());
+
+        // Not expired when constant scanning is active with LocalScreenAi
+        state.set_backend(OcrBackend::LocalScreenAi);
+        state.constant_scanning = true;
+        assert!(!state.is_expired());
+        assert_eq!(state.remaining_time(), None);
     }
 }

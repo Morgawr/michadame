@@ -131,8 +131,11 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
             state.toggle_audio_reactive();
             hotkey_repaint = true;
         }
-        // Ignore Space while typing in a text field (e.g. the mining tag).
-        if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+        // Ignore Space while typing in a text field (e.g. the mining tag) or when constant scanning is active.
+        if !state.ocr.is_constant_scanning_active()
+            && !ctx.wants_keyboard_input()
+            && ctx.input(|i| i.key_pressed(egui::Key::Space))
+        {
             if ctx.input(|i| i.modifiers.shift) {
                 state.clear_ocr();
             } else {
