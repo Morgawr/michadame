@@ -279,6 +279,52 @@ pub struct CrtFilterRenderer {
     last_fft_mask_gen: u64,
     last_input_tex: Option<glow::Texture>,
     history_count: u32,
+    pub capture_ocr_next_paint: bool,
+    pub last_ocr_capture: Option<(Vec<u8>, u32, u32)>,
+}
+
+pub fn read_framebuffer_pixels_raw(
+    gl: &glow::Context,
+    area: RenderedArea,
+) -> Option<(Vec<u8>, u32, u32)> {
+    if area.width == 0 || area.height == 0 {
+        return None;
+    }
+    let mut raw_pixels = vec![0u8; (area.width * area.height * 4) as usize];
+    unsafe {
+        let old_pbo = gl.get_parameter_i32(glow::PIXEL_PACK_BUFFER_BINDING);
+        let alignment = gl.get_parameter_i32(glow::PACK_ALIGNMENT);
+        let row_length = gl.get_parameter_i32(glow::PACK_ROW_LENGTH);
+        let skip_rows = gl.get_parameter_i32(glow::PACK_SKIP_ROWS);
+        let skip_pixels = gl.get_parameter_i32(glow::PACK_SKIP_PIXELS);
+
+        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+        gl.pixel_store_i32(glow::PACK_ROW_LENGTH, 0);
+        gl.pixel_store_i32(glow::PACK_SKIP_ROWS, 0);
+        gl.pixel_store_i32(glow::PACK_SKIP_PIXELS, 0);
+        gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+
+        gl.read_pixels(
+            area.x as i32,
+            area.y as i32,
+            area.width as i32,
+            area.height as i32,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelPackData::Slice(&mut raw_pixels),
+        );
+
+        gl.bind_buffer(
+            glow::PIXEL_PACK_BUFFER,
+            std::num::NonZeroU32::new(old_pbo as u32).map(glow::NativeBuffer),
+        );
+        gl.pixel_store_i32(glow::PACK_ALIGNMENT, alignment);
+        gl.pixel_store_i32(glow::PACK_ROW_LENGTH, row_length);
+        gl.pixel_store_i32(glow::PACK_SKIP_ROWS, skip_rows);
+        gl.pixel_store_i32(glow::PACK_SKIP_PIXELS, skip_pixels);
+    }
+
+    Some((raw_pixels, area.width, area.height))
 }
 
 fn intermediate_texture_internal_format(pass_index: usize) -> u32 {
@@ -1092,6 +1138,8 @@ impl CrtFilterRenderer {
                 last_fft_mask_gen: 0,
                 last_input_tex: None,
                 history_count: 0,
+                capture_ocr_next_paint: false,
+                last_ocr_capture: None,
             }
         }
     }
@@ -2181,6 +2229,26 @@ impl CrtFilterRenderer {
                 allow_srgb_fastpath,
             );
 
+            if self.capture_ocr_next_paint {
+                self.capture_ocr_next_paint = false;
+                self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
+                let clean_area = self.draw_passthrough_internal(
+                    gl,
+                    current_video_texture,
+                    current_res,
+                    output_size,
+                    [0.0, 0.0, 0.0],
+                    params.horizontal_stretch,
+                    1.0,
+                    params.scaler_filter,
+                    params.border_crop,
+                    Some(self.post_fbos[0]),
+                    input_is_srgb,
+                );
+                self.last_ocr_capture = read_framebuffer_pixels_raw(gl, clean_area);
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            }
+
             let mut final_input_texture = current_video_texture;
             let mut final_input_res = current_res;
 
@@ -2464,6 +2532,11 @@ impl CrtFilterRenderer {
                 upstream_target_fbo,
                 input_is_srgb,
             );
+
+            if self.capture_ocr_next_paint {
+                self.capture_ocr_next_paint = false;
+                self.last_ocr_capture = read_framebuffer_pixels_raw(gl, rendered_area);
+            }
 
             self.postprocess_and_present(
                 gl,

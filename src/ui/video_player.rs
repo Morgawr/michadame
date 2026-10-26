@@ -11,45 +11,7 @@ fn capture_frame_pixels_raw(
     gl: &eframe::glow::Context,
     area: crate::video::gpu::geometry::RenderedArea,
 ) -> Option<(Vec<u8>, u32, u32)> {
-    if area.width == 0 || area.height == 0 {
-        return None;
-    }
-    use eframe::glow::{self, HasContext};
-    let mut raw_pixels = vec![0u8; (area.width * area.height * 4) as usize];
-    unsafe {
-        let old_pbo = gl.get_parameter_i32(glow::PIXEL_PACK_BUFFER_BINDING);
-        let alignment = gl.get_parameter_i32(glow::PACK_ALIGNMENT);
-        let row_length = gl.get_parameter_i32(glow::PACK_ROW_LENGTH);
-        let skip_rows = gl.get_parameter_i32(glow::PACK_SKIP_ROWS);
-        let skip_pixels = gl.get_parameter_i32(glow::PACK_SKIP_PIXELS);
-
-        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-        gl.pixel_store_i32(glow::PACK_ROW_LENGTH, 0);
-        gl.pixel_store_i32(glow::PACK_SKIP_ROWS, 0);
-        gl.pixel_store_i32(glow::PACK_SKIP_PIXELS, 0);
-        gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
-
-        gl.read_pixels(
-            area.x as i32,
-            area.y as i32,
-            area.width as i32,
-            area.height as i32,
-            glow::RGBA,
-            glow::UNSIGNED_BYTE,
-            glow::PixelPackData::Slice(&mut raw_pixels),
-        );
-
-        gl.bind_buffer(
-            glow::PIXEL_PACK_BUFFER,
-            std::num::NonZeroU32::new(old_pbo as u32).map(glow::NativeBuffer),
-        );
-        gl.pixel_store_i32(glow::PACK_ALIGNMENT, alignment);
-        gl.pixel_store_i32(glow::PACK_ROW_LENGTH, row_length);
-        gl.pixel_store_i32(glow::PACK_SKIP_ROWS, skip_rows);
-        gl.pixel_store_i32(glow::PACK_SKIP_PIXELS, skip_pixels);
-    }
-
-    Some((raw_pixels, area.width, area.height))
+    crate::video::gpu::renderer::read_framebuffer_pixels_raw(gl, area)
 }
 
 fn capture_frame_pixels(
@@ -679,6 +641,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 software_mouse_clip
                             };
 
+                            renderer.capture_ocr_next_paint =
+                                ocr_capture_cb.swap(false, Ordering::AcqRel);
                             let rendered_area = renderer.paint(
                                 painter.gl(),
                                 painter,
@@ -708,22 +672,18 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 .map(|f| f.captured_at)
                                 .or_else(|| latest_dmabuf_frame_cb.as_ref().map(|f| f.captured_at))
                                 .unwrap_or(0);
-                            if ocr_capture_cb.swap(false, Ordering::AcqRel) {
-                                if let Some((pixels, w, h)) =
-                                    capture_frame_pixels_raw(painter.gl(), rendered_area)
-                                {
-                                    if let Some(req_tx) = &ocr_req_sender_cb {
-                                        ocr_is_processing_cb.store(true, Ordering::Release);
-                                        if req_tx
-                                            .send(crate::ocr::models::OcrCaptureRequest {
-                                                raw_rgba: pixels,
-                                                width: w,
-                                                height: h,
-                                            })
-                                            .is_err()
-                                        {
-                                            ocr_is_processing_cb.store(false, Ordering::Release);
-                                        }
+                            if let Some((pixels, w, h)) = renderer.last_ocr_capture.take() {
+                                if let Some(req_tx) = &ocr_req_sender_cb {
+                                    ocr_is_processing_cb.store(true, Ordering::Release);
+                                    if req_tx
+                                        .send(crate::ocr::models::OcrCaptureRequest {
+                                            raw_rgba: pixels,
+                                            width: w,
+                                            height: h,
+                                        })
+                                        .is_err()
+                                    {
+                                        ocr_is_processing_cb.store(false, Ordering::Release);
                                     }
                                 }
                             }
@@ -1023,63 +983,65 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     } else {
                         software_mouse_clip
                     };
-                    let rendered_area = renderer_clone.lock().unwrap().draw_passthrough(
-                        painter.gl(),
-                        painter,
-                        rect,
-                        latest_frame.as_deref(),
-                        fallback_tex,
-                        res,
-                        (rect.width() * ppp, rect.height() * ppp),
-                        background_color,
-                        horizontal_stretch,
-                        median_filter_enabled,
-                        median_mix,
-                        deinterlace_filter_enabled,
-                        deinterlace_mode,
-                        deinterlace_blend,
-                        deinterlace_motion_threshold,
-                        deinterlace_line_spacing,
-                        deinterlace_spatial_mix,
-                        vibrance,
-                        scaler_filter,
-                        overscan_x,
-                        overscan_y,
-                        underscan_x,
-                        underscan_y,
-                        border_crop,
-                        fft_clone.as_ref(),
-                        fft_threshold,
-                        fft_black,
-                        None,
-                        None,
-                        glass_params.as_ref(),
-                        0.0,
-                        current_software_mouse_pos,
-                        current_software_mouse_clip,
-                        is_mining_capture,
-                    );
+                    let (rendered_area, ocr_captured) = {
+                        let mut renderer = renderer_clone.lock().unwrap();
+                        renderer.capture_ocr_next_paint =
+                            ocr_capture_cb.swap(false, Ordering::AcqRel);
+                        let area = renderer.draw_passthrough(
+                            painter.gl(),
+                            painter,
+                            rect,
+                            latest_frame.as_deref(),
+                            fallback_tex,
+                            res,
+                            (rect.width() * ppp, rect.height() * ppp),
+                            background_color,
+                            horizontal_stretch,
+                            median_filter_enabled,
+                            median_mix,
+                            deinterlace_filter_enabled,
+                            deinterlace_mode,
+                            deinterlace_blend,
+                            deinterlace_motion_threshold,
+                            deinterlace_line_spacing,
+                            deinterlace_spatial_mix,
+                            vibrance,
+                            scaler_filter,
+                            overscan_x,
+                            overscan_y,
+                            underscan_x,
+                            underscan_y,
+                            border_crop,
+                            fft_clone.as_ref(),
+                            fft_threshold,
+                            fft_black,
+                            None,
+                            None,
+                            glass_params.as_ref(),
+                            0.0,
+                            current_software_mouse_pos,
+                            current_software_mouse_clip,
+                            is_mining_capture,
+                        );
+                        (area, renderer.last_ocr_capture.take())
+                    };
                     let at = latest_frame
                         .as_ref()
                         .map(|f| f.captured_at)
                         .or_else(|| latest_dmabuf_frame_cb.as_ref().map(|f| f.captured_at))
                         .unwrap_or(0);
-                    if ocr_capture_cb.swap(false, Ordering::AcqRel) {
-                        if let Some((pixels, w, h)) =
-                            capture_frame_pixels_raw(painter.gl(), rendered_area)
-                        {
-                            if let Some(req_tx) = &ocr_req_sender_cb {
-                                ocr_is_processing_cb.store(true, Ordering::Release);
-                                if req_tx
-                                    .send(crate::ocr::models::OcrCaptureRequest {
-                                        raw_rgba: pixels,
-                                        width: w,
-                                        height: h,
-                                    })
-                                    .is_err()
-                                {
-                                    ocr_is_processing_cb.store(false, Ordering::Release);
-                                }
+                    if let Some((pixels, w, h)) = ocr_captured {
+                        if let Some(req_tx) = &ocr_req_sender_cb {
+                            ocr_is_processing_cb.store(true, Ordering::Release);
+                            if req_tx
+                                .send(crate::ocr::models::OcrCaptureRequest {
+                                    raw_rgba: pixels,
+                                    width: w,
+                                    height: h,
+                                })
+                                .is_err()
+                            {
+                                ocr_is_processing_cb.store(false, Ordering::Release);
                             }
                         }
                     }
