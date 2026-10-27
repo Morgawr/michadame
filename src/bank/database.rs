@@ -261,6 +261,23 @@ impl BankDatabase {
         Ok(id)
     }
 
+    /// Updates `definition_json` for multiple entries in a single batch.
+    pub fn update_definition_jsons(&self, updates: &[(i64, String)]) -> Result<()> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt =
+                tx.prepare_cached("UPDATE mined_words SET definition_json = ?1 WHERE id = ?2")?;
+            for (id, def_json) in updates {
+                stmt.execute(params![def_json, id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn delete(&self, id: i64) -> Result<()> {
         self.conn
             .execute("DELETE FROM mined_words WHERE id = ?1", params![id])?;

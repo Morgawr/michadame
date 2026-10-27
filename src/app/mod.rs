@@ -1180,6 +1180,54 @@ impl eframe::App for AppState {
                     }
                     repaint_requested = true;
                 }
+                crate::dict::DictEvent::PitchImportProgress { message, progress } => {
+                    if let Ok(mut lock) = self.dict.pitch_import_progress.lock() {
+                        *lock = Some((message, progress));
+                    }
+                    repaint_requested = true;
+                }
+                crate::dict::DictEvent::PitchImportFinished(result) => {
+                    match result {
+                        Ok(meta) => {
+                            let db_path = self.dict.dict_dir.join("pitch.db");
+                            match crate::dict::PitchDatabase::open(&db_path) {
+                                Ok(db) => {
+                                    let backfilled = self.bank.backfill_pitches(&db);
+                                    if backfilled > 0 {
+                                        tracing::info!(
+                                            "Backfilled pitch accents for {} mined words",
+                                            backfilled
+                                        );
+                                    }
+                                    if let Ok(mut db_lock) = self.dict.pitch_db.lock() {
+                                        *db_lock = Some(db);
+                                    }
+                                    crate::dict::lookup::invalidate_scan_cache();
+                                }
+                                Err(e) => {
+                                    self.error(format!(
+                                        "Failed to open imported pitch dictionary: {e}"
+                                    ));
+                                }
+                            }
+                            self.dict.installed_pitch_metadata = Some(meta.clone());
+                            if let Ok(mut lock) = self.dict.pitch_import_progress.lock() {
+                                *lock = None;
+                            }
+                            self.info(format!(
+                                "Imported pitch dictionary '{}' ({} entries)!",
+                                meta.title, meta.total_entries
+                            ));
+                        }
+                        Err(e) => {
+                            if let Ok(mut lock) = self.dict.pitch_import_progress.lock() {
+                                *lock = None;
+                            }
+                            self.error(format!("Pitch dictionary import failed: {e}"));
+                        }
+                    }
+                    repaint_requested = true;
+                }
             }
         }
 

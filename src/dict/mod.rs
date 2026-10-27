@@ -6,6 +6,7 @@ pub mod long_vowel;
 pub mod lookup;
 pub mod models;
 pub mod particles;
+pub mod pitch;
 pub mod popup;
 pub mod render;
 pub mod sync;
@@ -14,6 +15,7 @@ pub use database::DictDatabase;
 pub use deinflect::{global_deinflector, Deinflector};
 pub use frequency::FreqDatabase;
 pub use models::*;
+pub use pitch::PitchDatabase;
 
 use crossbeam_channel::{Receiver, Sender};
 use std::path::PathBuf;
@@ -52,6 +54,15 @@ pub struct DictState {
     /// Current frequency sync progress: (Status message, fraction 0.0..1.0).
     pub freq_sync_progress: Arc<Mutex<Option<(String, f32)>>>,
 
+    /// Active SQLite pitch accent dictionary connection (imported from a local Yomitan .zip).
+    pub pitch_db: Arc<Mutex<Option<PitchDatabase>>>,
+    /// Currently installed pitch accent dictionary metadata.
+    pub installed_pitch_metadata: Option<DictMetadata>,
+    /// Atomic flag indicating a pitch dictionary import is running.
+    pub is_pitch_importing: Arc<AtomicBool>,
+    /// Current pitch dictionary import progress: (Status message, fraction 0.0..1.0).
+    pub pitch_import_progress: Arc<Mutex<Option<(String, f32)>>>,
+
     /// Local directory where dictionary database and temporary downloads are stored.
     pub dict_dir: PathBuf,
     /// Channel sender for worker events.
@@ -71,6 +82,7 @@ impl DictState {
         let dict_dir = resolve_dict_directory();
         let db_path = dict_dir.join("jitendex.db");
         let freq_db_path = dict_dir.join("jiten_freq.db");
+        let pitch_db_path = dict_dir.join("pitch.db");
 
         let mut installed_metadata = None;
         let mut db_handle = None;
@@ -124,6 +136,34 @@ impl DictState {
             }
         }
 
+        let mut installed_pitch_metadata = None;
+        let mut pitch_db_handle = None;
+
+        if pitch_db_path.exists() {
+            match PitchDatabase::open(&pitch_db_path) {
+                Ok(database) => match database.get_metadata() {
+                    Ok(meta) => {
+                        tracing::info!(
+                            "Loaded pitch accent dictionary '{}' (rev {}) with {} entries",
+                            meta.title,
+                            meta.revision,
+                            meta.total_entries
+                        );
+                        installed_pitch_metadata = Some(meta);
+                        pitch_db_handle = Some(database);
+                    }
+                    Err(e) => tracing::warn!(
+                        "Failed to read pitch metadata from {}: {e}",
+                        pitch_db_path.display()
+                    ),
+                },
+                Err(e) => tracing::warn!(
+                    "Failed to open pitch dictionary at {}: {e}",
+                    pitch_db_path.display()
+                ),
+            }
+        }
+
         let is_checking_update = Arc::new(AtomicBool::new(false));
         let is_syncing = Arc::new(AtomicBool::new(false));
         let sync_progress = Arc::new(Mutex::new(None));
@@ -131,6 +171,9 @@ impl DictState {
         let is_checking_freq_update = Arc::new(AtomicBool::new(false));
         let is_freq_syncing = Arc::new(AtomicBool::new(false));
         let freq_sync_progress = Arc::new(Mutex::new(None));
+
+        let is_pitch_importing = Arc::new(AtomicBool::new(false));
+        let pitch_import_progress = Arc::new(Mutex::new(None));
 
         // If not installed, mark update_available as true immediately
         let update_available = installed_metadata.is_none();
@@ -162,12 +205,43 @@ impl DictState {
             is_checking_freq_update,
             is_freq_syncing,
             freq_sync_progress,
+            pitch_db: Arc::new(Mutex::new(pitch_db_handle)),
+            installed_pitch_metadata,
+            is_pitch_importing,
+            pitch_import_progress,
             dict_dir,
             event_tx: tx,
             event_rx: Some(rx),
             popup: None,
             popup_under_crt: false,
         }
+    }
+
+    /// Triggers local import of a Yomitan pitch accent dictionary `.zip` file.
+    pub fn trigger_pitch_import(&mut self, zip_path: PathBuf) {
+        if self.is_pitch_importing.load(Ordering::Relaxed) {
+            return;
+        }
+
+        pitch::spawn_pitch_import(
+            zip_path,
+            self.dict_dir.clone(),
+            self.is_pitch_importing.clone(),
+            self.event_tx.clone(),
+        );
+    }
+
+    /// Removes the installed pitch accent dictionary.
+    pub fn remove_pitch_dict(&mut self) -> anyhow::Result<()> {
+        if let Ok(mut guard) = self.pitch_db.lock() {
+            *guard = None;
+        }
+        self.installed_pitch_metadata = None;
+        let pitch_db_path = self.dict_dir.join("pitch.db");
+        if pitch_db_path.exists() {
+            std::fs::remove_file(&pitch_db_path)?;
+        }
+        Ok(())
     }
 
     /// Triggers remote sync / download and indexing in a background thread.

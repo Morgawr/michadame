@@ -706,6 +706,7 @@ mod tests {
                 term_tags: None,
                 inflection_reasons: vec![],
                 frequency: None,
+                pitches: vec![],
                 custom_name_id: None,
                 custom_tag: None,
             }],

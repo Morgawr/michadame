@@ -232,6 +232,7 @@ impl DictDatabase {
                     term_tags,
                     inflection_reasons: candidate.reasons.clone(),
                     frequency: None,
+                    pitches: Vec::new(),
                     custom_name_id: None,
                     custom_tag: None,
                 });

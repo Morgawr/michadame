@@ -1170,6 +1170,7 @@ mod tests {
             term_tags: None,
             inflection_reasons: Vec::new(),
             frequency: None,
+            pitches: Vec::new(),
             custom_name_id: None,
             custom_tag: None,
         };

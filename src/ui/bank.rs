@@ -2,8 +2,10 @@
 
 use crate::app::AppState;
 use crate::bank::{tags, BankEntryMeta, TagEdit};
+#[cfg(test)]
+use crate::dict::render::build_headword_reading_job;
 use crate::dict::render::{
-    build_headword_reading_job, dict_font, render_entry_header, render_glossaries, with_dict_scale,
+    dict_font, render_entry_header, render_glossaries, render_headword_and_reading, with_dict_scale,
 };
 use crate::ui::tag_input::tag_input;
 use eframe::egui::{self, text::LayoutJob, Color32, RichText, TextFormat};
@@ -187,7 +189,12 @@ fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
                     let action = if is_expanded {
                         draw_row(ui, ctx, state, &entry, &mut loads_left)
                     } else {
-                        draw_compact_row(ui, &entry)
+                        let pitches = {
+                            let pitch_guard = state.dict.pitch_db.lock().ok();
+                            let pitch_db = pitch_guard.as_ref().and_then(|g| g.as_ref());
+                            state.bank.pitches_for_entry(&entry, pitch_db)
+                        };
+                        draw_compact_row(ui, &entry, &pitches)
                     };
                     match action {
                         RowAction::None => {}
@@ -239,7 +246,11 @@ enum RowAction {
     SetFilterTag(String),
 }
 
-fn draw_compact_row(ui: &mut egui::Ui, entry: &BankEntryMeta) -> RowAction {
+fn draw_compact_row(
+    ui: &mut egui::Ui,
+    entry: &BankEntryMeta,
+    pitches: &[crate::dict::PitchAccent],
+) -> RowAction {
     let mut action = RowAction::None;
     let card_height = 36.0;
     let (rect, response) = ui.allocate_exact_size(
@@ -278,14 +289,16 @@ fn draw_compact_row(ui: &mut egui::Ui, entry: &BankEntryMeta) -> RowAction {
             };
             ui.label(RichText::new("▶").size(11.0).color(arrow_color));
             ui.add_space(4.0);
-            ui.label(build_headword_reading_job(
+            render_headword_and_reading(
+                ui,
                 &entry.term,
                 &entry.reading,
+                pitches,
                 19.0,
                 15.0,
                 COLOR_TERM,
                 COLOR_READING,
-            ));
+            );
 
             // Subtle subordinate tag chip
             if let Some(tag) = &entry.tag {
@@ -424,7 +437,17 @@ fn draw_row(
                 }
 
                 ui.add_space(8.0);
-                let dict_entry = state.bank.dict_entry(entry);
+                let (dict_entry, fallback_pitches) = {
+                    let pitch_guard = state.dict.pitch_db.lock().ok();
+                    let pitch_db = pitch_guard.as_ref().and_then(|g| g.as_ref());
+                    let de = state.bank.dict_entry_with_pitch(entry, pitch_db);
+                    let fp = if de.is_none() {
+                        state.bank.pitches_for_entry(entry, pitch_db)
+                    } else {
+                        Vec::new()
+                    };
+                    (de, fp)
+                };
                 ui.vertical(|ui| {
                     // Entry header (word, reading, frequency, tags), date and delete button
                     ui.horizontal(|ui| {
@@ -439,14 +462,16 @@ fn draw_row(
                                     render_entry_header(ui, de, false);
                                 }),
                                 None => {
-                                    ui.label(build_headword_reading_job(
+                                    render_headword_and_reading(
+                                        ui,
                                         &entry.term,
                                         &entry.reading,
+                                        &fallback_pitches,
                                         28.0,
                                         21.0,
                                         COLOR_TERM,
                                         COLOR_READING,
-                                    ));
+                                    );
                                 }
                             },
                         );

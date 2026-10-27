@@ -334,13 +334,16 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
                     let db = db_guard.as_ref().and_then(|g| g.as_ref());
                     let freq_guard = state.dict.freq_db.lock().ok();
                     let freq_db = freq_guard.as_ref().and_then(|g| g.as_ref());
+                    let pitch_guard = state.dict.pitch_db.lock().ok();
+                    let pitch_db = pitch_guard.as_ref().and_then(|g| g.as_ref());
                     let current_tag = state.bank.mining_tag();
-                    let lookup = crate::dict::lookup::lookup_word_at_pointer(
+                    let lookup = crate::dict::lookup::lookup_word_at_pointer_with_pitch(
                         pos,
                         &state.ocr.boxes,
                         video_rect,
                         db,
                         freq_db,
+                        pitch_db,
                         crate::dict::global_deinflector(),
                         &state.bank.custom_names,
                         current_tag.as_deref(),

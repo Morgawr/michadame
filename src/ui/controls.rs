@@ -1156,6 +1156,82 @@ fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool
                 });
             }
         });
+
+        col2.add_space(4.0);
+
+        technical_group(col2, "Pitch Accent Dictionary:", |ui| {
+            if let Some(meta) = &state.dict.installed_pitch_metadata {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Installed: {} ({} entries, rev {})",
+                        meta.title, meta.total_entries, meta.revision
+                    ))
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(136, 136, 136)),
+                );
+            } else {
+                ui.label(
+                    egui::RichText::new("Status: Not installed - import a Yomitan pitch .zip file")
+                        .monospace()
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(136, 136, 136)),
+                );
+            }
+
+            ui.add_space(3.0);
+
+            let is_pitch_importing = state.dict.is_pitch_importing.load(Ordering::Relaxed);
+            if is_pitch_importing {
+                let (msg, prog) = if let Ok(lock) = state.dict.pitch_import_progress.lock() {
+                    lock.clone()
+                        .unwrap_or(("Importing pitch dictionary...".into(), 0.0))
+                } else {
+                    ("Importing pitch dictionary...".into(), 0.0)
+                };
+                ui.add(egui::ProgressBar::new(prog).text(msg).animate(true));
+            } else {
+                ui.horizontal(|ui| {
+                    let btn_label = if state.dict.installed_pitch_metadata.is_some() {
+                        "Replace Pitch Dictionary…"
+                    } else {
+                        "Import Pitch Dictionary…"
+                    };
+                    if ui
+                        .button(btn_label)
+                        .on_hover_text(
+                            "Import a local Yomitan-format pitch accent dictionary (.zip)",
+                        )
+                        .clicked()
+                    {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Yomitan Dictionary (.zip)", &["zip"])
+                            .pick_file()
+                        {
+                            state.dict.trigger_pitch_import(path);
+                        }
+                    }
+
+                    if state.dict.installed_pitch_metadata.is_some()
+                        && ui
+                            .small_button("Remove")
+                            .on_hover_text("Remove the installed pitch accent dictionary")
+                            .clicked()
+                    {
+                        match state.dict.remove_pitch_dict() {
+                            Ok(()) => {
+                                crate::dict::lookup::invalidate_scan_cache();
+                                state.bank.invalidate_dict_entries_cache();
+                                state.info("Removed pitch accent dictionary.");
+                            }
+                            Err(e) => {
+                                state.error(format!("Failed to remove pitch dictionary: {e}"));
+                            }
+                        }
+                    }
+                });
+            }
+        });
     });
 }
 

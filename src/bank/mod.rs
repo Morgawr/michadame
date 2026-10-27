@@ -137,6 +137,7 @@ fn entry_to_json(entry: &TermEntry) -> String {
             "rank": f.rank,
             "display_value": f.display_value,
         })),
+        "pitches": entry.pitches,
         "glossary": glossary,
     })
     .to_string()
@@ -182,6 +183,10 @@ pub fn entry_from_json(term: &str, reading: &str, json: &str) -> Option<TermEntr
                 .map(str::to_string),
         })
     });
+    let pitches: Vec<crate::dict::PitchAccent> = v
+        .get("pitches")
+        .and_then(|p| serde_json::from_value(p.clone()).ok())
+        .unwrap_or_default();
     Some(TermEntry {
         term: str_field("term").unwrap_or_else(|| term.to_string()),
         reading: str_field("reading").unwrap_or_else(|| reading.to_string()),
@@ -201,6 +206,7 @@ pub fn entry_from_json(term: &str, reading: &str, json: &str) -> Option<TermEntr
             })
             .unwrap_or_default(),
         frequency,
+        pitches,
         custom_name_id: None,
         custom_tag: None,
     })
@@ -874,13 +880,85 @@ impl BankState {
     }
 
     /// Returns the (cached) renderable dictionary entry stored with a bank entry.
+    #[cfg(test)]
     pub fn dict_entry(&mut self, entry: &BankEntryMeta) -> Option<Arc<TermEntry>> {
+        self.dict_entry_with_pitch(entry, None)
+    }
+
+    /// Returns the (cached) renderable dictionary entry stored with a bank entry,
+    /// enriching it with pitch accents from `pitch_db` if none were stored.
+    pub fn dict_entry_with_pitch(
+        &mut self,
+        entry: &BankEntryMeta,
+        pitch_db: Option<&crate::dict::PitchDatabase>,
+    ) -> Option<Arc<TermEntry>> {
         self.dict_entries
             .entry(entry.id)
             .or_insert_with(|| {
-                entry_from_json(&entry.term, &entry.reading, &entry.definition_json).map(Arc::new)
+                let mut parsed =
+                    entry_from_json(&entry.term, &entry.reading, &entry.definition_json)?;
+                if parsed.pitches.is_empty() {
+                    if let Some(pdb) = pitch_db {
+                        parsed.pitches = pdb.get_pitches(&entry.term, &entry.reading);
+                    }
+                }
+                Some(Arc::new(parsed))
             })
             .clone()
+    }
+
+    /// Returns the pitch accent patterns for `entry`, using the stored definition JSON
+    /// or falling back to `pitch_db`.
+    pub fn pitches_for_entry(
+        &mut self,
+        entry: &BankEntryMeta,
+        pitch_db: Option<&crate::dict::PitchDatabase>,
+    ) -> Vec<crate::dict::PitchAccent> {
+        if let Some(de) = self.dict_entry_with_pitch(entry, pitch_db) {
+            if !de.pitches.is_empty() {
+                return de.pitches.clone();
+            }
+        }
+        pitch_db
+            .map(|pdb| pdb.get_pitches(&entry.term, &entry.reading))
+            .unwrap_or_default()
+    }
+
+    /// Backfills pitch accent patterns for all already-mined words in the bank using `pitch_db`,
+    /// persisting updated `definition_json` values to SQLite. Returns the number of entries updated.
+    pub fn backfill_pitches(&mut self, pitch_db: &crate::dict::PitchDatabase) -> usize {
+        let mut updates = Vec::new();
+        for entry in &mut self.entries {
+            let pitches = pitch_db.get_pitches(&entry.term, &entry.reading);
+            if let Some(mut parsed) =
+                entry_from_json(&entry.term, &entry.reading, &entry.definition_json)
+            {
+                if parsed.pitches != pitches {
+                    parsed.pitches = pitches;
+                    let new_json = entry_to_json(&parsed);
+                    entry.definition_json = new_json.clone();
+                    updates.push((entry.id, new_json));
+                }
+            }
+        }
+        if !updates.is_empty() {
+            if let Ok(guard) = self.db.lock() {
+                if let Some(db) = guard.as_ref() {
+                    if let Err(e) = db.update_definition_jsons(&updates) {
+                        tracing::warn!(
+                            "Failed to persist backfilled pitch accents to bank.db: {e}"
+                        );
+                    }
+                }
+            }
+        }
+        self.dict_entries.clear();
+        updates.len()
+    }
+
+    /// Clears cached dictionary entries (e.g. when the pitch dictionary is removed or replaced).
+    pub fn invalidate_dict_entries_cache(&mut self) {
+        self.dict_entries.clear();
     }
 
     /// Loads (and caches) the thumbnail texture for an entry.
@@ -1026,6 +1104,13 @@ mod tests {
                 rank: 1234,
                 display_value: Some("1234㋕".into()),
             }),
+            pitches: vec![crate::dict::PitchAccent {
+                reading: "あつい".into(),
+                pattern: crate::dict::PitchPattern::Downstep(2),
+                nasal: vec![],
+                devoice: vec![],
+                tags: vec![],
+            }],
             custom_name_id: None,
             custom_tag: None,
         };
@@ -1039,6 +1124,7 @@ mod tests {
         assert_eq!(parsed.definition_tags.as_deref(), Some("adj-i"));
         assert_eq!(parsed.inflection_reasons, vec!["past".to_string()]);
         assert_eq!(parsed.frequency, entry.frequency);
+        assert_eq!(parsed.pitches, entry.pitches);
         assert_eq!(crate::dict::render::glossary_plain_text(&parsed), "hot");
     }
 
@@ -1049,6 +1135,7 @@ mod tests {
         assert_eq!(parsed.term, "猫");
         assert_eq!(parsed.reading, "ねこ");
         assert!(parsed.frequency.is_none());
+        assert!(parsed.pitches.is_empty());
         assert_eq!(crate::dict::render::glossary_plain_text(&parsed), "cat");
     }
 
@@ -1067,6 +1154,7 @@ mod tests {
             term_tags: None,
             inflection_reasons: vec![],
             frequency: None,
+            pitches: vec![],
             custom_name_id: None,
             custom_tag: None,
         };
@@ -1128,6 +1216,7 @@ mod tests {
             term_tags: None,
             inflection_reasons: vec![],
             frequency: None,
+            pitches: vec![],
             custom_name_id: None,
             custom_tag: None,
         };
@@ -1230,6 +1319,7 @@ mod tests {
             term_tags: None,
             inflection_reasons: vec![],
             frequency: None,
+            pitches: vec![],
             custom_name_id: None,
             custom_tag: None,
         };
@@ -1275,6 +1365,7 @@ mod tests {
             term_tags: None,
             inflection_reasons: vec![],
             frequency: None,
+            pitches: vec![],
             custom_name_id: None,
             custom_tag: None,
         };
@@ -1309,6 +1400,7 @@ mod tests {
             term_tags: None,
             inflection_reasons: vec![],
             frequency: None,
+            pitches: vec![],
             custom_name_id: None,
             custom_tag: None,
         };
@@ -1444,6 +1536,88 @@ mod tests {
         assert_eq!(
             inu.twitch_clip_url.as_deref(),
             Some("https://clips.twitch.tv/InuClip")
+        );
+    }
+
+    #[test]
+    fn test_backfill_pitches_updates_existing_mined_words() {
+        let mut bank = BankState::new();
+        let entry = TermEntry {
+            term: "橋".into(),
+            reading: "はし".into(),
+            definition_tags: Some("n".into()),
+            rules: String::new(),
+            score: 0.0,
+            glossary: vec![crate::dict::GlossaryEntry::Text("bridge".into())],
+            sequence: 10,
+            term_tags: None,
+            inflection_reasons: vec![],
+            frequency: None,
+            pitches: vec![],
+            custom_name_id: None,
+            custom_tag: None,
+        };
+        let req = MineRequest::from_lookup(&entry, "橋を渡る。", (0, 1), None);
+        assert!(bank.request_mine(req));
+        let handle = bank.capture_handle();
+        handle.save(handle.take_pending().unwrap(), None);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while bank.is_busy() && Instant::now() < deadline {
+            bank.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(bank.entries.len(), 1);
+        let before = bank.dict_entry(&bank.entries[0].clone()).unwrap();
+        assert!(before.pitches.is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        let pitch_db_path = dir.path().join("pitch_backfill.db");
+        let pitch_db = crate::dict::PitchDatabase::open_or_create(&pitch_db_path).unwrap();
+        let pitches_json = serde_json::to_string(&vec![crate::dict::PitchAccent {
+            reading: "はし".to_string(),
+            pattern: crate::dict::PitchPattern::Downstep(2),
+            nasal: vec![],
+            devoice: vec![],
+            tags: vec![],
+        }])
+        .unwrap();
+        pitch_db
+            .conn
+            .execute(
+                "INSERT INTO pitches (term, reading, reading_hira, pitches_json) VALUES ('橋', 'はし', 'はし', ?1)",
+                [pitches_json],
+            )
+            .unwrap();
+
+        let updated = bank.backfill_pitches(&pitch_db);
+        assert_eq!(updated, 1);
+
+        let after = bank.dict_entry(&bank.entries[0].clone()).unwrap();
+        assert_eq!(after.pitches.len(), 1);
+        assert_eq!(
+            after.pitches[0].pattern,
+            crate::dict::PitchPattern::Downstep(2)
+        );
+
+        // Verify persisted in SQLite database too
+        let reloaded = bank
+            .db
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .list_meta()
+            .unwrap();
+        let reloaded_entry = entry_from_json(
+            &reloaded[0].term,
+            &reloaded[0].reading,
+            &reloaded[0].definition_json,
+        )
+        .unwrap();
+        assert_eq!(reloaded_entry.pitches.len(), 1);
+        assert_eq!(
+            reloaded_entry.pitches[0].pattern,
+            crate::dict::PitchPattern::Downstep(2)
         );
     }
 }

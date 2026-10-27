@@ -45,6 +45,19 @@ pub fn init_app_state(cc: &eframe::CreationContext) -> AppState {
 
     let default_cfg_applied = state.config_load_error.is_some();
     let _ = default_cfg_applied;
+
+    if let Ok(pitch_guard) = state.dict.pitch_db.lock() {
+        if let Some(ref pitch_db) = *pitch_guard {
+            let backfilled = state.bank.backfill_pitches(pitch_db);
+            if backfilled > 0 {
+                tracing::info!(
+                    "Backfilled pitch accents for {} existing mined words on startup",
+                    backfilled
+                );
+            }
+        }
+    }
+
     crate::gamescope::steam::restore_steam_launch_wrappers();
     state.steam_games = crate::gamescope::steam::scan_steam_games();
     if let Some(ref selected) = state.selected_steam_game {

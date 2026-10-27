@@ -1,4 +1,4 @@
-use super::models::{GlossaryEntry, TermEntry};
+use super::models::{GlossaryEntry, PitchAccent, TermEntry};
 use eframe::egui::{self, text::LayoutJob, Color32, FontId, RichText, TextFormat};
 
 pub const FONT_DICT_FAMILY: &str = "GothicCJK";
@@ -37,6 +37,7 @@ pub fn dict_font(size: f32) -> FontId {
 /// Dark-theme palette constants
 const COLOR_HEADWORD: Color32 = Color32::from_rgb(248, 250, 252);
 const COLOR_READING: Color32 = Color32::from_rgb(56, 189, 248); // sky-400
+const COLOR_PITCH_ACCENT: Color32 = Color32::from_rgb(239, 68, 68); // red-500
 const COLOR_DEINFLECT_BG: Color32 = Color32::from_rgb(59, 45, 84);
 const COLOR_DEINFLECT_TEXT: Color32 = Color32::from_rgb(216, 180, 254);
 const COLOR_TAG_BG: Color32 = Color32::from_rgb(30, 41, 59);
@@ -360,6 +361,355 @@ pub fn build_headword_reading_job(
     job
 }
 
+/// Metadata for a single kana mora inside a pitch-annotated reading `LayoutJob`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MoraSpan {
+    /// Index of the pitch pattern within `pitches`.
+    pub pattern_idx: usize,
+    /// 0-based index of this mora within the pattern's reading.
+    pub mora_idx: usize,
+    /// Total morae in this pitch pattern.
+    pub total_morae: usize,
+    /// Start character index (inclusive) in `LayoutJob::text`.
+    pub char_start: usize,
+    /// End character index (exclusive) in `LayoutJob::text`.
+    pub char_end: usize,
+    /// Whether this mora has high pitch.
+    pub high: bool,
+    /// Whether the mora (or virtual particle mora) immediately following this one has high pitch.
+    pub high_next: bool,
+    /// Whether this mora is nasalized (bidakuon `か゚`).
+    pub is_nasal: bool,
+    /// Whether this mora is devoiced (dotted circle).
+    pub is_devoice: bool,
+}
+
+/// Builds a baseline-aligned `LayoutJob` for `term` and its pitch-accented reading(s),
+/// returning both the `LayoutJob` and the per-mora span metadata for painting pitch markers.
+pub fn build_headword_reading_pitch_job(
+    term: &str,
+    reading: &str,
+    pitches: &[PitchAccent],
+    term_size: f32,
+    reading_size: f32,
+    term_color: Color32,
+    reading_color: Color32,
+) -> (LayoutJob, Vec<MoraSpan>) {
+    if pitches.is_empty() {
+        return (
+            build_headword_reading_job(
+                term,
+                reading,
+                term_size,
+                reading_size,
+                term_color,
+                reading_color,
+            ),
+            Vec::new(),
+        );
+    }
+
+    let scale = dict_scale();
+    let mut job = LayoutJob::default();
+    let mut spans = Vec::new();
+
+    job.append(
+        term,
+        0.0,
+        TextFormat {
+            font_id: dict_font(term_size),
+            color: term_color,
+            ..Default::default()
+        },
+    );
+    let mut char_idx = term.chars().count();
+
+    let reading_format = TextFormat {
+        font_id: dict_font(reading_size),
+        color: reading_color,
+        ..Default::default()
+    };
+
+    let open_space = (term_size * 0.16).max(5.0) * scale;
+    job.append("【", open_space, reading_format.clone());
+    char_idx += 1;
+
+    let step_gap = (reading_size * 0.18).max(4.5) * scale;
+    let mut pending_leading_space = 0.0_f32;
+
+    for (p_idx, pitch) in pitches.iter().enumerate() {
+        if p_idx > 0 {
+            job.append("・", pending_leading_space, reading_format.clone());
+            pending_leading_space = 0.0;
+            char_idx += 1;
+        }
+
+        let r_str = if !pitch.reading.is_empty() {
+            pitch.reading.as_str()
+        } else if !reading.is_empty() {
+            reading
+        } else {
+            term
+        };
+
+        let morae = crate::dict::pitch::split_kana_morae(r_str);
+        if morae.is_empty() {
+            job.append(r_str, pending_leading_space, reading_format.clone());
+            pending_leading_space = 0.0;
+            char_idx += r_str.chars().count();
+            continue;
+        }
+
+        let total_morae = morae.len();
+        for (m_idx, mora) in morae.iter().enumerate() {
+            let high = crate::dict::pitch::is_mora_pitch_high(m_idx, &pitch.pattern);
+            let high_next = crate::dict::pitch::is_mora_pitch_high(m_idx + 1, &pitch.pattern);
+            let mora_1based = (m_idx + 1) as u32;
+            let is_nasal = pitch.nasal.contains(&mora_1based);
+            let is_devoice = pitch.devoice.contains(&mora_1based);
+
+            let display_mora = if is_nasal {
+                let mut chars = mora.chars();
+                if let Some(first) = chars.next() {
+                    let mut s = String::new();
+                    s.push(crate::dict::pitch::strip_kana_dakuten(first).unwrap_or(first));
+                    s.extend(chars);
+                    s
+                } else {
+                    mora.clone()
+                }
+            } else {
+                mora.clone()
+            };
+
+            let mora_char_len = display_mora.chars().count();
+            job.append(&display_mora, pending_leading_space, reading_format.clone());
+            spans.push(MoraSpan {
+                pattern_idx: p_idx,
+                mora_idx: m_idx,
+                total_morae,
+                char_start: char_idx,
+                char_end: char_idx + mora_char_len,
+                high,
+                high_next,
+                is_nasal,
+                is_devoice,
+            });
+            char_idx += mora_char_len;
+
+            let has_downstep = high && !high_next;
+            pending_leading_space = if has_downstep { step_gap } else { 0.0 };
+        }
+    }
+
+    job.append("】", pending_leading_space, reading_format);
+    (job, spans)
+}
+
+/// Paints pitch accent overlines, downstep ticks (`┐`),
+/// nasal handakuten rings (`゜`), and devoiced dotted circles onto `painter`.
+fn paint_pitch_accents(
+    painter: &egui::Painter,
+    galley_pos: egui::Pos2,
+    galley: &egui::Galley,
+    spans: &[MoraSpan],
+    reading_size: f32,
+    color: Color32,
+) {
+    if spans.is_empty() {
+        return;
+    }
+
+    let glyphs: Vec<_> = galley.rows.iter().flat_map(|r| r.glyphs.iter()).collect();
+    if glyphs.is_empty() {
+        return;
+    }
+
+    let scale = dict_scale();
+    let scaled_reading_size = reading_size * scale;
+    let stroke_width = (scaled_reading_size * 0.065).clamp(1.3, 2.5);
+    let pitch_stroke = egui::Stroke::new(stroke_width, COLOR_PITCH_ACCENT);
+
+    for (idx, span) in spans.iter().enumerate() {
+        if span.char_start >= glyphs.len()
+            || span.char_end > glyphs.len()
+            || span.char_start >= span.char_end
+        {
+            continue;
+        }
+
+        let first_g = glyphs[span.char_start];
+        let last_g = glyphs[span.char_end - 1];
+        let baseline_y = galley_pos.y + first_g.pos.y;
+
+        // Compute uniform overline Y for all morae sharing this row's baseline.
+        let mut row_min_ink_top = baseline_y - scaled_reading_size * 0.76;
+        for other in spans {
+            if other.char_start < glyphs.len() && other.char_end <= glyphs.len() {
+                for g in &glyphs[other.char_start..other.char_end] {
+                    if (galley_pos.y + g.pos.y - baseline_y).abs() < 1.0 {
+                        let ink_top = galley_pos.y + g.pos.y + g.uv_rect.offset.y;
+                        if ink_top < row_min_ink_top {
+                            row_min_ink_top = ink_top;
+                        }
+                    }
+                }
+            }
+        }
+        let pitch_gap = (scaled_reading_size * 0.16).max(3.5);
+        let overline_y = row_min_ink_top - pitch_gap;
+        let tick_len = (scaled_reading_size * 0.32).max(4.5);
+
+        let mut left_x = galley_pos.x + first_g.pos.x + (1.0 * scale).max(0.5);
+        let mut right_x = galley_pos.x + last_g.pos.x + last_g.size.x - (0.5 * scale);
+
+        // Connect seamlessly to the previous high mora in the same pattern on the same row.
+        if span.high && idx > 0 {
+            let prev = &spans[idx - 1];
+            if prev.pattern_idx == span.pattern_idx
+                && prev.high
+                && prev.high_next
+                && prev.char_end <= glyphs.len()
+            {
+                let prev_last_g = glyphs[prev.char_end - 1];
+                if (prev_last_g.pos.y - first_g.pos.y).abs() < 1.0 {
+                    let prev_right_x =
+                        galley_pos.x + prev_last_g.pos.x + prev_last_g.size.x - (0.5 * scale);
+                    left_x = left_x.min(prev_right_x);
+                }
+            }
+        }
+
+        // Connect seamlessly to the next high mora in the same pattern on the same row.
+        if span.high && span.high_next {
+            if let Some(next) = spans.get(idx + 1) {
+                if next.pattern_idx == span.pattern_idx
+                    && next.high
+                    && next.char_start < glyphs.len()
+                {
+                    let next_first_g = glyphs[next.char_start];
+                    if (next_first_g.pos.y - last_g.pos.y).abs() < 1.0 {
+                        let next_left_x =
+                            galley_pos.x + next_first_g.pos.x + (1.0 * scale).max(0.5);
+                        right_x = right_x.max(next_left_x);
+                    }
+                }
+            }
+        }
+
+        // 1. High pitch overline and downstep tick `┐`
+        if span.high {
+            let has_downstep = !span.high_next;
+            let bar_end_x = if has_downstep {
+                right_x + (2.5 * scale).max(1.8)
+            } else {
+                right_x
+            };
+            painter.line_segment(
+                [
+                    egui::pos2(left_x, overline_y),
+                    egui::pos2(bar_end_x, overline_y),
+                ],
+                pitch_stroke,
+            );
+            if has_downstep {
+                painter.line_segment(
+                    [
+                        egui::pos2(bar_end_x, overline_y),
+                        egui::pos2(bar_end_x, overline_y + tick_len),
+                    ],
+                    pitch_stroke,
+                );
+            }
+        }
+
+        // 2. Nasal indicator (handakuten ring `゜` at top-right of first glyph of mora)
+        if span.is_nasal {
+            let first_right_x = galley_pos.x + first_g.pos.x + first_g.size.x;
+            let first_top_y = galley_pos.y + first_g.pos.y + first_g.uv_rect.offset.y;
+            let nasal_r = (scaled_reading_size * 0.085).max(1.6);
+            let nasal_center =
+                egui::pos2(first_right_x - nasal_r * 1.35, first_top_y + nasal_r * 1.15);
+            painter.circle_stroke(
+                nasal_center,
+                nasal_r,
+                egui::Stroke::new((1.3 * scale).max(1.0), color),
+            );
+        }
+
+        // 3. Devoiced indicator (dashed/dotted circle around the mora)
+        if span.is_devoice {
+            let mut ink_top = f32::MAX;
+            let mut ink_bottom = f32::MIN;
+            for g in &glyphs[span.char_start..span.char_end] {
+                let top = galley_pos.y + g.pos.y + g.uv_rect.offset.y;
+                let bottom = top + g.uv_rect.size.y;
+                ink_top = ink_top.min(top);
+                ink_bottom = ink_bottom.max(bottom);
+            }
+            if ink_top < ink_bottom {
+                let center = egui::pos2((left_x + right_x) * 0.5, (ink_top + ink_bottom) * 0.5);
+                let radius = ((right_x - left_x).max(ink_bottom - ink_top) * 0.52).max(4.0);
+                let num_dashes = 12;
+                let devoice_stroke = egui::Stroke::new((1.2 * scale).max(1.0), color);
+                for i in 0..num_dashes {
+                    let a0 = (i as f32 / num_dashes as f32) * std::f32::consts::TAU;
+                    let a1 = ((i as f32 + 0.5) / num_dashes as f32) * std::f32::consts::TAU;
+                    let p0 = center + egui::vec2(a0.cos(), a0.sin()) * radius;
+                    let p1 = center + egui::vec2(a1.cos(), a1.sin()) * radius;
+                    painter.line_segment([p0, p1], devoice_stroke);
+                }
+            }
+        }
+    }
+}
+
+/// Renders a headword and its bracketed kana reading with optional pitch accent markers,
+/// preserving typographic baseline alignment.
+pub fn render_headword_and_reading(
+    ui: &mut egui::Ui,
+    term: &str,
+    reading: &str,
+    pitches: &[PitchAccent],
+    term_size: f32,
+    reading_size: f32,
+    term_color: Color32,
+    reading_color: Color32,
+) -> egui::Response {
+    if pitches.is_empty() {
+        let job = build_headword_reading_job(
+            term,
+            reading,
+            term_size,
+            reading_size,
+            term_color,
+            reading_color,
+        );
+        return ui.label(job);
+    }
+
+    let (job, spans) = build_headword_reading_pitch_job(
+        term,
+        reading,
+        pitches,
+        term_size,
+        reading_size,
+        term_color,
+        reading_color,
+    );
+    let galley = ui.fonts(|f| f.layout_job(job));
+    let response = ui.label(galley.clone());
+    paint_pitch_accents(
+        ui.painter(),
+        response.rect.min,
+        &galley,
+        &spans,
+        reading_size,
+        reading_color,
+    );
+    response
+}
+
 /// Renders the headword, reading, frequency, deinflection and tag badges of an entry.
 pub fn render_entry_header(ui: &mut egui::Ui, entry: &TermEntry, is_mined: bool) {
     let scale = dict_scale();
@@ -368,16 +718,17 @@ pub fn render_entry_header(ui: &mut egui::Ui, entry: &TermEntry, is_mined: bool)
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(8.0 * scale, 4.0 * scale);
 
-        // Headword + Kana reading combined in a single LayoutJob for baseline alignment
-        let job = build_headword_reading_job(
+        // Headword + Kana reading (with pitch accent markers when available)
+        render_headword_and_reading(
+            ui,
             &entry.term,
             &entry.reading,
+            &entry.pitches,
             48.0,
             34.0,
             COLOR_HEADWORD,
             COLOR_READING,
         );
-        ui.label(job);
 
         // Custom Name badge
         if entry.custom_name_id.is_some() {
@@ -2337,6 +2688,7 @@ mod tests {
             term_tags: None,
             inflection_reasons: vec![],
             frequency: None,
+            pitches: vec![],
             custom_name_id: None,
             custom_tag: None,
         };
@@ -2408,6 +2760,7 @@ mod tests {
                     term_tags: None,
                     inflection_reasons: vec![],
                     frequency: None,
+                    pitches: vec![],
                     custom_name_id: None,
                     custom_tag: None,
                 };
@@ -2430,6 +2783,140 @@ mod tests {
                     false,
                 );
                 assert_eq!(action_no_clip, EntryAction::None);
+            });
+        });
+    }
+
+    #[test]
+    fn test_build_headword_reading_pitch_job_multi_pitch_and_nasal_devoice() {
+        use crate::dict::models::PitchPattern;
+
+        let pitches = vec![
+            PitchAccent {
+                reading: "かがみ".to_string(),
+                pattern: PitchPattern::Downstep(3),
+                nasal: vec![2],
+                devoice: vec![1],
+                tags: vec![],
+            },
+            PitchAccent {
+                reading: "かがみ".to_string(),
+                pattern: PitchPattern::Downstep(0),
+                nasal: vec![],
+                devoice: vec![],
+                tags: vec![],
+            },
+        ];
+
+        let (job, spans) = build_headword_reading_pitch_job(
+            "鏡",
+            "かがみ",
+            &pitches,
+            48.0,
+            34.0,
+            COLOR_HEADWORD,
+            COLOR_READING,
+        );
+
+        // First pattern's 2nd mora ('が') is nasalized so dakuten is stripped -> "かかみ",
+        // second pattern is not nasalized -> "かがみ".
+        assert_eq!(job.text, "鏡【かかみ・かがみ】");
+        assert_eq!(spans.len(), 6);
+
+        // Pattern 0: Downstep(3) -> L H H (drop after 3rd mora)
+        assert_eq!(spans[0].pattern_idx, 0);
+        assert!(!spans[0].high);
+        assert!(spans[0].high_next);
+        assert!(spans[0].is_devoice);
+        assert!(!spans[0].is_nasal);
+
+        assert_eq!(spans[1].pattern_idx, 0);
+        assert!(spans[1].high);
+        assert!(spans[1].high_next);
+        assert!(spans[1].is_nasal);
+        assert!(!spans[1].is_devoice);
+
+        assert_eq!(spans[2].pattern_idx, 0);
+        assert!(spans[2].high);
+        assert!(!spans[2].high_next); // downstep after 3rd mora
+
+        // Pattern 1: Downstep(0) -> L H H (no drop after 3rd mora)
+        assert_eq!(spans[3].pattern_idx, 1);
+        assert!(!spans[3].high);
+        assert!(spans[4].high);
+        assert!(spans[5].high);
+        assert!(spans[5].high_next);
+    }
+
+    #[test]
+    fn test_render_headword_and_reading_with_pitches_baseline_and_paint() {
+        use crate::dict::models::PitchPattern;
+
+        let ctx = egui::Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "noto_sans_jp".to_owned(),
+            egui::FontData::from_static(include_bytes!("../../assets/NotoSansJP-Regular.ttf")),
+        );
+        fonts.families.insert(
+            egui::FontFamily::Name("GothicCJK".into()),
+            vec!["noto_sans_jp".to_owned()],
+        );
+        ctx.set_fonts(fonts);
+
+        let pitches = vec![
+            PitchAccent {
+                reading: "きっしゃ".to_string(),
+                pattern: PitchPattern::Downstep(1),
+                nasal: vec![],
+                devoice: vec![1],
+                tags: vec![],
+            },
+            PitchAccent {
+                reading: "きっしゃ".to_string(),
+                pattern: PitchPattern::Downstep(0),
+                nasal: vec![],
+                devoice: vec![],
+                tags: vec![],
+            },
+        ];
+
+        let (job, spans) = build_headword_reading_pitch_job(
+            "汽車",
+            "きっしゃ",
+            &pitches,
+            48.0,
+            34.0,
+            COLOR_HEADWORD,
+            COLOR_READING,
+        );
+        let _ = ctx.run(Default::default(), |ctx| {
+            let galley = ctx.fonts(|f| f.layout_job(job.clone()));
+            assert_eq!(galley.rows.len(), 1);
+            let baseline_y = galley.rows[0].glyphs[0].pos.y;
+            for g in &galley.rows[0].glyphs {
+                assert!(
+                    (g.pos.y - baseline_y).abs() < f32::EPSILON,
+                    "Glyph '{}' pos.y ({}) did not match headword baseline ({})",
+                    g.chr,
+                    g.pos.y,
+                    baseline_y
+                );
+            }
+            assert_eq!(spans.len(), 6); // 3 morae ("き", "っ", "しゃ") x 2 patterns
+
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let resp = render_headword_and_reading(
+                    ui,
+                    "汽車",
+                    "きっしゃ",
+                    &pitches,
+                    48.0,
+                    34.0,
+                    COLOR_HEADWORD,
+                    COLOR_READING,
+                );
+                assert!(resp.rect.width() > 0.0);
             });
         });
     }

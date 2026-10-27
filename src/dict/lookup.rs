@@ -20,6 +20,34 @@ pub fn lookup_word_at_pointer(
     current_tag: Option<&str>,
     custom_names_gen: u64,
 ) -> Option<DictPopupState> {
+    lookup_word_at_pointer_with_pitch(
+        pointer_pos,
+        ocr_boxes,
+        video_rect,
+        db,
+        freq_db,
+        None,
+        deinflector,
+        custom_names,
+        current_tag,
+        custom_names_gen,
+    )
+}
+
+/// Scans OCR boxes under the mouse pointer and performs Yomitan-style Japanese word recognition,
+/// enriching matched entries with pitch accent contours when `pitch_db` is provided.
+pub fn lookup_word_at_pointer_with_pitch(
+    pointer_pos: egui::Pos2,
+    ocr_boxes: &[OcrBox],
+    video_rect: egui::Rect,
+    db: Option<&DictDatabase>,
+    freq_db: Option<&super::frequency::FreqDatabase>,
+    pitch_db: Option<&super::pitch::PitchDatabase>,
+    deinflector: &Deinflector,
+    custom_names: &[CustomNameEntry],
+    current_tag: Option<&str>,
+    custom_names_gen: u64,
+) -> Option<DictPopupState> {
     if video_rect.width() <= 10.0 || video_rect.height() <= 10.0 || ocr_boxes.is_empty() {
         return None;
     }
@@ -186,6 +214,7 @@ pub fn lookup_word_at_pointer(
             db_generation: db.map_or(0, |d| d.generation),
             particle_index_ready: particle_index.is_some(),
             has_freq_db: freq_db.is_some(),
+            pitch_db_generation: pitch_db.map_or(0, |p| p.generation),
             custom_names_gen,
             current_tag: current_tag.map(str::to_string),
             line_text: full_text.clone(),
@@ -321,6 +350,11 @@ pub fn lookup_word_at_pointer(
                         })
                     });
                     entries = tagged.into_iter().map(|(_, e)| e).collect();
+                }
+                if let Some(pdb) = pitch_db {
+                    for entry in &mut entries {
+                        entry.pitches = pdb.get_pitches(&entry.term, &entry.reading);
+                    }
                 }
                 (start, end, entries)
             });
@@ -501,6 +535,7 @@ struct ScanCacheKey {
     db_generation: u64,
     particle_index_ready: bool,
     has_freq_db: bool,
+    pitch_db_generation: u64,
     custom_names_gen: u64,
     current_tag: Option<String>,
     line_text: String,
@@ -541,6 +576,7 @@ fn custom_name_to_term_entry(name: &CustomNameEntry) -> super::models::TermEntry
         term_tags: name.source_tag.clone(),
         inflection_reasons: vec![],
         frequency: None,
+        pitches: Vec::new(),
         custom_name_id: Some(name.id),
         custom_tag: name.source_tag.clone(),
     }
@@ -2109,5 +2145,83 @@ mod tests {
             0,
         );
         assert!(popup_ellipsis.is_none());
+    }
+
+    #[test]
+    fn test_lookup_word_enriches_pitches_and_invalidates_cache_on_pitch_db_change() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test_pitch_lookup.db");
+        let db = DictDatabase::open_or_create(&db_path).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO terms VALUES ('桜', 'さくら', 'n', '', 200.0, '[\"cherry blossom\"]', 1, '')",
+                [],
+            )
+            .unwrap();
+
+        let ocr_box = OcrBox {
+            text: "桜".to_string(),
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.2,
+            height: 0.1,
+            lines: vec![],
+            writing_direction: WritingDirection::LeftToRight,
+        };
+        let video_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
+
+        // 1. Lookup without pitch_db -> pitches is empty
+        let popup_no_pitch = lookup_word_at_pointer_with_pitch(
+            egui::pos2(500.0, 300.0),
+            &[ocr_box.clone()],
+            video_rect,
+            Some(&db),
+            None,
+            None,
+            global_deinflector(),
+            &[],
+            None,
+            0,
+        )
+        .expect("should match 桜");
+        assert!(popup_no_pitch.entries[0].pitches.is_empty());
+
+        // 2. Lookup with pitch_db -> cache invalidates and pitches are populated
+        let pitch_db_path = dir.path().join("pitch_lookup.db");
+        let pitch_db = super::super::pitch::PitchDatabase::open_or_create(&pitch_db_path).unwrap();
+        let pitches_json = serde_json::to_string(&vec![super::super::models::PitchAccent {
+            reading: "さくら".to_string(),
+            pattern: super::super::models::PitchPattern::Downstep(0),
+            nasal: vec![],
+            devoice: vec![],
+            tags: vec![],
+        }])
+        .unwrap();
+        pitch_db
+            .conn
+            .execute(
+                "INSERT INTO pitches (term, reading, reading_hira, pitches_json) VALUES ('桜', 'さくら', 'さくら', ?1)",
+                [pitches_json],
+            )
+            .unwrap();
+
+        let popup_with_pitch = lookup_word_at_pointer_with_pitch(
+            egui::pos2(500.0, 300.0),
+            &[ocr_box],
+            video_rect,
+            Some(&db),
+            None,
+            Some(&pitch_db),
+            global_deinflector(),
+            &[],
+            None,
+            0,
+        )
+        .expect("should match 桜 with pitch");
+        assert_eq!(popup_with_pitch.entries[0].pitches.len(), 1);
+        assert_eq!(
+            popup_with_pitch.entries[0].pitches[0].pattern,
+            super::super::models::PitchPattern::Downstep(0)
+        );
     }
 }
