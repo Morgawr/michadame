@@ -148,7 +148,12 @@ pub struct TwitchState {
     pub preroll_file_dialog_receiver: Option<Receiver<std::path::PathBuf>>,
     pub outro: Option<PrerollPlayer>,
     pub outro_file_dialog_receiver: Option<Receiver<std::path::PathBuf>>,
-    stream_key_receiver: Option<Receiver<Result<String, String>>>,
+    stream_key_receiver: Option<Receiver<StreamKeyResult>>,
+    fetched_stream_key: Option<(String, String)>,
+
+    pub auth_generation: u64,
+    pub auth_token_store: Arc<auth::SharedToken>,
+    auth_rx_generation: Option<u64>,
 
     self_display_name: Option<String>,
     self_color: Option<egui::Color32>,
@@ -165,8 +170,28 @@ pub struct TwitchState {
     warmup_clip_deadline: Option<Instant>,
 }
 
+struct StreamKeyResult {
+    generation: u64,
+    user_id: String,
+    login: String,
+    result: Result<String, String>,
+}
+
+fn account_identity_key(user_id: &str, login: &str) -> String {
+    if !user_id.is_empty() {
+        format!("id:{user_id}")
+    } else {
+        format!("login:{}", login.to_ascii_lowercase())
+    }
+}
+
 impl Default for TwitchState {
     fn default() -> Self {
+        let auth_token_store = if cfg!(test) {
+            Arc::new(auth::SharedToken::new())
+        } else {
+            auth::shared_token().clone()
+        };
         Self {
             config: TwitchConfig::default(),
             channel_input: String::new(),
@@ -200,6 +225,10 @@ impl Default for TwitchState {
             outro: None,
             outro_file_dialog_receiver: None,
             stream_key_receiver: None,
+            fetched_stream_key: None,
+            auth_generation: 0,
+            auth_token_store,
+            auth_rx_generation: None,
             self_display_name: None,
             self_color: None,
             worker: None,
@@ -667,13 +696,23 @@ impl TwitchState {
         if self.stream_key_receiver.is_some() {
             return;
         }
+        let store = self.auth_token_store.clone();
+        self.auth_generation = store.sync_if_uninitialized(&token);
+        let generation = self.auth_generation;
+        let user_id = token.user_id.clone();
+        let login = token.login.clone();
         let (tx, rx) = crossbeam_channel::bounded(1);
         self.stream_key_receiver = Some(rx);
         let _ = std::thread::Builder::new()
             .name("twitch-stream-key-fetch".to_string())
             .spawn(move || {
-                let res = auth::fetch_stream_key(&token).map_err(|e| e.to_string());
-                let _ = tx.send(res);
+                let res = store.fetch_stream_key(&token).map_err(|e| e.to_string());
+                let _ = tx.send(StreamKeyResult {
+                    generation,
+                    user_id,
+                    login,
+                    result: res,
+                });
             });
     }
 
@@ -729,6 +768,18 @@ impl TwitchState {
     }
 
     fn apply_refreshed_token(&mut self, token: StoredToken, ctx: &egui::Context) {
+        let Some(current) = &self.token else {
+            return;
+        };
+        if !auth::same_account(current, &token) {
+            return;
+        }
+        if !self
+            .auth_token_store
+            .is_token_current(&token, self.auth_generation)
+        {
+            return;
+        }
         if let Some(es) = &mut self.eventsub {
             es.access_token = token.access_token.clone();
         }
@@ -745,19 +796,29 @@ impl TwitchState {
         self.last_token_check = Some(Instant::now());
         if need_stream_info_retry && !self.stream_info.is_loading {
             self.stream_info_loaded = true;
-            self.stream_info.fetch_channel(&token, ctx);
+            if !cfg!(test) {
+                self.stream_info.fetch_channel(&token, ctx);
+            }
         }
     }
 
     fn handle_token_invalid(&mut self, reason: &str, ctx: &egui::Context) {
-        if let Some(latest) = auth::latest_token() {
-            self.apply_refreshed_token(latest, ctx);
+        let Some(current_acc) = self.token.clone() else {
             return;
+        };
+        if let Some(latest) = self.auth_token_store.latest_token() {
+            if auth::same_account(&current_acc, &latest)
+                && latest.access_token != current_acc.access_token
+            {
+                self.apply_refreshed_token(latest, ctx);
+                return;
+            }
         }
         self.token = None;
         self.eventsub = None;
+        self.live_poller = None;
         self.last_token_check = None;
-        auth::delete_token();
+        self.auth_generation = self.auth_token_store.delete_token();
         self.notify_error(format!("Twitch login expired ({reason}). Log in again."));
     }
 
@@ -767,16 +828,20 @@ impl TwitchState {
         let now = Instant::now();
         if !self.token_loaded {
             self.token_loaded = true;
-            self.token = auth::load_token();
+            self.token = self.auth_token_store.load_token();
+            self.auth_generation = self.auth_token_store.auth_generation();
             if self.token.is_some() {
                 self.last_token_check = Some(now);
             }
         }
-        if let Some(refreshed) = auth::take_refreshed_token() {
+        if let Some(ref token) = self.token {
+            self.auth_generation = self.auth_token_store.sync_if_uninitialized(token);
+        }
+        if let Some(refreshed) = self.auth_token_store.take_refreshed_token() {
             self.apply_refreshed_token(refreshed, ctx);
             changed = true;
         }
-        if let Some(reason) = auth::take_invalidated_reason() {
+        if let Some(reason) = self.auth_token_store.take_invalidated_reason() {
             self.handle_token_invalid(&reason, ctx);
             changed = true;
         }
@@ -843,18 +908,29 @@ impl TwitchState {
 
         if let Some(rx) = &self.stream_key_receiver {
             match rx.try_recv() {
-                Ok(Ok(key)) => {
-                    self.config.stream_key = key.clone();
-                    self.stream_key_input = key;
-                    self.config_dirty = true;
-                    self.notify_info("Twitch stream key fetched from account!");
+                Ok(msg) => {
                     self.stream_key_receiver = None;
-                    changed = true;
-                }
-                Ok(Err(e)) => {
-                    self.notify_error(format!("Could not fetch stream key: {e}"));
-                    self.stream_key_receiver = None;
-                    changed = true;
+                    let matches_session = msg.generation == self.auth_generation
+                        && self.token.as_ref().is_some_and(|cur| {
+                            auth::same_account_id(cur, &msg.user_id, &msg.login)
+                        });
+                    if matches_session {
+                        match msg.result {
+                            Ok(key) => {
+                                let owner = account_identity_key(&msg.user_id, &msg.login);
+                                self.fetched_stream_key = Some((owner, key.clone()));
+                                self.config.stream_key = key.clone();
+                                self.stream_key_input = key;
+                                self.config_dirty = true;
+                                self.notify_info("Twitch stream key fetched from account!");
+                                changed = true;
+                            }
+                            Err(e) => {
+                                self.notify_error(format!("Could not fetch stream key: {e}"));
+                                changed = true;
+                            }
+                        }
+                    }
                 }
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {
                     self.stream_key_receiver = None;
@@ -963,11 +1039,16 @@ impl TwitchState {
                     eventsub::EventSubMsg::TokenInvalid(reason) => {
                         self.handle_token_invalid(&reason, ctx);
                     }
+                    eventsub::EventSubMsg::Revoked(reason) => {
+                        self.notify_error(format!(
+                            "Twitch EventSub subscription revoked: {reason}"
+                        ));
+                    }
                 }
             }
             changed = true;
         }
-        if let Some(refreshed) = auth::take_refreshed_token() {
+        if let Some(refreshed) = self.auth_token_store.take_refreshed_token() {
             self.apply_refreshed_token(refreshed, ctx);
             changed = true;
         }
@@ -1549,6 +1630,8 @@ impl TwitchState {
     pub fn start_login(&mut self, ctx: &egui::Context) {
         self.cancel_login();
         let cancel = Arc::new(AtomicBool::new(false));
+        self.auth_generation = self.auth_token_store.advance_generation();
+        self.auth_rx_generation = Some(self.auth_generation);
         self.auth_rx = Some(auth::start_device_flow(
             self.client_id(),
             cancel.clone(),
@@ -1563,28 +1646,107 @@ impl TwitchState {
             cancel.store(true, Ordering::Release);
         }
         self.auth_rx = None;
+        self.auth_rx_generation = None;
         self.auth_flow = AuthFlow::Idle;
     }
 
-    pub fn logout(&mut self) {
-        if let Some(token) = self.token.take() {
-            auth::revoke_in_background(token);
+    /// Replaces the active authenticated account, advancing `auth_generation`,
+    /// invalidating in-flight operations from any previous session/account, and
+    /// persisting the new token to disk.
+    pub fn set_authenticated_token(&mut self, token: StoredToken) {
+        let account_changed = self
+            .token
+            .as_ref()
+            .is_some_and(|prev| !auth::same_account(prev, &token));
+        self.cancel_login();
+        self.stream_key_receiver = None;
+        let new_owner = account_identity_key(&token.user_id, &token.login);
+        if let Some((ref prev_owner, ref fetched_key)) = self.fetched_stream_key {
+            if *prev_owner != new_owner {
+                if self.config.stream_key == *fetched_key {
+                    self.config.stream_key.clear();
+                }
+                if self.stream_key_input == *fetched_key {
+                    self.stream_key_input.clear();
+                }
+                self.fetched_stream_key = None;
+            }
         }
-        auth::delete_token();
+        match self.auth_token_store.save_token(&token) {
+            Ok(gen) => {
+                self.auth_generation = gen;
+            }
+            Err(e) => {
+                self.auth_generation = self.auth_token_store.set_active_token(&token);
+                if !cfg!(test) {
+                    self.notify_error(format!("Could not save Twitch login: {e}"));
+                }
+            }
+        }
+        self.token = Some(token);
+        self.token_loaded = true;
+        self.last_token_check = Some(Instant::now());
+        self.stream_info = StreamInfoState::default();
+        self.stream_info_loaded = false;
+        if account_changed {
+            self.self_display_name = None;
+            self.self_color = None;
+            self.eventsub = None;
+            self.live_poller = None;
+            if self.worker.as_ref().is_some_and(|w| w.login.is_some()) {
+                self.worker = None;
+                self.status = ConnectionStatus::Disabled;
+            }
+            self.was_stream_live = false;
+            self.warmup_clip_deadline = None;
+        }
+    }
+
+    pub fn logout(&mut self) {
+        self.cancel_login();
+        let old_token = self.token.take();
+        self.stream_key_receiver = None;
+        if let Some((_owner, fetched_key)) = self.fetched_stream_key.take() {
+            if self.config.stream_key == fetched_key {
+                self.config.stream_key.clear();
+            }
+            if self.stream_key_input == fetched_key {
+                self.stream_key_input.clear();
+            }
+        }
+        self.auth_generation = self.auth_token_store.delete_token();
+        if let Some(token) = old_token {
+            if !cfg!(test) {
+                auth::revoke_in_background(token);
+            }
+        }
+        self.eventsub = None;
+        self.live_poller = None;
+        if self.worker.as_ref().is_some_and(|w| w.login.is_some()) {
+            self.worker = None;
+            self.status = ConnectionStatus::Disabled;
+        }
+        self.stream_status = StreamStatus::Unknown("log in to Twitch to see live status".into());
         self.last_token_check = None;
         self.self_display_name = None;
         self.self_color = None;
         self.stream_info = StreamInfoState::default();
         self.stream_info_loaded = false;
+        self.was_stream_live = false;
+        self.warmup_clip_deadline = None;
     }
 
     fn poll_auth_flow(&mut self, ctx: &egui::Context) -> bool {
         let Some(rx) = &self.auth_rx else {
             return false;
         };
+        let rx_gen = self.auth_rx_generation;
         let events: Vec<DeviceFlowEvent> = rx.try_iter().collect();
         let changed = !events.is_empty();
         for event in events {
+            if rx_gen.is_some_and(|g| g != self.auth_generation) {
+                continue;
+            }
             match event {
                 DeviceFlowEvent::Code {
                     user_code,
@@ -1599,20 +1761,14 @@ impl TwitchState {
                     };
                 }
                 DeviceFlowEvent::Success(token) => {
-                    if let Err(e) = auth::save_token(&token) {
-                        self.notify_error(format!("Could not save Twitch login: {e}"));
-                    }
-                    self.notify_info(format!("Logged in to Twitch as {}.", token.login));
-                    self.token = Some(token);
-                    self.last_token_check = Some(Instant::now());
-                    self.stream_info_loaded = false;
-                    self.auth_rx = None;
-                    self.auth_cancel = None;
-                    self.auth_flow = AuthFlow::Idle;
+                    let login_name = token.login.clone();
+                    self.set_authenticated_token(token);
+                    self.notify_info(format!("Logged in to Twitch as {login_name}."));
                 }
                 DeviceFlowEvent::Failed(reason) => {
                     self.notify_error(format!("Twitch login failed: {reason}"));
                     self.auth_rx = None;
+                    self.auth_rx_generation = None;
                     self.auth_cancel = None;
                     self.auth_flow = AuthFlow::Idle;
                 }
@@ -2334,5 +2490,280 @@ mod tests {
             "Twitch connection must stop when outro finishes"
         );
         assert!(!tap.is_broadcast_preroll_active());
+    }
+
+    #[test]
+    fn poll_and_logout_do_not_block_when_background_validation_and_refresh_are_stalled_f09() {
+        let ctx = egui::Context::default();
+        let mut state = TwitchState::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        state
+            .auth_token_store
+            .set_token_path_override(Some(dir.path().join("twitch_token.json")));
+
+        let token_a = StoredToken {
+            access_token: "access_a_old".into(),
+            refresh_token: Some("refresh_a_old".into()),
+            login: "alice".into(),
+            user_id: "111".into(),
+            client_id: "cid".into(),
+        };
+        state.set_authenticated_token(token_a.clone());
+
+        let (entered_tx, entered_rx) = crossbeam_channel::bounded::<()>(1);
+        let (release_tx, release_rx) = crossbeam_channel::bounded::<()>(1);
+
+        state.auth_token_store.set_test_hooks(
+            Some(Arc::new(move |_access| {
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv_timeout(Duration::from_secs(5));
+                Err(auth::AuthError::Invalid("expired".into()))
+            })),
+            Some(Arc::new(|_cid, _rt| {
+                Ok(auth::Tokens {
+                    access_token: "access_a_new".into(),
+                    refresh_token: Some("refresh_a_new".into()),
+                })
+            })),
+            None,
+        );
+
+        let store_bg = state.auth_token_store.clone();
+        let tok_bg = token_a.clone();
+        let worker = std::thread::spawn(move || store_bg.revalidate(&tok_bg));
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("background revalidation entered network hook");
+
+        // While background validation is stalled, UI `poll()` and `logout()` must not block!
+        let t0 = Instant::now();
+        state.poll(&ctx);
+        state.logout();
+        state.poll(&ctx);
+        let ui_elapsed = t0.elapsed();
+        assert!(
+            ui_elapsed < Duration::from_millis(50),
+            "UI poll and logout took {:?} while background validation was stalled",
+            ui_elapsed
+        );
+        assert!(state.token.is_none());
+
+        let _ = release_tx.send(());
+        let bg_res = worker.join().expect("worker joined");
+        assert!(bg_res.is_err(), "logged-out session must abort commit");
+        state.poll(&ctx);
+        assert!(state.token.is_none());
+    }
+
+    #[test]
+    fn logout_and_account_switch_discard_delayed_stream_key_and_refresh_and_preserve_disk_f10() {
+        let ctx = egui::Context::default();
+        let mut state = TwitchState::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token_path = dir.path().join("twitch_token.json");
+        state
+            .auth_token_store
+            .set_token_path_override(Some(token_path.clone()));
+
+        let token_a = StoredToken {
+            access_token: "access_a_1".into(),
+            refresh_token: Some("refresh_a_1".into()),
+            login: "alice".into(),
+            user_id: "111".into(),
+            client_id: "cid".into(),
+        };
+        let token_b = StoredToken {
+            access_token: "access_b_1".into(),
+            refresh_token: Some("refresh_b_1".into()),
+            login: "bob".into(),
+            user_id: "222".into(),
+            client_id: "cid".into(),
+        };
+
+        state.set_authenticated_token(token_a.clone());
+
+        let (refresh_entered_tx, refresh_entered_rx) = crossbeam_channel::bounded::<()>(1);
+        let (refresh_release_tx, refresh_release_rx) = crossbeam_channel::bounded::<()>(1);
+        let (key_entered_tx, key_entered_rx) = crossbeam_channel::bounded::<()>(1);
+        let (key_release_tx, key_release_rx) = crossbeam_channel::bounded::<()>(1);
+
+        state.auth_token_store.set_test_hooks(
+            Some(Arc::new(|access| {
+                if access == "access_a_1" {
+                    Err(auth::AuthError::Invalid("expired".into()))
+                } else if access == "access_a_2" {
+                    Ok(auth::Validation {
+                        login: "alice".into(),
+                        user_id: "111".into(),
+                    })
+                } else {
+                    Ok(auth::Validation {
+                        login: "bob".into(),
+                        user_id: "222".into(),
+                    })
+                }
+            })),
+            Some(Arc::new(move |_cid, _rt| {
+                let _ = refresh_entered_tx.send(());
+                let _ = refresh_release_rx.recv_timeout(Duration::from_secs(5));
+                Ok(auth::Tokens {
+                    access_token: "access_a_2".into(),
+                    refresh_token: Some("refresh_a_2".into()),
+                })
+            })),
+            None,
+        );
+
+        state
+            .auth_token_store
+            .set_stream_key_hook(Some(Arc::new(move |tok| {
+                if tok.user_id == "111" {
+                    let _ = key_entered_tx.send(());
+                    let _ = key_release_rx.recv_timeout(Duration::from_secs(5));
+                    Ok("live_stream_key_alice".into())
+                } else {
+                    Ok("live_stream_key_bob".into())
+                }
+            })));
+
+        // Start Account A's stream-key fetch (which triggers token refresh + stream key hook)
+        state.try_fetch_stream_key();
+        refresh_entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("Account A refresh in flight");
+
+        // Release refresh so stream_key_hook is entered for Account A
+        let _ = refresh_release_tx.send(());
+        key_entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("Account A stream key fetch in flight");
+
+        // Also queue a stale IrcEvent::TokenRefreshed for Account A
+        let (irc_worker, _cmd_rx) = irc::WorkerHandle::mock("alice".into(), Some("alice".into()));
+        state.worker = Some(irc_worker);
+
+        // User logs out of Account A and logs in as Account B
+        state.logout();
+        state.set_authenticated_token(token_b.clone());
+        state.config.stream_key = "live_stream_key_bob".into();
+        state.stream_key_input = "live_stream_key_bob".into();
+
+        // Now release Account A's delayed stream-key response and poll UI
+        let _ = key_release_tx.send(());
+        std::thread::sleep(Duration::from_millis(30));
+        state.poll(&ctx);
+
+        //Also test direct apply_refreshed_token with a stale Account A token
+        state.apply_refreshed_token(
+            StoredToken {
+                access_token: "access_a_late".into(),
+                refresh_token: Some("refresh_a_late".into()),
+                login: "alice".into(),
+                user_id: "111".into(),
+                client_id: "cid".into(),
+            },
+            &ctx,
+        );
+
+        // Account B's token, stream key, and on-disk file must remain completely intact!
+        assert_eq!(state.token.as_ref(), Some(&token_b));
+        assert_eq!(state.config.stream_key, "live_stream_key_bob");
+        assert_eq!(state.stream_key_input, "live_stream_key_bob");
+        let disk_token = state
+            .auth_token_store
+            .load_token()
+            .expect("Account B token remains on disk");
+        assert_eq!(disk_token, token_b);
+    }
+
+    #[test]
+    fn logout_with_no_subsequent_login_rejects_delayed_responses_and_clears_auto_fetched_key_f10() {
+        let ctx = egui::Context::default();
+        let mut state = TwitchState::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token_path = dir.path().join("twitch_token.json");
+        state
+            .auth_token_store
+            .set_token_path_override(Some(token_path.clone()));
+
+        let token_a = StoredToken {
+            access_token: "access_a_1".into(),
+            refresh_token: Some("refresh_a_1".into()),
+            login: "alice".into(),
+            user_id: "111".into(),
+            client_id: "cid".into(),
+        };
+        state.set_authenticated_token(token_a.clone());
+
+        // 1. Auto-fetched stream key is cleared on logout, while manual key is preserved.
+        state
+            .auth_token_store
+            .set_stream_key_hook(Some(Arc::new(|_tok| Ok("auto_fetched_key_a".into()))));
+        state.try_fetch_stream_key();
+        for _ in 0..20 {
+            state.poll(&ctx);
+            if state.config.stream_key == "auto_fetched_key_a" {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(state.config.stream_key, "auto_fetched_key_a");
+        assert_eq!(state.stream_key_input, "auto_fetched_key_a");
+
+        state.logout();
+        assert!(
+            state.config.stream_key.is_empty(),
+            "auto-fetched stream key owned by logged-out account must be cleared"
+        );
+        assert!(state.stream_key_input.is_empty());
+        assert!(state.token.is_none());
+        assert!(!token_path.exists());
+
+        // 2. Now log in again as Account A, start a delayed refresh + stream key fetch, then logout() with NO subsequent login.
+        state.set_authenticated_token(token_a.clone());
+        state.config.stream_key = "manual_custom_key".into();
+        state.stream_key_input = "manual_custom_key".into();
+
+        let (entered_tx, entered_rx) = crossbeam_channel::bounded::<()>(1);
+        let (release_tx, release_rx) = crossbeam_channel::bounded::<()>(1);
+        state.auth_token_store.set_test_hooks(
+            Some(Arc::new(|_access| {
+                Err(auth::AuthError::Invalid("expired".into()))
+            })),
+            Some(Arc::new(move |_cid, _rt| {
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv_timeout(Duration::from_secs(5));
+                Ok(auth::Tokens {
+                    access_token: "access_a_2".into(),
+                    refresh_token: Some("refresh_a_2".into()),
+                })
+            })),
+            None,
+        );
+
+        let store_bg = state.auth_token_store.clone();
+        let tok_bg = token_a.clone();
+        let bg_worker = std::thread::spawn(move || store_bg.ensure_valid(&tok_bg));
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("Account A refresh in flight");
+
+        // Logout with no subsequent login; manual key should remain, delayed Account A refresh must not repopulate token or disk.
+        state.logout();
+        assert_eq!(
+            state.config.stream_key, "manual_custom_key",
+            "manually entered stream key must be preserved on logout"
+        );
+
+        let _ = release_tx.send(());
+        let res = bg_worker.join().expect("bg worker joined");
+        assert!(res.is_err());
+
+        state.poll(&ctx);
+        assert!(state.token.is_none());
+        assert!(state.auth_token_store.load_token().is_none());
+        assert!(!token_path.exists());
     }
 }

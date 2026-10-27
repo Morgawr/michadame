@@ -20,6 +20,8 @@ pub struct GamescopeHookState {
     pub prev_modifiers: eframe::egui::Modifiers,
     pub initial_resolution: (u32, u32),
     pub last_cursor_retry: Option<std::time::Instant>,
+    pub dma_retry_count: u32,
+    pub last_dma_retry: Option<std::time::Instant>,
 }
 
 impl Default for GamescopeHookState {
@@ -38,6 +40,8 @@ impl Default for GamescopeHookState {
             prev_modifiers: eframe::egui::Modifiers::default(),
             initial_resolution: (video::GAMESCOPE_WIDTH, video::GAMESCOPE_HEIGHT),
             last_cursor_retry: None,
+            dma_retry_count: 0,
+            last_dma_retry: None,
         }
     }
 }

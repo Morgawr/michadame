@@ -35,7 +35,7 @@ pub fn execute_popup_mine_action(
         return false;
     };
 
-    let created_at = request.created_at;
+    let request_id = request.request_id;
     if !state.bank.request_mine(request) {
         state.error("Another word is still being mined, try again.");
         ctx.request_repaint();
@@ -44,7 +44,7 @@ pub fn execute_popup_mine_action(
 
     if with_clip {
         let clip_title = crate::twitch::clips::format_clip_title(&term, &reading, tag.as_deref());
-        if let Err(e) = state.twitch.request_clip(clip_title, Some(created_at), ctx) {
+        if let Err(e) = state.twitch.request_clip(clip_title, Some(request_id), ctx) {
             state.error(format!("Could not create Twitch clip: {e}"));
         } else {
             state.info(format!(

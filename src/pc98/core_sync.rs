@@ -47,63 +47,156 @@ pub fn np2kai_system_subdir() -> PathBuf {
     system_dir().join("np2kai")
 }
 
-/// Ensures the Libretro system and save directories exist and seeds `np2kai/`
-/// with `default.ttf` (from Michadame's embedded NotoSansJP) plus any local PC-98
-/// font/ROM files discovered on the machine.
-pub fn ensure_system_dir() -> Result<PathBuf> {
-    let sys_dir = system_dir();
-    let np2_dir = np2kai_system_subdir();
-    let save_dir = saves_dir();
+pub const CONFLICTING_9801_EXPANSION_ROMS: &[&str] = &[
+    "bios9821.rom",
+    "BIOS9821.ROM",
+    "d8000.rom",
+    "D8000.ROM",
+    "ide.rom",
+    "IDE.ROM",
+    "pci.rom",
+    "PCI.ROM",
+    "sasi.rom",
+    "SASI.ROM",
+    "scsi.rom",
+    "SCSI.ROM",
+];
 
-    fs::create_dir_all(&np2_dir)
-        .with_context(|| format!("Failed to create PC-98 system dir {:?}", np2_dir))?;
+fn is_conflicting_expansion_rom_for_model(file_name: &str, model: &str) -> bool {
+    let model_upper = model.trim().to_ascii_uppercase();
+    let is_9821 = model_upper.contains("9821");
+    if is_9821 && file_name.eq_ignore_ascii_case("bios9821.rom") {
+        return false;
+    }
+    CONFLICTING_9801_EXPANSION_ROMS
+        .iter()
+        .any(|cand| file_name.eq_ignore_ascii_case(cand))
+}
+
+fn sanitize_model_dir_slug(model: &str) -> String {
+    let mut slug = String::new();
+    for ch in model.trim().chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            slug.push(ch.to_ascii_lowercase());
+        } else if !slug.ends_with('_') && !slug.is_empty() {
+            slug.push('_');
+        }
+    }
+    let trimmed = slug.trim_matches('_');
+    if trimmed.is_empty() {
+        "vx".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Ensures the user's canonical Libretro system (`<base>/system/np2kai`) and save directories exist,
+/// seeds missing default font/audio assets without deleting any user-supplied ROMs, and constructs
+/// a model-specific runtime system directory (`<base>/runtime_system/<model>/np2kai`) that exposes
+/// only the ROMs compatible with `model`.
+pub fn ensure_system_dir() -> Result<PathBuf> {
+    ensure_system_dir_for_model("VX")
+}
+
+/// Prepares the PC-98 system directory for a specific `np2kai_model` without deleting any user
+/// ROM files from the source `system/np2kai` directory.
+pub fn ensure_system_dir_for_model(model: &str) -> Result<PathBuf> {
+    prepare_system_dir_in(&pc98_base_dir(), model, true)
+}
+
+/// Prepares the PC-98 system directory inside `base_dir` for `model`.
+/// All user-supplied ROM files in `<base_dir>/system/np2kai` are preserved intact.
+/// Returns the model-specific runtime system root (`<base_dir>/runtime_system/<model_slug>`) whose
+/// `np2kai/` subdirectory contains only the model-compatible ROM set.
+pub fn prepare_system_dir_in(
+    base_dir: &Path,
+    model: &str,
+    seed_from_host: bool,
+) -> Result<PathBuf> {
+    let np2_source_dir = base_dir.join("system").join("np2kai");
+    let save_dir = base_dir.join("saves");
+
+    fs::create_dir_all(&np2_source_dir)
+        .with_context(|| format!("Failed to create PC-98 system dir {:?}", np2_source_dir))?;
     fs::create_dir_all(&save_dir)
         .with_context(|| format!("Failed to create PC-98 saves dir {:?}", save_dir))?;
 
-    // 1. Seed default.ttf so fontmng_init() and text-VRAM Kanji rendering always work out of the box
-    let default_ttf = np2_dir.join("default.ttf");
+    // 1. Seed default.ttf in source dir if missing
+    let default_ttf = np2_source_dir.join("default.ttf");
     if !default_ttf.exists() {
         let _ = fs::write(&default_ttf, EMBEDDED_JP_FONT);
     }
 
-    // 2. Remove conflicting PC-9821 / IDE / SASI / SCSI expansion ROMs from np2_dir.
-    // When bios9821.rom, d8000.rom, or ide.rom is present in system/np2kai/, NP2kai maps them into
-    // the 0xD8000 expansion ROM window even on PC-9801VX, causing disk bootstrap to jump into an
-    // incompatible expansion ROM and hang on a black screen after the memory check.
-    for conflicting_rom in [
-        "bios9821.rom",
-        "BIOS9821.ROM",
-        "d8000.rom",
-        "D8000.ROM",
-        "ide.rom",
-        "IDE.ROM",
-        "pci.rom",
-        "PCI.ROM",
-        "sasi.rom",
-        "SASI.ROM",
-        "scsi.rom",
-        "SCSI.ROM",
-    ] {
-        let p = np2_dir.join(conflicting_rom);
-        if p.exists() {
-            let _ = fs::remove_file(&p);
-        }
+    // 2. Opportunistically seed FONT.ROM / font.bmp / sound.rom / BIOS ROMs if missing (never overwrites or deletes)
+    if seed_from_host {
+        seed_optional_rom_files(&np2_source_dir);
     }
 
-    // 3. Opportunistically seed FONT.ROM / font.bmp / sound.rom / BIOS ROMs if user has NekoProject2 or RetroArch files
-    seed_optional_rom_files(&np2_dir);
-
-    // 4. Seed authentic NP2 floppy stepper motor seek WAV samples (fddseek.wav / fddseek1.wav)
-    let fddseek_wav = np2_dir.join("fddseek.wav");
+    // 3. Seed authentic NP2 floppy stepper motor seek WAV samples if missing
+    let fddseek_wav = np2_source_dir.join("fddseek.wav");
     if !fddseek_wav.exists() {
         let _ = fs::write(&fddseek_wav, EMBEDDED_FDDSEEK_WAV);
     }
-    let fddseek1_wav = np2_dir.join("fddseek1.wav");
+    let fddseek1_wav = np2_source_dir.join("fddseek1.wav");
     if !fddseek1_wav.exists() {
         let _ = fs::write(&fddseek1_wav, EMBEDDED_FDDSEEK1_WAV);
     }
 
-    Ok(sys_dir)
+    // 4. Construct a model-specific runtime directory that exposes only compatible ROMs
+    // while keeping every user file in `np2_source_dir` completely untouched.
+    let model_slug = sanitize_model_dir_slug(model);
+    let runtime_sys_dir = base_dir.join("runtime_system").join(&model_slug);
+    let runtime_np2_dir = runtime_sys_dir.join("np2kai");
+    fs::create_dir_all(&runtime_np2_dir).with_context(|| {
+        format!(
+            "Failed to create PC-98 runtime system dir {:?}",
+            runtime_np2_dir
+        )
+    })?;
+
+    // Clean any previously synced files in the owned runtime directory that are incompatible or stale
+    if let Ok(entries) = fs::read_dir(&runtime_np2_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(fname) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let src_path = np2_source_dir.join(fname);
+            if !src_path.is_file() || is_conflicting_expansion_rom_for_model(fname, model) {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
+
+    // Sync compatible files from `np2_source_dir` into `runtime_np2_dir`
+    if let Ok(entries) = fs::read_dir(&np2_source_dir) {
+        for entry in entries.flatten() {
+            let src_path = entry.path();
+            if !src_path.is_file() {
+                continue;
+            }
+            let Some(fname) = src_path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if is_conflicting_expansion_rom_for_model(fname, model) {
+                continue;
+            }
+            let dst_path = runtime_np2_dir.join(fname);
+            let needs_copy = match (fs::metadata(&src_path), fs::metadata(&dst_path)) {
+                (Ok(src_m), Ok(dst_m)) => src_m.len() != dst_m.len(),
+                (Ok(_), Err(_)) => true,
+                _ => false,
+            };
+            if needs_copy {
+                let _ = fs::copy(&src_path, &dst_path);
+            }
+        }
+    }
+
+    Ok(runtime_sys_dir)
 }
 
 fn seed_optional_rom_files(np2_dir: &Path) {
@@ -328,5 +421,69 @@ mod tests {
 
         assert!(target_so.exists());
         assert_eq!(fs::read(&target_so).unwrap(), b"\x7fELF-dummy-np2kai-core");
+    }
+
+    #[test]
+    fn test_prepare_system_dir_preserves_all_user_roms_across_models() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let base_dir = tmp_dir.path();
+        let source_np2_dir = base_dir.join("system").join("np2kai");
+        fs::create_dir_all(&source_np2_dir).unwrap();
+
+        let mut sentinels = Vec::new();
+        for (idx, &rom_name) in CONFLICTING_9801_EXPANSION_ROMS.iter().enumerate() {
+            let sentinel = format!("USER_ROM_SENTINEL_{idx}_{rom_name}").into_bytes();
+            fs::write(source_np2_dir.join(rom_name), &sentinel).unwrap();
+            sentinels.push((rom_name, sentinel));
+        }
+        let main_bios_sentinel = b"USER_MAIN_BIOS_ROM_DATA".to_vec();
+        fs::write(source_np2_dir.join("bios.rom"), &main_bios_sentinel).unwrap();
+
+        for model in ["PC-9801VX", "PC-9801VM", "PC-286", "PC-9821"] {
+            let runtime_sys = prepare_system_dir_in(base_dir, model, false).unwrap();
+            let runtime_np2 = runtime_sys.join("np2kai");
+            assert!(runtime_np2.is_dir());
+
+            // Every original user ROM in system/np2kai must remain intact with its exact sentinel bytes
+            for (rom_name, expected_bytes) in &sentinels {
+                let user_rom_path = source_np2_dir.join(rom_name);
+                assert!(
+                    user_rom_path.is_file(),
+                    "User ROM {rom_name} was deleted when preparing model {model}"
+                );
+                assert_eq!(
+                    &fs::read(&user_rom_path).unwrap(),
+                    expected_bytes,
+                    "User ROM {rom_name} contents changed when preparing model {model}"
+                );
+            }
+            assert_eq!(
+                fs::read(source_np2_dir.join("bios.rom")).unwrap(),
+                main_bios_sentinel
+            );
+
+            // Runtime directory must have bios.rom and default.ttf
+            assert_eq!(
+                fs::read(runtime_np2.join("bios.rom")).unwrap(),
+                main_bios_sentinel
+            );
+            assert!(runtime_np2.join("default.ttf").is_file());
+
+            // On PC-9801VX / VM / PC-286, conflicting expansion ROMs must not be exposed in runtime_np2
+            if !model.contains("9821") {
+                for &(rom_name, _) in &sentinels {
+                    assert!(
+                        !runtime_np2.join(rom_name).exists(),
+                        "Conflicting expansion ROM {rom_name} should not be exposed in runtime dir for {model}"
+                    );
+                }
+            } else {
+                // On PC-9821, bios9821.rom is allowed in the runtime directory
+                assert!(
+                    runtime_np2.join("bios9821.rom").is_file()
+                        || runtime_np2.join("BIOS9821.ROM").is_file()
+                );
+            }
+        }
     }
 }

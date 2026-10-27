@@ -9,11 +9,11 @@ fn main() {
         .probe("libpipewire-0.3")
         .expect("Failed to find libpipewire-0.3 via pkg-config");
 
-    pkg_config::Config::new()
+    let x11 = pkg_config::Config::new()
         .probe("x11")
         .expect("Failed to find libX11 via pkg-config");
 
-    pkg_config::Config::new()
+    let xfixes = pkg_config::Config::new()
         .probe("xfixes")
         .expect("Failed to find libXfixes via pkg-config");
 
@@ -21,7 +21,13 @@ fn main() {
     build.file("src/gamescope/pipewire_dma.c");
     build.file("src/gamescope/x11_cursor.c");
     build.include("src/gamescope");
-    for include in pw.include_paths {
+    for include in &pw.include_paths {
+        build.include(include);
+    }
+    for include in &x11.include_paths {
+        build.include(include);
+    }
+    for include in &xfixes.include_paths {
         build.include(include);
     }
     build.compile("pipewire_dma_bridge");

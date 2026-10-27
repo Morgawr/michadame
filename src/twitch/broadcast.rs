@@ -10,7 +10,6 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use ff::{codec, encoder, format, frame, sys as ffi, Packet, Rational};
 use ffmpeg_next as ff;
 use std::ffi::CString;
-use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -520,6 +519,131 @@ impl LiveAudioEncoder {
     }
 }
 
+const DEFAULT_RTMP_IO_TIMEOUT: Duration = Duration::from_secs(10);
+
+struct RtmpInterruptState {
+    stop_requested: Arc<AtomicBool>,
+    origin: Instant,
+    /// Monotonic deadline in nanoseconds since `origin` (`0` = no active per-op deadline).
+    deadline_ns: AtomicU64,
+}
+
+impl RtmpInterruptState {
+    fn new(stop_requested: Arc<AtomicBool>) -> Self {
+        Self {
+            stop_requested,
+            origin: Instant::now(),
+            deadline_ns: AtomicU64::new(0),
+        }
+    }
+
+    fn set_deadline(&self, timeout: Duration) {
+        let now_ns = self.origin.elapsed().as_nanos() as u64;
+        let add_ns = timeout.as_nanos().min(u64::MAX as u128 / 2) as u64;
+        let target = now_ns.saturating_add(add_ns).max(1);
+        self.deadline_ns.store(target, Ordering::Release);
+    }
+
+    fn clear_deadline(&self) {
+        self.deadline_ns.store(0, Ordering::Release);
+    }
+
+    fn should_interrupt(&self) -> bool {
+        if self.stop_requested.load(Ordering::Acquire) {
+            return true;
+        }
+        let deadline = self.deadline_ns.load(Ordering::Acquire);
+        if deadline != 0 {
+            let now_ns = self.origin.elapsed().as_nanos() as u64;
+            if now_ns >= deadline {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+unsafe extern "C" fn rtmp_interrupt_callback(opaque: *mut libc::c_void) -> libc::c_int {
+    if opaque.is_null() {
+        return 0;
+    }
+    let state = &*(opaque as *const RtmpInterruptState);
+    i32::from(state.should_interrupt())
+}
+
+fn open_rtmp_flv_output(
+    url: &str,
+    interrupt_state: &RtmpInterruptState,
+    io_timeout: Duration,
+) -> Result<format::context::Output> {
+    ff::init()?;
+    let c_url = CString::new(url).context("RTMP URL contains interior NUL byte")?;
+    let c_format = CString::new("flv").unwrap();
+
+    unsafe {
+        let mut ctx: *mut ffi::AVFormatContext = ptr::null_mut();
+        check(ffi::avformat_alloc_output_context2(
+            &mut ctx,
+            ptr::null_mut(),
+            c_format.as_ptr(),
+            c_url.as_ptr(),
+        ))
+        .context("Failed to allocate RTMP FLV output context")?;
+        ensure!(
+            !ctx.is_null(),
+            "avformat_alloc_output_context2 returned null"
+        );
+
+        let int_cb = ffi::AVIOInterruptCB {
+            callback: Some(rtmp_interrupt_callback),
+            opaque: (interrupt_state as *const RtmpInterruptState)
+                .cast_mut()
+                .cast::<libc::c_void>(),
+        };
+        (*ctx).interrupt_callback = int_cb;
+
+        if ((*(*ctx).oformat).flags & ffi::AVFMT_NOFILE) == 0 {
+            let mut raw_opts: *mut ffi::AVDictionary = ptr::null_mut();
+            let timeout_us = CString::new(io_timeout.as_micros().max(50_000).to_string()).unwrap();
+            let k_rw_timeout = CString::new("rw_timeout").unwrap();
+            let k_tcp_nodelay = CString::new("tcp_nodelay").unwrap();
+            let v_one = CString::new("1").unwrap();
+            ffi::av_dict_set(&mut raw_opts, k_rw_timeout.as_ptr(), timeout_us.as_ptr(), 0);
+            ffi::av_dict_set(&mut raw_opts, k_tcp_nodelay.as_ptr(), v_one.as_ptr(), 0);
+
+            interrupt_state.set_deadline(io_timeout);
+            let open_res = ffi::avio_open2(
+                &mut (*ctx).pb,
+                c_url.as_ptr(),
+                ffi::AVIO_FLAG_WRITE,
+                &(*ctx).interrupt_callback,
+                &mut raw_opts,
+            );
+            interrupt_state.clear_deadline();
+            ffi::av_dict_free(&mut raw_opts);
+
+            if let Err(e) = check(open_res) {
+                ffi::avformat_free_context(ctx);
+                return Err(e).context("Failed to connect to RTMP ingest server");
+            }
+        }
+
+        Ok(format::context::Output::wrap(ctx))
+    }
+}
+
+fn write_packet_with_deadline(
+    pkt: &mut Packet,
+    output: &mut format::context::Output,
+    interrupt_state: &RtmpInterruptState,
+    io_timeout: Duration,
+) -> Result<()> {
+    interrupt_state.set_deadline(io_timeout);
+    let res = pkt.write_interleaved(output);
+    interrupt_state.clear_deadline();
+    res.context("Failed to write packet to RTMP ingest")
+}
+
 pub struct BroadcastHandle {
     pub status: Arc<Mutex<BroadcastStatus>>,
     pub metrics: Arc<BroadcastMetrics>,
@@ -527,6 +651,7 @@ pub struct BroadcastHandle {
     pub video_tx: Sender<VideoFrame>,
     pub video_free_rx: Receiver<Vec<u8>>,
     audio_tap: Arc<crate::replay::AudioTap>,
+    done_rx: Option<Receiver<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -542,6 +667,9 @@ impl BroadcastHandle {
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Release);
         self.audio_tap.unregister_broadcast_routes();
+        if let Some(rx) = self.done_rx.take() {
+            let _ = rx.recv_timeout(Duration::from_secs(3));
+        }
         if let Some(t) = self.thread.take() {
             if std::thread::Builder::new()
                 .name("twitch-broadcast-stop".into())
@@ -568,6 +696,7 @@ impl BroadcastHandle {
             video_tx,
             video_free_rx,
             audio_tap,
+            done_rx: None,
             thread: None,
         }
     }
@@ -584,6 +713,14 @@ pub fn start_broadcast(
     config: BroadcastConfig,
     audio_tap: Arc<crate::replay::AudioTap>,
 ) -> Result<BroadcastHandle> {
+    start_broadcast_with_timeout(config, audio_tap, DEFAULT_RTMP_IO_TIMEOUT)
+}
+
+fn start_broadcast_with_timeout(
+    config: BroadcastConfig,
+    audio_tap: Arc<crate::replay::AudioTap>,
+    io_timeout: Duration,
+) -> Result<BroadcastHandle> {
     ensure!(
         !config.stream_key.trim().is_empty(),
         "Twitch stream key is required"
@@ -591,6 +728,7 @@ pub fn start_broadcast(
     let status = Arc::new(Mutex::new(BroadcastStatus::Connecting));
     let metrics = Arc::new(BroadcastMetrics::default());
     let stop = Arc::new(AtomicBool::new(false));
+    let (done_tx, done_rx) = bounded::<()>(1);
 
     // Video frame queue: small capacity of 3 frames to strictly ensure low latency.
     let (vtx, vrx) = bounded::<VideoFrame>(3);
@@ -673,16 +811,22 @@ pub fn start_broadcast(
                 &worker_metrics,
                 &worker_stop,
                 &worker_audio_tap,
+                io_timeout,
             );
-            if !worker_stop.load(Ordering::Acquire) {
+            let stopped_by_user = worker_stop.load(Ordering::Acquire);
+            if !stopped_by_user {
                 worker_audio_tap.unregister_broadcast_routes();
             }
-            if let Err(e) = result {
-                tracing::error!("Twitch broadcast stopped with error: {e:#}");
-                *worker_status.lock().unwrap() = BroadcastStatus::Error(format!("{e:#}"));
-            } else {
-                *worker_status.lock().unwrap() = BroadcastStatus::Offline;
+            match result {
+                Err(e) if !stopped_by_user => {
+                    tracing::error!("Twitch broadcast stopped with error: {e:#}");
+                    *worker_status.lock().unwrap() = BroadcastStatus::Error(format!("{e:#}"));
+                }
+                _ => {
+                    *worker_status.lock().unwrap() = BroadcastStatus::Offline;
+                }
             }
+            let _ = done_tx.send(());
         })?;
 
     Ok(BroadcastHandle {
@@ -692,6 +836,7 @@ pub fn start_broadcast(
         video_tx: vtx,
         video_free_rx: vfree_rx,
         audio_tap,
+        done_rx: Some(done_rx),
         thread: Some(thread),
     })
 }
@@ -709,11 +854,12 @@ fn run_broadcast_loop(
     metrics: &Arc<BroadcastMetrics>,
     stop: &Arc<AtomicBool>,
     audio_tap: &Arc<crate::replay::AudioTap>,
+    io_timeout: Duration,
 ) -> Result<()> {
     // Wait for the first video frame to establish stream dimensions
     let mut initial_frame = None;
     while !stop.load(Ordering::Acquire) {
-        if let Ok(frame) = video_rx.recv_timeout(Duration::from_millis(100)) {
+        if let Ok(frame) = video_rx.recv_timeout(Duration::from_millis(50)) {
             initial_frame = Some(frame);
             break;
         }
@@ -735,8 +881,10 @@ fn run_broadcast_loop(
         format!("{}/{}", base, config.stream_key.trim())
     };
 
-    let mut output = format::output_as(&Path::new(&url), "flv")
-        .context("Failed to allocate RTMP FLV output context")?;
+    // `interrupt_state` is declared before `output` so it strictly outlives `output`
+    // (including `avio_closep` inside `Drop for Output`).
+    let interrupt_state = Box::new(RtmpInterruptState::new(stop.clone()));
+    let mut output = open_rtmp_flv_output(&url, &interrupt_state, io_timeout)?;
 
     {
         let mut v_stream = output.add_stream(encoder::find(video_encoder.parameters().id()))?;
@@ -750,11 +898,10 @@ fn run_broadcast_loop(
 
     let mut muxer_opts = ff::Dictionary::new();
     muxer_opts.set("flvflags", "no_duration_filesize");
-    muxer_opts.set("tcp_nodelay", "1");
-    muxer_opts.set("rw_timeout", "10000000"); // 10s timeout
-    output
-        .write_header_with(muxer_opts)
-        .context("Failed to connect or send stream header to Twitch ingest")?;
+    interrupt_state.set_deadline(io_timeout);
+    let header_res = output.write_header_with(muxer_opts);
+    interrupt_state.clear_deadline();
+    header_res.context("Failed to connect or send stream header to Twitch ingest")?;
 
     let started_at = Instant::now();
     *status.lock().unwrap() = BroadcastStatus::Live { started_at };
@@ -789,7 +936,7 @@ fn run_broadcast_loop(
         pkt.set_pts(Some(pkt_pts));
         pkt.set_dts(Some(dts));
         bytes_this_sec += pkt.size() as u64;
-        pkt.write_interleaved(&mut output)?;
+        write_packet_with_deadline(&mut pkt, &mut output, &interrupt_state, io_timeout)?;
     }
     let _ = video_free_tx.send(first_frame.rgba);
     frames_this_sec += 1;
@@ -832,7 +979,7 @@ fn run_broadcast_loop(
                 pkt.set_pts(Some(pts));
                 pkt.set_dts(Some(dts));
                 bytes_this_sec += pkt.size() as u64;
-                pkt.write_interleaved(&mut output)?;
+                write_packet_with_deadline(&mut pkt, &mut output, &interrupt_state, io_timeout)?;
             }
         }
 
@@ -852,7 +999,12 @@ fn run_broadcast_loop(
                     pkt.set_pts(Some(pkt_pts));
                     pkt.set_dts(Some(dts));
                     bytes_this_sec += pkt.size() as u64;
-                    pkt.write_interleaved(&mut output)?;
+                    write_packet_with_deadline(
+                        &mut pkt,
+                        &mut output,
+                        &interrupt_state,
+                        io_timeout,
+                    )?;
                 }
                 let _ = video_free_tx.send(frame.rgba);
                 frames_this_sec += 1;
@@ -878,7 +1030,10 @@ fn run_broadcast_loop(
         }
     }
 
+    interrupt_state.set_deadline(Duration::from_millis(500));
     let _ = output.write_trailer();
+    drop(output);
+    drop(interrupt_state);
     Ok(())
 }
 
@@ -999,5 +1154,126 @@ mod tests {
         assert_eq!(mixed.len(), n);
         assert!((mixed[0][0] - 0.35).abs() < 1e-6);
         assert!((mixed[0][1] - 0.35).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_stalled_rtmp_handshake_interrupted_promptly_by_stop_f21() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock rtmp server");
+        let addr = listener.local_addr().unwrap();
+        let (accepted_tx, accepted_rx) = crossbeam_channel::bounded::<()>(1);
+        let (release_server_tx, release_server_rx) = crossbeam_channel::bounded::<()>(1);
+
+        let server_thread = std::thread::spawn(move || {
+            if let Ok((_stream, _)) = listener.accept() {
+                let _ = accepted_tx.send(());
+                // Hold the TCP connection open without completing the RTMP handshake
+                let _ = release_server_rx.recv_timeout(Duration::from_secs(5));
+            }
+        });
+
+        let config = BroadcastConfig {
+            video_bitrate_kbps: 1000,
+            audio_bitrate_kbps: 128,
+            video_encoder: StreamingVideoEncoder::SoftwareX264,
+            encoder_preset: "ultrafast".to_string(),
+            ingest_server: format!("rtmp://{addr}/app"),
+            stream_key: "live_test_key".to_string(),
+            render_device: String::new(),
+        };
+        let tap = Arc::new(crate::replay::AudioTap::default());
+        let mut handle = start_broadcast(config, tap).expect("start broadcast");
+
+        // Send first video frame so worker enters `open_rtmp_flv_output` (`avio_open2`)
+        let mut rgba = handle.video_free_rx.recv().expect("get free frame buffer");
+        rgba.resize(64 * 64 * 4, 0);
+        handle
+            .video_tx
+            .send(VideoFrame {
+                rgba,
+                width: 64,
+                height: 64,
+                at: 0,
+                generation: 0,
+            })
+            .expect("send first video frame");
+
+        accepted_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("RTMP server accepted connection and stalled handshake");
+
+        // Stop the broadcast while `avio_open2` is blocked on the stalled RTMP handshake
+        let stop_start = Instant::now();
+        handle.stop();
+        let stop_elapsed = stop_start.elapsed();
+
+        assert!(
+            stop_elapsed < Duration::from_secs(1),
+            "BroadcastHandle::stop() should interrupt stalled RTMP handshake promptly, took {:?}",
+            stop_elapsed
+        );
+        assert_eq!(handle.status(), BroadcastStatus::Offline);
+
+        let _ = release_server_tx.send(());
+        let _ = server_thread.join();
+    }
+
+    #[test]
+    fn test_stalled_rtmp_handshake_times_out_via_deadline_without_stop_f21() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock rtmp server");
+        let addr = listener.local_addr().unwrap();
+        let (release_server_tx, release_server_rx) = crossbeam_channel::bounded::<()>(1);
+
+        let server_thread = std::thread::spawn(move || {
+            if let Ok((_stream, _)) = listener.accept() {
+                // Hold the TCP connection open without completing the RTMP handshake
+                let _ = release_server_rx.recv_timeout(Duration::from_secs(5));
+            }
+        });
+
+        let config = BroadcastConfig {
+            video_bitrate_kbps: 1000,
+            audio_bitrate_kbps: 128,
+            video_encoder: StreamingVideoEncoder::SoftwareX264,
+            encoder_preset: "ultrafast".to_string(),
+            ingest_server: format!("rtmp://{addr}/app"),
+            stream_key: "live_test_key".to_string(),
+            render_device: String::new(),
+        };
+        let tap = Arc::new(crate::replay::AudioTap::default());
+        let mut handle = start_broadcast_with_timeout(config, tap, Duration::from_millis(200))
+            .expect("start broadcast with 200ms io_timeout");
+
+        let mut rgba = handle.video_free_rx.recv().expect("get free frame buffer");
+        rgba.resize(64 * 64 * 4, 0);
+        handle
+            .video_tx
+            .send(VideoFrame {
+                rgba,
+                width: 64,
+                height: 64,
+                at: 0,
+                generation: 0,
+            })
+            .expect("send first video frame");
+
+        let wait_start = Instant::now();
+        let mut timed_out_with_error = false;
+        while wait_start.elapsed() < Duration::from_secs(3) {
+            if matches!(handle.status(), BroadcastStatus::Error(_)) {
+                timed_out_with_error = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert!(
+            timed_out_with_error,
+            "stalled RTMP handshake must fail with BroadcastStatus::Error within per-operation deadline, got {:?}",
+            handle.status()
+        );
+
+        handle.stop();
+        let _ = release_server_tx.send(());
+        let _ = server_thread.join();
     }
 }

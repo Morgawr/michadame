@@ -10,9 +10,12 @@ pub use database::{BankDatabase, BankEntryMeta, CustomNameEntry, NewBankEntry, N
 use crate::dict::TermEntry;
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicI64, Ordering},
+    Arc, Mutex,
+};
 use std::time::{Duration, Instant};
 
 /// Maximum dimensions of list thumbnails.
@@ -20,6 +23,26 @@ const THUMB_MAX: (u32, u32) = (320, 180);
 /// If the video paint callback hasn't picked up a mining request within this time (e.g. no
 /// video is being rendered), the entry is saved without a screenshot.
 const CAPTURE_TIMEOUT: Duration = Duration::from_millis(1500);
+/// Maximum time an unattached pending Twitch clip URL is retained before expiring.
+const PENDING_CLIP_TTL: Duration = Duration::from_secs(120);
+/// Maximum number of pending unattached Twitch clips retained in memory.
+const MAX_PENDING_CLIPS: usize = 128;
+/// Maximum number of recent request_id -> row_id mappings cached in memory.
+const MAX_TRACKED_REQUEST_IDS: usize = 512;
+
+static NEXT_MINE_REQUEST_ID: AtomicI64 = AtomicI64::new(1);
+
+/// Allocates a unique, monotonically increasing request ID for correlating a mined word
+/// with asynchronous screenshot capture, database insertion, and Twitch clip attachment.
+pub fn next_mine_request_id() -> i64 {
+    NEXT_MINE_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+#[derive(Clone, Debug)]
+struct PendingClip {
+    url: String,
+    queued_at: Instant,
+}
 
 /// Identifies a mined word in a specific sentence, used to avoid duplicates and to show the
 /// "already mined" state in the dictionary popup: (term, reading, sentence).
@@ -28,6 +51,7 @@ pub type MineKey = (String, String, String);
 /// A request to mine a word, waiting for its screenshot to be captured.
 #[derive(Clone, Debug)]
 pub struct MineRequest {
+    pub request_id: i64,
     pub created_at: i64,
     pub term: String,
     pub reading: String,
@@ -51,6 +75,7 @@ impl MineRequest {
     ) -> Self {
         let (sentence, word_range) = sentence::extract_sentence(source_text, char_range);
         Self {
+            request_id: next_mine_request_id(),
             created_at: unix_millis(),
             term: entry.term.clone(),
             reading: entry.reading.clone(),
@@ -214,9 +239,13 @@ pub fn entry_from_json(term: &str, reading: &str, json: &str) -> Option<TermEntr
 
 /// Result of a background save, delivered to the UI thread.
 pub enum BankEvent {
-    Saved(BankEntryMeta),
+    Saved {
+        meta: BankEntryMeta,
+        request_id: i64,
+    },
     Failed {
         key: MineKey,
+        request_id: i64,
         created_at: i64,
         error: String,
     },
@@ -246,19 +275,24 @@ impl BankCaptureHandle {
 
     /// Saves `request` in a background thread. `shot` is the raw RGBA rendered area
     /// (top-left origin) as `(pixels, width, height)`.
-    pub fn save(&self, request: MineRequest, shot: Option<(Vec<u8>, u32, u32)>) {
+    pub fn save(&self, mut request: MineRequest, shot: Option<(Vec<u8>, u32, u32)>) {
+        if request.request_id == 0 {
+            request.request_id = next_mine_request_id();
+        }
         let db = self.db.clone();
         let tx = self.tx.clone();
         let fail_key = request.key();
+        let request_id = request.request_id;
         let created_at = request.created_at;
         if let Err(e) = std::thread::Builder::new()
             .name("mining-bank-save".into())
             .spawn(move || {
                 let key = request.key();
                 let event = match save_entry(&db, request, shot) {
-                    Ok(meta) => BankEvent::Saved(meta),
+                    Ok(meta) => BankEvent::Saved { meta, request_id },
                     Err(e) => BankEvent::Failed {
                         key,
+                        request_id,
                         created_at,
                         error: e.to_string(),
                     },
@@ -268,6 +302,7 @@ impl BankCaptureHandle {
         {
             let _ = self.tx.send(BankEvent::Failed {
                 key: fail_key,
+                request_id,
                 created_at,
                 error: format!("Failed to spawn bank save thread: {e}"),
             });
@@ -291,6 +326,7 @@ fn save_entry(
         None => (None, None),
     };
     let entry = NewBankEntry {
+        request_id: Some(request.request_id),
         created_at: request.created_at,
         term: request.term,
         reading: request.reading,
@@ -418,8 +454,12 @@ pub struct BankState {
     pub add_name_dialog: AddNameDialogState,
     /// Entries newly saved in the most recent poll ticks, drained by the app to share with chat.
     pub newly_mined: Vec<BankEntryMeta>,
-    /// Pending Twitch clips keyed by mined word timestamp, for attaching when the entry finishes saving.
-    pending_clips: HashMap<i64, String>,
+    /// Pending Twitch clips keyed by unique request ID (or unambiguous legacy timestamp),
+    /// for attaching when the entry finishes saving.
+    pending_clips: HashMap<i64, PendingClip>,
+    /// Bounded mapping from unique `MineRequest.request_id` to persisted SQLite row `id`.
+    request_to_entry_id: HashMap<i64, i64>,
+    request_id_order: VecDeque<i64>,
 }
 
 /// Modal dialog state for adding a custom name in the word bank window.
@@ -513,9 +553,51 @@ impl BankState {
             add_name_dialog: AddNameDialogState::default(),
             newly_mined: Vec::new(),
             pending_clips: HashMap::new(),
+            request_to_entry_id: HashMap::new(),
+            request_id_order: VecDeque::new(),
         };
         state.rebuild_keys();
         state
+    }
+
+    fn record_request_entry_id(&mut self, request_id: i64, entry_id: i64) {
+        if request_id == 0 {
+            return;
+        }
+        if !self.request_to_entry_id.contains_key(&request_id) {
+            while self.request_id_order.len() >= MAX_TRACKED_REQUEST_IDS {
+                if let Some(oldest) = self.request_id_order.pop_front() {
+                    self.request_to_entry_id.remove(&oldest);
+                }
+            }
+            self.request_id_order.push_back(request_id);
+        }
+        self.request_to_entry_id.insert(request_id, entry_id);
+    }
+
+    fn prune_pending_clips(&mut self) {
+        self.pending_clips
+            .retain(|_, clip| clip.queued_at.elapsed() <= PENDING_CLIP_TTL);
+        while self.pending_clips.len() > MAX_PENDING_CLIPS {
+            if let Some((&oldest_key, _)) =
+                self.pending_clips.iter().min_by_key(|(_, c)| c.queued_at)
+            {
+                self.pending_clips.remove(&oldest_key);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn insert_pending_clip(&mut self, key: i64, url: String) {
+        self.prune_pending_clips();
+        self.pending_clips.insert(
+            key,
+            PendingClip {
+                url,
+                queued_at: Instant::now(),
+            },
+        );
     }
 
     fn rebuild_keys(&mut self) {
@@ -763,16 +845,45 @@ impl BankState {
         }
 
         let mut messages = Vec::new();
+        self.prune_pending_clips();
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
-                BankEvent::Saved(mut meta) => {
-                    if let Some(clip_url) = self.pending_clips.remove(&meta.created_at) {
-                        if let Ok(guard) = self.db.lock() {
-                            if let Some(db) = guard.as_ref() {
-                                let _ = db.set_twitch_clip_url(meta.id, Some(&clip_url));
+                BankEvent::Saved {
+                    mut meta,
+                    request_id,
+                } => {
+                    self.record_request_entry_id(request_id, meta.id);
+                    let pending = self.pending_clips.remove(&request_id).or_else(|| {
+                        let same_ts_count = self
+                            .entries
+                            .iter()
+                            .filter(|e| e.created_at == meta.created_at)
+                            .count();
+                        if same_ts_count == 0 {
+                            self.pending_clips.remove(&meta.created_at)
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(pending) = pending {
+                        let persist_res = match self.db.lock() {
+                            Ok(guard) => match guard.as_ref() {
+                                Some(db) => db.set_twitch_clip_url(meta.id, Some(&pending.url)),
+                                None => {
+                                    Err(anyhow::anyhow!("mining bank database is not available"))
+                                }
+                            },
+                            Err(_) => Err(anyhow::anyhow!("bank database lock poisoned")),
+                        };
+                        match persist_res {
+                            Ok(()) => {
+                                meta.twitch_clip_url = Some(pending.url);
+                            }
+                            Err(e) => {
+                                messages
+                                    .push(Err(format!("Failed to persist Twitch clip URL: {e}")));
                             }
                         }
-                        meta.twitch_clip_url = Some(clip_url);
                     }
                     let key = (
                         meta.term.clone(),
@@ -798,10 +909,12 @@ impl BankState {
                 }
                 BankEvent::Failed {
                     key,
+                    request_id,
                     created_at,
                     error,
                 } => {
                     self.in_flight.remove(&key);
+                    self.pending_clips.remove(&request_id);
                     self.pending_clips.remove(&created_at);
                     messages.push(Err(format!("Failed to mine word: {error}")));
                 }
@@ -817,26 +930,65 @@ impl BankState {
         messages
     }
 
-    /// Attaches a Twitch clip URL to a mined word identified by its `created_at` timestamp.
-    /// Updates both the persistent SQLite database and the in-memory entry list.
-    /// If the word is still being saved, the clip URL is queued and attached on completion.
-    pub fn attach_twitch_clip(&mut self, created_at: i64, clip_url: &str) -> anyhow::Result<bool> {
-        let mut attached = false;
-        if let Ok(guard) = self.db.lock() {
-            if let Some(db) = guard.as_ref() {
-                if let Some(_id) = db.set_twitch_clip_url_by_created_at(created_at, clip_url)? {
-                    attached = true;
+    /// Attaches a Twitch clip URL to a mined word identified by its unique `request_id`
+    /// (or unambiguous `created_at` timestamp).
+    /// Updates the persistent SQLite database first and updates in-memory state only after
+    /// SQLite persistence succeeds. If the word is still being saved, the clip URL is queued
+    /// and attached upon save completion.
+    pub fn attach_twitch_clip(
+        &mut self,
+        request_or_created_at: i64,
+        clip_url: &str,
+    ) -> anyhow::Result<bool> {
+        self.prune_pending_clips();
+        let matched_id = {
+            let guard = self
+                .db
+                .lock()
+                .map_err(|_| anyhow::anyhow!("bank database lock poisoned"))?;
+            let db = guard
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("mining bank database is not available"))?;
+            if let Some(&entry_id) = self.request_to_entry_id.get(&request_or_created_at) {
+                db.set_twitch_clip_url(entry_id, Some(clip_url))?;
+                Some(entry_id)
+            } else if let Some(entry_id) =
+                db.set_twitch_clip_url_by_request_id(request_or_created_at, clip_url)?
+            {
+                Some(entry_id)
+            } else {
+                let matching_in_mem = self
+                    .entries
+                    .iter()
+                    .filter(|e| e.created_at == request_or_created_at)
+                    .count();
+                let in_flight_for_ts = self
+                    .pending
+                    .lock()
+                    .ok()
+                    .and_then(|p| {
+                        p.as_ref().map(|r| {
+                            r.request_id == request_or_created_at
+                                || r.created_at == request_or_created_at
+                        })
+                    })
+                    .unwrap_or(false);
+                if matching_in_mem == 1 && !in_flight_for_ts {
+                    db.set_twitch_clip_url_by_created_at(request_or_created_at, clip_url)?
+                } else {
+                    None
                 }
             }
+        };
+        if let Some(id) = matched_id {
+            self.record_request_entry_id(request_or_created_at, id);
+            if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
+                entry.twitch_clip_url = Some(clip_url.to_string());
+            }
+            return Ok(true);
         }
-        if let Some(entry) = self.entries.iter_mut().find(|e| e.created_at == created_at) {
-            entry.twitch_clip_url = Some(clip_url.to_string());
-            attached = true;
-        }
-        if !attached {
-            self.pending_clips.insert(created_at, clip_url.to_string());
-        }
-        Ok(attached)
+        self.insert_pending_clip(request_or_created_at, clip_url.to_string());
+        Ok(false)
     }
 
     /// Drains entries that were newly saved during recent `poll` updates.
@@ -1484,7 +1636,9 @@ mod tests {
         let mut bank = BankState::new();
 
         // 1. Attach to existing entry
+        let req1_id = next_mine_request_id();
         let req = MineRequest {
+            request_id: req1_id,
             created_at: 10_000,
             term: "猫".into(),
             reading: "ねこ".into(),
@@ -1503,7 +1657,7 @@ mod tests {
         }
 
         assert_eq!(bank.entries[0].twitch_clip_url, None);
-        bank.attach_twitch_clip(10_000, "https://clips.twitch.tv/NekoClip")
+        bank.attach_twitch_clip(req1_id, "https://clips.twitch.tv/NekoClip")
             .unwrap();
         assert_eq!(
             bank.entries[0].twitch_clip_url.as_deref(),
@@ -1511,7 +1665,9 @@ mod tests {
         );
 
         // 2. Attach before save completes (pending queue)
+        let req2_id = next_mine_request_id();
         let req2 = MineRequest {
+            request_id: req2_id,
             created_at: 20_000,
             term: "犬".into(),
             reading: "いぬ".into(),
@@ -1524,7 +1680,7 @@ mod tests {
             requested_at: Instant::now(),
         };
         // Queue clip first
-        bank.attach_twitch_clip(20_000, "https://clips.twitch.tv/InuClip")
+        bank.attach_twitch_clip(req2_id, "https://clips.twitch.tv/InuClip")
             .unwrap();
         // Now save entry
         bank.capture_handle().save(req2, None);
@@ -1536,6 +1692,95 @@ mod tests {
         assert_eq!(
             inu.twitch_clip_url.as_deref(),
             Some("https://clips.twitch.tv/InuClip")
+        );
+    }
+
+    #[test]
+    fn test_f30_identical_timestamp_requests_and_db_failure_handling() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("f30_bank.db");
+        let mut bank = BankState::with_database(Some(BankDatabase::open(&db_path).unwrap()), None);
+
+        let same_ts = 50_000;
+        let req_a_id = next_mine_request_id();
+        let req_b_id = next_mine_request_id();
+        let req_c_id = next_mine_request_id();
+        let req_d_id = next_mine_request_id();
+
+        let make_req = |request_id: i64, term: &str| MineRequest {
+            request_id,
+            created_at: same_ts,
+            term: term.into(),
+            reading: "よみ".into(),
+            definition_text: "meaning".into(),
+            definition_json: "[]".into(),
+            sentence: format!("{term}の文"),
+            word_range: (0, term.chars().count()),
+            source_text: format!("{term}の文"),
+            tag: None,
+            requested_at: Instant::now(),
+        };
+
+        // Order 1: Save A and B with identical timestamp first, then attach clips in reverse order (B then A)
+        bank.capture_handle().save(make_req(req_a_id, "猫"), None);
+        bank.capture_handle().save(make_req(req_b_id, "犬"), None);
+        while bank.entries.len() < 2 {
+            let _ = bank.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(bank
+            .attach_twitch_clip(req_b_id, "https://clips.twitch.tv/ClipB")
+            .unwrap());
+        assert!(bank
+            .attach_twitch_clip(req_a_id, "https://clips.twitch.tv/ClipA")
+            .unwrap());
+
+        // Order 2: Queue clips for C and D (identical timestamp) first, then complete saves in reverse order (D then C)
+        assert!(!bank
+            .attach_twitch_clip(req_c_id, "https://clips.twitch.tv/ClipC")
+            .unwrap());
+        assert!(!bank
+            .attach_twitch_clip(req_d_id, "https://clips.twitch.tv/ClipD")
+            .unwrap());
+        bank.capture_handle().save(make_req(req_d_id, "鳥"), None);
+        bank.capture_handle().save(make_req(req_c_id, "魚"), None);
+        while bank.entries.len() < 4 {
+            let _ = bank.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // Verify all 4 entries in memory and after reopening from disk
+        let reopened = BankDatabase::open(&db_path).unwrap().list_meta().unwrap();
+        for list in [&bank.entries, &reopened] {
+            let clip_for = |term: &str| {
+                list.iter()
+                    .find(|e| e.term == term)
+                    .unwrap()
+                    .twitch_clip_url
+                    .as_deref()
+            };
+            assert_eq!(clip_for("猫"), Some("https://clips.twitch.tv/ClipA"));
+            assert_eq!(clip_for("犬"), Some("https://clips.twitch.tv/ClipB"));
+            assert_eq!(clip_for("魚"), Some("https://clips.twitch.tv/ClipC"));
+            assert_eq!(clip_for("鳥"), Some("https://clips.twitch.tv/ClipD"));
+        }
+
+        // Inject DB failure (drop DB handle) and ensure UI/in-memory state does NOT falsely claim persistence
+        let req_e_id = next_mine_request_id();
+        bank.capture_handle().save(make_req(req_e_id, "馬"), None);
+        while bank.entries.len() < 5 {
+            let _ = bank.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        *bank.db.lock().unwrap() = None;
+        let err = bank
+            .attach_twitch_clip(req_e_id, "https://clips.twitch.tv/ShouldNotPersist")
+            .expect_err("attach_twitch_clip must fail when DB persistence fails");
+        assert!(err.to_string().contains("not available"));
+        let uma = bank.entries.iter().find(|e| e.term == "馬").unwrap();
+        assert_eq!(
+            uma.twitch_clip_url, None,
+            "in-memory entry must not claim persistence when DB update failed"
         );
     }
 

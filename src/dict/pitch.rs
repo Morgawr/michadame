@@ -154,6 +154,7 @@ impl PitchDatabase {
         .context("Failed to open pitch accent database")?;
 
         let _ = conn.execute_batch("PRAGMA query_only = ON; PRAGMA cache_size = -32000;");
+        super::lookup::invalidate_scan_cache();
         Ok(Self::from_conn(conn))
     }
 
@@ -379,6 +380,18 @@ impl PitchDatabase {
         }
     }
 
+    /// Alias for [`Self::build_from_zip`] that validates and imports a Yomitan pitch accent archive.
+    pub fn import_zip<P1: AsRef<Path>, P2: AsRef<Path>, F>(
+        zip_path: P1,
+        db_path: P2,
+        progress_cb: F,
+    ) -> Result<DictMetadata>
+    where
+        F: FnMut(&str, f32),
+    {
+        Self::build_from_zip(zip_path, db_path, progress_cb)
+    }
+
     /// Validates and builds a SQLite database from a local Yomitan pitch accent `.zip` archive.
     ///
     /// Validation checks:
@@ -432,11 +445,10 @@ impl PitchDatabase {
                 anyhow::anyhow!("Invalid index.json: missing or empty dictionary 'title'")
             })?;
 
-        if let Some(fmt) = index_obj
-            .get("format")
-            .or_else(|| index_obj.get("version"))
-            .and_then(|v| v.as_i64())
-        {
+        if let Some(fmt_val) = index_obj.get("format").or_else(|| index_obj.get("version")) {
+            let fmt = fmt_val.as_i64().ok_or_else(|| {
+                anyhow::anyhow!("Invalid index.json: 'format'/'version' must be an integer")
+            })?;
             if !(1..=3).contains(&fmt) {
                 anyhow::bail!("Unsupported Yomitan dictionary format version: {fmt}");
             }
@@ -529,22 +541,58 @@ impl PitchDatabase {
                 let arr = bank_entries.as_array().ok_or_else(|| {
                     anyhow::anyhow!("Invalid term meta bank {name}: root must be a JSON array")
                 })?;
-
-                for item in arr {
-                    if let Some((term, reading, pitches)) = parse_pitch_entry(item) {
-                        if !pitches.is_empty() {
-                            total_patterns += pitches.len();
-                            let reading_hira = katakana_to_hiragana(&reading);
-                            let pitches_json =
-                                serde_json::to_string(&pitches).unwrap_or_else(|_| "[]".into());
-                            insert_batch.push((term, reading, reading_hira, pitches_json));
-                            total_inserted += 1;
-                        }
-                    }
+                if arr.is_empty() {
+                    anyhow::bail!("Invalid term meta bank {name}: array is empty");
                 }
 
-                if insert_batch.len() >= 10_000 {
-                    flush_pitch_batch(&mut conn, &mut insert_batch)?;
+                for (row_idx, item) in arr.iter().enumerate() {
+                    let row_arr = item.as_array().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Invalid pitch row #{row_idx} in {name}: expected JSON array"
+                        )
+                    })?;
+                    if row_arr.len() < 3 {
+                        anyhow::bail!(
+                            "Invalid pitch row #{row_idx} in {name}: expected at least 3 elements"
+                        );
+                    }
+                    let row_term = row_arr[0]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Invalid pitch row #{row_idx} in {name}: term must be a non-empty string"
+                            )
+                        })?;
+                    let mode = row_arr[1].as_str().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Invalid pitch row #{row_idx} in {name}: mode must be a string"
+                        )
+                    })?;
+
+                    if mode == "pitch" {
+                        let (term, reading, pitches) = parse_pitch_entry(item).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Invalid pitch row #{row_idx} in {name}: malformed pitch payload for term '{row_term}'"
+                            )
+                        })?;
+                        if pitches.is_empty() {
+                            anyhow::bail!(
+                                "Invalid pitch row #{row_idx} in {name}: empty pitches list for term '{row_term}'"
+                            );
+                        }
+                        total_patterns += pitches.len();
+                        let reading_hira = katakana_to_hiragana(&reading);
+                        let pitches_json = serde_json::to_string(&pitches)
+                            .context("Failed to serialize validated pitch patterns")?;
+                        insert_batch.push((term, reading, reading_hira, pitches_json));
+                        total_inserted += 1;
+
+                        if insert_batch.len() >= 10_000 {
+                            flush_pitch_batch(&mut conn, &mut insert_batch)?;
+                        }
+                    }
                 }
             }
 
@@ -568,12 +616,43 @@ impl PitchDatabase {
             progress_cb("Building pitch lookup indexes...", 0.93);
             Self::init_indexes(&conn)?;
 
-            drop(conn);
+            // Verify row count and structural integrity before replacing live DB
+            let row_count: usize = conn
+                .query_row("SELECT COUNT(*) FROM pitches", [], |r| r.get(0))
+                .context("Failed to verify imported pitch row count")?;
+            if row_count == 0 || row_count != total_inserted {
+                anyhow::bail!(
+                    "Imported pitch row count mismatch: expected {total_inserted}, found {row_count}"
+                );
+            }
+
+            let integrity: String = conn
+                .query_row("PRAGMA quick_check", [], |r| r.get(0))
+                .context("Failed to run PRAGMA quick_check on temporary pitch database")?;
+            if !integrity.eq_ignore_ascii_case("ok") {
+                anyhow::bail!("Temporary pitch database failed integrity check: {integrity}");
+            }
+
+            conn.cache_flush()?;
+            conn.close()
+                .map_err(|(_, e)| e)
+                .context("Failed to close temporary pitch database cleanly")?;
 
             progress_cb("Finalizing pitch dictionary...", 0.98);
             std::fs::rename(&tmp_db_path, db_path.as_ref()).context(
                 "Failed to atomically move imported pitch dictionary database into place",
             )?;
+
+            let verified_db = Self::open(db_path.as_ref())
+                .context("Failed to reopen newly imported pitch database for verification")?;
+            let verified_meta = verified_db
+                .get_metadata()
+                .context("Failed to read metadata from newly imported pitch database")?;
+            if verified_meta.total_entries == 0 {
+                anyhow::bail!(
+                    "Newly imported pitch database reported zero entries after replacement"
+                );
+            }
 
             meta.total_entries = total_patterns;
             progress_cb("Pitch dictionary ready!", 1.0);

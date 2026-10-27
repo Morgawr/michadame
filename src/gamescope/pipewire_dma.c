@@ -11,6 +11,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <stdatomic.h>
 
 struct gamescope_dma_stream {
     struct pw_thread_loop *loop;
@@ -19,6 +20,7 @@ struct gamescope_dma_stream {
 
     gamescope_dma_frame_cb on_frame;
     gamescope_dma_state_cb on_state;
+    gamescope_dma_remove_buffer_cb on_remove_buffer;
     void *user_data;
 
     uint32_t width;
@@ -27,6 +29,8 @@ struct gamescope_dma_stream {
     uint64_t modifier;
     bool has_format;
     uint32_t next_buffer_id;
+    uint64_t pool_generation;
+    atomic_bool stopping;
 };
 
 static uint32_t spa_format_to_drm_fourcc(enum spa_video_format format) {
@@ -50,7 +54,7 @@ static void on_stream_state_changed(void *data, enum pw_stream_state old,
                                     enum pw_stream_state state, const char *error) {
     (void)old;
     struct gamescope_dma_stream *s = (struct gamescope_dma_stream *)data;
-    if (!s || !s->on_state) return;
+    if (!s) return;
 
     int code = 0;
     switch (state) {
@@ -70,7 +74,9 @@ static void on_stream_state_changed(void *data, enum pw_stream_state old,
             code = 3;
             break;
     }
-    s->on_state(s->user_data, code, error);
+    if (s->on_state && !atomic_load(&s->stopping)) {
+        s->on_state(s->user_data, code, error);
+    }
 }
 
 static void on_stream_param_changed(void *data, uint32_t id, const struct spa_pod *param) {
@@ -90,9 +96,14 @@ static void on_stream_param_changed(void *data, uint32_t id, const struct spa_po
     s->drm_fourcc = spa_format_to_drm_fourcc(info.format);
     s->modifier = (info.flags & SPA_VIDEO_FLAG_MODIFIER) ? info.modifier : DRM_FORMAT_MOD_LINEAR;
     s->has_format = true;
+    s->pool_generation++;
+    if (s->pool_generation == 0) {
+        s->pool_generation = 1;
+    }
 
-    pw_log_info("Gamescope format negotiated: %ux%u (DRM FourCC: 0x%08x, modifier: 0x%lx)",
-                s->width, s->height, s->drm_fourcc, (unsigned long)s->modifier);
+    pw_log_info("Gamescope format negotiated: %ux%u (DRM FourCC: 0x%08x, modifier: 0x%lx, gen: %lu)",
+                s->width, s->height, s->drm_fourcc, (unsigned long)s->modifier,
+                (unsigned long)s->pool_generation);
 
     // After format is negotiated, update stream parameters to request DMA-BUF buffers
     uint8_t buffer_bufs[512];
@@ -111,25 +122,36 @@ static void on_stream_add_buffer(void *data, struct pw_buffer *b) {
     struct gamescope_dma_stream *s = (struct gamescope_dma_stream *)data;
     if (!s || !b) return;
     s->next_buffer_id++;
+    if (s->next_buffer_id == 0) {
+        s->next_buffer_id = 1;
+    }
     b->user_data = (void *)(uintptr_t)s->next_buffer_id;
 }
 
 static void on_stream_remove_buffer(void *data, struct pw_buffer *b) {
-    (void)data;
-    if (b) {
-        b->user_data = NULL;
+    struct gamescope_dma_stream *s = (struct gamescope_dma_stream *)data;
+    if (!b) return;
+
+    uint32_t buffer_id = (uint32_t)(uintptr_t)b->user_data;
+    b->user_data = NULL;
+
+    if (s && buffer_id != 0 && s->on_remove_buffer && !atomic_load(&s->stopping)) {
+        s->on_remove_buffer(s->user_data, buffer_id, s->pool_generation);
     }
 }
 
 static void on_stream_process(void *data) {
     struct gamescope_dma_stream *s = (struct gamescope_dma_stream *)data;
-    if (!s) return;
+    if (!s || !s->stream || atomic_load(&s->stopping)) return;
 
     struct pw_buffer *b = pw_stream_dequeue_buffer(s->stream);
     if (!b) return;
 
     if (!b->user_data) {
         s->next_buffer_id++;
+        if (s->next_buffer_id == 0) {
+            s->next_buffer_id = 1;
+        }
         b->user_data = (void *)(uintptr_t)s->next_buffer_id;
     }
     uint32_t buffer_id = (uint32_t)(uintptr_t)b->user_data;
@@ -137,13 +159,17 @@ static void on_stream_process(void *data) {
     struct spa_buffer *buf = b->buffer;
     if (buf && buf->n_datas > 0 && s->has_format) {
         struct spa_data *d = &buf->datas[0];
-        if (d->type == SPA_DATA_DmaBuf && d->fd >= 0) {
-            uint32_t stride = (d->chunk && d->chunk->stride > 0) ? (uint32_t)d->chunk->stride : (s->width * 4);
+        if (d->type == SPA_DATA_DmaBuf && d->fd >= 0 &&
+            !(d->chunk && (d->chunk->flags & SPA_CHUNK_FLAG_CORRUPTED))) {
+            uint32_t stride = (d->chunk && d->chunk->stride > 0)
+                ? (uint32_t)d->chunk->stride
+                : (s->width * 4);
 
-            if (s->on_frame) {
+            if (s->on_frame && !atomic_load(&s->stopping)) {
                 s->on_frame(
                     s->user_data,
                     buffer_id,
+                    s->pool_generation,
                     d->fd,
                     s->width,
                     s->height,
@@ -171,6 +197,7 @@ struct gamescope_dma_stream *gamescope_dma_stream_start(
     const char *target_object,
     gamescope_dma_frame_cb on_frame,
     gamescope_dma_state_cb on_state,
+    gamescope_dma_remove_buffer_cb on_remove_buffer,
     void *user_data
 ) {
     pw_init(NULL, NULL);
@@ -180,7 +207,10 @@ struct gamescope_dma_stream *gamescope_dma_stream_start(
 
     s->on_frame = on_frame;
     s->on_state = on_state;
+    s->on_remove_buffer = on_remove_buffer;
     s->user_data = user_data;
+    s->pool_generation = 1;
+    atomic_init(&s->stopping, false);
 
     s->loop = pw_thread_loop_new("gamescope-dma-loop", NULL);
     if (!s->loop) {
@@ -276,6 +306,8 @@ struct gamescope_dma_stream *gamescope_dma_stream_start(
 
 void gamescope_dma_stream_stop(struct gamescope_dma_stream *s) {
     if (!s) return;
+
+    atomic_store(&s->stopping, true);
 
     if (s->loop) {
         pw_thread_loop_lock(s->loop);

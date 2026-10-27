@@ -213,7 +213,7 @@ pub fn lookup_word_at_pointer_with_pitch(
         let cache_key = ScanCacheKey {
             db_generation: db.map_or(0, |d| d.generation),
             particle_index_ready: particle_index.is_some(),
-            has_freq_db: freq_db.is_some(),
+            freq_db_generation: freq_db.map_or(0, |f| f.generation),
             pitch_db_generation: pitch_db.map_or(0, |p| p.generation),
             custom_names_gen,
             current_tag: current_tag.map(str::to_string),
@@ -534,7 +534,7 @@ impl LineSegment<'_> {
 struct ScanCacheKey {
     db_generation: u64,
     particle_index_ready: bool,
-    has_freq_db: bool,
+    freq_db_generation: u64,
     pitch_db_generation: u64,
     custom_names_gen: u64,
     current_tag: Option<String>,
@@ -2223,5 +2223,101 @@ mod tests {
             popup_with_pitch.entries[0].pitches[0].pattern,
             super::super::models::PitchPattern::Downstep(0)
         );
+    }
+
+    #[test]
+    fn test_lookup_word_invalidates_cache_on_freq_db_replacement() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test_freq_replace_dict.db");
+        let db = DictDatabase::open_or_create(&db_path).unwrap();
+        db.conn
+            .execute_batch(
+                "
+                INSERT INTO terms VALUES ('気', 'き', 'n', '', 100.0, '[\"spirit\"]', 1, '');
+                INSERT INTO terms VALUES ('木', 'き', 'n', '', 100.0, '[\"tree\"]', 2, '');
+                ",
+            )
+            .unwrap();
+
+        let freq_db1_path = dir.path().join("freq_db1.db");
+        let freq_db1 =
+            super::super::frequency::FreqDatabase::open_or_create(&freq_db1_path).unwrap();
+        freq_db1
+            .conn
+            .execute_batch(
+                "
+                INSERT INTO frequencies (term, reading, rank, display_value) VALUES
+                ('気', 'き', 10, '10'),
+                ('木', 'き', 5000, '5000');
+                ",
+            )
+            .unwrap();
+
+        let freq_db2_path = dir.path().join("freq_db2.db");
+        let freq_db2 =
+            super::super::frequency::FreqDatabase::open_or_create(&freq_db2_path).unwrap();
+        freq_db2
+            .conn
+            .execute_batch(
+                "
+                INSERT INTO frequencies (term, reading, rank, display_value) VALUES
+                ('気', 'き', 5000, '5000'),
+                ('木', 'き', 10, '10');
+                ",
+            )
+            .unwrap();
+
+        assert_ne!(freq_db1.generation, freq_db2.generation);
+
+        let ocr_box = OcrBox {
+            text: "き".to_string(),
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.2,
+            height: 0.1,
+            lines: vec![],
+            writing_direction: WritingDirection::LeftToRight,
+        };
+        let video_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
+        let pointer = egui::pos2(500.0, 300.0);
+
+        // 1. Lookup with freq_db1 -> '気' (rank 10) ranks ahead of '木' (rank 5000)
+        let popup1 = lookup_word_at_pointer(
+            pointer,
+            std::slice::from_ref(&ocr_box),
+            video_rect,
+            Some(&db),
+            Some(&freq_db1),
+            global_deinflector(),
+            &[],
+            None,
+            0,
+        )
+        .expect("should match き with freq_db1");
+        assert_eq!(popup1.entries.len(), 2);
+        assert_eq!(popup1.entries[0].term, "気");
+        assert_eq!(popup1.entries[0].frequency.as_ref().unwrap().rank, 10);
+        assert_eq!(popup1.entries[1].term, "木");
+        assert_eq!(popup1.entries[1].frequency.as_ref().unwrap().rank, 5000);
+
+        // 2. Replace freq_db1 with freq_db2 at the exact same pointer and text ->
+        // ScanCacheKey's freq_db_generation invalidates the cached result and re-sorts immediately.
+        let popup2 = lookup_word_at_pointer(
+            pointer,
+            std::slice::from_ref(&ocr_box),
+            video_rect,
+            Some(&db),
+            Some(&freq_db2),
+            global_deinflector(),
+            &[],
+            None,
+            0,
+        )
+        .expect("should match き with freq_db2");
+        assert_eq!(popup2.entries.len(), 2);
+        assert_eq!(popup2.entries[0].term, "木");
+        assert_eq!(popup2.entries[0].frequency.as_ref().unwrap().rank, 10);
+        assert_eq!(popup2.entries[1].term, "気");
+        assert_eq!(popup2.entries[1].frequency.as_ref().unwrap().rank, 5000);
     }
 }

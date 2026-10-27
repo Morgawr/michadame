@@ -28,6 +28,7 @@ pub struct BankEntryMeta {
 /// A fully-prepared entry ready to be inserted.
 #[derive(Clone, Debug, Default)]
 pub struct NewBankEntry {
+    pub request_id: Option<i64>,
     pub created_at: i64,
     pub term: String,
     pub reading: String,
@@ -125,8 +126,15 @@ impl BankDatabase {
         if !has_clip {
             conn.execute_batch("ALTER TABLE mined_words ADD COLUMN twitch_clip_url TEXT;")?;
         }
+        let has_request_id = conn
+            .prepare("SELECT 1 FROM pragma_table_info('mined_words') WHERE name = 'request_id'")?
+            .exists([])?;
+        if !has_request_id {
+            conn.execute_batch("ALTER TABLE mined_words ADD COLUMN request_id INTEGER;")?;
+        }
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_mined_words_tag ON mined_words(tag);
+             CREATE INDEX IF NOT EXISTS idx_mined_words_request_id ON mined_words(request_id);
              CREATE TABLE IF NOT EXISTS custom_names (
                  id         INTEGER PRIMARY KEY AUTOINCREMENT,
                  created_at INTEGER NOT NULL,
@@ -146,8 +154,8 @@ impl BankDatabase {
     pub fn insert(&self, entry: &NewBankEntry) -> Result<BankEntryMeta> {
         self.conn.execute(
             "INSERT INTO mined_words (created_at, term, reading, definition_text, definition_json,
-                 sentence, word_start, word_end, source_text, screenshot, thumbnail, tag, twitch_clip_url)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                 sentence, word_start, word_end, source_text, screenshot, thumbnail, tag, twitch_clip_url, request_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 entry.created_at,
                 entry.term,
@@ -162,6 +170,7 @@ impl BankDatabase {
                 entry.thumbnail,
                 entry.tag,
                 entry.twitch_clip_url,
+                entry.request_id,
             ],
         )?;
         Ok(BankEntryMeta {
@@ -235,14 +244,36 @@ impl BankDatabase {
 
     /// Sets (or, with `None`, removes) the Twitch clip URL of an entry by ID.
     pub fn set_twitch_clip_url(&self, id: i64, clip_url: Option<&str>) -> Result<()> {
-        self.conn.execute(
+        let updated = self.conn.execute(
             "UPDATE mined_words SET twitch_clip_url = ?1 WHERE id = ?2",
             params![clip_url, id],
         )?;
+        if updated == 0 {
+            anyhow::bail!("mined word entry id {id} not found");
+        }
         Ok(())
     }
 
-    /// Sets the Twitch clip URL for the entry with matching `created_at`.
+    /// Sets the Twitch clip URL for the entry with matching unique `request_id`.
+    /// Returns the ID of the matched entry if found.
+    pub fn set_twitch_clip_url_by_request_id(
+        &self,
+        request_id: i64,
+        clip_url: &str,
+    ) -> Result<Option<i64>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM mined_words WHERE request_id = ?1 ORDER BY id DESC LIMIT 1")?;
+        let id: Option<i64> = stmt
+            .query_row(params![request_id], |row| row.get(0))
+            .optional()?;
+        if let Some(id) = id {
+            self.set_twitch_clip_url(id, Some(clip_url))?;
+        }
+        Ok(id)
+    }
+
+    /// Sets the Twitch clip URL for the entry with matching `created_at` when unambiguous.
     /// Returns the ID of the matched entry if found.
     pub fn set_twitch_clip_url_by_created_at(
         &self,
@@ -251,14 +282,20 @@ impl BankDatabase {
     ) -> Result<Option<i64>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id FROM mined_words WHERE created_at = ?1 LIMIT 1")?;
-        let id: Option<i64> = stmt
-            .query_row(params![created_at], |row| row.get(0))
-            .optional()?;
-        if let Some(id) = id {
-            self.set_twitch_clip_url(id, Some(clip_url))?;
+            .prepare("SELECT id FROM mined_words WHERE created_at = ?1 LIMIT 2")?;
+        let ids: Vec<i64> = stmt
+            .query_map(params![created_at], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        match ids.as_slice() {
+            [] => Ok(None),
+            [id] => {
+                self.set_twitch_clip_url(*id, Some(clip_url))?;
+                Ok(Some(*id))
+            }
+            _ => anyhow::bail!(
+                "ambiguous created_at timestamp {created_at} matches multiple mined entries"
+            ),
         }
-        Ok(id)
     }
 
     /// Updates `definition_json` for multiple entries in a single batch.
@@ -340,6 +377,7 @@ mod tests {
 
     fn entry(term: &str, created_at: i64, shot: bool) -> NewBankEntry {
         NewBankEntry {
+            request_id: None,
             created_at,
             term: term.into(),
             reading: "よみ".into(),

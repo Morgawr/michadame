@@ -217,8 +217,10 @@ impl AppState {
                 self.hardware.audio_sources = audio_sources;
                 self.hardware.usb_devices = usb_devices;
 
-                if let Ok(cfg) = confy::load::<config::MichadameConfig>("michadame", None) {
-                    config::apply_hardware_devices_from_config(self, &cfg);
+                if !cfg!(test) {
+                    if let Ok(cfg) = confy::load::<config::MichadameConfig>("michadame", None) {
+                        config::apply_hardware_devices_from_config(self, &cfg);
+                    }
                 }
                 self.sync_mic_stream();
                 self.sync_webcam_stream(ctx);
@@ -384,7 +386,12 @@ impl AppState {
         if self.ocr.was_constant_scan_paused {
             self.ocr.was_constant_scan_paused = false;
             self.ocr.consecutive_same_scans = 0;
-            let delay = std::time::Duration::from_secs_f32(self.ocr.scan_interval_secs.clamp(
+            let safe_interval = if self.ocr.scan_interval_secs.is_finite() {
+                self.ocr.scan_interval_secs
+            } else {
+                crate::ocr::models::DEFAULT_SCAN_INTERVAL_SECS
+            };
+            let delay = std::time::Duration::from_secs_f32(safe_interval.clamp(
                 crate::ocr::models::MIN_SCAN_INTERVAL_SECS,
                 crate::ocr::models::MAX_SCAN_INTERVAL_SECS,
             ));
@@ -536,6 +543,76 @@ impl AppState {
             self.bank.copying_screenshot = None;
             self.error(format!("Failed to start clipboard copy: {e}"));
         }
+    }
+
+    /// Applies a worker OCR result if and only if its generation matches the current OCR session.
+    pub fn handle_ocr_worker_result(
+        &mut self,
+        worker_result: crate::ocr::OcrWorkerResult,
+        ctx: &egui::Context,
+    ) -> bool {
+        if !self.ocr.accept_worker_result(&worker_result) {
+            return false;
+        }
+        let model_name = worker_result.backend.short_name();
+        let constant_active = worker_result.constant_scan && self.ocr.is_constant_scanning_active();
+        let mut repaint_requested = false;
+        match worker_result.result {
+            Ok(lines) => {
+                if constant_active {
+                    let is_paused = self.dict.popup.is_some()
+                        || (self.ocr.is_box_hovered && !self.ocr.hide_overlay)
+                        || self.whiteboard.open;
+                    if !is_paused {
+                        let updated = self.ocr.apply_constant_scan_lines(lines);
+                        let delay = self.ocr.current_constant_scan_delay();
+                        self.ocr.next_constant_scan_time = Some(Instant::now() + delay);
+                        ctx.request_repaint_after(delay);
+                        if updated {
+                            repaint_requested = true;
+                        }
+                    } else {
+                        self.ocr.was_constant_scan_paused = true;
+                        self.ocr.next_constant_scan_time = None;
+                    }
+                } else {
+                    self.ocr.raw_lines = lines;
+                    self.ocr.recompute_boxes();
+                    let count = self.ocr.boxes.len();
+                    self.ocr.last_copied_index = None;
+                    self.ocr.last_error = None;
+                    if count == 0 {
+                        self.ocr.last_scan_time = None;
+                        self.info(format!("{}: No Japanese text detected.", model_name));
+                    } else {
+                        self.ocr.last_scan_time = Some(Instant::now());
+                        self.info(format!(
+                            "{}: Found {} text box{}.",
+                            model_name,
+                            count,
+                            if count == 1 { "" } else { "es" }
+                        ));
+                    }
+                    repaint_requested = true;
+                }
+            }
+            Err(e) => {
+                let is_same_error = self.ocr.last_error.as_deref() == Some(e.as_str());
+                self.ocr.last_error = Some(e.clone());
+                if !constant_active || !is_same_error {
+                    self.error(format!("OCR error ({}): {}", model_name, e));
+                }
+                if constant_active {
+                    self.ocr.consecutive_same_scans =
+                        self.ocr.consecutive_same_scans.saturating_add(1);
+                    let delay = self.ocr.current_constant_scan_delay();
+                    self.ocr.next_constant_scan_time = Some(Instant::now() + delay);
+                    ctx.request_repaint_after(delay);
+                }
+                repaint_requested = true;
+            }
+        }
+        repaint_requested
     }
 
     /// Updates the target time for the next 60 FPS presentation interval without blocking.
@@ -950,70 +1027,13 @@ impl eframe::App for AppState {
             repaint_requested = true;
         }
 
-        let ocr_result = self
+        while let Some(worker_result) = self
             .ocr
             .result_receiver
             .as_ref()
-            .and_then(|rx| rx.try_recv().ok());
-        if let Some(result) = ocr_result {
-            self.ocr.is_processing.store(false, Ordering::Release);
-            let model_name = self.ocr.backend.short_name();
-            let constant_active = self.ocr.is_constant_scanning_active();
-            match result {
-                Ok(lines) => {
-                    if constant_active {
-                        let is_paused = self.dict.popup.is_some()
-                            || (self.ocr.is_box_hovered && !self.ocr.hide_overlay)
-                            || self.whiteboard.open;
-                        if !is_paused {
-                            let updated = self.ocr.apply_constant_scan_lines(lines);
-                            let delay = self.ocr.current_constant_scan_delay();
-                            self.ocr.next_constant_scan_time = Some(Instant::now() + delay);
-                            ctx.request_repaint_after(delay);
-                            if updated {
-                                repaint_requested = true;
-                            }
-                        } else {
-                            self.ocr.was_constant_scan_paused = true;
-                            self.ocr.next_constant_scan_time = None;
-                        }
-                    } else {
-                        self.ocr.raw_lines = lines;
-                        self.ocr.recompute_boxes();
-                        let count = self.ocr.boxes.len();
-                        self.ocr.last_copied_index = None;
-                        self.ocr.last_error = None;
-                        if count == 0 {
-                            self.ocr.last_scan_time = None;
-                            self.info(format!("{}: No Japanese text detected.", model_name));
-                        } else {
-                            self.ocr.last_scan_time = Some(Instant::now());
-                            self.info(format!(
-                                "{}: Found {} text box{}.",
-                                model_name,
-                                count,
-                                if count == 1 { "" } else { "es" }
-                            ));
-                        }
-                        repaint_requested = true;
-                    }
-                }
-                Err(e) => {
-                    let is_same_error = self.ocr.last_error.as_deref() == Some(e.as_str());
-                    self.ocr.last_error = Some(e.clone());
-                    if !constant_active || !is_same_error {
-                        self.error(format!("OCR error ({}): {}", model_name, e));
-                    }
-                    if constant_active {
-                        self.ocr.consecutive_same_scans =
-                            self.ocr.consecutive_same_scans.saturating_add(1);
-                        let delay = self.ocr.current_constant_scan_delay();
-                        self.ocr.next_constant_scan_time = Some(Instant::now() + delay);
-                        ctx.request_repaint_after(delay);
-                    }
-                    repaint_requested = true;
-                }
-            }
+            .and_then(|rx| rx.try_recv().ok())
+        {
+            repaint_requested |= self.handle_ocr_worker_result(worker_result, ctx);
         }
 
         let screen_ai_events: Vec<crate::ocr::ScreenAiEvent> =
@@ -1052,13 +1072,22 @@ impl eframe::App for AppState {
                             self.ocr.screen_ai_installed_metadata = Some(meta.clone());
                             self.ocr.screen_ai_update_available = false;
                             let dir = self.ocr.screen_ai_dir.clone();
-                            std::thread::spawn(move || {
-                                let _ = crate::ocr::screen_ai::warmup_screen_ai(&dir);
-                            });
-                            self.info(format!(
-                                "Chrome Screen AI local OCR model updated to {}!",
-                                meta.version
-                            ));
+                            let restart_needed =
+                                crate::ocr::screen_ai::is_screen_ai_restart_required(&dir);
+                            if !restart_needed {
+                                std::thread::spawn(move || {
+                                    let _ = crate::ocr::screen_ai::warmup_screen_ai(&dir);
+                                });
+                                self.info(format!(
+                                    "Chrome Screen AI local OCR model updated to {}!",
+                                    meta.version
+                                ));
+                            } else {
+                                self.info(format!(
+                                    "Chrome Screen AI {} staged on disk (restart Michadame to activate new runtime).",
+                                    meta.version
+                                ));
+                            }
                         }
                         Err(e) => {
                             self.error(format!("Chrome Screen AI model sync failed: {e}"));
@@ -1103,30 +1132,22 @@ impl eframe::App for AppState {
                     repaint_requested = true;
                 }
                 crate::dict::DictEvent::SyncFinished(result) => {
+                    if let Ok(mut lock) = self.dict.sync_progress.lock() {
+                        *lock = None;
+                    }
                     match result {
-                        Ok(meta) => {
-                            let db_path = self.dict.dict_dir.join("jitendex.db");
-                            match crate::dict::DictDatabase::open(&db_path) {
-                                Ok(db) => {
-                                    if let Ok(mut db_lock) = self.dict.db.lock() {
-                                        *db_lock = Some(db);
-                                    }
-                                }
-                                Err(e) => {
-                                    self.error(format!("Failed to open synced dictionary: {e}"));
-                                }
+                        Ok(meta) => match self.dict.reload_dict_db(Some(meta.clone())) {
+                            Ok(meta) => {
+                                self.info(format!(
+                                    "Jitendex dictionary updated to {}!",
+                                    meta.revision
+                                ));
                             }
-                            self.dict.installed_metadata = Some(meta.clone());
-                            self.dict.update_available = false;
-                            if let Ok(mut lock) = self.dict.sync_progress.lock() {
-                                *lock = None;
+                            Err(e) => {
+                                self.error(e.to_string());
                             }
-                            self.info(format!("Jitendex dictionary updated to {}!", meta.revision));
-                        }
+                        },
                         Err(e) => {
-                            if let Ok(mut lock) = self.dict.sync_progress.lock() {
-                                *lock = None;
-                            }
                             self.error(format!("Dictionary sync failed: {e}"));
                         }
                     }
@@ -1147,35 +1168,22 @@ impl eframe::App for AppState {
                     repaint_requested = true;
                 }
                 crate::dict::DictEvent::FreqSyncFinished(result) => {
+                    if let Ok(mut lock) = self.dict.freq_sync_progress.lock() {
+                        *lock = None;
+                    }
                     match result {
-                        Ok(meta) => {
-                            let db_path = self.dict.dict_dir.join("jiten_freq.db");
-                            match crate::dict::FreqDatabase::open(&db_path) {
-                                Ok(db) => {
-                                    if let Ok(mut db_lock) = self.dict.freq_db.lock() {
-                                        *db_lock = Some(db);
-                                    }
-                                }
-                                Err(e) => {
-                                    self.error(format!(
-                                        "Failed to open synced frequency dictionary: {e}"
-                                    ));
-                                }
+                        Ok(meta) => match self.dict.reload_freq_db(Some(meta.clone())) {
+                            Ok(meta) => {
+                                self.info(format!(
+                                    "Jiten frequency dictionary updated to {}!",
+                                    meta.revision
+                                ));
                             }
-                            self.dict.installed_freq_metadata = Some(meta.clone());
-                            self.dict.freq_update_available = false;
-                            if let Ok(mut lock) = self.dict.freq_sync_progress.lock() {
-                                *lock = None;
+                            Err(e) => {
+                                self.error(e.to_string());
                             }
-                            self.info(format!(
-                                "Jiten frequency dictionary updated to {}!",
-                                meta.revision
-                            ));
-                        }
+                        },
                         Err(e) => {
-                            if let Ok(mut lock) = self.dict.freq_sync_progress.lock() {
-                                *lock = None;
-                            }
                             self.error(format!("Frequency dictionary sync failed: {e}"));
                         }
                     }
@@ -1188,42 +1196,33 @@ impl eframe::App for AppState {
                     repaint_requested = true;
                 }
                 crate::dict::DictEvent::PitchImportFinished(result) => {
+                    if let Ok(mut lock) = self.dict.pitch_import_progress.lock() {
+                        *lock = None;
+                    }
                     match result {
-                        Ok(meta) => {
-                            let db_path = self.dict.dict_dir.join("pitch.db");
-                            match crate::dict::PitchDatabase::open(&db_path) {
-                                Ok(db) => {
-                                    let backfilled = self.bank.backfill_pitches(&db);
-                                    if backfilled > 0 {
-                                        tracing::info!(
-                                            "Backfilled pitch accents for {} mined words",
-                                            backfilled
-                                        );
+                        Ok(meta) => match self.dict.reload_pitch_db(Some(meta.clone())) {
+                            Ok(meta) => {
+                                if let Ok(guard) = self.dict.pitch_db.lock() {
+                                    if let Some(ref db) = *guard {
+                                        let backfilled = self.bank.backfill_pitches(db);
+                                        if backfilled > 0 {
+                                            tracing::info!(
+                                                "Backfilled pitch accents for {} mined words",
+                                                backfilled
+                                            );
+                                        }
                                     }
-                                    if let Ok(mut db_lock) = self.dict.pitch_db.lock() {
-                                        *db_lock = Some(db);
-                                    }
-                                    crate::dict::lookup::invalidate_scan_cache();
                                 }
-                                Err(e) => {
-                                    self.error(format!(
-                                        "Failed to open imported pitch dictionary: {e}"
-                                    ));
-                                }
+                                self.info(format!(
+                                    "Imported pitch dictionary '{}' ({} entries)!",
+                                    meta.title, meta.total_entries
+                                ));
                             }
-                            self.dict.installed_pitch_metadata = Some(meta.clone());
-                            if let Ok(mut lock) = self.dict.pitch_import_progress.lock() {
-                                *lock = None;
+                            Err(e) => {
+                                self.error(e.to_string());
                             }
-                            self.info(format!(
-                                "Imported pitch dictionary '{}' ({} entries)!",
-                                meta.title, meta.total_entries
-                            ));
-                        }
+                        },
                         Err(e) => {
-                            if let Ok(mut lock) = self.dict.pitch_import_progress.lock() {
-                                *lock = None;
-                            }
                             self.error(format!("Pitch dictionary import failed: {e}"));
                         }
                     }
@@ -1250,9 +1249,10 @@ impl eframe::App for AppState {
 
         self.twitch.studio_active = self.ui.studio_window_open;
         repaint_requested |= self.twitch.poll(ctx);
-        for (created_at, clip_url) in self.twitch.take_ready_mined_clips() {
-            if let Err(e) = self.bank.attach_twitch_clip(created_at, &clip_url) {
+        for (request_id, clip_url) in self.twitch.take_ready_mined_clips() {
+            if let Err(e) = self.bank.attach_twitch_clip(request_id, &clip_url) {
                 tracing::warn!("Mining bank: failed to attach Twitch clip: {e}");
+                self.error(format!("Failed to attach Twitch clip: {e}"));
             }
         }
         for (is_error, message) in self.twitch.take_notifications() {
@@ -1658,5 +1658,76 @@ mod tests {
         state.ocr.set_backend(crate::ocr::OcrBackend::GoogleLens);
         assert!(!state.handle_constant_ocr_scanning(&ctx));
         assert!(state.ocr.next_constant_scan_time.is_none());
+    }
+
+    #[test]
+    fn test_f23_stale_ocr_results_do_not_repopulate_after_clear_or_stop_stream() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::default();
+        let gen1 = state.ocr.current_generation();
+        state.ocr.active_request_id.store(10, Ordering::Release);
+        state.ocr.is_processing.store(true, Ordering::Release);
+
+        // User clears OCR (or stops stream) while request 10 is in flight
+        state.clear_ocr();
+        let gen2 = state.ocr.current_generation();
+        assert!(gen2 > gen1);
+        assert!(!state.ocr.is_processing.load(Ordering::Acquire));
+
+        // Late success from generation 1 arrives: must be ignored
+        let stale_ok = crate::ocr::OcrWorkerResult {
+            request_id: 10,
+            generation: gen1,
+            backend: crate::ocr::OcrBackend::GoogleLens,
+            constant_scan: false,
+            result: Ok(vec![crate::ocr::ParsedLine {
+                text: "古いテキスト".to_string(),
+                center_x: 0.5,
+                center_y: 0.5,
+                width: 0.2,
+                height: 0.1,
+                paragraph_idx: 0,
+                writing_direction: crate::ocr::WritingDirection::LeftToRight,
+                char_spans: Vec::new(),
+            }]),
+        };
+        assert!(!state.handle_ocr_worker_result(stale_ok, &ctx));
+        assert!(state.ocr.boxes.is_empty());
+        assert!(state.ocr.raw_lines.is_empty());
+
+        // Late error from generation 1 arrives: must also be ignored
+        let stale_err = crate::ocr::OcrWorkerResult {
+            request_id: 10,
+            generation: gen1,
+            backend: crate::ocr::OcrBackend::GoogleLens,
+            constant_scan: false,
+            result: Err("stale network error".to_string()),
+        };
+        assert!(!state.handle_ocr_worker_result(stale_err, &ctx));
+        assert!(state.ocr.last_error.is_none());
+
+        // Current generation result is applied normally
+        state.ocr.active_request_id.store(11, Ordering::Release);
+        state.ocr.is_processing.store(true, Ordering::Release);
+        let fresh_ok = crate::ocr::OcrWorkerResult {
+            request_id: 11,
+            generation: gen2,
+            backend: crate::ocr::OcrBackend::GoogleLens,
+            constant_scan: false,
+            result: Ok(vec![crate::ocr::ParsedLine {
+                text: "新しいテキスト".to_string(),
+                center_x: 0.5,
+                center_y: 0.5,
+                width: 0.2,
+                height: 0.1,
+                paragraph_idx: 0,
+                writing_direction: crate::ocr::WritingDirection::LeftToRight,
+                char_spans: Vec::new(),
+            }]),
+        };
+        assert!(state.handle_ocr_worker_result(fresh_ok, &ctx));
+        assert_eq!(state.ocr.boxes.len(), 1);
+        assert_eq!(state.ocr.boxes[0].text, "新しいテキスト");
+        assert!(!state.ocr.is_processing.load(Ordering::Acquire));
     }
 }

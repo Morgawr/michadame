@@ -138,6 +138,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
     }
 
     let mut new_dma_frame_received = false;
+    state.poll_gamescope_dma_retry(ctx);
     if let Some(hook) = &mut state.gamescope_hook {
         if hook.is_active {
             hook.poll_late_connections();
@@ -211,8 +212,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             .ocr
             .backend_shared
             .store(state.ocr.backend.as_u8(), Ordering::Release);
-        let ocr_capture = state.ocr.capture_requested.clone();
-        let ocr_req_sender = state.ocr.ocr_request_sender.clone();
+        let ocr_dispatch = state.ocr.dispatch_handle();
         let mining_capture_this_frame = state.bank.has_pending();
         if mining_capture_this_frame {
             ctx.request_repaint();
@@ -560,9 +560,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     .as_ref()
                     .map(crate::replay::gpu::RuntimeView::new);
 
-                let ocr_capture_cb = ocr_capture.clone();
-                let ocr_is_processing_cb = state.ocr.is_processing.clone();
-                let ocr_req_sender_cb = ocr_req_sender.clone();
+                let ocr_dispatch_cb = ocr_dispatch.clone();
                 let bank_capture_cb = bank_capture.clone();
 
                 let latest_dmabuf_frame_cb = latest_dmabuf_frame.clone();
@@ -642,7 +640,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                             };
 
                             renderer.capture_ocr_next_paint =
-                                ocr_capture_cb.swap(false, Ordering::AcqRel);
+                                ocr_dispatch_cb.take_capture_requested();
                             let rendered_area = renderer.paint(
                                 painter.gl(),
                                 painter,
@@ -673,19 +671,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 .or_else(|| latest_dmabuf_frame_cb.as_ref().map(|f| f.captured_at))
                                 .unwrap_or(0);
                             if let Some((pixels, w, h)) = renderer.last_ocr_capture.take() {
-                                if let Some(req_tx) = &ocr_req_sender_cb {
-                                    ocr_is_processing_cb.store(true, Ordering::Release);
-                                    if req_tx
-                                        .send(crate::ocr::models::OcrCaptureRequest {
-                                            raw_rgba: pixels,
-                                            width: w,
-                                            height: h,
-                                        })
-                                        .is_err()
-                                    {
-                                        ocr_is_processing_cb.store(false, Ordering::Release);
-                                    }
-                                }
+                                ocr_dispatch_cb.dispatch(pixels, w, h);
                             }
 
                             if retro_pc_frame {
@@ -910,9 +896,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 .as_ref()
                 .map(crate::replay::gpu::RuntimeView::new);
 
-            let ocr_capture_cb = ocr_capture.clone();
-            let ocr_is_processing_cb = state.ocr.is_processing.clone();
-            let ocr_req_sender_cb = ocr_req_sender.clone();
+            let ocr_dispatch_cb = ocr_dispatch.clone();
             let bank_capture_cb = bank_capture.clone();
 
             let latest_dmabuf_frame_cb = latest_dmabuf_frame.clone();
@@ -985,8 +969,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     };
                     let (rendered_area, ocr_captured) = {
                         let mut renderer = renderer_clone.lock().unwrap();
-                        renderer.capture_ocr_next_paint =
-                            ocr_capture_cb.swap(false, Ordering::AcqRel);
+                        renderer.capture_ocr_next_paint = ocr_dispatch_cb.take_capture_requested();
                         let area = renderer.draw_passthrough(
                             painter.gl(),
                             painter,
@@ -1031,19 +1014,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         .or_else(|| latest_dmabuf_frame_cb.as_ref().map(|f| f.captured_at))
                         .unwrap_or(0);
                     if let Some((pixels, w, h)) = ocr_captured {
-                        if let Some(req_tx) = &ocr_req_sender_cb {
-                            ocr_is_processing_cb.store(true, Ordering::Release);
-                            if req_tx
-                                .send(crate::ocr::models::OcrCaptureRequest {
-                                    raw_rgba: pixels,
-                                    width: w,
-                                    height: h,
-                                })
-                                .is_err()
-                            {
-                                ocr_is_processing_cb.store(false, Ordering::Release);
-                            }
-                        }
+                        ocr_dispatch_cb.dispatch(pixels, w, h);
                     }
 
                     if retro_pc_frame && !is_showing_roll {

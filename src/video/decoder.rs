@@ -155,27 +155,171 @@ pub(crate) fn copy_frame_tightly(frame: &ffmpeg_next::frame::Video) -> Result<Ve
     Ok(data)
 }
 
+pub(crate) fn normalize_v4l2_input_format(fourcc: &str) -> String {
+    let lower = fourcc.trim_end_matches('\0').to_lowercase();
+    match lower.as_str() {
+        "yuyv" => "yuyv422".to_string(),
+        "mjpg" => "mjpeg".to_string(),
+        _ => lower,
+    }
+}
+
+pub(crate) fn setup_v4l2_ffmpeg_options(
+    format: &VideoFormat,
+    resolution: (u32, u32),
+    framerate: u32,
+    include_capture_pixel_and_range_defaults: bool,
+) -> (String, ffmpeg_next::Dictionary<'static>) {
+    let pixel_format_str = normalize_v4l2_input_format(&format.fourcc);
+    let mut ffmpeg_options = ffmpeg_next::Dictionary::new();
+    if resolution.0 > 0 && resolution.1 > 0 {
+        ffmpeg_options.set("video_size", &format!("{}x{}", resolution.0, resolution.1));
+    }
+    if framerate > 0 {
+        ffmpeg_options.set("framerate", &framerate.to_string());
+    }
+    if !pixel_format_str.is_empty() && pixel_format_str != "unkn" {
+        ffmpeg_options.set("input_format", &pixel_format_str);
+    }
+    // Do NOT set `nobuffer` in `fflags`: if `avformat_find_stream_info` runs, `nobuffer`
+    // discards the initial probed packet (which on hardware H.264 V4L2 devices contains
+    // the only IDR keyframe + SPS/PPS for an entire GOP).
+    ffmpeg_options.set("fflags", "discardcorrupt");
+    ffmpeg_options.set("probesize", "32");
+    if include_capture_pixel_and_range_defaults && pixel_format_str != "h264" {
+        ffmpeg_options.set("analyzeduration", "100000");
+    } else {
+        ffmpeg_options.set("analyzeduration", "0");
+    }
+    if include_capture_pixel_and_range_defaults {
+        ffmpeg_options.set("pixel_format", &pixel_format_str);
+        ffmpeg_options.set("color_range", "pc");
+    }
+    (pixel_format_str, ffmpeg_options)
+}
+
 fn setup_ffmpeg_options(
     format: &VideoFormat,
     resolution: (u32, u32),
     framerate: u32,
 ) -> (String, ffmpeg_next::Dictionary<'_>) {
-    let mut pixel_format_str = format.fourcc.trim_end_matches('\0').to_lowercase();
-    if pixel_format_str == "yuyv" {
-        pixel_format_str = "yuyv422".to_string();
-    } else if pixel_format_str == "mjpg" {
-        pixel_format_str = "mjpeg".to_string();
+    setup_v4l2_ffmpeg_options(format, resolution, framerate, true)
+}
+
+pub(crate) unsafe fn v4l2_context_needs_stream_info(
+    context: *const ffmpeg_next::sys::AVFormatContext,
+) -> bool {
+    if context.is_null() {
+        return true;
     }
-    let mut ffmpeg_options = ffmpeg_next::Dictionary::new();
-    ffmpeg_options.set("video_size", &format!("{}x{}", resolution.0, resolution.1));
-    ffmpeg_options.set("framerate", &framerate.to_string());
-    ffmpeg_options.set("input_format", &pixel_format_str);
-    ffmpeg_options.set("fflags", "nobuffer+discardcorrupt");
-    ffmpeg_options.set("probesize", "32");
-    ffmpeg_options.set("analyzeduration", "100000");
-    ffmpeg_options.set("pixel_format", &pixel_format_str);
-    ffmpeg_options.set("color_range", "pc");
-    (pixel_format_str, ffmpeg_options)
+    let nb_streams = unsafe { (*context).nb_streams as usize };
+    let streams_ptr = unsafe { (*context).streams };
+    if nb_streams == 0 || streams_ptr.is_null() {
+        return true;
+    }
+    let streams = unsafe { std::slice::from_raw_parts(streams_ptr, nb_streams) };
+    !streams.iter().any(|&st| {
+        if st.is_null() {
+            return false;
+        }
+        let codecpar = unsafe { (*st).codecpar };
+        if codecpar.is_null() {
+            return false;
+        }
+        let codec_type = unsafe { (*codecpar).codec_type };
+        let codec_id = unsafe { (*codecpar).codec_id };
+        let width = unsafe { (*codecpar).width };
+        let height = unsafe { (*codecpar).height };
+        let format = unsafe { (*codecpar).format };
+        let has_pixel_format =
+            format != ffmpeg_next::sys::AVPixelFormat::AV_PIX_FMT_NONE as libc::c_int;
+        codec_type == ffmpeg_next::sys::AVMediaType::AVMEDIA_TYPE_VIDEO
+            && codec_id != ffmpeg_next::sys::AVCodecID::AV_CODEC_ID_NONE
+            && width > 0
+            && height > 0
+            && (codec_id == ffmpeg_next::sys::AVCodecID::AV_CODEC_ID_H264 || has_pixel_format)
+    })
+}
+
+pub(crate) unsafe fn probe_v4l2_stream_info_if_needed(
+    context: *mut ffmpeg_next::sys::AVFormatContext,
+) -> std::result::Result<bool, ffmpeg_next::Error> {
+    if unsafe { v4l2_context_needs_stream_info(context) } {
+        let stream_info_result =
+            unsafe { ffmpeg_next::sys::avformat_find_stream_info(context, std::ptr::null_mut()) };
+        if stream_info_result < 0 {
+            return Err(ffmpeg_next::Error::from(stream_info_result));
+        }
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+pub(crate) fn normalize_decoded_video_frame(
+    decoded: &ffmpeg_next::frame::Video,
+    normalized: &mut ffmpeg_next::frame::Video,
+    scaler: &mut Option<ffmpeg_next::software::scaling::context::Context>,
+    active_scaler_filter: &mut u8,
+    desired_scaler_filter: u8,
+) -> Result<Option<(u32, u32, ffmpeg_next::format::Pixel, Vec<u8>)>> {
+    if decoded.width() == 0
+        || decoded.height() == 0
+        || decoded.format() == ffmpeg_next::format::Pixel::None
+    {
+        return Ok(None);
+    }
+
+    let output_format = renderable_pixel_format(decoded.format());
+    if decoded.format() == output_format {
+        let data = copy_frame_tightly(decoded)?;
+        return Ok(Some((
+            decoded.width(),
+            decoded.height(),
+            decoded.format(),
+            data,
+        )));
+    }
+
+    let filter_changed = *active_scaler_filter != desired_scaler_filter;
+    let needs_reinit = filter_changed
+        || scaler.as_ref().is_none_or(|s| {
+            s.input().format != decoded.format()
+                || s.input().width != decoded.width()
+                || s.input().height != decoded.height()
+                || s.output().format != output_format
+                || s.output().width != decoded.width()
+                || s.output().height != decoded.height()
+        });
+
+    if needs_reinit {
+        let new_scaler = ffmpeg_next::software::scaling::context::Context::get(
+            decoded.format(),
+            decoded.width(),
+            decoded.height(),
+            output_format,
+            decoded.width(),
+            decoded.height(),
+            crate::video::types::ScalerFilter::from_u8(desired_scaler_filter).into_ffmpeg_flag(),
+        )
+        .context("Failed to create software scaler for normalization")?;
+        *scaler = Some(new_scaler);
+        *active_scaler_filter = desired_scaler_filter;
+    }
+
+    let active_scaler = scaler
+        .as_mut()
+        .expect("scaler initialized before frame normalization");
+    active_scaler
+        .run(decoded, normalized)
+        .context("Failed to normalize video frame")?;
+    let data = copy_frame_tightly(normalized)?;
+    Ok(Some((
+        normalized.width(),
+        normalized.height(),
+        normalized.format(),
+        data,
+    )))
 }
 
 fn open_video_input(
@@ -184,10 +328,11 @@ fn open_video_input(
     interrupt_state: &mut VideoInterruptState,
 ) -> Result<ffmpeg_next::format::context::Input> {
     use ffmpeg_next::sys::{
-        avformat_alloc_context, avformat_close_input, avformat_find_stream_info,
-        avformat_open_input, AVIOInterruptCB,
+        av_find_input_format, avformat_alloc_context, avformat_close_input, avformat_open_input,
+        AVIOInterruptCB,
     };
 
+    let is_v4l2_device = device.starts_with("/dev/video");
     let device = CString::new(device).context("Video device path contains a NUL byte")?;
 
     unsafe {
@@ -201,13 +346,14 @@ fn open_video_input(
             opaque: interrupt_state as *mut VideoInterruptState as *mut c_void,
         };
 
+        let input_fmt = if is_v4l2_device {
+            av_find_input_format(c"v4l2".as_ptr())
+        } else {
+            std::ptr::null_mut()
+        };
         let mut options_ptr = options.disown();
-        let open_result = avformat_open_input(
-            &mut context,
-            device.as_ptr(),
-            std::ptr::null_mut(),
-            &mut options_ptr,
-        );
+        let open_result =
+            avformat_open_input(&mut context, device.as_ptr(), input_fmt, &mut options_ptr);
         drop(ffmpeg_next::Dictionary::own(options_ptr));
 
         if open_result < 0 {
@@ -216,11 +362,9 @@ fn open_video_input(
                 .context("FFmpeg could not open the video input");
         }
 
-        let stream_info_result = avformat_find_stream_info(context, std::ptr::null_mut());
-        if stream_info_result < 0 {
+        if let Err(err) = probe_v4l2_stream_info_if_needed(context) {
             avformat_close_input(&mut context);
-            return Err(ffmpeg_next::Error::from(stream_info_result))
-                .context("FFmpeg could not read video stream information");
+            return Err(err).context("FFmpeg could not read video stream information");
         }
 
         Ok(ffmpeg_next::format::context::Input::wrap(context))
@@ -365,35 +509,10 @@ fn run_video_capture_session(
 
     decoder.set_threading(ffmpeg_next::codec::threading::Config::default());
     let mut current_scaler_val = scaler_filter.load(Ordering::Relaxed);
-    let output_format = renderable_pixel_format(decoder.format());
-    let mut scaler = ffmpeg_next::software::scaling::context::Context::get(
-        decoder.format(),
-        decoder.width(),
-        decoder.height(),
-        output_format,
-        decoder.width(),
-        decoder.height(),
-        crate::video::types::ScalerFilter::from_u8(current_scaler_val).into_ffmpeg_flag(),
-    )
-    .context("Failed to create software scaler for normalization")?;
+    let mut scaler: Option<ffmpeg_next::software::scaling::context::Context> = None;
     let mut decoded = ffmpeg_next::frame::Video::empty();
     let mut normalized = ffmpeg_next::frame::Video::empty();
     loop {
-        let new_scaler_val = scaler_filter.load(Ordering::Relaxed);
-        if new_scaler_val != current_scaler_val {
-            current_scaler_val = new_scaler_val;
-            scaler = ffmpeg_next::software::scaling::context::Context::get(
-                decoder.format(),
-                decoder.width(),
-                decoder.height(),
-                output_format,
-                decoder.width(),
-                decoder.height(),
-                crate::video::types::ScalerFilter::from_u8(current_scaler_val).into_ffmpeg_flag(),
-            )
-            .context("Failed to re-create software scaler")?;
-        }
-
         if stop_requested.load(Ordering::Relaxed) {
             return Ok(());
         }
@@ -427,29 +546,18 @@ fn run_video_capture_session(
             .send_packet(&packet)
             .context("Failed to send packet to decoder")?;
         while decoder.receive_frame(&mut decoded).is_ok() {
-            let range_val = color_range.load(Ordering::Relaxed);
-
-            let (width, height, format, data) = if decoded.format() == output_format
-                && decoded.width() == decoder.width()
-                && decoded.height() == decoder.height()
-            {
-                (
-                    decoded.width(),
-                    decoded.height(),
-                    decoded.format(),
-                    copy_frame_tightly(&decoded)?,
-                )
-            } else {
-                scaler
-                    .run(&decoded, &mut normalized)
-                    .context("Failed to normalize video frame")?;
-                (
-                    normalized.width(),
-                    normalized.height(),
-                    normalized.format(),
-                    copy_frame_tightly(&normalized)?,
-                )
+            let desired_scaler_val = scaler_filter.load(Ordering::Relaxed);
+            let Some((width, height, format, data)) = normalize_decoded_video_frame(
+                &decoded,
+                &mut normalized,
+                &mut scaler,
+                &mut current_scaler_val,
+                desired_scaler_val,
+            )?
+            else {
+                continue;
             };
+            let range_val = color_range.load(Ordering::Relaxed);
 
             let now = crate::replay::now_us();
             let timestamp = decoded
@@ -597,5 +705,195 @@ mod tests {
         assert_eq!(options.get("video_size"), Some("800x600"));
         assert_eq!(options.get("framerate"), Some("120"));
         assert_eq!(options.get("input_format"), Some("nv12"));
+    }
+
+    #[test]
+    fn test_setup_ffmpeg_options_omits_nobuffer_for_h264_capture() {
+        ffmpeg_next::init().unwrap();
+        let format = VideoFormat {
+            fourcc: "H264".to_string(),
+            description: "H.264".to_string(),
+            resolutions: vec![],
+        };
+        let (pix_fmt, options) = setup_ffmpeg_options(&format, (1920, 1080), 60);
+        assert_eq!(pix_fmt, "h264");
+        let fflags = options.get("fflags").unwrap_or("");
+        assert!(
+            !fflags.contains("nobuffer"),
+            "fflags ({fflags}) must not include nobuffer so initial H.264 IDR keyframes are preserved"
+        );
+        assert_eq!(options.get("analyzeduration"), Some("0"));
+    }
+
+    #[test]
+    fn test_v4l2_context_needs_stream_info_skips_when_header_populated_codec_and_dimensions() {
+        ffmpeg_next::init().unwrap();
+        unsafe {
+            assert!(v4l2_context_needs_stream_info(std::ptr::null()));
+
+            let ctx = ffmpeg_next::sys::avformat_alloc_context();
+            assert!(!ctx.is_null());
+            assert!(
+                v4l2_context_needs_stream_info(ctx),
+                "empty context without streams must require stream info"
+            );
+
+            let stream = ffmpeg_next::sys::avformat_new_stream(ctx, std::ptr::null());
+            assert!(!stream.is_null());
+            (*(*stream).codecpar).codec_type = ffmpeg_next::sys::AVMediaType::AVMEDIA_TYPE_VIDEO;
+            (*(*stream).codecpar).codec_id = ffmpeg_next::sys::AVCodecID::AV_CODEC_ID_NONE;
+            (*(*stream).codecpar).width = 1920;
+            (*(*stream).codecpar).height = 1080;
+            assert!(
+                v4l2_context_needs_stream_info(ctx),
+                "unknown codec_id must still probe stream info"
+            );
+
+            // Raw video (e.g. YUYV) with AV_PIX_FMT_NONE must still run avformat_find_stream_info
+            // so FFmpeg populates codecpar->format before opening rawdec.
+            (*(*stream).codecpar).codec_id = ffmpeg_next::sys::AVCodecID::AV_CODEC_ID_RAWVIDEO;
+            (*(*stream).codecpar).format =
+                ffmpeg_next::sys::AVPixelFormat::AV_PIX_FMT_NONE as libc::c_int;
+            assert!(
+                v4l2_context_needs_stream_info(ctx),
+                "rawvideo with AV_PIX_FMT_NONE must probe stream info"
+            );
+
+            // Simulate v4l2_read_header on H.264 capture: codec_id and dimensions are known,
+            // while pixel format is still AV_PIX_FMT_NONE (-1).
+            (*(*stream).codecpar).codec_id = ffmpeg_next::sys::AVCodecID::AV_CODEC_ID_H264;
+            (*(*stream).codecpar).format =
+                ffmpeg_next::sys::AVPixelFormat::AV_PIX_FMT_NONE as libc::c_int;
+            assert!(
+                !v4l2_context_needs_stream_info(ctx),
+                "known H.264 codec_id + dimensions should skip avformat_find_stream_info"
+            );
+
+            ffmpeg_next::sys::avformat_free_context(ctx);
+        }
+    }
+
+    #[test]
+    fn test_lazy_scaler_decodes_first_keyframe_when_initial_decoder_format_is_none() {
+        ffmpeg_next::init().unwrap();
+        let codec = ffmpeg_next::encoder::find(ffmpeg_next::codec::Id::H264)
+            .or_else(|| ffmpeg_next::encoder::find(ffmpeg_next::codec::Id::MPEG4))
+            .expect("H264 or MPEG4 encoder must be available");
+
+        let mut enc_ctx = ffmpeg_next::codec::context::Context::new_with_codec(codec)
+            .encoder()
+            .video()
+            .unwrap();
+        enc_ctx.set_width(64);
+        enc_ctx.set_height(64);
+        enc_ctx.set_format(ffmpeg_next::format::Pixel::YUV420P);
+        enc_ctx.set_time_base(ffmpeg_next::Rational(1, 30));
+        enc_ctx.set_gop(300);
+        enc_ctx.set_max_b_frames(0);
+        let mut encoder = enc_ctx.open_as(codec).unwrap();
+
+        let mut packets = Vec::new();
+        for i in 0..4i64 {
+            let mut f = ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::YUV420P, 64, 64);
+            f.set_pts(Some(i));
+            f.data_mut(0).fill(64 + i as u8 * 20);
+            f.data_mut(1).fill(128);
+            f.data_mut(2).fill(128);
+            encoder.send_frame(&f).unwrap();
+            let mut pkt = ffmpeg_next::Packet::empty();
+            while encoder.receive_packet(&mut pkt).is_ok() {
+                packets.push(pkt.clone());
+            }
+        }
+        encoder.send_eof().unwrap();
+        let mut pkt = ffmpeg_next::Packet::empty();
+        while encoder.receive_packet(&mut pkt).is_ok() {
+            packets.push(pkt.clone());
+        }
+        assert!(packets.len() >= 2);
+
+        // Simulate V4L2 compressed stream parameters before any probing decode pass:
+        // codec_id, width, height are set, but pixel format is AV_PIX_FMT_NONE.
+        let mut params = ffmpeg_next::codec::Parameters::new();
+        unsafe {
+            let raw = params.as_mut_ptr();
+            (*raw).codec_type = ffmpeg_next::sys::AVMediaType::AVMEDIA_TYPE_VIDEO;
+            (*raw).codec_id = codec.id().into();
+            (*raw).width = 64;
+            (*raw).height = 64;
+            (*raw).format = ffmpeg_next::sys::AVPixelFormat::AV_PIX_FMT_NONE as libc::c_int;
+        }
+
+        let mut decoder = ffmpeg_next::codec::context::Context::from_parameters(params)
+            .unwrap()
+            .decoder()
+            .video()
+            .unwrap();
+        assert_eq!(decoder.format(), ffmpeg_next::format::Pixel::None);
+
+        let mut scaler = None;
+        let mut active_filter = 0u8;
+        let mut decoded = ffmpeg_next::frame::Video::empty();
+        let mut normalized = ffmpeg_next::frame::Video::empty();
+        let mut out_frames = 0usize;
+
+        for packet in &packets {
+            decoder.send_packet(packet).unwrap();
+            while decoder.receive_frame(&mut decoded).is_ok() {
+                if let Some((w, h, fmt, data)) = normalize_decoded_video_frame(
+                    &decoded,
+                    &mut normalized,
+                    &mut scaler,
+                    &mut active_filter,
+                    0,
+                )
+                .unwrap()
+                {
+                    assert_eq!((w, h), (64, 64));
+                    assert_eq!(fmt, ffmpeg_next::format::Pixel::YUV420P);
+                    assert!(!data.is_empty());
+                    out_frames += 1;
+                }
+            }
+        }
+        decoder.send_eof().unwrap();
+        while decoder.receive_frame(&mut decoded).is_ok() {
+            if normalize_decoded_video_frame(
+                &decoded,
+                &mut normalized,
+                &mut scaler,
+                &mut active_filter,
+                0,
+            )
+            .unwrap()
+            .is_some()
+            {
+                out_frames += 1;
+            }
+        }
+        assert_eq!(
+            out_frames, 4,
+            "all 4 frames including initial IDR keyframe must decode"
+        );
+
+        // Also verify lazy scaler initialization when decoded format requires swscale conversion (e.g. YUV444P -> YUV420P).
+        let mut yuv444_frame =
+            ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::YUV444P, 64, 64);
+        yuv444_frame.data_mut(0).fill(100);
+        yuv444_frame.data_mut(1).fill(128);
+        yuv444_frame.data_mut(2).fill(128);
+        let (w, h, fmt, data) = normalize_decoded_video_frame(
+            &yuv444_frame,
+            &mut normalized,
+            &mut scaler,
+            &mut active_filter,
+            0,
+        )
+        .unwrap()
+        .expect("YUV444P frame should be scaled to YUV420P");
+        assert_eq!((w, h), (64, 64));
+        assert_eq!(fmt, ffmpeg_next::format::Pixel::YUV420P);
+        assert_eq!(data.len(), 64 * 64 * 3 / 2);
+        assert!(scaler.is_some());
     }
 }

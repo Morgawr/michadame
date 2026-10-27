@@ -19,8 +19,10 @@ pub use pitch::PitchDatabase;
 
 use crossbeam_channel::{Receiver, Sender};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+static OFFLINE_DICT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Global state of the Yomitan / Jitendex dictionary subsystem in michadame.
 pub struct DictState {
@@ -77,9 +79,31 @@ pub struct DictState {
 
 impl DictState {
     pub fn new() -> Self {
+        #[cfg(test)]
+        {
+            Self::new_offline()
+        }
+        #[cfg(not(test))]
+        {
+            Self::with_dir(resolve_dict_directory(), true)
+        }
+    }
+
+    /// Creates an isolated, offline `DictState` backed by a temporary directory without
+    /// spawning background HTTP version-check threads or touching the user's XDG config.
+    pub fn new_offline() -> Self {
+        let seq = OFFLINE_DICT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dict_dir = std::env::temp_dir().join(format!(
+            "michadame-offline-dict-{}-{seq}",
+            std::process::id()
+        ));
+        Self::with_dir(dict_dir, false)
+    }
+
+    /// Creates a `DictState` rooted at `dict_dir`, optionally spawning remote version-check threads.
+    pub fn with_dir(dict_dir: PathBuf, spawn_remote_checks: bool) -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
 
-        let dict_dir = resolve_dict_directory();
         let db_path = dict_dir.join("jitendex.db");
         let freq_db_path = dict_dir.join("jiten_freq.db");
         let pitch_db_path = dict_dir.join("pitch.db");
@@ -179,16 +203,18 @@ impl DictState {
         let update_available = installed_metadata.is_none();
         let freq_update_available = installed_freq_metadata.is_none();
 
-        // Trigger background check for remote version
-        let current_rev = installed_metadata.as_ref().map(|m| m.revision.clone());
-        sync::spawn_check_version(current_rev, is_checking_update.clone(), tx.clone());
+        if spawn_remote_checks {
+            // Trigger background check for remote version
+            let current_rev = installed_metadata.as_ref().map(|m| m.revision.clone());
+            sync::spawn_check_version(current_rev, is_checking_update.clone(), tx.clone());
 
-        let current_freq_rev = installed_freq_metadata.as_ref().map(|m| m.revision.clone());
-        sync::spawn_check_freq_version(
-            current_freq_rev,
-            is_checking_freq_update.clone(),
-            tx.clone(),
-        );
+            let current_freq_rev = installed_freq_metadata.as_ref().map(|m| m.revision.clone());
+            sync::spawn_check_freq_version(
+                current_freq_rev,
+                is_checking_freq_update.clone(),
+                tx.clone(),
+            );
+        }
 
         Self {
             db: Arc::new(Mutex::new(db_handle)),
@@ -217,6 +243,83 @@ impl DictState {
         }
     }
 
+    /// Reopens the primary Jitendex database from `dict_dir`, validates its metadata, swaps the
+    /// active handle, and invalidates the lookup scan cache. Returns `Err` without overwriting
+    /// existing state if opening or reading metadata fails.
+    pub fn reload_dict_db(
+        &mut self,
+        fallback_meta: Option<DictMetadata>,
+    ) -> anyhow::Result<DictMetadata> {
+        let db_path = self.dict_dir.join("jitendex.db");
+        let db = DictDatabase::open(&db_path)?;
+        let db_meta = db.get_metadata()?;
+        if db_meta.total_entries == 0 {
+            anyhow::bail!(
+                "Refusing to activate empty Jitendex database at {}",
+                db_path.display()
+            );
+        }
+        let final_meta = fallback_meta.unwrap_or(db_meta);
+        if let Ok(mut guard) = self.db.lock() {
+            *guard = Some(db);
+        }
+        self.installed_metadata = Some(final_meta.clone());
+        self.update_available = false;
+        lookup::invalidate_scan_cache();
+        Ok(final_meta)
+    }
+
+    /// Reopens the Jiten frequency database from `dict_dir`, validates its metadata, swaps the
+    /// active handle, and invalidates the lookup scan cache. Returns `Err` without overwriting
+    /// existing state if opening or reading metadata fails.
+    pub fn reload_freq_db(
+        &mut self,
+        fallback_meta: Option<DictMetadata>,
+    ) -> anyhow::Result<DictMetadata> {
+        let db_path = self.dict_dir.join("jiten_freq.db");
+        let db = FreqDatabase::open(&db_path)?;
+        let db_meta = db.get_metadata()?;
+        if db_meta.total_entries == 0 {
+            anyhow::bail!(
+                "Refusing to activate empty frequency database at {}",
+                db_path.display()
+            );
+        }
+        let final_meta = fallback_meta.unwrap_or(db_meta);
+        if let Ok(mut guard) = self.freq_db.lock() {
+            *guard = Some(db);
+        }
+        self.installed_freq_metadata = Some(final_meta.clone());
+        self.freq_update_available = false;
+        lookup::invalidate_scan_cache();
+        Ok(final_meta)
+    }
+
+    /// Reopens the pitch accent database from `dict_dir`, validates its metadata, swaps the
+    /// active handle, and invalidates the lookup scan cache. Returns `Err` without overwriting
+    /// existing state if opening or reading metadata fails.
+    pub fn reload_pitch_db(
+        &mut self,
+        fallback_meta: Option<DictMetadata>,
+    ) -> anyhow::Result<DictMetadata> {
+        let db_path = self.dict_dir.join("pitch.db");
+        let db = PitchDatabase::open(&db_path)?;
+        let db_meta = db.get_metadata()?;
+        if db_meta.total_entries == 0 {
+            anyhow::bail!(
+                "Refusing to activate empty pitch database at {}",
+                db_path.display()
+            );
+        }
+        let final_meta = fallback_meta.unwrap_or(db_meta);
+        if let Ok(mut guard) = self.pitch_db.lock() {
+            *guard = Some(db);
+        }
+        self.installed_pitch_metadata = Some(final_meta.clone());
+        lookup::invalidate_scan_cache();
+        Ok(final_meta)
+    }
+
     /// Triggers local import of a Yomitan pitch accent dictionary `.zip` file.
     pub fn trigger_pitch_import(&mut self, zip_path: PathBuf) {
         if self.is_pitch_importing.load(Ordering::Relaxed) {
@@ -237,6 +340,7 @@ impl DictState {
             *guard = None;
         }
         self.installed_pitch_metadata = None;
+        lookup::invalidate_scan_cache();
         let pitch_db_path = self.dict_dir.join("pitch.db");
         if pitch_db_path.exists() {
             std::fs::remove_file(&pitch_db_path)?;
@@ -326,5 +430,74 @@ pub fn resolve_dict_directory() -> PathBuf {
             .join("dict")
     } else {
         PathBuf::from("./dict")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dict_state_new_in_tests_is_offline_and_isolated() {
+        let state = DictState::new();
+        assert!(
+            !state.is_checking_update.load(Ordering::Relaxed),
+            "DictState::new() under test must not spawn remote dictionary version check"
+        );
+        assert!(
+            !state.is_checking_freq_update.load(Ordering::Relaxed),
+            "DictState::new() under test must not spawn remote frequency version check"
+        );
+        assert!(
+            state.dict_dir.starts_with(std::env::temp_dir()),
+            "DictState::new() under test must use an isolated temp directory"
+        );
+    }
+
+    #[test]
+    fn test_reload_freq_db_validates_before_replacing_active_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = DictState::with_dir(dir.path().to_path_buf(), false);
+
+        // Reloading when jiten_freq.db does not exist must fail and not mark installed
+        assert!(state.reload_freq_db(None).is_err());
+        assert!(state.installed_freq_metadata.is_none());
+        assert!(state.freq_update_available);
+
+        // Seed a valid frequency DB
+        let freq_db_path = dir.path().join("jiten_freq.db");
+        {
+            let db = FreqDatabase::open_or_create(&freq_db_path).unwrap();
+            db.conn
+                .execute_batch(
+                    "
+                    INSERT INTO metadata (key, value) VALUES ('title', 'Jiten v1'), ('revision', 'rev1');
+                    INSERT INTO frequencies (term, reading, rank, display_value) VALUES ('私', 'わたし', 23, '23㋕');
+                    ",
+                )
+                .unwrap();
+        }
+
+        let meta1 = state.reload_freq_db(None).unwrap();
+        assert_eq!(meta1.title, "Jiten v1");
+        assert_eq!(meta1.revision, "rev1");
+        assert_eq!(meta1.total_entries, 1);
+        assert!(!state.freq_update_available);
+        let gen1 = state.freq_db.lock().unwrap().as_ref().unwrap().generation;
+
+        // Corrupt / remove the file on disk and verify reload_freq_db fails without wiping active handle
+        std::fs::remove_file(&freq_db_path).unwrap();
+        assert!(state.reload_freq_db(None).is_err());
+        assert_eq!(
+            state
+                .installed_freq_metadata
+                .as_ref()
+                .map(|m| m.revision.as_str()),
+            Some("rev1")
+        );
+        assert_eq!(
+            state.freq_db.lock().unwrap().as_ref().unwrap().generation,
+            gen1
+        );
     }
 }

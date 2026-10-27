@@ -217,33 +217,50 @@ pub struct AlertSoundPlayer {
 
 impl Default for AlertSoundPlayer {
     fn default() -> Self {
-        Self::new()
+        if cfg!(test) {
+            Self::new_headless()
+        } else {
+            Self::new()
+        }
     }
 }
 
 impl AlertSoundPlayer {
+    /// Creates an `AlertSoundPlayer` with precomputed audio samples but no hardware audio output stream.
+    pub fn new_headless() -> Self {
+        Self::with_playback(false)
+    }
+
     pub fn new() -> Self {
+        Self::with_playback(!cfg!(test))
+    }
+
+    fn with_playback(enable_hardware: bool) -> Self {
         let chime_samples = Arc::new(generate_retro_chime_samples());
         let light_switch_samples = Arc::new(generate_light_switch_clack_samples());
         let light_switch_on_samples = Arc::new(generate_light_switch_on_samples());
 
-        // Attempt to initialize Rodio playback. If unavailable (e.g. headless environment),
-        // we safely retain None so execution never crashes.
-        let (stream, stream_handle, sink) = match crate::devices::audio::initialize_rodio_playback()
-        {
-            Ok((guard, handle)) => match Sink::try_new(&handle) {
-                Ok(sink) => {
-                    sink.set_volume(1.0);
-                    (Some(guard), Some(handle), Some(sink))
-                }
+        // Attempt to initialize Rodio playback when hardware output is enabled.
+        // If unavailable (e.g. headless environment or unit tests), we safely retain None
+        // so execution never probes ALSA/PipeWire in tests or crashes without audio hardware.
+        let (stream, stream_handle, sink) = if !enable_hardware {
+            (None, None, None)
+        } else {
+            match crate::devices::audio::initialize_rodio_playback() {
+                Ok((guard, handle)) => match Sink::try_new(&handle) {
+                    Ok(sink) => {
+                        sink.set_volume(1.0);
+                        (Some(guard), Some(handle), Some(sink))
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to create Rodio sink for alert audio: {e}");
+                        (Some(guard), Some(handle), None)
+                    }
+                },
                 Err(e) => {
-                    tracing::warn!("Failed to create Rodio sink for alert audio: {e}");
-                    (Some(guard), Some(handle), None)
+                    tracing::debug!("Rodio output stream not available for alert audio: {e}");
+                    (None, None, None)
                 }
-            },
-            Err(e) => {
-                tracing::debug!("Rodio output stream not available for alert audio: {e}");
-                (None, None, None)
             }
         };
 
@@ -257,6 +274,12 @@ impl AlertSoundPlayer {
             light_switch_on_samples,
             volume: std::sync::atomic::AtomicU32::new(1.0f32.to_bits()),
         }
+    }
+
+    /// Returns true if a hardware audio output stream is attached to this player.
+    #[allow(dead_code)]
+    pub fn has_hardware_output(&self) -> bool {
+        self._stream.is_some() || self.stream_handle.is_some() || self.sink.is_some()
     }
 
     /// Sets the playback volume for local alert audio, matching the stream master volume.
@@ -394,6 +417,14 @@ mod tests {
     #[test]
     fn test_player_instantiation_does_not_panic() {
         let player = AlertSoundPlayer::new();
+        assert!(
+            !player.has_hardware_output(),
+            "AlertSoundPlayer::new() in unit tests must not open hardware audio devices"
+        );
+        let default_player = AlertSoundPlayer::default();
+        assert!(!default_player.has_hardware_output());
+        let headless_player = AlertSoundPlayer::new_headless();
+        assert!(!headless_player.has_hardware_output());
         assert_eq!(
             player.chime_samples().len(),
             (48_000.0 * 2.20 * 2.0) as usize
@@ -406,6 +437,8 @@ mod tests {
             player.light_switch_on_samples().len(),
             (48_000.0 * 2.600) as usize * 2
         );
+        player.set_volume(0.42);
+        assert!((player.volume() - 0.42).abs() < 1e-6);
         player.play_local();
         player.play_light_switch_local(true);
         player.play_light_switch_local(false);

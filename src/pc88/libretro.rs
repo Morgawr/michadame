@@ -4,7 +4,8 @@ use super::core_sync::{
 use super::{Pc88Command, Pc88Config, Pc88Event};
 use crate::pc98::input::RETROK_F12;
 use crate::pc98::libretro::{
-    convert_rgb1555_to_rgba, convert_rgb565_to_rgba, convert_xrgb8888_to_rgba, FloppySeekMixer,
+    convert_rgb1555_to_rgba, convert_rgb565_to_rgba, convert_xrgb8888_to_rgba,
+    ContinuousStereoResampler, EmulatorLifecycleState, FloppySeekMixer,
 };
 use crate::pc98::Pc98InputState;
 use crate::video::types::{ColorRange, RawFrame};
@@ -18,7 +19,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const RETRO_ENVIRONMENT_SET_ROTATION: c_uint = 1;
@@ -211,7 +212,122 @@ impl Source for Pc88AudioSource {
     }
 }
 
+struct Pc88SessionCoordinatorState {
+    active_session_id: Option<u64>,
+    lifecycle: EmulatorLifecycleState,
+    next_session_id: u64,
+}
+
+struct Pc88SessionCoordinator {
+    state: Mutex<Pc88SessionCoordinatorState>,
+    cv: Condvar,
+}
+
+impl Pc88SessionCoordinator {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(Pc88SessionCoordinatorState {
+                active_session_id: None,
+                lifecycle: EmulatorLifecycleState::Idle,
+                next_session_id: 1,
+            }),
+            cv: Condvar::new(),
+        }
+    }
+
+    fn current_lifecycle(&self) -> EmulatorLifecycleState {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .lifecycle
+    }
+}
+
+fn pc88_session_coordinator() -> &'static Pc88SessionCoordinator {
+    static COORD: OnceLock<Pc88SessionCoordinator> = OnceLock::new();
+    COORD.get_or_init(Pc88SessionCoordinator::new)
+}
+
+pub fn pc88_lifecycle_state() -> EmulatorLifecycleState {
+    pc88_session_coordinator().current_lifecycle()
+}
+
+struct Pc88SessionGuard {
+    session_id: u64,
+}
+
+impl Pc88SessionGuard {
+    fn acquire(stop_requested: &AtomicBool) -> Option<Self> {
+        let coord = pc88_session_coordinator();
+        let mut guard = coord.state.lock().unwrap_or_else(|p| p.into_inner());
+        while guard.active_session_id.is_some() {
+            if stop_requested.load(Ordering::Acquire) {
+                return None;
+            }
+            let (next_guard, _) = coord
+                .cv
+                .wait_timeout(guard, Duration::from_millis(10))
+                .unwrap_or_else(|p| p.into_inner());
+            guard = next_guard;
+        }
+        if stop_requested.load(Ordering::Acquire) {
+            return None;
+        }
+        let session_id = guard.next_session_id;
+        guard.next_session_id = guard.next_session_id.saturating_add(1);
+        guard.active_session_id = Some(session_id);
+        guard.lifecycle = EmulatorLifecycleState::Starting(session_id);
+        Some(Self { session_id })
+    }
+
+    fn install_bridge(&self, mut ctx: LibretroBridgeContext, stop_requested: &AtomicBool) -> bool {
+        if stop_requested.load(Ordering::Acquire) {
+            return false;
+        }
+        ctx.session_id = self.session_id;
+        {
+            let mut bridge_guard = ACTIVE_PC88_BRIDGE.lock().unwrap_or_else(|p| p.into_inner());
+            if stop_requested.load(Ordering::Acquire) {
+                return false;
+            }
+            *bridge_guard = Some(Box::new(ctx));
+        }
+        let coord = pc88_session_coordinator();
+        let mut guard = coord.state.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.active_session_id == Some(self.session_id) {
+            guard.lifecycle = EmulatorLifecycleState::Running(self.session_id);
+        }
+        true
+    }
+
+    fn mark_stopping(&self) {
+        let coord = pc88_session_coordinator();
+        let mut guard = coord.state.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.active_session_id == Some(self.session_id) {
+            guard.lifecycle = EmulatorLifecycleState::Stopping(self.session_id);
+        }
+    }
+}
+
+impl Drop for Pc88SessionGuard {
+    fn drop(&mut self) {
+        if let Ok(mut bridge_guard) = ACTIVE_PC88_BRIDGE.lock() {
+            if bridge_guard.as_ref().map(|c| c.session_id) == Some(self.session_id) {
+                *bridge_guard = None;
+            }
+        }
+        let coord = pc88_session_coordinator();
+        let mut guard = coord.state.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.active_session_id == Some(self.session_id) {
+            guard.active_session_id = None;
+            guard.lifecycle = EmulatorLifecycleState::Idle;
+            coord.cv.notify_all();
+        }
+    }
+}
+
 struct LibretroBridgeContext {
+    session_id: u64,
     system_dir_c: CString,
     save_dir_c: CString,
     variables: HashMap<String, CString>,
@@ -236,6 +352,7 @@ struct LibretroBridgeContext {
     latched_mouse_middle: bool,
     seek_mixer: FloppySeekMixer,
     rumble_seek_frames: u32,
+    resampler: ContinuousStereoResampler,
 }
 
 static ACTIVE_PC88_BRIDGE: Mutex<Option<Box<LibretroBridgeContext>>> = Mutex::new(None);
@@ -578,7 +695,7 @@ unsafe extern "C" fn bridge_audio_sample_batch_cb(data: *const i16, frames: usiz
         f32_samples.push((s as f32) / 32768.0);
     }
 
-    let (audio_queue, peak_amplitude, audio_latency_ms, replay_audio) = {
+    let (audio_queue, peak_amplitude, audio_latency_ms, replay_audio, resampled_opt) = {
         let Ok(mut guard) = ACTIVE_PC88_BRIDGE.lock() else {
             return frames;
         };
@@ -586,11 +703,18 @@ unsafe extern "C" fn bridge_audio_sample_batch_cb(data: *const i16, frames: usiz
             return frames;
         };
         ctx.seek_mixer.mix_into_stereo(&mut f32_samples);
+        let resampled_opt = if ctx.replay_audio.is_enabled() {
+            Some(ctx.resampler.process_stereo(&f32_samples))
+        } else {
+            ctx.resampler.reset();
+            None
+        };
         (
             ctx.audio_queue.clone(),
             ctx.peak_amplitude.clone(),
             ctx.audio_latency_ms.clone(),
             ctx.replay_audio.clone(),
+            resampled_opt,
         )
     };
 
@@ -618,39 +742,18 @@ unsafe extern "C" fn bridge_audio_sample_batch_cb(data: *const i16, frames: usiz
 
     replay_audio.observe_reactive(&f32_samples, PC88_AUDIO_SAMPLE_RATE, PC88_AUDIO_CHANNELS);
 
-    if replay_audio.is_enabled() {
-        let resampled = resample_stereo_44100_to_48000(&f32_samples);
-        replay_audio.submit(
-            &resampled,
-            PC88_REPLAY_SAMPLE_RATE,
-            PC88_AUDIO_CHANNELS,
-            crate::replay::now_us(),
-        );
+    if let Some(resampled) = resampled_opt {
+        if !resampled.is_empty() {
+            replay_audio.submit(
+                &resampled,
+                PC88_REPLAY_SAMPLE_RATE,
+                PC88_AUDIO_CHANNELS,
+                crate::replay::now_us(),
+            );
+        }
     }
 
     frames
-}
-
-fn resample_stereo_44100_to_48000(input: &[f32]) -> Vec<f32> {
-    let in_frames = input.len() / 2;
-    if in_frames == 0 {
-        return Vec::new();
-    }
-    let out_frames =
-        (in_frames * PC88_REPLAY_SAMPLE_RATE as usize) / PC88_AUDIO_SAMPLE_RATE as usize;
-    let mut out = Vec::with_capacity(out_frames * 2);
-    let ratio = (in_frames as f32) / (out_frames.max(1) as f32);
-    for i in 0..out_frames {
-        let src_pos = (i as f32) * ratio;
-        let idx0 = (src_pos.floor() as usize).min(in_frames - 1);
-        let idx1 = (idx0 + 1).min(in_frames - 1);
-        let frac = src_pos - (idx0 as f32);
-        let l = input[idx0 * 2] * (1.0 - frac) + input[idx1 * 2] * frac;
-        let r = input[idx0 * 2 + 1] * (1.0 - frac) + input[idx1 * 2 + 1] * frac;
-        out.push(l);
-        out.push(r);
-    }
-    out
 }
 
 unsafe extern "C" fn bridge_input_poll_cb() {
@@ -807,9 +910,20 @@ fn prepare_pc88_boot_media(
 
 /// Entry point for the background PC-88 emulator thread.
 pub fn run_pc88_worker(params: Pc88WorkerParams) -> Result<()> {
+    let Some(session_guard) = Pc88SessionGuard::acquire(&params.stop_requested) else {
+        return Ok(());
+    };
+
     let sys_dir = ensure_pc88_system_dir(Some(&params.config.games_dir))?;
+    if params.stop_requested.load(Ordering::Acquire) {
+        return Ok(());
+    }
+
     let save_dir = pc88_saves_dir();
     let core_so_path = ensure_quasi88_core(Some(&params.event_tx))?;
+    if params.stop_requested.load(Ordering::Acquire) {
+        return Ok(());
+    }
 
     let _ = params.event_tx.send(Pc88Event::SyncProgress(
         "Booting NEC PC-8801 hardware...".to_string(),
@@ -824,6 +938,10 @@ pub fn run_pc88_worker(params: Pc88WorkerParams) -> Result<()> {
         .context("Failed to create temporary Quasi88 core copy")?;
     fs::copy(&core_so_path, temp_so.path())
         .with_context(|| format!("Failed to copy {:?} to temp path", core_so_path))?;
+
+    if params.stop_requested.load(Ordering::Acquire) {
+        return Ok(());
+    }
 
     let boot_plan = prepare_pc88_boot_media(&params.config, &params.active_game_floppies)?;
 
@@ -856,49 +974,52 @@ pub fn run_pc88_worker(params: Pc88WorkerParams) -> Result<()> {
     let mut variables = HashMap::new();
     populate_quasi88_variables(&mut variables, &params.config);
 
-    {
-        let mut guard = ACTIVE_PC88_BRIDGE.lock().unwrap();
-        *guard = Some(Box::new(LibretroBridgeContext {
-            system_dir_c: CString::new(sys_dir.to_string_lossy().as_bytes())?,
-            save_dir_c: CString::new(save_dir.to_string_lossy().as_bytes())?,
-            variables,
-            variables_dirty: false,
-            pixel_format: RETRO_PIXEL_FORMAT_RGB565,
-            av_info: RetroSystemAvInfo {
-                geometry: RetroGameGeometry {
-                    base_width: 640,
-                    base_height: 400,
-                    max_width: 640,
-                    max_height: 400,
-                    aspect_ratio: 1.6,
-                },
-                timing: RetroSystemTiming {
-                    fps: 59.94,
-                    sample_rate: 44100.0,
-                },
+    let bridge_ctx = LibretroBridgeContext {
+        session_id: session_guard.session_id,
+        system_dir_c: CString::new(sys_dir.to_string_lossy().as_bytes())?,
+        save_dir_c: CString::new(save_dir.to_string_lossy().as_bytes())?,
+        variables,
+        variables_dirty: false,
+        pixel_format: RETRO_PIXEL_FORMAT_RGB565,
+        av_info: RetroSystemAvInfo {
+            geometry: RetroGameGeometry {
+                base_width: 640,
+                base_height: 400,
+                max_width: 640,
+                max_height: 400,
+                aspect_ratio: 1.6,
             },
-            last_resolution: (640, 400),
-            last_frame: None,
-            frame_tx: params.frame_tx.clone(),
-            event_tx: params.event_tx.clone(),
-            request_repaint: params.request_repaint.clone(),
-            audio_queue,
-            peak_amplitude: params.peak_amplitude,
-            audio_latency_ms: params.audio_latency_ms,
-            replay_audio: params.replay_audio,
-            input_state: params.input_state.clone(),
-            latched_keys: [false; 512],
-            latched_mouse_dx: 0,
-            latched_mouse_dy: 0,
-            latched_mouse_left: false,
-            latched_mouse_right: false,
-            latched_mouse_middle: false,
-            seek_mixer: FloppySeekMixer::new(
-                params.config.floppy_seek_sound,
-                params.config.floppy_seek_volume,
-            ),
-            rumble_seek_frames: 0,
-        }));
+            timing: RetroSystemTiming {
+                fps: 59.94,
+                sample_rate: 44100.0,
+            },
+        },
+        last_resolution: (640, 400),
+        last_frame: None,
+        frame_tx: params.frame_tx.clone(),
+        event_tx: params.event_tx.clone(),
+        request_repaint: params.request_repaint.clone(),
+        audio_queue,
+        peak_amplitude: params.peak_amplitude,
+        audio_latency_ms: params.audio_latency_ms,
+        replay_audio: params.replay_audio,
+        input_state: params.input_state.clone(),
+        latched_keys: [false; 512],
+        latched_mouse_dx: 0,
+        latched_mouse_dy: 0,
+        latched_mouse_left: false,
+        latched_mouse_right: false,
+        latched_mouse_middle: false,
+        seek_mixer: FloppySeekMixer::new(
+            params.config.floppy_seek_sound,
+            params.config.floppy_seek_volume,
+        ),
+        rumble_seek_frames: 0,
+        resampler: ContinuousStereoResampler::new(PC88_AUDIO_SAMPLE_RATE, PC88_REPLAY_SAMPLE_RATE),
+    };
+
+    if !session_guard.install_bridge(bridge_ctx, &params.stop_requested) {
+        return Ok(());
     }
 
     let result = unsafe {
@@ -913,9 +1034,10 @@ pub fn run_pc88_worker(params: Pc88WorkerParams) -> Result<()> {
         )
     };
 
-    if let Ok(mut guard) = ACTIVE_PC88_BRIDGE.lock() {
-        *guard = None;
-    }
+    session_guard.mark_stopping();
+    // `session_guard` drops here AFTER `run_loaded_core` has called `retro_unload_game()`,
+    // `retro_deinit()`, and dropped `Library` (`dlclose`).
+    drop(session_guard);
 
     result
 }
@@ -1143,13 +1265,19 @@ unsafe fn run_loaded_core(
                     }
                 }
                 Pc88Command::MountFdd { drive, path } => {
-                    super::library::sync_back_multi_d88_files(&boot_plan.disk_list);
-                    if drive == 0 {
-                        current_fdd1 = path.clone();
-                    } else if drive == 1 {
-                        current_fdd2 = path.clone();
+                    if let Err(e) =
+                        super::library::try_sync_back_multi_d88_files(&boot_plan.disk_list)
+                    {
+                        let _ = event_tx.send(Pc88Event::Info(format!(
+                            "Failed to sync multi-disk D88 changes: {e}"
+                        )));
                     }
                     if mount_fdd_live(drive as usize, path.as_deref(), &mut boot_plan.disk_list) {
+                        if drive == 0 {
+                            current_fdd1 = path.clone();
+                        } else if drive == 1 {
+                            current_fdd2 = path.clone();
+                        }
                         if let Some(p) = path {
                             let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("disk");
                             let _ = event_tx.send(Pc88Event::Info(format!(
@@ -1179,7 +1307,13 @@ unsafe fn run_loaded_core(
                 }
                 Pc88Command::SaveState { slot } => {
                     let slot = slot.clamp(1, crate::pc98::savestate::SAVE_SLOT_COUNT as u8);
-                    super::library::sync_back_multi_d88_files(&boot_plan.disk_list);
+                    if let Err(e) =
+                        super::library::try_sync_back_multi_d88_files(&boot_plan.disk_list)
+                    {
+                        let _ = event_tx.send(Pc88Event::Info(format!(
+                            "Failed to sync multi-disk D88 changes: {e}"
+                        )));
+                    }
                     let state_size = retro_serialize_size();
                     if state_size == 0 {
                         let _ = event_tx.send(Pc88Event::Info(
@@ -1213,12 +1347,14 @@ unsafe fn run_loaded_core(
                                 resolution: last_res,
                                 size_bytes: state_buf.len(),
                             };
-                            match crate::pc98::savestate::write_slot_files(
+                            match crate::pc98::savestate::write_slot_files_with_options(
                                 &crate::pc98::savestate::pc88_states_root(),
                                 &game_key,
                                 &meta,
                                 &state_buf,
                                 last_frame.as_deref(),
+                                Some("quasi88_libretro"),
+                                None,
                             ) {
                                 Ok(()) => {
                                     let _ = event_tx.send(Pc88Event::StateSaved { slot, meta });
@@ -1242,47 +1378,79 @@ unsafe fn run_loaded_core(
                     let slot = slot.clamp(1, crate::pc98::savestate::SAVE_SLOT_COUNT as u8);
                     let (game_key, _) =
                         crate::pc98::savestate::derive_pc88_game_key(&active_config);
-                    match crate::pc98::savestate::read_slot_state(
+                    let max_state_size = retro_serialize_size();
+                    match crate::pc98::savestate::validate_slot_for_session_load(
                         &crate::pc98::savestate::pc88_states_root(),
                         &game_key,
                         slot,
+                        "PC-88",
+                        Some("quasi88_libretro"),
+                        if max_state_size > 0 {
+                            Some(max_state_size)
+                        } else {
+                            None
+                        },
                     ) {
                         Ok((meta, state_bytes)) => {
-                            if !meta.fdd1_path.is_empty() && Path::new(&meta.fdd1_path).is_file() {
-                                let p1 = PathBuf::from(&meta.fdd1_path);
-                                if current_fdd1.as_ref() != Some(&p1) {
-                                    mount_fdd_live(0, Some(&p1), &mut boot_plan.disk_list);
-                                    current_fdd1 = Some(p1);
+                            let pre_load_snapshot = if max_state_size > 0 {
+                                let mut snap = vec![0u8; max_state_size];
+                                if retro_serialize(snap.as_mut_ptr() as *mut c_void, max_state_size)
+                                {
+                                    Some(snap)
+                                } else {
+                                    None
                                 }
-                            }
-                            if !meta.fdd2_path.is_empty() && Path::new(&meta.fdd2_path).is_file() {
-                                let p2 = PathBuf::from(&meta.fdd2_path);
-                                if current_fdd2.as_ref() != Some(&p2) {
-                                    mount_fdd_live(1, Some(&p2), &mut boot_plan.disk_list);
-                                    current_fdd2 = Some(p2);
-                                }
-                            }
-                            if retro_unserialize(
-                                state_bytes.as_ptr() as *const c_void,
-                                state_bytes.len(),
-                            ) {
-                                with_bridge_ctx(|ctx| {
-                                    ctx.rumble_seek_frames = 0;
-                                    ctx.seek_mixer.stop(0);
-                                    ctx.seek_mixer.stop(1);
-                                    if let Ok(mut inp) = ctx.input_state.lock() {
-                                        inp.release_all();
-                                    }
-                                    if let Ok(mut q) = ctx.audio_queue.lock() {
-                                        q.samples.clear();
-                                    }
-                                });
-                                let _ = event_tx.send(Pc88Event::StateLoaded { slot, meta });
                             } else {
-                                let _ = event_tx.send(Pc88Event::Info(format!(
-                                    "PC-88 core rejected state data in slot {}.",
-                                    slot
-                                )));
+                                None
+                            };
+                            let prev_disk_list = boot_plan.disk_list.clone();
+
+                            let load_res = crate::pc98::savestate::execute_load_state_with_rollback(
+                                &meta,
+                                &state_bytes,
+                                &mut current_fdd1,
+                                &mut current_fdd2,
+                                |drive, path| {
+                                    mount_fdd_live(drive as usize, path, &mut boot_plan.disk_list)
+                                },
+                                |bytes| {
+                                    if retro_unserialize(
+                                        bytes.as_ptr() as *const c_void,
+                                        bytes.len(),
+                                    ) {
+                                        true
+                                    } else {
+                                        if let Some(ref snap) = pre_load_snapshot {
+                                            let _ = retro_unserialize(
+                                                snap.as_ptr() as *const c_void,
+                                                snap.len(),
+                                            );
+                                        }
+                                        false
+                                    }
+                                },
+                            );
+
+                            match load_res {
+                                Ok(()) => {
+                                    with_bridge_ctx(|ctx| {
+                                        ctx.rumble_seek_frames = 0;
+                                        ctx.seek_mixer.stop(0);
+                                        ctx.seek_mixer.stop(1);
+                                        ctx.resampler.reset();
+                                        if let Ok(mut inp) = ctx.input_state.lock() {
+                                            inp.release_all();
+                                        }
+                                        if let Ok(mut q) = ctx.audio_queue.lock() {
+                                            q.samples.clear();
+                                        }
+                                    });
+                                    let _ = event_tx.send(Pc88Event::StateLoaded { slot, meta });
+                                }
+                                Err(e) => {
+                                    boot_plan.disk_list = prev_disk_list;
+                                    let _ = event_tx.send(Pc88Event::Info(format!("{e}")));
+                                }
                             }
                         }
                         Err(e) => {
@@ -1322,7 +1490,160 @@ unsafe fn run_loaded_core(
     retro_unload_game();
     retro_deinit();
 
-    super::library::sync_back_multi_d88_files(&boot_plan.disk_list);
+    if let Err(e) = super::library::try_sync_back_multi_d88_files(&boot_plan.disk_list) {
+        let _ = event_tx.send(Pc88Event::Info(format!(
+            "Failed to sync multi-disk D88 changes on exit: {e}"
+        )));
+    }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_f18_pc88_single_sample_and_batch_resampling_equivalence() {
+        let mut resampler_single =
+            ContinuousStereoResampler::new(PC88_AUDIO_SAMPLE_RATE, PC88_REPLAY_SAMPLE_RATE);
+        let mut resampler_batch =
+            ContinuousStereoResampler::new(PC88_AUDIO_SAMPLE_RATE, PC88_REPLAY_SAMPLE_RATE);
+
+        let in_frames = 44_100usize;
+        let mut input = Vec::with_capacity(in_frames * 2);
+        for i in 0..in_frames {
+            let phase = (i as f32) / 44_100.0;
+            input.push((phase * 200.0).sin() * 0.5);
+            input.push((phase * 300.0).cos() * 0.5);
+        }
+
+        let mut single_out = Vec::with_capacity(48_000 * 2);
+        for frame in input.chunks_exact(2) {
+            single_out.extend(resampler_single.process_stereo(frame));
+        }
+
+        let batch_out = resampler_batch.process_stereo(&input);
+        assert_eq!(single_out.len(), 48_000 * 2);
+        assert_eq!(batch_out.len(), 48_000 * 2);
+        for (i, (&s, &b)) in single_out.iter().zip(batch_out.iter()).enumerate() {
+            assert!((s - b).abs() <= 1e-6, "Mismatch at sample {i}: {s} vs {b}");
+        }
+    }
+
+    #[test]
+    fn test_f01_pc88_session_lifecycle_isolation_and_pointer_validity() {
+        use std::sync::Barrier;
+
+        let make_ctx = |sys_dir: &str, save_dir: &str| -> LibretroBridgeContext {
+            let (frame_tx, _frame_rx) = crossbeam_channel::bounded(2);
+            let (event_tx, _event_rx) = crossbeam_channel::unbounded();
+            let mut variables = HashMap::new();
+            populate_quasi88_variables(&mut variables, &Pc88Config::default());
+            LibretroBridgeContext {
+                session_id: 0,
+                system_dir_c: CString::new(sys_dir).unwrap(),
+                save_dir_c: CString::new(save_dir).unwrap(),
+                variables,
+                variables_dirty: false,
+                pixel_format: RETRO_PIXEL_FORMAT_RGB565,
+                av_info: RetroSystemAvInfo::default(),
+                last_resolution: (640, 400),
+                last_frame: None,
+                frame_tx,
+                event_tx,
+                request_repaint: Arc::new(|| {}),
+                audio_queue: Arc::new(Mutex::new(Pc88AudioQueue {
+                    samples: VecDeque::new(),
+                })),
+                peak_amplitude: Arc::new(AtomicU64::new(0)),
+                audio_latency_ms: Arc::new(AtomicU64::new(0)),
+                replay_audio: Arc::new(crate::replay::AudioTap::default()),
+                input_state: Arc::new(Mutex::new(Pc98InputState::default())),
+                latched_keys: [false; 512],
+                latched_mouse_dx: 0,
+                latched_mouse_dy: 0,
+                latched_mouse_left: false,
+                latched_mouse_right: false,
+                latched_mouse_middle: false,
+                seek_mixer: FloppySeekMixer::new(false, 0),
+                rumble_seek_frames: 0,
+                resampler: ContinuousStereoResampler::new(44100, 48000),
+            }
+        };
+
+        // 1. Start A -> Stop A during download/init -> Start B
+        let stop_a1 = Arc::new(AtomicBool::new(false));
+        let guard_a1 = Pc88SessionGuard::acquire(&stop_a1).unwrap();
+        stop_a1.store(true, Ordering::SeqCst);
+        assert!(!guard_a1.install_bridge(make_ctx("/sys/88_a1", "/save/88_a1"), &stop_a1));
+        drop(guard_a1);
+        assert_eq!(pc88_lifecycle_state(), EmulatorLifecycleState::Idle);
+
+        // 2. Start A -> Stop A while A is shutting down, while Start B is waiting on the session gate
+        let stop_a2 = Arc::new(AtomicBool::new(false));
+        let stop_b2 = Arc::new(AtomicBool::new(false));
+        let a_running_barrier = Arc::new(Barrier::new(2));
+        let a_allow_finish_barrier = Arc::new(Barrier::new(2));
+
+        let stop_a2_thread = stop_a2.clone();
+        let a_run_b = a_running_barrier.clone();
+        let a_fin_b = a_allow_finish_barrier.clone();
+        let ctx_a2 = make_ctx("/sys/pc88_a", "/save/pc88_a");
+
+        let handle_a = std::thread::spawn(move || {
+            let guard = Pc88SessionGuard::acquire(&stop_a2_thread).unwrap();
+            assert!(guard.install_bridge(ctx_a2, &stop_a2_thread));
+
+            let mut sys_ptr: *const c_char = std::ptr::null();
+            let mut save_ptr: *const c_char = std::ptr::null();
+            unsafe {
+                assert!(bridge_environment_cb(
+                    RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY,
+                    (&mut sys_ptr as *mut *const c_char).cast(),
+                ));
+                assert!(bridge_environment_cb(
+                    RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY,
+                    (&mut save_ptr as *mut *const c_char).cast(),
+                ));
+            }
+            a_run_b.wait();
+            a_fin_b.wait();
+
+            guard.mark_stopping();
+            let sys_str = unsafe { CStr::from_ptr(sys_ptr).to_str().unwrap().to_string() };
+            let save_str = unsafe { CStr::from_ptr(save_ptr).to_str().unwrap().to_string() };
+            assert_eq!(sys_str, "/sys/pc88_a");
+            assert_eq!(save_str, "/save/pc88_a");
+            drop(guard);
+        });
+
+        a_running_barrier.wait();
+        stop_a2.store(true, Ordering::SeqCst);
+
+        let stop_b2_thread = stop_b2.clone();
+        let ctx_b2 = make_ctx("/sys/pc88_b", "/save/pc88_b");
+        let handle_b = std::thread::spawn(move || {
+            let guard = Pc88SessionGuard::acquire(&stop_b2_thread).unwrap();
+            assert!(guard.install_bridge(ctx_b2, &stop_b2_thread));
+            let mut sys_ptr: *const c_char = std::ptr::null();
+            unsafe {
+                assert!(bridge_environment_cb(
+                    RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY,
+                    (&mut sys_ptr as *mut *const c_char).cast(),
+                ));
+                let sys_str = CStr::from_ptr(sys_ptr).to_str().unwrap();
+                assert_eq!(sys_str, "/sys/pc88_b");
+            }
+            drop(guard);
+        });
+
+        std::thread::sleep(Duration::from_millis(25));
+        a_allow_finish_barrier.wait();
+
+        handle_a.join().unwrap();
+        handle_b.join().unwrap();
+        assert_eq!(pc88_lifecycle_state(), EmulatorLifecycleState::Idle);
+        assert!(ACTIVE_PC88_BRIDGE.lock().unwrap().is_none());
+    }
 }

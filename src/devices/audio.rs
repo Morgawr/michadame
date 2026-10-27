@@ -335,6 +335,60 @@ pub fn is_usable_input_device(name: &str, desc: &str, direction: Option<alsa::Di
     true
 }
 
+pub fn filter_usable_audio_hints<I, F>(hints: I, mut can_open_capture: F) -> Vec<(String, String)>
+where
+    I: IntoIterator<Item = (String, String, Option<alsa::Direction>)>,
+    F: FnMut(&str) -> bool,
+{
+    let mut sources = Vec::new();
+    let mut seen_card_keys = std::collections::HashSet::new();
+    let mut seen_names = std::collections::HashSet::new();
+
+    for (name, desc, direction) in hints {
+        if !is_usable_input_device(&name, &desc, direction) {
+            continue;
+        }
+
+        if seen_names.contains(&name) {
+            continue;
+        }
+
+        if !can_open_capture(&name) {
+            continue;
+        }
+
+        // Deduplicate multiple PCM interfaces for the same physical card/device (preferring default:CARD=...)
+        if let Some(card_part) = name.split(':').nth(1) {
+            let mut parts = card_part.split(',');
+            let card = parts.next().unwrap_or("");
+            if card.starts_with("CARD=") {
+                let dev = parts.find(|p| p.starts_with("DEV=")).unwrap_or("DEV=0");
+                let card_key = format!("{card}:{dev}");
+                if !seen_card_keys.insert(card_key) {
+                    continue;
+                }
+            }
+        }
+
+        seen_names.insert(name.clone());
+
+        let display_name = if let Some((first, second)) = desc.split_once('\n') {
+            if second.trim() == "Default Audio Device" {
+                first.trim().to_string()
+            } else {
+                format!("{} - {}", first.trim(), second.trim())
+            }
+        } else {
+            desc.replace('\n', " - ")
+        };
+
+        sources.push((display_name, name));
+    }
+
+    sources.sort_by(|(a, _), (b, _)| a.cmp(b));
+    sources
+}
+
 pub fn find_audio_devices() -> Result<Vec<(String, String)>> {
     static INIT_ALSA_ERROR_HANDLER: std::sync::Once = std::sync::Once::new();
     INIT_ALSA_ERROR_HANDLER.call_once(|| unsafe {
@@ -355,67 +409,26 @@ pub fn find_audio_devices() -> Result<Vec<(String, String)>> {
         snd_lib_error_set_handler(michadame_alsa_silent_error_handler);
     });
 
-    let mut sources = Vec::new();
-    let mut seen_card_keys = std::collections::HashSet::new();
-    let mut seen_names = std::collections::HashSet::new();
-
     use alsa::pcm::PCM;
     use alsa::Direction;
 
+    let mut raw_hints = Vec::new();
     if let Ok(hints) = HintIter::new_str(None, "pcm") {
         for hint in hints {
             if let (Some(name), Some(desc)) = (hint.name, hint.desc) {
-                if !is_usable_input_device(&name, &desc, hint.direction) {
-                    continue;
-                }
-
-                if seen_names.contains(&name) {
-                    continue;
-                }
-
-                // Probe for capture capability
-                let is_input = match PCM::new(&name, Direction::Capture, true) {
-                    Ok(_) => true,
-                    Err(e) if e.to_string().contains("busy") => true,
-                    _ => false,
-                };
-
-                if !is_input {
-                    continue;
-                }
-
-                // Deduplicate multiple PCM interfaces for the same physical card/device (preferring default:CARD=...)
-                if let Some(card_part) = name.split(':').nth(1) {
-                    let mut parts = card_part.split(',');
-                    let card = parts.next().unwrap_or("");
-                    if card.starts_with("CARD=") {
-                        let dev = parts.find(|p| p.starts_with("DEV=")).unwrap_or("DEV=0");
-                        let card_key = format!("{card}:{dev}");
-                        if !seen_card_keys.insert(card_key) {
-                            continue;
-                        }
-                    }
-                }
-
-                seen_names.insert(name.clone());
-
-                let display_name = if let Some((first, second)) = desc.split_once('\n') {
-                    if second.trim() == "Default Audio Device" {
-                        first.trim().to_string()
-                    } else {
-                        format!("{} - {}", first.trim(), second.trim())
-                    }
-                } else {
-                    desc.replace('\n', " - ")
-                };
-
-                sources.push((display_name, name));
+                raw_hints.push((name, desc, hint.direction));
             }
         }
     }
 
-    sources.sort_by(|(a, _), (b, _)| a.cmp(b));
-    Ok(sources)
+    Ok(filter_usable_audio_hints(
+        raw_hints,
+        |name| match PCM::new(name, Direction::Capture, true) {
+            Ok(_) => true,
+            Err(e) if e.to_string().contains("busy") => true,
+            _ => false,
+        },
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -853,6 +866,11 @@ fn push_to_ring(
 }
 
 pub(crate) fn initialize_rodio_playback() -> Result<(OutputStream, rodio::OutputStreamHandle)> {
+    if cfg!(test) {
+        return Err(anyhow!(
+            "Hardware audio playback is disabled during unit tests"
+        ));
+    }
     // On Linux, the "default" host is ALSA, but for output we want to hit the sound server (Pulse/PipeWire).
     // If we can find a Host for PulseAudio or if the default host has a "pulse"/"pipewire" device, we prefer it.
     let host = cpal::default_host();
@@ -1137,7 +1155,63 @@ mod tests {
 
     #[test]
     fn test_find_audio_devices_only_returns_usable_inputs() {
-        let devices = find_audio_devices().expect("find_audio_devices should succeed");
+        use alsa::Direction;
+        let synthetic_hints = vec![
+            (
+                "pulse".to_string(),
+                "PulseAudio Sound Server".to_string(),
+                None,
+            ),
+            (
+                "pipewire".to_string(),
+                "PipeWire Sound Server".to_string(),
+                None,
+            ),
+            (
+                "default:CARD=PCH".to_string(),
+                "HDA Intel PCH, ALC1220 Analog\nDefault Audio Device".to_string(),
+                Some(Direction::Capture),
+            ),
+            (
+                "front:CARD=PCH,DEV=0".to_string(),
+                "HDA Intel PCH, ALC1220 Analog\nFront output / input".to_string(),
+                None,
+            ),
+            (
+                "sysdefault:CARD=PCH".to_string(),
+                "HDA Intel PCH\nDefault Audio Device".to_string(),
+                None,
+            ),
+            (
+                "surround51:CARD=PCH,DEV=0".to_string(),
+                "5.1 Surround output to Front, Center, Rear and Subwoofer speakers".to_string(),
+                None,
+            ),
+            (
+                "iec958:CARD=PCH,DEV=0".to_string(),
+                "HDA Intel PCH\nIEC958 (S/PDIF) Digital Audio Output".to_string(),
+                None,
+            ),
+            (
+                "hdmi:CARD=HDMI,DEV=0".to_string(),
+                "HDA ATI HDMI\nHDMI Audio Output".to_string(),
+                None,
+            ),
+            (
+                "usbstream:CARD=PCH".to_string(),
+                "USB Stream Output".to_string(),
+                None,
+            ),
+            ("null".to_string(), "Discard all samples".to_string(), None),
+            (
+                "samplerate".to_string(),
+                "Rate Converter Plugin".to_string(),
+                None,
+            ),
+        ];
+
+        let devices = filter_usable_audio_hints(synthetic_hints, |_| true);
+        assert_eq!(devices.len(), 3);
 
         for (desc, name) in &devices {
             let n = name.to_lowercase();

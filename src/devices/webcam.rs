@@ -93,30 +93,7 @@ fn setup_webcam_ffmpeg_options(
     resolution: (u32, u32),
     framerate: u32,
 ) -> ffmpeg_next::Dictionary<'static> {
-    let mut pixel_format_str = format.fourcc.trim_end_matches('\0').to_lowercase();
-    if pixel_format_str == "yuyv" {
-        pixel_format_str = "yuyv422".to_string();
-    } else if pixel_format_str == "mjpg" {
-        pixel_format_str = "mjpeg".to_string();
-    }
-    let mut options = ffmpeg_next::Dictionary::new();
-    if resolution.0 > 0 && resolution.1 > 0 {
-        options.set("video_size", &format!("{}x{}", resolution.0, resolution.1));
-    }
-    if framerate > 0 {
-        options.set("framerate", &framerate.to_string());
-    }
-    if !pixel_format_str.is_empty() && pixel_format_str != "unkn" {
-        options.set("input_format", &pixel_format_str);
-    }
-    // Note: Do NOT set `nobuffer` in `fflags` here. If `avformat_find_stream_info` runs,
-    // `nobuffer` causes FFmpeg to discard the initial probed packet (which on hardware H.264
-    // webcams like the Logitech C920 contains the only IDR keyframe + SPS/PPS for up to 60s),
-    // leaving the decoder unable to output frames until the next GOP keyframe arrives.
-    options.set("fflags", "discardcorrupt");
-    options.set("probesize", "32");
-    options.set("analyzeduration", "0");
-    options
+    crate::video::decoder::setup_v4l2_ffmpeg_options(format, resolution, framerate, false).1
 }
 
 fn open_webcam_input(
@@ -125,8 +102,8 @@ fn open_webcam_input(
     interrupt_state: &mut WebcamInterruptState,
 ) -> Result<ffmpeg_next::format::context::Input> {
     use ffmpeg_next::sys::{
-        av_find_input_format, avformat_alloc_context, avformat_close_input,
-        avformat_find_stream_info, avformat_open_input, AVIOInterruptCB,
+        av_find_input_format, avformat_alloc_context, avformat_close_input, avformat_open_input,
+        AVIOInterruptCB,
     };
 
     let device_c = CString::new(device).context("Webcam device path contains a NUL byte")?;
@@ -158,34 +135,11 @@ fn open_webcam_input(
 
         // `v4l2_read_header` already populates `codec_type`, `codec_id`, `width`, and `height`
         // during `avformat_open_input`. Skipping `avformat_find_stream_info` when `codec_id`
-        // is already known avoids redundant probing decode passes and prevents consuming or
-        // delaying the initial H.264 IDR keyframe.
-        let needs_stream_info = {
-            let nb_streams = (*context).nb_streams as usize;
-            if nb_streams == 0 || (*context).streams.is_null() {
-                true
-            } else {
-                let streams = std::slice::from_raw_parts((*context).streams, nb_streams);
-                !streams.iter().any(|&st| {
-                    !st.is_null()
-                        && !(*st).codecpar.is_null()
-                        && (*(*st).codecpar).codec_type
-                            == ffmpeg_next::sys::AVMediaType::AVMEDIA_TYPE_VIDEO
-                        && (*(*st).codecpar).codec_id
-                            != ffmpeg_next::sys::AVCodecID::AV_CODEC_ID_NONE
-                })
-            }
-        };
-
-        if needs_stream_info {
-            (*context).fps_probe_size = 0;
-            (*context).max_ts_probe = 0;
-            let stream_info_result = avformat_find_stream_info(context, std::ptr::null_mut());
-            if stream_info_result < 0 {
-                avformat_close_input(&mut context);
-                return Err(ffmpeg_next::Error::from(stream_info_result))
-                    .context("FFmpeg could not read webcam stream info");
-            }
+        // and dimensions are known avoids redundant probing decode passes and prevents consuming
+        // or delaying the initial H.264 IDR keyframe.
+        if let Err(err) = crate::video::decoder::probe_v4l2_stream_info_if_needed(context) {
+            avformat_close_input(&mut context);
+            return Err(err).context("FFmpeg could not read webcam stream info");
         }
 
         Ok(ffmpeg_next::format::context::Input::wrap(context))

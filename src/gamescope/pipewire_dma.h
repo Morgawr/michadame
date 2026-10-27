@@ -11,6 +11,7 @@ extern "C" {
 typedef void (*gamescope_dma_frame_cb)(
     void *user_data,
     uint32_t buffer_id,
+    uint64_t pool_generation,
     int fd,
     uint32_t width,
     uint32_t height,
@@ -25,12 +26,19 @@ typedef void (*gamescope_dma_state_cb)(
     const char *error_msg
 );
 
+typedef void (*gamescope_dma_remove_buffer_cb)(
+    void *user_data,
+    uint32_t buffer_id,
+    uint64_t pool_generation
+);
+
 struct gamescope_dma_stream;
 
 struct gamescope_dma_stream *gamescope_dma_stream_start(
     const char *target_object,
     gamescope_dma_frame_cb on_frame,
     gamescope_dma_state_cb on_state,
+    gamescope_dma_remove_buffer_cb on_remove_buffer,
     void *user_data
 );
 

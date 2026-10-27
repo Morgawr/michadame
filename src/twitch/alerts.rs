@@ -27,7 +27,7 @@ pub enum AlertKind {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AlertEvent {
     pub id: String,
     pub kind: AlertKind,

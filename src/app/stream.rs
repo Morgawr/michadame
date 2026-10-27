@@ -405,7 +405,7 @@ impl AppState {
         // Apply dedicated gamescope profile
         crate::config::apply_profile_to_state(self, &self.gamescope_profile.clone());
 
-        let (frame_tx, frame_rx) = crossbeam_channel::bounded(2);
+        let (_frame_tx, frame_rx) = crossbeam_channel::bounded(2);
         self.frame_receiver = Some(frame_rx);
         self.latest_frame = None;
         self.hardware.video_queue_drops = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -424,9 +424,8 @@ impl AppState {
             repaint_ctx.request_repaint();
         });
 
-        // 1. Start Gamescope video reader:
-        // Try native zero-copy PipeWire DMA-BUF + EGL stream first.
-        let dma_handle = crate::gamescope::pipewire_dma::start_gamescope_dma_stream(
+        // 1. Start Gamescope video reader via native zero-copy PipeWire DMA-BUF + EGL stream.
+        let mut dma_handle = crate::gamescope::pipewire_dma::start_gamescope_dma_stream(
             None,
             request_repaint.clone(),
             self.hardware.video_queue_drops.clone(),
@@ -437,30 +436,19 @@ impl AppState {
         } else {
             None
         };
+        if egl_importer.is_none() {
+            // Release native PipeWire DMA stream immediately if EGL importer construction failed
+            dma_handle = None;
+        }
 
-        let video_handle = if dma_handle.is_none() || egl_importer.is_none() {
-            tracing::info!("Using fallback GStreamer pipewiresrc pipeline for Gamescope video");
-            self.color_range.store(
-                crate::video::types::ColorRange::Limited as u8,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            match crate::gamescope::video::start_gamescope_video(
-                frame_tx,
-                request_repaint.clone(),
-                self.color_range.clone(),
-            ) {
-                Ok(handle) => Some(handle),
-                Err(e) => {
-                    self.error(format!("Failed to connect to Gamescope video stream: {e}"));
-                    None
-                }
-            }
-        } else {
+        if dma_handle.is_some() {
             tracing::info!(
                 "Native PipeWire DMA-BUF zero-copy pipeline initialized for Gamescope video"
             );
-            None
-        };
+        } else {
+            tracing::warn!("Gamescope DMA-BUF pipeline not ready yet; will retry until ready");
+        }
+        let video_handle = None;
 
         // 2. Start Gamescope audio monitor capture
         let audio_handle = match crate::gamescope::audio::start_gamescope_audio(
@@ -505,6 +493,7 @@ impl AppState {
         };
 
         let initial_resolution = crate::gamescope::video::detect_gamescope_resolution();
+        let now = std::time::Instant::now();
 
         self.gamescope_hook = Some(crate::gamescope::GamescopeHookState {
             is_active: true,
@@ -519,11 +508,94 @@ impl AppState {
             cursor_texture: None,
             prev_modifiers: eframe::egui::Modifiers::default(),
             initial_resolution,
-            last_cursor_retry: Some(std::time::Instant::now()),
+            last_cursor_retry: Some(now),
+            dma_retry_count: 0,
+            last_dma_retry: Some(now),
         });
 
         self.info("Gamescope hook started (4K 60Hz). Mouse/keyboard passthrough active (Shift+Tab to release).");
         ctx.request_repaint();
+    }
+
+    pub fn poll_gamescope_dma_retry(&mut self, ctx: &egui::Context) {
+        const MAX_DMA_RETRIES: u32 = 15;
+        const DMA_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+        let mut should_give_up = None;
+        if let Some(hook) = &mut self.gamescope_hook {
+            if !hook.is_active {
+                return;
+            }
+            if let Some(dma) = &hook.dma_handle {
+                if dma.frames_imported() > 0 {
+                    hook.dma_retry_count = 0;
+                    return;
+                }
+                if let Some(reason) = dma.failure_reason() {
+                    tracing::warn!(
+                        "Gamescope DMA-BUF capture error ({reason}); resetting for retry"
+                    );
+                    hook.dma_handle = None;
+                    hook.egl_importer = None;
+                    hook.current_dmabuf_frame = None;
+                } else {
+                    return;
+                }
+            }
+
+            let now = std::time::Instant::now();
+            if let Some(last) = hook.last_dma_retry {
+                if now.duration_since(last) < DMA_RETRY_INTERVAL {
+                    ctx.request_repaint_after(DMA_RETRY_INTERVAL - now.duration_since(last));
+                    return;
+                }
+            }
+            hook.last_dma_retry = Some(now);
+
+            if hook.dma_retry_count >= MAX_DMA_RETRIES {
+                should_give_up = Some(format!(
+                    "Gamescope DMA-BUF failed after {} retries; giving up.",
+                    MAX_DMA_RETRIES
+                ));
+            } else {
+                hook.dma_retry_count += 1;
+                let repaint_ctx = ctx.clone();
+                let request_repaint: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                    repaint_ctx.request_repaint();
+                });
+                let mut dma_handle = crate::gamescope::pipewire_dma::start_gamescope_dma_stream(
+                    None,
+                    request_repaint,
+                    self.hardware.video_queue_drops.clone(),
+                );
+                let egl_importer = if dma_handle.is_some() {
+                    crate::gamescope::egl::EglDmaBufImporter::new()
+                        .map(|imp| std::sync::Arc::new(std::sync::Mutex::new(imp)))
+                } else {
+                    None
+                };
+                if egl_importer.is_none() {
+                    dma_handle = None;
+                }
+                if dma_handle.is_some() {
+                    tracing::info!(
+                        "Gamescope DMA-BUF pipeline connected on retry {}/{}",
+                        hook.dma_retry_count,
+                        MAX_DMA_RETRIES
+                    );
+                    hook.dma_handle = dma_handle;
+                    hook.egl_importer = egl_importer;
+                } else {
+                    ctx.request_repaint_after(DMA_RETRY_INTERVAL);
+                }
+            }
+        }
+
+        if let Some(msg) = should_give_up {
+            self.error(msg);
+            self.stop_gamescope_hook();
+            self.ui.control_window_open = true;
+        }
     }
 
     pub fn restart_audio_stream(&mut self, ctx: &egui::Context) {

@@ -2,7 +2,7 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU8, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
     Arc, Mutex,
 };
 use std::time::Instant;
@@ -106,6 +106,69 @@ pub struct OcrCaptureRequest {
     pub raw_rgba: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    pub request_id: u64,
+    pub generation: u64,
+    pub backend: OcrBackend,
+    pub constant_scan: bool,
+}
+
+/// Result produced by the background OCR worker tagged with the originating request metadata.
+#[derive(Clone, Debug)]
+pub struct OcrWorkerResult {
+    pub request_id: u64,
+    pub generation: u64,
+    pub backend: OcrBackend,
+    pub constant_scan: bool,
+    pub result: Result<Vec<ParsedLine>, String>,
+}
+
+/// Cloneable handle used by OpenGL paint callbacks to dispatch tagged OCR capture requests.
+#[derive(Clone)]
+pub struct OcrDispatchHandle {
+    pub capture_requested: Arc<AtomicBool>,
+    pub is_processing: Arc<AtomicBool>,
+    pub session_generation: Arc<AtomicU64>,
+    pub next_request_id: Arc<AtomicU64>,
+    pub active_request_id: Arc<AtomicU64>,
+    pub backend: OcrBackend,
+    pub constant_scan: bool,
+    pub sender: Option<crossbeam_channel::Sender<OcrCaptureRequest>>,
+}
+
+impl OcrDispatchHandle {
+    pub fn take_capture_requested(&self) -> bool {
+        self.capture_requested.swap(false, Ordering::AcqRel)
+    }
+
+    pub fn dispatch(&self, raw_rgba: Vec<u8>, width: u32, height: u32) -> Option<u64> {
+        let req_tx = self.sender.as_ref()?;
+        let request_id = self.next_request_id.fetch_add(1, Ordering::AcqRel);
+        let generation = self.session_generation.load(Ordering::Acquire);
+        self.active_request_id.store(request_id, Ordering::Release);
+        self.is_processing.store(true, Ordering::Release);
+        if req_tx
+            .send(OcrCaptureRequest {
+                raw_rgba,
+                width,
+                height,
+                request_id,
+                generation,
+                backend: self.backend,
+                constant_scan: self.constant_scan,
+            })
+            .is_err()
+        {
+            if self
+                .active_request_id
+                .compare_exchange(request_id, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                self.is_processing.store(false, Ordering::Release);
+            }
+            return None;
+        }
+        Some(request_id)
+    }
 }
 
 /// Minimum base scan interval (in seconds) for constant background scanning.
@@ -187,7 +250,12 @@ fn normalize_box_text_for_comparison(text: &str) -> String {
 
 /// Returns `true` if two `OcrBox` instances represent the same text block within `jitter_tolerance`.
 pub fn is_same_ocr_box(a: &OcrBox, b: &OcrBox, jitter_tolerance: f32) -> bool {
-    let tol = jitter_tolerance.clamp(MIN_JITTER_TOLERANCE, MAX_JITTER_TOLERANCE);
+    let safe_jitter = if jitter_tolerance.is_finite() {
+        jitter_tolerance
+    } else {
+        DEFAULT_JITTER_TOLERANCE
+    };
+    let tol = safe_jitter.clamp(MIN_JITTER_TOLERANCE, MAX_JITTER_TOLERANCE);
     (a.center_x - b.center_x).abs() <= tol
         && (a.center_y - b.center_y).abs() <= tol
         && (a.width - b.width).abs() <= tol
@@ -270,6 +338,12 @@ pub struct OcrState {
     pub capture_requested: Arc<AtomicBool>,
     /// Whether an OCR request is currently being processed by the background worker.
     pub is_processing: Arc<AtomicBool>,
+    /// Monotonically increasing OCR session generation incremented on clear, backend switch, or source change.
+    pub session_generation: Arc<AtomicU64>,
+    /// Monotonically increasing request ID generator for correlating in-flight OCR captures.
+    pub next_request_id: Arc<AtomicU64>,
+    /// Request ID of the currently in-flight OCR request (`0` when idle).
+    pub active_request_id: Arc<AtomicU64>,
     /// List of OCR text boxes detected from the last scan.
     pub boxes: Vec<OcrBox>,
     /// Raw unmerged lines from the last OCR scan.
@@ -294,12 +368,56 @@ pub struct OcrState {
     /// Channel sender for dispatching raw frame captures to the persistent OCR background worker.
     pub ocr_request_sender: Option<crossbeam_channel::Sender<OcrCaptureRequest>>,
     /// Sender for OCR worker results.
-    pub ocr_sender: Option<crossbeam_channel::Sender<Result<Vec<ParsedLine>, String>>>,
+    pub ocr_sender: Option<crossbeam_channel::Sender<OcrWorkerResult>>,
     /// Channel receiver for completed OCR results from the background worker.
-    pub result_receiver: Option<crossbeam_channel::Receiver<Result<Vec<ParsedLine>, String>>>,
+    pub result_receiver: Option<crossbeam_channel::Receiver<OcrWorkerResult>>,
 }
 
 impl OcrState {
+    /// Returns the current OCR session generation.
+    #[inline]
+    pub fn current_generation(&self) -> u64 {
+        self.session_generation.load(Ordering::Acquire)
+    }
+
+    /// Advances the OCR session generation and invalidates any in-flight request so stale
+    /// completions cannot repopulate boxes, errors, or backoff state.
+    pub fn bump_generation(&mut self) -> u64 {
+        let next = self.session_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.active_request_id.store(0, Ordering::Release);
+        self.is_processing.store(false, Ordering::Release);
+        self.capture_requested.store(false, Ordering::Release);
+        next
+    }
+
+    /// Creates a cloneable dispatch handle capturing the current backend and scan mode.
+    pub fn dispatch_handle(&self) -> OcrDispatchHandle {
+        OcrDispatchHandle {
+            capture_requested: self.capture_requested.clone(),
+            is_processing: self.is_processing.clone(),
+            session_generation: self.session_generation.clone(),
+            next_request_id: self.next_request_id.clone(),
+            active_request_id: self.active_request_id.clone(),
+            backend: self.backend,
+            constant_scan: self.is_constant_scanning_active(),
+            sender: self.ocr_request_sender.clone(),
+        }
+    }
+
+    /// Validates a worker completion against the active request ID and current session generation.
+    /// Clears `is_processing` only if `res.request_id` matches `active_request_id`, and returns
+    /// `true` only if `res.generation` matches the current session generation.
+    pub fn accept_worker_result(&mut self, res: &OcrWorkerResult) -> bool {
+        if self
+            .active_request_id
+            .compare_exchange(res.request_id, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.is_processing.store(false, Ordering::Release);
+        }
+        res.generation == self.current_generation()
+    }
+
     /// Returns `true` if constant background scanning is currently active.
     /// Constant scanning is only supported when the local Chrome Screen AI model is selected.
     #[inline]
@@ -315,30 +433,47 @@ impl OcrState {
         max_dropoff_secs: f32,
         consecutive_same_scans: u32,
     ) -> f32 {
-        let base = scan_interval_secs.clamp(MIN_SCAN_INTERVAL_SECS, MAX_SCAN_INTERVAL_SECS);
-        let max_delay = max_dropoff_secs
+        let safe_interval = if scan_interval_secs.is_finite() {
+            scan_interval_secs
+        } else {
+            DEFAULT_SCAN_INTERVAL_SECS
+        };
+        let safe_dropoff = if max_dropoff_secs.is_finite() {
+            max_dropoff_secs
+        } else {
+            DEFAULT_MAX_DROPOFF_SECS
+        };
+        let base = safe_interval.clamp(MIN_SCAN_INTERVAL_SECS, MAX_SCAN_INTERVAL_SECS);
+        let max_delay = safe_dropoff
             .clamp(MIN_MAX_DROPOFF_SECS, MAX_MAX_DROPOFF_SECS)
             .max(base);
         let raw = (base + DROPOFF_STEP_SECS * (consecutive_same_scans as f32)).min(max_delay);
-        (raw * 1000.0).round() / 1000.0
+        let rounded = (raw * 1000.0).round() / 1000.0;
+        if rounded.is_finite() && rounded >= MIN_SCAN_INTERVAL_SECS {
+            rounded
+        } else {
+            DEFAULT_SCAN_INTERVAL_SECS
+        }
     }
 
     /// Returns the `Duration` to wait before the next constant scan, accounting for drop-off backoff.
     pub fn current_constant_scan_delay(&self) -> std::time::Duration {
-        std::time::Duration::from_secs_f32(Self::calculate_dropoff_delay_secs(
+        let secs = Self::calculate_dropoff_delay_secs(
             self.scan_interval_secs,
             self.max_dropoff_secs,
             self.consecutive_same_scans,
-        ))
+        );
+        std::time::Duration::try_from_secs_f32(secs)
+            .unwrap_or_else(|_| std::time::Duration::from_secs_f32(DEFAULT_SCAN_INTERVAL_SECS))
     }
 
-    /// Resets the constant scan drop-off counter and scheduled timer.
+    /// Resets the constant scan drop-off counter and scheduled timer, and invalidates in-flight scans.
     pub fn reset_constant_scan_backoff(&mut self) {
         self.consecutive_same_scans = 0;
         self.has_previous_constant_scan = false;
         self.next_constant_scan_time = None;
         self.was_constant_scan_paused = false;
-        self.capture_requested.store(false, Ordering::Release);
+        self.bump_generation();
     }
 
     /// Processes a completed constant OCR scan result (`lines`).
@@ -351,7 +486,12 @@ impl OcrState {
     ///   do not flicker), the drop-off counter is reset to `0`, and this method returns `true`.
     pub fn apply_constant_scan_lines(&mut self, lines: Vec<ParsedLine>) -> bool {
         let now = Instant::now();
-        let new_boxes = crate::ocr::lens::group_lines_into_blocks(&lines, self.sticky_distance);
+        let safe_sticky = if self.sticky_distance.is_finite() {
+            self.sticky_distance.clamp(0.0, 10.0)
+        } else {
+            0.6
+        };
+        let new_boxes = crate::ocr::lens::group_lines_into_blocks(&lines, safe_sticky);
         let tol = self.jitter_tolerance;
         if self.has_previous_constant_scan && are_ocr_boxes_equivalent(&self.boxes, &new_boxes, tol)
         {
@@ -457,6 +597,7 @@ impl OcrState {
 
         let res_tx = self.ocr_sender.as_ref().unwrap().clone();
         let is_processing = self.is_processing.clone();
+        let session_generation = self.session_generation.clone();
         let backend_shared = self.backend_shared.clone();
         let screen_ai_dir = self.screen_ai_dir.clone();
         let is_syncing_screen_ai = self.is_syncing_screen_ai.clone();
@@ -488,9 +629,18 @@ impl OcrState {
                     // Wait for capture request or send periodic keep-alive probe after 45s
                     match req_rx.recv_timeout(std::time::Duration::from_secs(45)) {
                         Ok(req) => {
+                            if req.generation != session_generation.load(Ordering::Acquire) {
+                                let _ = res_tx.send(OcrWorkerResult {
+                                    request_id: req.request_id,
+                                    generation: req.generation,
+                                    backend: req.backend,
+                                    constant_scan: req.constant_scan,
+                                    result: Ok(Vec::new()),
+                                });
+                                continue;
+                            }
                             is_processing.store(true, Ordering::Release);
-                            let active_backend =
-                                OcrBackend::from_u8(backend_shared.load(Ordering::Acquire));
+                            let active_backend = req.backend;
 
                             let result = match active_backend {
                                 OcrBackend::GoogleLens => {
@@ -595,7 +745,13 @@ impl OcrState {
                                 }
                             };
 
-                            let _ = res_tx.send(result);
+                            let _ = res_tx.send(OcrWorkerResult {
+                                request_id: req.request_id,
+                                generation: req.generation,
+                                backend: req.backend,
+                                constant_scan: req.constant_scan,
+                                result,
+                            });
                             if let Some(ctx) = &egui_ctx {
                                 ctx.request_repaint();
                             }
@@ -618,8 +774,12 @@ impl OcrState {
 
     /// Recomputes merged `boxes` from `raw_lines` using the current `sticky_distance`.
     pub fn recompute_boxes(&mut self) {
-        self.boxes =
-            crate::ocr::lens::group_lines_into_blocks(&self.raw_lines, self.sticky_distance);
+        let safe_sticky = if self.sticky_distance.is_finite() {
+            self.sticky_distance.clamp(0.0, 10.0)
+        } else {
+            0.6
+        };
+        self.boxes = crate::ocr::lens::group_lines_into_blocks(&self.raw_lines, safe_sticky);
         self.last_copied_index = None;
     }
 
@@ -694,6 +854,9 @@ impl Default for OcrState {
             screen_ai_event_rx: Some(sa_rx),
             capture_requested: Arc::new(AtomicBool::new(false)),
             is_processing: Arc::new(AtomicBool::new(false)),
+            session_generation: Arc::new(AtomicU64::new(1)),
+            next_request_id: Arc::new(AtomicU64::new(1)),
+            active_request_id: Arc::new(AtomicU64::new(0)),
             boxes: Vec::new(),
             raw_lines: Vec::new(),
             sticky_distance: 0.6,
@@ -1221,5 +1384,101 @@ mod tests {
         state.constant_scanning = true;
         assert!(!state.is_expired());
         assert_eq!(state.remaining_time(), None);
+    }
+
+    #[test]
+    fn test_f28_nonfinite_timing_and_jitter_do_not_panic() {
+        assert_eq!(
+            OcrState::calculate_dropoff_delay_secs(f32::NAN, f32::NAN, 0),
+            DEFAULT_SCAN_INTERVAL_SECS
+        );
+        assert_eq!(
+            OcrState::calculate_dropoff_delay_secs(f32::INFINITY, f32::NEG_INFINITY, 5),
+            DEFAULT_SCAN_INTERVAL_SECS + DROPOFF_STEP_SECS * 5.0
+        );
+
+        let mut state = OcrState::default();
+        state.scan_interval_secs = f32::NAN;
+        state.max_dropoff_secs = f32::NAN;
+        state.jitter_tolerance = f32::NAN;
+        state.sticky_distance = f32::NAN;
+        let delay = state.current_constant_scan_delay();
+        assert!((delay.as_secs_f32() - DEFAULT_SCAN_INTERVAL_SECS).abs() < 1e-4);
+
+        let box_a = OcrBox {
+            text: "テスト".to_string(),
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.2,
+            height: 0.1,
+            lines: Vec::new(),
+            writing_direction: WritingDirection::LeftToRight,
+        };
+        assert!(is_same_ocr_box(&box_a, &box_a, f32::NAN));
+    }
+
+    #[test]
+    fn test_f23_generation_and_request_id_reject_stale_completions() {
+        let mut state = OcrState::default();
+        let (req_tx, req_rx) = crossbeam_channel::unbounded();
+        state.ocr_request_sender = Some(req_tx);
+
+        // Dispatch request 1 in generation 1
+        let handle1 = state.dispatch_handle();
+        let req1_id = handle1
+            .dispatch(vec![0u8; 16], 2, 2)
+            .expect("request 1 should dispatch");
+        let captured1 = req_rx.try_recv().expect("captured request 1");
+        assert_eq!(captured1.request_id, req1_id);
+        assert_eq!(captured1.generation, 1);
+        assert!(state.is_processing.load(Ordering::Acquire));
+
+        // Clear OCR state while request 1 is in flight -> bumps generation to 2 and clears is_processing
+        state.clear();
+        assert_eq!(state.current_generation(), 2);
+        assert!(!state.is_processing.load(Ordering::Acquire));
+
+        // Dispatch request 2 in generation 2 while request 1 is still running on worker
+        state.set_backend(OcrBackend::LocalScreenAi);
+        assert_eq!(state.current_generation(), 3);
+        let handle2 = state.dispatch_handle();
+        let req2_id = handle2
+            .dispatch(vec![0u8; 16], 2, 2)
+            .expect("request 2 should dispatch");
+        let captured2 = req_rx.try_recv().expect("captured request 2");
+        assert_eq!(captured2.request_id, req2_id);
+        assert_eq!(captured2.generation, 3);
+        assert!(state.is_processing.load(Ordering::Acquire));
+
+        // Stale completion for request 1 arrives: must be rejected AND must not clear is_processing for request 2
+        let stale_res = OcrWorkerResult {
+            request_id: captured1.request_id,
+            generation: captured1.generation,
+            backend: captured1.backend,
+            constant_scan: captured1.constant_scan,
+            result: Ok(vec![ParsedLine {
+                text: "古い結果".to_string(),
+                ..Default::default()
+            }]),
+        };
+        assert!(!state.accept_worker_result(&stale_res));
+        assert!(
+            state.is_processing.load(Ordering::Acquire),
+            "stale completion must not clear is_processing while request 2 is active"
+        );
+
+        // Fresh completion for request 2 arrives: accepted and clears is_processing
+        let fresh_res = OcrWorkerResult {
+            request_id: captured2.request_id,
+            generation: captured2.generation,
+            backend: captured2.backend,
+            constant_scan: captured2.constant_scan,
+            result: Ok(vec![ParsedLine {
+                text: "新しい結果".to_string(),
+                ..Default::default()
+            }]),
+        };
+        assert!(state.accept_worker_result(&fresh_res));
+        assert!(!state.is_processing.load(Ordering::Acquire));
     }
 }

@@ -4,6 +4,85 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+const WRAPPER_MARKER: &str = "# MICHADAME_WRAPPER_V1";
+const WRAPPER_SESSION_PREFIX: &str = "# MICHADAME_SESSION=";
+const WRAPPER_DIGEST_PREFIX: &str = "# MICHADAME_REAL_DIGEST=";
+const WRAPPER_META_FILENAME: &str = ".steam-launch-wrapper.michadame";
+const WRAPPER_TMP_FILENAME: &str = ".steam-launch-wrapper.michadame.tmp";
+
+static NEXT_WRAPPER_SESSION_SEQ: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WrapperOwnershipMeta {
+    session_id: String,
+    real_digest: String,
+}
+
+pub fn next_wrapper_session_id(pid: u32) -> String {
+    let seq = NEXT_WRAPPER_SESSION_SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{pid}-{nanos}-{seq}")
+}
+
+fn compute_content_digest(bytes: &[u8]) -> String {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x00000100000001b3;
+    let mut hash = FNV_OFFSET_BASIS;
+    for &b in bytes {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{}:{hash:016x}", bytes.len())
+}
+
+fn compute_file_digest(path: &Path) -> Result<String> {
+    let bytes =
+        fs::read(path).with_context(|| format!("Failed to read {} for digest", path.display()))?;
+    Ok(compute_content_digest(&bytes))
+}
+
+fn has_michadame_wrapper_marker(content: &str) -> bool {
+    content.lines().any(|line| line.trim() == WRAPPER_MARKER)
+}
+
+fn parse_wrapper_metadata(content: &str) -> Option<WrapperOwnershipMeta> {
+    let mut has_marker = false;
+    let mut session_id = None;
+    let mut real_digest = None;
+    for line in content.lines().take(16) {
+        let trimmed = line.trim();
+        if trimmed == WRAPPER_MARKER {
+            has_marker = true;
+        } else if let Some(rest) = trimmed.strip_prefix(WRAPPER_SESSION_PREFIX) {
+            if !rest.is_empty() {
+                session_id = Some(rest.to_string());
+            }
+        } else if let Some(rest) = trimmed.strip_prefix(WRAPPER_DIGEST_PREFIX) {
+            if !rest.is_empty() {
+                real_digest = Some(rest.to_string());
+            }
+        }
+    }
+    if !has_marker {
+        return None;
+    }
+    Some(WrapperOwnershipMeta {
+        session_id: session_id?,
+        real_digest: real_digest?,
+    })
+}
+
+fn format_wrapper_metadata(meta: &WrapperOwnershipMeta) -> String {
+    format!(
+        "{WRAPPER_MARKER}\n{WRAPPER_SESSION_PREFIX}{}\n{WRAPPER_DIGEST_PREFIX}{}\n",
+        meta.session_id, meta.real_digest
+    )
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SteamGame {
@@ -195,24 +274,60 @@ pub fn build_ephemeral_wrapper_script(
     launcher_script: &Path,
     michadame_pid: u32,
 ) -> String {
+    let session_id = next_wrapper_session_id(michadame_pid);
+    build_ephemeral_wrapper_script_with_session(
+        steam_root,
+        appid,
+        launcher_script,
+        michadame_pid,
+        &session_id,
+        "0:0000000000000000",
+    )
+}
+
+pub fn build_ephemeral_wrapper_script_with_session(
+    steam_root: &Path,
+    appid: &str,
+    launcher_script: &Path,
+    michadame_pid: u32,
+    session_id: &str,
+    real_digest: &str,
+) -> String {
+    let clean_session: String = session_id
+        .chars()
+        .filter(|&c| c != '\n' && c != '\r')
+        .collect();
+    let clean_digest: String = real_digest
+        .chars()
+        .filter(|&c| c != '\n' && c != '\r')
+        .collect();
     let quoted_root = shell_single_quote(&steam_root.to_string_lossy());
     let quoted_target = shell_single_quote(&format!("AppId={appid}"));
     let quoted_launcher = shell_single_quote(&launcher_script.to_string_lossy());
+    let quoted_session = shell_single_quote(&clean_session);
 
     format!(
         "#!/bin/sh\n\
+{WRAPPER_MARKER}\n\
+{WRAPPER_SESSION_PREFIX}{clean_session}\n\
+{WRAPPER_DIGEST_PREFIX}{clean_digest}\n\
 {{\n\
     SELF=\"$0\"\n\
     REAL=\"${{SELF}}.real\"\n\
     STEAM_ROOT={quoted_root}\n\
     TARGET_APPID={quoted_target}\n\
     MICHADAME_PID=\"{michadame_pid}\"\n\
+    MICHADAME_SESSION={quoted_session}\n\
     LAUNCHER_SCRIPT={quoted_launcher}\n\
 \n\
     restore_all() {{\n\
         for dir in \"$STEAM_ROOT/steamrt64\" \"$STEAM_ROOT/ubuntu12_32\"; do\n\
-            if [ -f \"$dir/steam-launch-wrapper.real\" ]; then\n\
-                mv -f \"$dir/steam-launch-wrapper.real\" \"$dir/steam-launch-wrapper\" 2>/dev/null || true\n\
+            if [ -f \"$dir/steam-launch-wrapper.real\" ] && [ -f \"$dir/steam-launch-wrapper\" ]; then\n\
+                if grep -Fxq '{WRAPPER_MARKER}' \"$dir/steam-launch-wrapper\" 2>/dev/null && \\\n\
+                   grep -Fxq \"{WRAPPER_SESSION_PREFIX}$MICHADAME_SESSION\" \"$dir/steam-launch-wrapper\" 2>/dev/null; then\n\
+                    mv -f \"$dir/steam-launch-wrapper.real\" \"$dir/steam-launch-wrapper\" 2>/dev/null || true\n\
+                    rm -f \"$dir/{WRAPPER_META_FILENAME}\" 2>/dev/null || true\n\
+                fi\n\
             fi\n\
         done\n\
     }}\n\
@@ -264,12 +379,88 @@ pub fn restore_steam_launch_wrappers() {
 }
 
 pub fn restore_steam_launch_wrappers_in_roots(roots: &[PathBuf]) {
+    restore_steam_launch_wrappers_for_session(roots, None);
+}
+
+pub fn restore_steam_launch_wrappers_for_session(
+    roots: &[PathBuf],
+    expected_session: Option<&str>,
+) {
     for root in roots {
         for sub in ["steamrt64", "ubuntu12_32"] {
             let dir = root.join(sub);
             let wrapper = dir.join("steam-launch-wrapper");
             let real = dir.join("steam-launch-wrapper.real");
-            if real.is_file() {
+            let meta_path = dir.join(WRAPPER_META_FILENAME);
+            let tmp_path = dir.join(WRAPPER_TMP_FILENAME);
+
+            if expected_session.is_none() && tmp_path.is_file() {
+                let _ = fs::remove_file(&tmp_path);
+            }
+
+            if !real.is_file() {
+                if meta_path.is_file() {
+                    let should_remove = match expected_session {
+                        None => true,
+                        Some(req_session) => fs::read(&meta_path)
+                            .ok()
+                            .and_then(|b| parse_wrapper_metadata(&String::from_utf8_lossy(&b)))
+                            .is_some_and(|m| m.session_id == req_session),
+                    };
+                    if should_remove {
+                        let _ = fs::remove_file(&meta_path);
+                    }
+                }
+                continue;
+            }
+
+            let meta_file_meta = fs::read(&meta_path)
+                .ok()
+                .and_then(|b| parse_wrapper_metadata(&String::from_utf8_lossy(&b)));
+            let wrapper_bytes = fs::read(&wrapper).ok();
+            let wrapper_meta = wrapper_bytes
+                .as_deref()
+                .and_then(|b| parse_wrapper_metadata(&String::from_utf8_lossy(b)));
+            let wrapper_has_marker = wrapper_bytes
+                .as_deref()
+                .is_some_and(|b| has_michadame_wrapper_marker(&String::from_utf8_lossy(b)));
+
+            if let Some(w_meta) = wrapper_meta {
+                if let Some(req_session) = expected_session {
+                    if w_meta.session_id != req_session {
+                        continue;
+                    }
+                }
+                if let Some(ref m_meta) = meta_file_meta {
+                    if m_meta.session_id != w_meta.session_id
+                        || m_meta.real_digest != w_meta.real_digest
+                    {
+                        tracing::warn!(
+                            "Refusing to restore {}: wrapper header and companion metadata disagree",
+                            wrapper.display()
+                        );
+                        continue;
+                    }
+                }
+                let Ok(actual_real_digest) = compute_file_digest(&real) else {
+                    tracing::warn!(
+                        "Refusing to restore {}: failed to digest {}",
+                        wrapper.display(),
+                        real.display()
+                    );
+                    continue;
+                };
+                if actual_real_digest != w_meta.real_digest {
+                    tracing::warn!(
+                        "Refusing to restore {}: {} digest mismatch (expected {}, got {})",
+                        wrapper.display(),
+                        real.display(),
+                        w_meta.real_digest,
+                        actual_real_digest
+                    );
+                    continue;
+                }
+
                 if let Err(e) = fs::rename(&real, &wrapper) {
                     tracing::warn!(
                         "Failed to restore {} -> {}: {e}",
@@ -277,10 +468,66 @@ pub fn restore_steam_launch_wrappers_in_roots(roots: &[PathBuf]) {
                         wrapper.display()
                     );
                 } else {
+                    let _ = fs::remove_file(&meta_path);
                     tracing::info!("Restored original {}", wrapper.display());
+                }
+            } else if !wrapper_has_marker {
+                let Some(m_meta) = meta_file_meta else {
+                    // No Michadame marker in wrapper and no Michadame companion metadata:
+                    // `.real` is an unowned file created outside Michadame. Leave untouched.
+                    continue;
+                };
+                if let Some(req_session) = expected_session {
+                    if m_meta.session_id != req_session {
+                        continue;
+                    }
+                }
+                let Ok(actual_real_digest) = compute_file_digest(&real) else {
+                    continue;
+                };
+                if actual_real_digest != m_meta.real_digest {
+                    continue;
+                }
+
+                if wrapper_bytes.is_some() {
+                    // Steam (or another external update) replaced `steam-launch-wrapper`
+                    // with a new non-wrapper file while Michadame was armed. Preserve the
+                    // updated file and remove our obsolete `.real` backup and metadata.
+                    let _ = fs::remove_file(&real);
+                    let _ = fs::remove_file(&meta_path);
+                    tracing::info!(
+                        "Detected external update to {}; preserved updated file and removed obsolete backup {}",
+                        wrapper.display(),
+                        real.display()
+                    );
+                } else {
+                    // `steam-launch-wrapper` is missing after an interrupted transition;
+                    // restore the verified `.real` backup.
+                    if fs::rename(&real, &wrapper).is_ok() {
+                        let _ = fs::remove_file(&meta_path);
+                        tracing::info!(
+                            "Recovered missing {} from verified backup {}",
+                            wrapper.display(),
+                            real.display()
+                        );
+                    }
                 }
             }
         }
+    }
+}
+
+fn rollback_armed_dirs(armed_dirs: &[PathBuf]) {
+    for dir in armed_dirs.iter().rev() {
+        let wrapper = dir.join("steam-launch-wrapper");
+        let real = dir.join("steam-launch-wrapper.real");
+        let meta_path = dir.join(WRAPPER_META_FILENAME);
+        let tmp_path = dir.join(WRAPPER_TMP_FILENAME);
+        let _ = fs::remove_file(&tmp_path);
+        if real.is_file() {
+            let _ = fs::rename(&real, &wrapper);
+        }
+        let _ = fs::remove_file(&meta_path);
     }
 }
 
@@ -290,34 +537,144 @@ pub fn arm_steam_launch_wrapper_in_roots(
     launcher_script: &Path,
     michadame_pid: u32,
 ) -> Result<Vec<PathBuf>> {
+    let session_id = next_wrapper_session_id(michadame_pid);
+    arm_steam_launch_wrapper_in_roots_with_session(
+        roots,
+        appid,
+        launcher_script,
+        michadame_pid,
+        &session_id,
+    )
+}
+
+pub fn arm_steam_launch_wrapper_in_roots_with_session(
+    roots: &[PathBuf],
+    appid: &str,
+    launcher_script: &Path,
+    michadame_pid: u32,
+    session_id: &str,
+) -> Result<Vec<PathBuf>> {
+    if session_id.trim().is_empty() {
+        anyhow::bail!("Wrapper session ID must not be empty");
+    }
+
     restore_steam_launch_wrappers_in_roots(roots);
 
     let mut armed = Vec::new();
+    let mut armed_dirs = Vec::new();
+
     for root in roots {
-        let script_content =
-            build_ephemeral_wrapper_script(root, appid, launcher_script, michadame_pid);
         for sub in ["steamrt64", "ubuntu12_32"] {
             let dir = root.join(sub);
             let wrapper = dir.join("steam-launch-wrapper");
             let real = dir.join("steam-launch-wrapper.real");
-            if wrapper.is_file() {
+            let meta_path = dir.join(WRAPPER_META_FILENAME);
+            let tmp_path = dir.join(WRAPPER_TMP_FILENAME);
+
+            match fs::symlink_metadata(&real) {
+                Ok(_) => {
+                    rollback_armed_dirs(&armed_dirs);
+                    anyhow::bail!(
+                        "Refusing to arm {}: unowned or unrestorable backup {} already exists",
+                        wrapper.display(),
+                        real.display()
+                    );
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    rollback_armed_dirs(&armed_dirs);
+                    return Err(e).with_context(|| {
+                        format!("Failed to inspect backup path {}", real.display())
+                    });
+                }
+            }
+
+            let wrapper_is_file = match fs::metadata(&wrapper) {
+                Ok(m) => m.is_file(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(e) => {
+                    rollback_armed_dirs(&armed_dirs);
+                    return Err(e).with_context(|| {
+                        format!("Failed to inspect wrapper path {}", wrapper.display())
+                    });
+                }
+            };
+
+            if !wrapper_is_file {
+                continue;
+            }
+
+            let step_result = (|| -> Result<()> {
+                let orig_bytes = fs::read(&wrapper)
+                    .with_context(|| format!("Failed to read {}", wrapper.display()))?;
+                if has_michadame_wrapper_marker(&String::from_utf8_lossy(&orig_bytes)) {
+                    anyhow::bail!(
+                        "Refusing to arm {}: file is already a Michadame wrapper without a valid backup",
+                        wrapper.display()
+                    );
+                }
+
+                let real_digest = compute_content_digest(&orig_bytes);
+                let meta = WrapperOwnershipMeta {
+                    session_id: session_id.to_string(),
+                    real_digest: real_digest.clone(),
+                };
+                let script_content = build_ephemeral_wrapper_script_with_session(
+                    root,
+                    appid,
+                    launcher_script,
+                    michadame_pid,
+                    session_id,
+                    &real_digest,
+                );
+
+                fs::write(&tmp_path, script_content.as_bytes()).with_context(|| {
+                    format!(
+                        "Failed to write temporary wrapper to {}",
+                        tmp_path.display()
+                    )
+                })?;
+                let mut perms = fs::metadata(&tmp_path)?.permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&tmp_path, perms)?;
+
+                fs::write(&meta_path, format_wrapper_metadata(&meta).as_bytes()).with_context(
+                    || {
+                        format!(
+                            "Failed to write wrapper metadata to {}",
+                            meta_path.display()
+                        )
+                    },
+                )?;
+
                 fs::rename(&wrapper, &real).with_context(|| {
                     format!("Failed to move {} to {}", wrapper.display(), real.display())
                 })?;
-                if let Err(e) = (|| -> Result<()> {
-                    fs::write(&wrapper, script_content.as_bytes())?;
-                    let mut perms = fs::metadata(&wrapper)?.permissions();
-                    perms.set_mode(0o755);
-                    fs::set_permissions(&wrapper, perms)?;
-                    Ok(())
-                })() {
+
+                if let Err(e) = fs::rename(&tmp_path, &wrapper) {
                     let _ = fs::rename(&real, &wrapper);
+                    let _ = fs::remove_file(&meta_path);
+                    let _ = fs::remove_file(&tmp_path);
                     return Err(e).with_context(|| {
-                        format!("Failed to write ephemeral wrapper to {}", wrapper.display())
+                        format!(
+                            "Failed to publish ephemeral wrapper to {}",
+                            wrapper.display()
+                        )
                     });
                 }
-                armed.push(wrapper);
+
+                Ok(())
+            })();
+
+            if let Err(e) = step_result {
+                let _ = fs::remove_file(&tmp_path);
+                let _ = fs::remove_file(&meta_path);
+                rollback_armed_dirs(&armed_dirs);
+                return Err(e);
             }
+
+            armed_dirs.push(dir);
+            armed.push(wrapper);
         }
     }
     Ok(armed)
@@ -344,18 +701,26 @@ pub fn launch_steam_game(game: &SteamGame, launcher_script_str: &str) -> Result<
     }
 
     let pid = std::process::id();
-    let armed = arm_steam_launch_wrapper_in_roots(&roots, &game.appid, &launcher_path, pid)?;
+    let session_id = next_wrapper_session_id(pid);
+    let armed = arm_steam_launch_wrapper_in_roots_with_session(
+        &roots,
+        &game.appid,
+        &launcher_path,
+        pid,
+        &session_id,
+    )?;
     if armed.is_empty() {
         anyhow::bail!("Could not find steam-launch-wrapper in Steam installation.");
     }
 
     let args = game.steam_launch_args();
     tracing::info!(
-        "Launching Steam game '{}' (AppId={}) with args {:?} via wrapper {}",
+        "Launching Steam game '{}' (AppId={}) with args {:?} via wrapper {} (session={})",
         game.name,
         game.appid,
         args,
-        launcher_path.display()
+        launcher_path.display(),
+        session_id
     );
 
     if let Err(e) = Command::new("steam")
@@ -365,7 +730,7 @@ pub fn launch_steam_game(game: &SteamGame, launcher_script_str: &str) -> Result<
         .stderr(Stdio::null())
         .spawn()
     {
-        restore_steam_launch_wrappers_in_roots(&roots);
+        restore_steam_launch_wrappers_for_session(&roots, Some(&session_id));
         anyhow::bail!("Failed to execute 'steam' command: {e}");
     }
 
@@ -376,7 +741,7 @@ pub fn launch_steam_game(game: &SteamGame, launcher_script_str: &str) -> Result<
         .name("steam-wrapper-restore".to_string())
         .spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(30));
-            restore_steam_launch_wrappers_in_roots(&roots_clone);
+            restore_steam_launch_wrappers_for_session(&roots_clone, Some(&session_id));
         });
 
     Ok(())
@@ -526,6 +891,8 @@ mod tests {
             .contains("ORIG_RAN:-- reaper SteamLaunch AppId=3259780 -- game.exe -skipintro"));
         assert!(!rt64.join("steam-launch-wrapper.real").exists());
         assert!(!u32_dir.join("steam-launch-wrapper.real").exists());
+        assert!(!rt64.join(WRAPPER_META_FILENAME).exists());
+        assert!(!u32_dir.join(WRAPPER_META_FILENAME).exists());
         assert_eq!(
             fs::read_to_string(rt64.join("steam-launch-wrapper")).unwrap(),
             orig_content
@@ -534,6 +901,254 @@ mod tests {
             fs::read_to_string(u32_dir.join("steam-launch-wrapper")).unwrap(),
             orig_content
         );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    fn make_temp_steam_test_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "michadame_steam_{tag}_{}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            next_wrapper_session_id(std::process::id())
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_multi_location_rollback_on_failure() {
+        let temp_dir = make_temp_steam_test_dir("rollback");
+        let rt64 = temp_dir.join("steamrt64");
+        let u32_dir = temp_dir.join("ubuntu12_32");
+        fs::create_dir_all(&rt64).unwrap();
+        fs::create_dir_all(&u32_dir).unwrap();
+
+        let orig_rt64 = "#!/bin/sh\necho \"ORIG_RT64\"\n";
+        let orig_u32 = "#!/bin/sh\necho \"ORIG_U32\"\n";
+        fs::write(rt64.join("steam-launch-wrapper"), orig_rt64).unwrap();
+        fs::write(u32_dir.join("steam-launch-wrapper"), orig_u32).unwrap();
+        for sub in [&rt64, &u32_dir] {
+            let w = sub.join("steam-launch-wrapper");
+            let mut p = fs::metadata(&w).unwrap().permissions();
+            p.set_mode(0o755);
+            fs::set_permissions(&w, p).unwrap();
+        }
+
+        let launcher = temp_dir.join("launcher.sh");
+        fs::write(&launcher, "#!/bin/sh\nexec \"$@\"\n").unwrap();
+        let mut lp = fs::metadata(&launcher).unwrap().permissions();
+        lp.set_mode(0o755);
+        fs::set_permissions(&launcher, lp).unwrap();
+
+        let roots = vec![temp_dir.clone()];
+
+        // Case 1: Second directory has an unowned `.real` backup.
+        let unowned_real = u32_dir.join("steam-launch-wrapper.real");
+        fs::write(&unowned_real, "USER_CUSTOM_BACKUP").unwrap();
+
+        let res =
+            arm_steam_launch_wrapper_in_roots(&roots, "3259780", &launcher, std::process::id());
+        assert!(res.is_err(), "arming should fail when unowned .real exists");
+
+        // First directory (`steamrt64`) must be rolled back completely.
+        assert_eq!(
+            fs::read_to_string(rt64.join("steam-launch-wrapper")).unwrap(),
+            orig_rt64
+        );
+        assert!(!rt64.join("steam-launch-wrapper.real").exists());
+        assert!(!rt64.join(WRAPPER_META_FILENAME).exists());
+        // Second directory's files must be untouched.
+        assert_eq!(
+            fs::read_to_string(u32_dir.join("steam-launch-wrapper")).unwrap(),
+            orig_u32
+        );
+        assert_eq!(
+            fs::read_to_string(&unowned_real).unwrap(),
+            "USER_CUSTOM_BACKUP"
+        );
+
+        fs::remove_file(&unowned_real).unwrap();
+
+        // Case 2: Second directory is read-only so writing the wrapper fails.
+        let mut ro_perms = fs::metadata(&u32_dir).unwrap().permissions();
+        ro_perms.set_mode(0o555);
+        fs::set_permissions(&u32_dir, ro_perms).unwrap();
+
+        let res_ro =
+            arm_steam_launch_wrapper_in_roots(&roots, "3259780", &launcher, std::process::id());
+
+        let mut rw_perms = fs::metadata(&u32_dir).unwrap().permissions();
+        rw_perms.set_mode(0o755);
+        fs::set_permissions(&u32_dir, rw_perms).unwrap();
+
+        assert!(
+            res_ro.is_err(),
+            "arming should fail when second directory is read-only"
+        );
+        assert_eq!(
+            fs::read_to_string(rt64.join("steam-launch-wrapper")).unwrap(),
+            orig_rt64
+        );
+        assert!(!rt64.join("steam-launch-wrapper.real").exists());
+        assert!(!rt64.join(WRAPPER_META_FILENAME).exists());
+        assert_eq!(
+            fs::read_to_string(u32_dir.join("steam-launch-wrapper")).unwrap(),
+            orig_u32
+        );
+        assert!(!u32_dir.join("steam-launch-wrapper.real").exists());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_session_isolation_overlapping_launches() {
+        let temp_dir = make_temp_steam_test_dir("session_isolation");
+        let rt64 = temp_dir.join("steamrt64");
+        let u32_dir = temp_dir.join("ubuntu12_32");
+        fs::create_dir_all(&rt64).unwrap();
+        fs::create_dir_all(&u32_dir).unwrap();
+
+        let orig_content = "#!/bin/sh\necho \"ORIG_BINARY\"\n";
+        for sub in [&rt64, &u32_dir] {
+            let w = sub.join("steam-launch-wrapper");
+            fs::write(&w, orig_content).unwrap();
+            let mut p = fs::metadata(&w).unwrap().permissions();
+            p.set_mode(0o755);
+            fs::set_permissions(&w, p).unwrap();
+        }
+
+        let launcher = temp_dir.join("launcher.sh");
+        fs::write(&launcher, "#!/bin/sh\nexec \"$@\"\n").unwrap();
+        let mut lp = fs::metadata(&launcher).unwrap().permissions();
+        lp.set_mode(0o755);
+        fs::set_permissions(&launcher, lp).unwrap();
+
+        let roots = vec![temp_dir.clone()];
+        let pid = std::process::id();
+        let session_a = next_wrapper_session_id(pid);
+        let session_b = next_wrapper_session_id(pid);
+        assert_ne!(session_a, session_b);
+
+        // Launch A arms wrappers with session_a
+        arm_steam_launch_wrapper_in_roots_with_session(&roots, "1001", &launcher, pid, &session_a)
+            .unwrap();
+        let wrapper_a = fs::read_to_string(rt64.join("steam-launch-wrapper")).unwrap();
+        assert!(wrapper_a.contains(&format!("{WRAPPER_SESSION_PREFIX}{session_a}")));
+        assert!(wrapper_a.contains("AppId=1001"));
+
+        // Launch B arms wrappers with session_b before Launch A's 30s cleanup fires
+        arm_steam_launch_wrapper_in_roots_with_session(&roots, "2002", &launcher, pid, &session_b)
+            .unwrap();
+        let wrapper_b = fs::read_to_string(rt64.join("steam-launch-wrapper")).unwrap();
+        assert!(wrapper_b.contains(&format!("{WRAPPER_SESSION_PREFIX}{session_b}")));
+        assert!(wrapper_b.contains("AppId=2002"));
+        assert_eq!(
+            fs::read_to_string(rt64.join("steam-launch-wrapper.real")).unwrap(),
+            orig_content
+        );
+
+        // Delayed cleanup from Launch A runs: must NOT clobber Launch B's armed wrapper!
+        restore_steam_launch_wrappers_for_session(&roots, Some(&session_a));
+        assert!(rt64.join("steam-launch-wrapper.real").is_file());
+        assert!(u32_dir.join("steam-launch-wrapper.real").is_file());
+        assert!(rt64.join(WRAPPER_META_FILENAME).is_file());
+        let after_a_cleanup = fs::read_to_string(rt64.join("steam-launch-wrapper")).unwrap();
+        assert_eq!(after_a_cleanup, wrapper_b);
+
+        // Cleanup for Launch B runs: must restore original wrapper and remove .real + metadata
+        restore_steam_launch_wrappers_for_session(&roots, Some(&session_b));
+        assert!(!rt64.join("steam-launch-wrapper.real").exists());
+        assert!(!u32_dir.join("steam-launch-wrapper.real").exists());
+        assert!(!rt64.join(WRAPPER_META_FILENAME).exists());
+        assert!(!u32_dir.join(WRAPPER_META_FILENAME).exists());
+        assert_eq!(
+            fs::read_to_string(rt64.join("steam-launch-wrapper")).unwrap(),
+            orig_content
+        );
+        assert_eq!(
+            fs::read_to_string(u32_dir.join("steam-launch-wrapper")).unwrap(),
+            orig_content
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_unowned_real_is_not_restored_over_steam_wrapper() {
+        let temp_dir = make_temp_steam_test_dir("unowned_real");
+        let rt64 = temp_dir.join("steamrt64");
+        fs::create_dir_all(&rt64).unwrap();
+
+        let wrapper_path = rt64.join("steam-launch-wrapper");
+        let real_path = rt64.join("steam-launch-wrapper.real");
+        let steam_binary = "#!/bin/sh\necho \"OFFICIAL_STEAM_WRAPPER\"\n";
+        let unrelated_real = "#!/bin/sh\necho \"UNOWNED_REAL_FILE\"\n";
+
+        fs::write(&wrapper_path, steam_binary).unwrap();
+        fs::write(&real_path, unrelated_real).unwrap();
+
+        let roots = vec![temp_dir.clone()];
+        restore_steam_launch_wrappers_in_roots(&roots);
+
+        assert_eq!(fs::read_to_string(&wrapper_path).unwrap(), steam_binary);
+        assert_eq!(fs::read_to_string(&real_path).unwrap(), unrelated_real);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_steam_update_during_armed_interval_preserves_new_binary() {
+        let temp_dir = make_temp_steam_test_dir("steam_update");
+        let rt64 = temp_dir.join("steamrt64");
+        fs::create_dir_all(&rt64).unwrap();
+
+        let wrapper_path = rt64.join("steam-launch-wrapper");
+        let real_path = rt64.join("steam-launch-wrapper.real");
+        let meta_path = rt64.join(WRAPPER_META_FILENAME);
+
+        let old_steam_binary = "#!/bin/sh\necho \"STEAM_WRAPPER_V1\"\n";
+        fs::write(&wrapper_path, old_steam_binary).unwrap();
+        let mut p = fs::metadata(&wrapper_path).unwrap().permissions();
+        p.set_mode(0o755);
+        fs::set_permissions(&wrapper_path, p).unwrap();
+
+        let launcher = temp_dir.join("launcher.sh");
+        fs::write(&launcher, "#!/bin/sh\nexec \"$@\"\n").unwrap();
+        let mut lp = fs::metadata(&launcher).unwrap().permissions();
+        lp.set_mode(0o755);
+        fs::set_permissions(&launcher, lp).unwrap();
+
+        let roots = vec![temp_dir.clone()];
+        let pid = std::process::id();
+        let session_id = next_wrapper_session_id(pid);
+        arm_steam_launch_wrapper_in_roots_with_session(
+            &roots,
+            "3259780",
+            &launcher,
+            pid,
+            &session_id,
+        )
+        .unwrap();
+        assert!(real_path.is_file());
+        assert!(meta_path.is_file());
+
+        // Simulate Steam updating `steam-launch-wrapper` while the wrapper was armed
+        let updated_steam_binary = "#!/bin/sh\necho \"STEAM_WRAPPER_V2_UPDATED\"\n";
+        fs::write(&wrapper_path, updated_steam_binary).unwrap();
+
+        // Restoration must NOT overwrite the updated Steam binary with the old `.real` backup
+        restore_steam_launch_wrappers_for_session(&roots, Some(&session_id));
+
+        assert_eq!(
+            fs::read_to_string(&wrapper_path).unwrap(),
+            updated_steam_binary
+        );
+        assert!(!real_path.exists());
+        assert!(!meta_path.exists());
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

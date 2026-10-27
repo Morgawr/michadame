@@ -205,10 +205,14 @@ pub fn draw_shaders_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             state.fft_mask_threshold,
                             state.fft_black_threshold,
                         ) {
-                            Ok(()) => {
-                                state.info(format!("Saved FFT mask '{}'", state.fft_mask_save_name));
+                            Ok(canonical_name) => {
+                                state.fft_mask_save_name = canonical_name.clone();
                                 state.fft_available_masks =
                                     crate::config::fft_masks::list_masks_for_resolution(stream_res);
+                                crate::config::persistence::sync_active_profile_in_state(state);
+                                crate::config::save_config(state);
+                                changed = true;
+                                state.info(format!("Saved FFT mask '{}'", canonical_name));
                             }
                             Err(e) => state.error(format!("Failed to save mask: {}", e)),
                         }
@@ -232,13 +236,24 @@ pub fn draw_shaders_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                 match crate::config::fft_masks::load_mask(&mask_name, stream_res) {
                                     Ok((data, fft_res, mask_thresh, black_thresh)) => {
                                         if fft_res == (fft_w, fft_h) {
+                                            let canonical_name =
+                                                crate::config::fft_masks::sanitize_mask_name(
+                                                    &mask_name,
+                                                )
+                                                .unwrap_or_else(|_| mask_name.clone());
                                             state.fft_mask_data = data;
                                             state.fft_mask_threshold = mask_thresh;
                                             state.fft_black_threshold = black_thresh;
-                                            state.fft_mask_save_name = mask_name.clone();
+                                            state.fft_mask_save_name = canonical_name.clone();
                                             state.fft_mask_dirty = true;
+                                            crate::config::persistence::sync_active_profile_in_state(
+                                                state,
+                                            );
                                             changed = true;
-                                            state.info(format!("Loaded FFT mask '{}'", mask_name));
+                                            state.info(format!(
+                                                "Loaded FFT mask '{}'",
+                                                canonical_name
+                                            ));
                                         } else {
                                             state.error(format!(
                                                 "FFT size mismatch: mask is {}x{} but current is {}x{}",

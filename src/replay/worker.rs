@@ -873,10 +873,138 @@ fn save_file(
         let _ = std::fs::remove_file(&temporary);
         return Err(e);
     }
-    // Hard-link publish is atomic and fails if destination exists.
-    std::fs::hard_link(&temporary, &path)?;
-    std::fs::remove_file(&temporary)?;
+    publish_completed_recording(&temporary, &path)?;
     Ok(path)
+}
+
+fn is_rename_noreplace_unsupported(err: &std::io::Error) -> bool {
+    matches!(err.kind(), std::io::ErrorKind::Unsupported)
+        || matches!(
+            err.raw_os_error(),
+            Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP)
+        )
+}
+
+fn is_hard_link_unsupported(err: &std::io::Error) -> bool {
+    matches!(err.kind(), std::io::ErrorKind::Unsupported)
+        || matches!(
+            err.raw_os_error(),
+            Some(libc::EPERM | libc::EOPNOTSUPP | libc::ENOSYS | libc::EINVAL | libc::EXDEV)
+        )
+}
+
+fn os_rename_noreplace(
+    temp_path: &std::path::Path,
+    final_path: &std::path::Path,
+) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let temp_c = std::ffi::CString::new(temp_path.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "temporary path contains interior NUL byte",
+        )
+    })?;
+    let final_c = std::ffi::CString::new(final_path.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "destination path contains interior NUL byte",
+        )
+    })?;
+    let rc = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            temp_c.as_ptr(),
+            libc::AT_FDCWD,
+            final_c.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+fn reserve_exclusive_destination(final_path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(final_path)
+        .map(|_| ())
+}
+
+fn publish_completed_recording(
+    temp_path: &std::path::Path,
+    final_path: &std::path::Path,
+) -> Result<()> {
+    publish_completed_recording_with(
+        temp_path,
+        final_path,
+        os_rename_noreplace,
+        |src, dst| std::fs::hard_link(src, dst),
+        reserve_exclusive_destination,
+        |src, dst| std::fs::rename(src, dst),
+        |p| std::fs::remove_file(p),
+    )
+}
+
+fn publish_completed_recording_with<Rnr, Hl, Res, Ren, Rem>(
+    temp_path: &std::path::Path,
+    final_path: &std::path::Path,
+    rename_noreplace_fn: Rnr,
+    hard_link_fn: Hl,
+    reserve_excl_fn: Res,
+    rename_fn: Ren,
+    remove_fn: Rem,
+) -> Result<()>
+where
+    Rnr: FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+    Hl: FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+    Res: FnOnce(&std::path::Path) -> std::io::Result<()>,
+    Ren: FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+    Rem: Fn(&std::path::Path) -> std::io::Result<()>,
+{
+    match rename_noreplace_fn(temp_path, final_path) {
+        Ok(()) => return Ok(()),
+        Err(err) if is_rename_noreplace_unsupported(&err) => {}
+        Err(err) => {
+            let _ = remove_fn(temp_path);
+            return Err(err.into());
+        }
+    }
+
+    match hard_link_fn(temp_path, final_path) {
+        Ok(()) => {
+            if let Err(err) = remove_fn(temp_path) {
+                tracing::warn!(
+                    "Replay saved to {:?}, but failed to remove temporary file {:?}: {}",
+                    final_path,
+                    temp_path,
+                    err
+                );
+            }
+            return Ok(());
+        }
+        Err(err) if is_hard_link_unsupported(&err) => {}
+        Err(err) => {
+            let _ = remove_fn(temp_path);
+            return Err(err.into());
+        }
+    }
+
+    if let Err(err) = reserve_excl_fn(final_path) {
+        let _ = remove_fn(temp_path);
+        return Err(err.into());
+    }
+
+    if let Err(err) = rename_fn(temp_path, final_path) {
+        let _ = remove_fn(final_path);
+        let _ = remove_fn(temp_path);
+        return Err(err.into());
+    }
+
+    Ok(())
 }
 #[cfg(test)]
 mod tests {
@@ -1247,11 +1375,110 @@ mod tests {
         let mut mixer = TimelineMixer::new();
         // Game audio at 0.4 scaled by 0.5 = 0.2
         mixer.push(MixSource::Game, 0, &vec![[0.4, 0.4]; n], 0.5);
-        // Mic audio at 0.3 with factor 1.0 = 0.3
+        // Mic audio at 0.3 with factor 1.0 = 1.0 * 0.3 = 0.3
         mixer.push(MixSource::Mic, 0, &vec![[0.3, 0.3]; n], 1.0);
         let (_, frame) = mixer.take().expect("Should output mixed frame");
         // Sum: 0.2 + 0.3 = 0.5
         assert!((frame[0][0] - 0.5).abs() < 1e-6);
         assert!((frame[0][1] - 0.5).abs() < 1e-6);
+    }
+
+    fn unique_test_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "michadame-f29-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn publish_completed_recording_moves_temp_and_never_overwrites_existing_file() {
+        let dir = unique_test_dir("normal");
+        let temp = dir.join(".replay-1.partial");
+        let dst = dir.join("replay-1.mp4");
+
+        std::fs::write(&temp, b"new-recording-bytes").unwrap();
+        publish_completed_recording(&temp, &dst).unwrap();
+        assert!(!temp.exists());
+        assert_eq!(std::fs::read(&dst).unwrap(), b"new-recording-bytes");
+
+        // Second attempt targeting the same destination must fail, preserve existing dst, and clean up temp.
+        let temp2 = dir.join(".replay-1-dup.partial");
+        std::fs::write(&temp2, b"conflicting-bytes").unwrap();
+        assert!(publish_completed_recording(&temp2, &dst).is_err());
+        assert!(
+            !temp2.exists(),
+            "temporary .partial file must be cleaned up when destination already exists"
+        );
+        assert_eq!(std::fs::read(&dst).unwrap(), b"new-recording-bytes");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn publish_completed_recording_falls_back_when_noreplace_and_hard_link_unsupported() {
+        let dir = unique_test_dir("fat32-fallback");
+        let temp = dir.join(".replay-2.partial");
+        let dst = dir.join("replay-2.mp4");
+        std::fs::write(&temp, b"vfat-mp4-payload").unwrap();
+
+        publish_completed_recording_with(
+            &temp,
+            &dst,
+            |_, _| Err(std::io::Error::from_raw_os_error(libc::EINVAL)),
+            |_, _| Err(std::io::Error::from_raw_os_error(libc::EPERM)),
+            reserve_exclusive_destination,
+            |src, dst| std::fs::rename(src, dst),
+            |p| std::fs::remove_file(p),
+        )
+        .unwrap();
+
+        assert!(!temp.exists());
+        assert_eq!(std::fs::read(&dst).unwrap(), b"vfat-mp4-payload");
+
+        // If destination already exists on the fallback path, O_CREAT | O_EXCL rejects it and cleans up temp.
+        let temp_conflict = dir.join(".replay-2-conflict.partial");
+        std::fs::write(&temp_conflict, b"should-not-overwrite").unwrap();
+        let res = publish_completed_recording_with(
+            &temp_conflict,
+            &dst,
+            |_, _| Err(std::io::Error::from_raw_os_error(libc::ENOSYS)),
+            |_, _| Err(std::io::Error::from_raw_os_error(libc::EOPNOTSUPP)),
+            reserve_exclusive_destination,
+            |src, dst| std::fs::rename(src, dst),
+            |p| std::fs::remove_file(p),
+        );
+        assert!(res.is_err());
+        assert!(!temp_conflict.exists());
+        assert_eq!(std::fs::read(&dst).unwrap(), b"vfat-mp4-payload");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn publish_completed_recording_succeeds_even_if_unlink_after_hard_link_fails() {
+        let dir = unique_test_dir("hardlink-unlink-warn");
+        let temp = dir.join(".replay-3.partial");
+        let dst = dir.join("replay-3.mp4");
+        std::fs::write(&temp, b"linked-mp4-payload").unwrap();
+
+        publish_completed_recording_with(
+            &temp,
+            &dst,
+            |_, _| Err(std::io::Error::from_raw_os_error(libc::EOPNOTSUPP)),
+            |src, dst| std::fs::hard_link(src, dst),
+            reserve_exclusive_destination,
+            |src, dst| std::fs::rename(src, dst),
+            |_| Err(std::io::Error::from_raw_os_error(libc::EACCES)),
+        )
+        .expect("publication must succeed once hard_link has created the final file");
+
+        assert_eq!(std::fs::read(&dst).unwrap(), b"linked-mp4-payload");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

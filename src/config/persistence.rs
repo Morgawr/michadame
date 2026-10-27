@@ -142,6 +142,9 @@ pub fn store_config_atomic_at(path: &Path, cfg: &MichadameConfig) -> Result<(), 
 pub fn save_replay_config(
     replay: &crate::replay::config::ReplayConfig,
 ) -> Result<(), confy::ConfyError> {
+    if cfg!(test) {
+        return Ok(());
+    }
     let path = confy::get_configuration_file_path("michadame", None)?;
     save_replay_config_at(&path, replay)
 }
@@ -258,10 +261,13 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         },
 
         fft_filter_enabled: Some(state.video.fft_filter_enabled),
-        fft_mask_save_name: if state.fft_mask_save_name.is_empty() {
+        fft_mask_save_name: if state.fft_mask_save_name.trim().is_empty() {
             None
         } else {
-            Some(state.fft_mask_save_name.clone())
+            Some(
+                crate::config::fft_masks::sanitize_mask_name(&state.fft_mask_save_name)
+                    .unwrap_or_else(|_| state.fft_mask_save_name.clone()),
+            )
         },
 
         audio_source: state.hardware.selected_audio_source_name.clone(),
@@ -434,6 +440,17 @@ pub fn save_global_hardware_config_at(
     store_config_atomic_at(path, &cfg)
 }
 
+fn sanitize_finite_f32(val: Option<f32>, default: f32, min: f32, max: f32) -> f32 {
+    let fallback = if default.is_finite() {
+        default.clamp(min, max)
+    } else {
+        min
+    };
+    val.filter(|v| v.is_finite())
+        .unwrap_or(fallback)
+        .clamp(min, max)
+}
+
 pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) -> bool {
     state
         .crt_filter
@@ -454,79 +471,96 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) -> bool {
     );
     state.video.pixelate_filter_enabled = profile.pixelate_filter_enabled.unwrap_or(false);
 
-    state.crt.hard_scan = profile.crt_hard_scan.unwrap_or(-8.0);
-    state.crt.hard_pix = profile.crt_hard_pix.unwrap_or(-3.0);
-    state.crt.brightboost = profile.crt_brightboost.unwrap_or(1.0);
-    state.crt.warp_x = profile.crt_warp_x.unwrap_or(0.031);
-    state.crt.warp_y = profile.crt_warp_y.unwrap_or(0.041);
-    state.crt.shadow_mask = profile.crt_shadow_mask.unwrap_or(3.0);
-    state.crt.hard_bloom_pix = profile.crt_hard_bloom_pix.unwrap_or(-1.5);
-    state.crt.hard_bloom_scan = profile.crt_hard_bloom_scan.unwrap_or(-2.0);
-    state.crt.bloom_amount = profile.crt_bloom_amount.unwrap_or(0.15);
-    state.crt.shape = profile.crt_shape.unwrap_or(2.0);
+    state.crt.hard_scan = sanitize_finite_f32(profile.crt_hard_scan, -8.0, -20.0, 0.0);
+    state.crt.hard_pix = sanitize_finite_f32(profile.crt_hard_pix, -3.0, -20.0, 0.0);
+    state.crt.brightboost = sanitize_finite_f32(profile.crt_brightboost, 1.0, 0.0, 4.0);
+    state.crt.warp_x = sanitize_finite_f32(profile.crt_warp_x, 0.031, 0.0, 0.5);
+    state.crt.warp_y = sanitize_finite_f32(profile.crt_warp_y, 0.041, 0.0, 0.5);
+    state.crt.shadow_mask = sanitize_finite_f32(profile.crt_shadow_mask, 3.0, 0.0, 4.0);
+    state.crt.hard_bloom_pix = sanitize_finite_f32(profile.crt_hard_bloom_pix, -1.5, -4.0, 0.0);
+    state.crt.hard_bloom_scan = sanitize_finite_f32(profile.crt_hard_bloom_scan, -2.0, -8.0, 0.0);
+    state.crt.bloom_amount = sanitize_finite_f32(profile.crt_bloom_amount, 0.15, 0.0, 2.0);
+    state.crt.shape = sanitize_finite_f32(profile.crt_shape, 2.0, 0.0, 10.0);
 
     state.video.use_magenta_background = profile.use_magenta_background.unwrap_or(false);
     state.video.retro_pc_frame = profile.retro_pc_frame.unwrap_or(false);
     state.video.retro_pc_frame_dark_mode = profile.retro_pc_frame_dark_mode.unwrap_or(false);
-    state.video.retro_pc_ambient_glow = profile.retro_pc_ambient_glow.unwrap_or(0.55);
+    state.video.retro_pc_ambient_glow =
+        sanitize_finite_f32(profile.retro_pc_ambient_glow, 0.55, 0.0, 1.0);
     state.video.retro_software_mouse = profile.retro_software_mouse.unwrap_or(false);
     state.video.lights_off_night_mode = profile.lights_off_night_mode.unwrap_or(false);
     state.video.realistic_light_switch = profile.realistic_light_switch.unwrap_or(false);
     state.video.light_switch_flicker_start = None;
-    state.video.night_mode_glow_intensity = profile.night_mode_glow_intensity.unwrap_or(0.0);
+    state.video.night_mode_glow_intensity =
+        sanitize_finite_f32(profile.night_mode_glow_intensity, 0.0, 0.0, 1.0);
 
     state.video.crt_glass_enabled = profile.crt_glass_enabled.unwrap_or(false);
-    state.video.crt_glass_intensity = profile.crt_glass_intensity.unwrap_or(0.25);
-    state.video.crt_glass_glossiness = profile.crt_glass_glossiness.unwrap_or(0.50);
+    state.video.crt_glass_intensity =
+        sanitize_finite_f32(profile.crt_glass_intensity, 0.25, 0.0, 1.0);
+    state.video.crt_glass_glossiness =
+        sanitize_finite_f32(profile.crt_glass_glossiness, 0.50, 0.0, 1.0);
     state.video.crt_glass_ceiling_light_enabled =
         profile.crt_glass_ceiling_light_enabled.unwrap_or(true);
     state.video.crt_glass_photographer_enabled =
         profile.crt_glass_photographer_enabled.unwrap_or(false);
     state.video.crt_glass_photographer_intensity =
-        profile.crt_glass_photographer_intensity.unwrap_or(0.50);
+        sanitize_finite_f32(profile.crt_glass_photographer_intensity, 0.50, 0.0, 1.0);
     state.video.crt_glass_flash_enabled = profile.crt_glass_flash_enabled.unwrap_or(false);
-    state.video.crt_glass_flash_intensity = profile.crt_glass_flash_intensity.unwrap_or(0.70);
+    state.video.crt_glass_flash_intensity =
+        sanitize_finite_f32(profile.crt_glass_flash_intensity, 0.70, 0.0, 1.0);
 
-    state.video.horizontal_stretch = profile.horizontal_stretch.unwrap_or(1.0);
+    state.video.horizontal_stretch = sanitize_finite_f32(profile.horizontal_stretch, 1.0, 0.5, 1.5);
     state.video.median_filter_enabled = profile.median_filter_enabled.unwrap_or(false);
-    state.video.median_mix = profile.median_mix.unwrap_or(1.0);
+    state.video.median_mix = sanitize_finite_f32(profile.median_mix, 1.0, 0.0, 1.0);
     state.video.deinterlace_filter_enabled = profile.deinterlace_filter_enabled.unwrap_or(false);
     state.video.deinterlace_mode = profile.deinterlace_mode.unwrap_or(0);
-    state.video.deinterlace_blend = profile.deinterlace_blend.unwrap_or(0.5);
-    state.video.deinterlace_motion_threshold = profile.deinterlace_motion_threshold.unwrap_or(0.08);
-    state.video.deinterlace_line_spacing = profile.deinterlace_line_spacing.unwrap_or(1.0);
-    state.video.deinterlace_spatial_mix = profile.deinterlace_spatial_mix.unwrap_or(0.75);
-    state.video.vibrance = profile.vibrance.unwrap_or(1.0);
-    state.video.overscan_x = profile.overscan_x.unwrap_or(0.0);
-    state.video.overscan_y = profile.overscan_y.unwrap_or(0.0);
-    state.video.underscan_x = profile.underscan_x.unwrap_or(0.0);
-    state.video.underscan_y = profile.underscan_y.unwrap_or(0.0);
-    state.video.border_crop_left = profile.border_crop_left.unwrap_or(0.0);
-    state.video.border_crop_right = profile.border_crop_right.unwrap_or(0.0);
-    state.video.border_crop_top = profile.border_crop_top.unwrap_or(0.0);
-    state.video.border_crop_bottom = profile.border_crop_bottom.unwrap_or(0.0);
+    state.video.deinterlace_blend = sanitize_finite_f32(profile.deinterlace_blend, 0.5, 0.0, 1.0);
+    state.video.deinterlace_motion_threshold =
+        sanitize_finite_f32(profile.deinterlace_motion_threshold, 0.08, 0.01, 0.5);
+    state.video.deinterlace_line_spacing =
+        sanitize_finite_f32(profile.deinterlace_line_spacing, 1.0, 0.5, 3.0);
+    state.video.deinterlace_spatial_mix =
+        sanitize_finite_f32(profile.deinterlace_spatial_mix, 0.75, 0.0, 1.0);
+    state.video.vibrance = sanitize_finite_f32(profile.vibrance, 1.0, 0.0, 3.0);
+    state.video.overscan_x = sanitize_finite_f32(profile.overscan_x, 0.0, -0.2, 0.2);
+    state.video.overscan_y = sanitize_finite_f32(profile.overscan_y, 0.0, -0.2, 0.2);
+    state.video.underscan_x = sanitize_finite_f32(profile.underscan_x, 0.0, -0.2, 0.3);
+    state.video.underscan_y = sanitize_finite_f32(profile.underscan_y, 0.0, -0.2, 0.3);
+    state.video.border_crop_left = sanitize_finite_f32(profile.border_crop_left, 0.0, 0.0, 0.2);
+    state.video.border_crop_right = sanitize_finite_f32(profile.border_crop_right, 0.0, 0.0, 0.2);
+    state.video.border_crop_top = sanitize_finite_f32(profile.border_crop_top, 0.0, 0.0, 0.2);
+    state.video.border_crop_bottom = sanitize_finite_f32(profile.border_crop_bottom, 0.0, 0.0, 0.2);
 
     let def_halo = state.halo_defaults.clone();
-    state.halo.brightboost = profile.halo_brightboost.unwrap_or(def_halo.brightboost);
-    state.halo.brightboost1 = profile.halo_brightboost1.unwrap_or(def_halo.brightboost1);
-    state.halo.beam_min = profile.halo_beam_min.unwrap_or(def_halo.beam_min);
-    state.halo.beam_max = profile.halo_beam_max.unwrap_or(def_halo.beam_max);
-    state.halo.beam_size = profile.halo_beam_size.unwrap_or(def_halo.beam_size);
-    state.halo.h_sharp = profile.halo_h_sharp.unwrap_or(def_halo.h_sharp);
-    state.halo.glow = profile.halo_glow.unwrap_or(def_halo.glow);
-    state.halo.bloom = profile.halo_bloom.unwrap_or(def_halo.bloom);
-    state.halo.halation = profile.halo_halation.unwrap_or(def_halo.halation);
-    state.halo.shadow_mask = profile.halo_shadow_mask.unwrap_or(def_halo.shadow_mask);
-    state.halo.masksize = profile.halo_masksize.unwrap_or(def_halo.masksize);
-    state.halo.maskstr = profile.halo_maskstr.unwrap_or(def_halo.maskstr);
-    state.halo.mcut = profile.halo_mcut.unwrap_or(def_halo.mcut);
-    state.halo.slotmask = profile.halo_slotmask.unwrap_or(def_halo.slotmask);
-    state.halo.slotmask1 = profile.halo_slotmask1.unwrap_or(def_halo.slotmask1);
-    state.halo.double_slot = profile.halo_double_slot.unwrap_or(def_halo.double_slot);
-    state.halo.smoothmask = profile.halo_smoothmask.unwrap_or(def_halo.smoothmask);
-    state.halo.halo_zoom = profile.halo_zoom.unwrap_or(def_halo.halo_zoom);
-    state.halo.halo_intensity = profile.halo_intensity.unwrap_or(def_halo.halo_intensity);
-    state.halo.corner_size = profile.halo_corner_size.unwrap_or(def_halo.corner_size);
+    state.halo.brightboost =
+        sanitize_finite_f32(profile.halo_brightboost, def_halo.brightboost, 0.5, 3.0);
+    state.halo.brightboost1 =
+        sanitize_finite_f32(profile.halo_brightboost1, def_halo.brightboost1, 0.5, 3.0);
+    state.halo.beam_min = sanitize_finite_f32(profile.halo_beam_min, def_halo.beam_min, 0.5, 3.0);
+    state.halo.beam_max = sanitize_finite_f32(profile.halo_beam_max, def_halo.beam_max, 0.2, 2.0);
+    state.halo.beam_size =
+        sanitize_finite_f32(profile.halo_beam_size, def_halo.beam_size, 0.0, 2.0);
+    state.halo.h_sharp = sanitize_finite_f32(profile.halo_h_sharp, def_halo.h_sharp, 1.0, 10.0);
+    state.halo.glow = sanitize_finite_f32(profile.halo_glow, def_halo.glow, 0.0, 1.0);
+    state.halo.bloom = sanitize_finite_f32(profile.halo_bloom, def_halo.bloom, 0.0, 1.0);
+    state.halo.halation = sanitize_finite_f32(profile.halo_halation, def_halo.halation, 0.0, 0.5);
+    state.halo.shadow_mask =
+        sanitize_finite_f32(profile.halo_shadow_mask, def_halo.shadow_mask, 0.0, 6.0);
+    state.halo.masksize = sanitize_finite_f32(profile.halo_masksize, def_halo.masksize, 1.0, 4.0);
+    state.halo.maskstr = sanitize_finite_f32(profile.halo_maskstr, def_halo.maskstr, 0.0, 1.0);
+    state.halo.mcut = sanitize_finite_f32(profile.halo_mcut, def_halo.mcut, 0.0, 1.0);
+    state.halo.slotmask = sanitize_finite_f32(profile.halo_slotmask, def_halo.slotmask, 0.0, 1.0);
+    state.halo.slotmask1 =
+        sanitize_finite_f32(profile.halo_slotmask1, def_halo.slotmask1, 0.0, 1.0);
+    state.halo.double_slot =
+        sanitize_finite_f32(profile.halo_double_slot, def_halo.double_slot, 1.0, 4.0);
+    state.halo.smoothmask =
+        sanitize_finite_f32(profile.halo_smoothmask, def_halo.smoothmask, 0.0, 2.0);
+    state.halo.halo_zoom = sanitize_finite_f32(profile.halo_zoom, def_halo.halo_zoom, 50.0, 100.0);
+    state.halo.halo_intensity =
+        sanitize_finite_f32(profile.halo_intensity, def_halo.halo_intensity, 0.0, 2.0);
+    state.halo.corner_size =
+        sanitize_finite_f32(profile.halo_corner_size, def_halo.corner_size, 0.0, 0.1);
     state.halo.curvature = profile.halo_curvature.unwrap_or(def_halo.curvature);
 
     let def_cathode = state.cathode_interference_defaults.clone();
@@ -534,24 +568,39 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) -> bool {
         .cathode_interference_enabled
         .unwrap_or(def_cathode.enabled);
     state.cathode_interference.intensity =
-        profile.cathode_intensity.unwrap_or(def_cathode.intensity);
+        sanitize_finite_f32(profile.cathode_intensity, def_cathode.intensity, 0.0, 1.0);
     state.cathode_interference.frequency =
-        profile.cathode_frequency.unwrap_or(def_cathode.frequency);
-    state.cathode_interference.randomization = profile
-        .cathode_randomization
-        .unwrap_or(def_cathode.randomization);
-    state.cathode_interference.electricity_glow = profile
-        .cathode_electricity_glow
-        .unwrap_or(def_cathode.electricity_glow);
-    state.cathode_interference.flicker_depth = profile
-        .cathode_flicker_depth
-        .unwrap_or(def_cathode.flicker_depth);
-    state.cathode_interference.interference = profile
-        .cathode_interference
-        .unwrap_or(def_cathode.interference);
-    state.cathode_interference.lightbulb_effect = profile
-        .cathode_lightbulb_effect
-        .unwrap_or(def_cathode.lightbulb_effect);
+        sanitize_finite_f32(profile.cathode_frequency, def_cathode.frequency, 0.1, 5.0);
+    state.cathode_interference.randomization = sanitize_finite_f32(
+        profile.cathode_randomization,
+        def_cathode.randomization,
+        0.0,
+        1.0,
+    );
+    state.cathode_interference.electricity_glow = sanitize_finite_f32(
+        profile.cathode_electricity_glow,
+        def_cathode.electricity_glow,
+        0.0,
+        1.0,
+    );
+    state.cathode_interference.flicker_depth = sanitize_finite_f32(
+        profile.cathode_flicker_depth,
+        def_cathode.flicker_depth,
+        0.0,
+        1.0,
+    );
+    state.cathode_interference.interference = sanitize_finite_f32(
+        profile.cathode_interference,
+        def_cathode.interference,
+        0.0,
+        1.0,
+    );
+    state.cathode_interference.lightbulb_effect = sanitize_finite_f32(
+        profile.cathode_lightbulb_effect,
+        def_cathode.lightbulb_effect,
+        0.0,
+        1.0,
+    );
 
     // Video format / resolution / framerate
     if !state.hardware.supported_formats.is_empty() {
@@ -590,22 +639,31 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) -> bool {
     // FFT mask filter
     state.video.fft_filter_enabled = profile.fft_filter_enabled.unwrap_or(false);
     if let Some(mask_name) = &profile.fft_mask_save_name {
-        state.fft_mask_save_name = mask_name.clone();
-        if state.video.fft_filter_enabled && !mask_name.is_empty() {
+        let canonical_name = crate::config::fft_masks::sanitize_mask_name(mask_name)
+            .unwrap_or_else(|_| mask_name.clone());
+        state.fft_mask_save_name = canonical_name.clone();
+        if state.video.fft_filter_enabled && !canonical_name.is_empty() {
             let stream_res = state
                 .latest_frame
                 .as_ref()
                 .map(|f| (f.width, f.height))
                 .unwrap_or(state.hardware.selected_resolution);
             if stream_res.0 > 0 && stream_res.1 > 0 {
-                if let Ok((data, fft_res, mask_thresh, black_thresh)) =
-                    crate::config::fft_masks::load_mask(mask_name, stream_res)
-                {
-                    state.fft_mask_data = data;
-                    state.fft_mask_resolution = fft_res;
-                    state.fft_mask_threshold = mask_thresh;
-                    state.fft_black_threshold = black_thresh;
-                    state.fft_mask_dirty = true;
+                match crate::config::fft_masks::load_mask(&canonical_name, stream_res) {
+                    Ok((data, fft_res, mask_thresh, black_thresh)) => {
+                        state.fft_mask_data = data;
+                        state.fft_mask_resolution = fft_res;
+                        state.fft_mask_threshold = mask_thresh;
+                        state.fft_black_threshold = black_thresh;
+                        state.fft_mask_dirty = true;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to restore FFT mask '{}': {}", canonical_name, e);
+                        state.error(format!(
+                            "Failed to restore FFT mask '{}': {}",
+                            canonical_name, e
+                        ));
+                    }
                 }
             }
         }
@@ -658,7 +716,7 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) -> bool {
     }
 
     if let Some(vol) = profile.master_volume {
-        state.set_master_volume(vol);
+        state.set_master_volume(sanitize_finite_f32(Some(vol), 1.0, 0.0, 1.0));
     }
 
     audio_hardware_changed
@@ -775,39 +833,36 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
         .clone()
         .unwrap_or_else(|| "S16LE".to_string());
     if let Some(vol) = cfg.master_volume {
-        state.set_master_volume(vol);
+        state.set_master_volume(sanitize_finite_f32(Some(vol), 1.0, 0.0, 1.0));
     }
 
     if !cfg.has_shown_first_run_warning.unwrap_or(false) {
         state.ui.show_first_run_dialog = true;
     }
     state.ocr.set_backend(cfg.ocr_backend.unwrap_or_default());
-    state.ocr.sticky_distance = cfg.ocr_sticky_distance.unwrap_or(0.6);
+    state.ocr.sticky_distance = sanitize_finite_f32(cfg.ocr_sticky_distance, 0.6, 0.0, 10.0);
     state.ocr.hide_overlay = cfg.ocr_hide_overlay.unwrap_or(false);
     state.ocr.timeout_seconds = cfg.ocr_timeout_seconds.unwrap_or(45);
     state.ocr.constant_scanning = cfg.ocr_constant_scanning.unwrap_or(false);
-    state.ocr.scan_interval_secs = cfg
-        .ocr_scan_interval_secs
-        .unwrap_or(crate::ocr::models::DEFAULT_SCAN_INTERVAL_SECS)
-        .clamp(
-            crate::ocr::models::MIN_SCAN_INTERVAL_SECS,
-            crate::ocr::models::MAX_SCAN_INTERVAL_SECS,
-        );
-    state.ocr.max_dropoff_secs = cfg
-        .ocr_max_dropoff_secs
-        .unwrap_or(crate::ocr::models::DEFAULT_MAX_DROPOFF_SECS)
-        .clamp(
-            crate::ocr::models::MIN_MAX_DROPOFF_SECS,
-            crate::ocr::models::MAX_MAX_DROPOFF_SECS,
-        )
-        .max(state.ocr.scan_interval_secs);
-    state.ocr.jitter_tolerance = cfg
-        .ocr_jitter_tolerance
-        .unwrap_or(crate::ocr::models::DEFAULT_JITTER_TOLERANCE)
-        .clamp(
-            crate::ocr::models::MIN_JITTER_TOLERANCE,
-            crate::ocr::models::MAX_JITTER_TOLERANCE,
-        );
+    state.ocr.scan_interval_secs = sanitize_finite_f32(
+        cfg.ocr_scan_interval_secs,
+        crate::ocr::models::DEFAULT_SCAN_INTERVAL_SECS,
+        crate::ocr::models::MIN_SCAN_INTERVAL_SECS,
+        crate::ocr::models::MAX_SCAN_INTERVAL_SECS,
+    );
+    state.ocr.max_dropoff_secs = sanitize_finite_f32(
+        cfg.ocr_max_dropoff_secs,
+        crate::ocr::models::DEFAULT_MAX_DROPOFF_SECS,
+        crate::ocr::models::MIN_MAX_DROPOFF_SECS,
+        crate::ocr::models::MAX_MAX_DROPOFF_SECS,
+    )
+    .max(state.ocr.scan_interval_secs);
+    state.ocr.jitter_tolerance = sanitize_finite_f32(
+        cfg.ocr_jitter_tolerance,
+        crate::ocr::models::DEFAULT_JITTER_TOLERANCE,
+        crate::ocr::models::MIN_JITTER_TOLERANCE,
+        crate::ocr::models::MAX_JITTER_TOLERANCE,
+    );
     state.ocr.reset_constant_scan_backoff();
     state.dict.popup_under_crt = cfg.popup_under_crt.unwrap_or(false);
     state.bank.current_tag = cfg.bank_current_tag.clone().unwrap_or_default();
@@ -2181,5 +2236,88 @@ crt_brightboost = 1.6
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("toml.bak"));
+    }
+
+    #[test]
+    fn test_apply_config_sanitizes_non_finite_floats() {
+        for non_finite in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut state = AppState::default();
+            let cfg = MichadameConfig {
+                master_volume: Some(non_finite),
+                ocr_sticky_distance: Some(non_finite),
+                ocr_scan_interval_secs: Some(non_finite),
+                ocr_max_dropoff_secs: Some(non_finite),
+                ocr_jitter_tolerance: Some(non_finite),
+                ..Default::default()
+            };
+
+            apply_config(&mut state, &cfg);
+
+            assert!(state.hardware.master_volume.is_finite());
+            assert_eq!(state.hardware.master_volume, 1.0);
+            assert!(state.ocr.sticky_distance.is_finite());
+            assert!((state.ocr.sticky_distance - 0.6).abs() < 1e-5);
+            assert!(state.ocr.scan_interval_secs.is_finite());
+            assert_eq!(
+                state.ocr.scan_interval_secs,
+                crate::ocr::models::DEFAULT_SCAN_INTERVAL_SECS
+            );
+            assert!(state.ocr.max_dropoff_secs.is_finite());
+            assert_eq!(
+                state.ocr.max_dropoff_secs,
+                crate::ocr::models::DEFAULT_MAX_DROPOFF_SECS
+            );
+            assert!(state.ocr.jitter_tolerance.is_finite());
+            assert_eq!(
+                state.ocr.jitter_tolerance,
+                crate::ocr::models::DEFAULT_JITTER_TOLERANCE
+            );
+
+            for step in 0..=10 {
+                let delay_secs = crate::ocr::OcrState::calculate_dropoff_delay_secs(
+                    state.ocr.scan_interval_secs,
+                    state.ocr.max_dropoff_secs,
+                    step,
+                );
+                assert!(delay_secs.is_finite() && delay_secs > 0.0);
+                state.ocr.consecutive_same_scans = step;
+                let duration = state.ocr.current_constant_scan_delay();
+                assert!(duration > std::time::Duration::ZERO);
+            }
+        }
+    }
+
+    #[test]
+    fn test_apply_profile_sanitizes_non_finite_floats_and_normalizes_fft_mask_name() {
+        let mut state = AppState::default();
+        let profile = Profile {
+            crt_hard_scan: Some(f32::NAN),
+            crt_brightboost: Some(f32::INFINITY),
+            vibrance: Some(f32::NEG_INFINITY),
+            horizontal_stretch: Some(f32::NAN),
+            halo_brightboost: Some(f32::NAN),
+            cathode_intensity: Some(f32::INFINITY),
+            master_volume: Some(f32::NAN),
+            fft_filter_enabled: Some(false),
+            fft_mask_save_name: Some("my custom mask".to_string()),
+            ..Default::default()
+        };
+
+        apply_profile_to_state(&mut state, &profile);
+
+        assert_eq!(state.crt.hard_scan, -8.0);
+        assert_eq!(state.crt.brightboost, 1.0);
+        assert_eq!(state.video.vibrance, 1.0);
+        assert_eq!(state.video.horizontal_stretch, 1.0);
+        assert_eq!(state.halo.brightboost, state.halo_defaults.brightboost);
+        assert_eq!(
+            state.cathode_interference.intensity,
+            state.cathode_interference_defaults.intensity
+        );
+        assert_eq!(state.hardware.master_volume, 1.0);
+        assert_eq!(state.fft_mask_save_name, "my_custom_mask");
+
+        let built = build_profile_from_state(&state);
+        assert_eq!(built.fft_mask_save_name.as_deref(), Some("my_custom_mask"));
     }
 }

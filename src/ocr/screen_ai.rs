@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::ffi::{c_char, c_void, CStr};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -15,16 +15,27 @@ pub const CIPD_RESOLVE_URL: &str =
     "https://chrome-infra-packages.appspot.com/prpc/cipd.Repository/ResolveVersion";
 pub const CIPD_DESCRIBE_URL: &str =
     "https://chrome-infra-packages.appspot.com/prpc/cipd.Repository/DescribeInstance";
+#[allow(dead_code)]
 pub const CIPD_DOWNLOAD_URL: &str =
     "https://chrome-infra-packages.appspot.com/dl/chromium/third_party/screen-ai/linux/+/latest";
 
 pub const DEFAULT_MAX_DIMENSION: u32 = 2048;
+
+static STAGING_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Metadata describing an installed or remote Chrome Screen AI OCR package.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScreenAiMetadata {
     pub version: String,
     pub instance_digest: String,
+}
+
+/// Pinned state of the currently loaded native Screen AI runtime in this process.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActiveRuntimePin {
+    pub base_dir: PathBuf,
+    pub runtime_dir: PathBuf,
+    pub metadata: ScreenAiMetadata,
 }
 
 /// Background events sent between Screen AI sync/update worker threads and the UI.
@@ -59,9 +70,28 @@ pub fn resolve_screen_ai_directory() -> PathBuf {
     }
 }
 
-/// Resolves a relative model file path inside `screen_ai_dir`, checking both the root
-/// directory and a `resources/` subdirectory.
-pub fn resolve_model_file_path(dir: &Path, rel_path: &str) -> Option<PathBuf> {
+/// Resolves the active versioned directory inside `dir` (via `active_version` -> `versions/<id>`),
+/// falling back to `dir` itself for legacy flat layouts or when `dir` is already a version directory.
+pub fn resolve_active_version_dir(dir: &Path) -> PathBuf {
+    let active_marker = dir.join("active_version");
+    if let Ok(raw) = std::fs::read_to_string(&active_marker) {
+        let ver_id = raw.trim();
+        if !ver_id.is_empty() {
+            let rel = Path::new(ver_id);
+            if rel.components().count() == 1
+                && rel.components().all(|c| matches!(c, Component::Normal(_)))
+            {
+                let version_dir = dir.join("versions").join(rel);
+                if version_dir.is_dir() {
+                    return version_dir;
+                }
+            }
+        }
+    }
+    dir.to_path_buf()
+}
+
+fn resolve_model_file_path_in_concrete_dir(dir: &Path, rel_path: &str) -> Option<PathBuf> {
     let trimmed = rel_path.trim_start_matches("./").trim_start_matches('/');
     if trimmed.is_empty() {
         return None;
@@ -83,21 +113,165 @@ pub fn resolve_model_file_path(dir: &Path, rel_path: &str) -> Option<PathBuf> {
     None
 }
 
-/// Returns true if the Chrome Screen AI shared library and model manifest are present on disk.
-pub fn is_screen_ai_installed(dir: &Path) -> bool {
-    resolve_model_file_path(dir, "libchromescreenai.so").is_some()
-        && resolve_model_file_path(dir, "files_list_ocr.txt").is_some()
+/// Resolves a relative model file path inside `screen_ai_dir`, checking the active version
+/// subdirectory first, then the root directory and `resources/` subdirectory.
+pub fn resolve_model_file_path(dir: &Path, rel_path: &str) -> Option<PathBuf> {
+    let active_dir = resolve_active_version_dir(dir);
+    if let Some(found) = resolve_model_file_path_in_concrete_dir(&active_dir, rel_path) {
+        return Some(found);
+    }
+    if active_dir != dir {
+        return resolve_model_file_path_in_concrete_dir(dir, rel_path);
+    }
+    None
 }
 
-/// Loads installed `ScreenAiMetadata` from `dir/metadata.json` if the model files exist.
+/// Validates that a concrete Screen AI directory contains a valid ELF `libchromescreenai.so`
+/// and a non-empty `files_list_ocr.txt` (plus optional `manifest.json`) whose listed files
+/// all exist on disk and are non-empty.
+pub fn validate_staged_screen_ai_dir(dir: &Path) -> Result<(), String> {
+    let so_path =
+        resolve_model_file_path_in_concrete_dir(dir, "libchromescreenai.so").ok_or_else(|| {
+            format!(
+                "Missing libchromescreenai.so in extracted Screen AI directory {}",
+                dir.display()
+            )
+        })?;
+    let mut so_file = std::fs::File::open(&so_path)
+        .map_err(|e| format!("Failed to open {}: {e}", so_path.display()))?;
+    let so_len = so_file
+        .metadata()
+        .map_err(|e| format!("Failed to stat {}: {e}", so_path.display()))?
+        .len();
+    if so_len < 4 {
+        return Err(format!(
+            "Invalid libchromescreenai.so in {}: file is too small ({so_len} bytes)",
+            dir.display()
+        ));
+    }
+    let mut magic = [0u8; 4];
+    so_file
+        .read_exact(&mut magic)
+        .map_err(|e| format!("Failed to read ELF header from {}: {e}", so_path.display()))?;
+    if &magic != b"\x7fELF" {
+        return Err(format!(
+            "Invalid libchromescreenai.so in {}: missing ELF magic header",
+            dir.display()
+        ));
+    }
+
+    let list_path =
+        resolve_model_file_path_in_concrete_dir(dir, "files_list_ocr.txt").ok_or_else(|| {
+            format!(
+                "Missing files_list_ocr.txt in extracted Screen AI directory {}",
+                dir.display()
+            )
+        })?;
+    let list_content = std::fs::read_to_string(&list_path)
+        .map_err(|e| format!("Failed to read {}: {e}", list_path.display()))?;
+    let mut listed_count = 0usize;
+    for raw_line in list_content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        listed_count += 1;
+        let resolved = resolve_model_file_path_in_concrete_dir(dir, line).ok_or_else(|| {
+            format!(
+                "Model file '{}' listed in files_list_ocr.txt is missing in {}",
+                line,
+                dir.display()
+            )
+        })?;
+        let file_len = std::fs::metadata(&resolved)
+            .map_err(|e| format!("Failed to stat model file {}: {e}", resolved.display()))?
+            .len();
+        if file_len == 0 {
+            return Err(format!(
+                "Model file '{}' listed in files_list_ocr.txt is empty (0 bytes)",
+                line
+            ));
+        }
+    }
+    if listed_count == 0 {
+        return Err(format!(
+            "Invalid files_list_ocr.txt in {}: no model files listed",
+            dir.display()
+        ));
+    }
+
+    // If a manifest.json exists in the extracted directory, validate its listed files as well
+    if let Some(manifest_path) = resolve_model_file_path_in_concrete_dir(dir, "manifest.json") {
+        let manifest_raw = std::fs::read_to_string(&manifest_path)
+            .map_err(|e| format!("Failed to read {}: {e}", manifest_path.display()))?;
+        let manifest_val: serde_json::Value = serde_json::from_str(&manifest_raw)
+            .map_err(|e| format!("Invalid JSON in {}: {e}", manifest_path.display()))?;
+        if let Some(files_arr) = manifest_val.get("files").and_then(|v| v.as_array()) {
+            for item in files_arr {
+                let rel_opt = item.as_str().or_else(|| {
+                    item.as_object()
+                        .and_then(|o| o.get("name").or_else(|| o.get("path")))
+                        .and_then(|v| v.as_str())
+                });
+                if let Some(rel_name) = rel_opt {
+                    let clean = rel_name
+                        .trim_start_matches("./")
+                        .trim_start_matches('/')
+                        .strip_prefix("resources/")
+                        .unwrap_or(rel_name);
+                    if clean.is_empty() || clean.starts_with(".cipdpkg") {
+                        continue;
+                    }
+                    let resolved =
+                        resolve_model_file_path_in_concrete_dir(dir, clean).ok_or_else(|| {
+                            format!(
+                                "File '{}' listed in manifest.json is missing in {}",
+                                clean,
+                                dir.display()
+                            )
+                        })?;
+                    let len = std::fs::metadata(&resolved)
+                        .map_err(|e| format!("Failed to stat {}: {e}", resolved.display()))?
+                        .len();
+                    if len == 0 {
+                        return Err(format!(
+                            "File '{}' listed in manifest.json is empty (0 bytes)",
+                            clean
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Returns true if the Chrome Screen AI shared library and model manifest are present and valid on disk.
+pub fn is_screen_ai_installed(dir: &Path) -> bool {
+    let active_dir = resolve_active_version_dir(dir);
+    if validate_staged_screen_ai_dir(&active_dir).is_ok() {
+        return true;
+    }
+    if active_dir != dir {
+        return validate_staged_screen_ai_dir(dir).is_ok();
+    }
+    false
+}
+
+/// Loads installed `ScreenAiMetadata` from `dir/metadata.json` (or the active version directory)
+/// if the model files exist and are valid.
 pub fn load_installed_metadata(dir: &Path) -> Option<ScreenAiMetadata> {
     if !is_screen_ai_installed(dir) {
         return None;
     }
-    let meta_path = dir.join("metadata.json");
-    if let Ok(content) = std::fs::read_to_string(&meta_path) {
-        if let Ok(meta) = serde_json::from_str::<ScreenAiMetadata>(&content) {
-            return Some(meta);
+    let active_dir = resolve_active_version_dir(dir);
+    for candidate_dir in [dir, active_dir.as_path()] {
+        let meta_path = candidate_dir.join("metadata.json");
+        if let Ok(content) = std::fs::read_to_string(&meta_path) {
+            if let Ok(meta) = serde_json::from_str::<ScreenAiMetadata>(&content) {
+                return Some(meta);
+            }
         }
     }
     Some(ScreenAiMetadata {
@@ -106,14 +280,52 @@ pub fn load_installed_metadata(dir: &Path) -> Option<ScreenAiMetadata> {
     })
 }
 
-/// Saves `ScreenAiMetadata` to `dir/metadata.json`.
+fn write_file_atomically(path: &Path, content: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create directory {}: {e}", parent.display()))?;
+    }
+    let seq = STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = path.with_extension(format!("tmp.{}.{}", std::process::id(), seq));
+    if let Err(e) = std::fs::write(&tmp_path, content) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!(
+            "Failed to write temporary file {}: {e}",
+            tmp_path.display()
+        ));
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!(
+            "Failed to atomically replace {}: {e}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Saves `ScreenAiMetadata` to `dir/metadata.json` (and the active version directory if distinct).
+#[allow(dead_code)]
 pub fn save_installed_metadata(dir: &Path, meta: &ScreenAiMetadata) -> Result<(), String> {
     std::fs::create_dir_all(dir)
         .map_err(|e| format!("Failed to create Screen AI directory: {e}"))?;
-    let meta_path = dir.join("metadata.json");
     let json = serde_json::to_string_pretty(meta)
         .map_err(|e| format!("Failed to serialize Screen AI metadata: {e}"))?;
-    std::fs::write(&meta_path, json).map_err(|e| format!("Failed to write Screen AI metadata: {e}"))
+    write_file_atomically(&dir.join("metadata.json"), json.as_bytes())?;
+
+    let active_dir = resolve_active_version_dir(dir);
+    if active_dir != dir && active_dir.is_dir() {
+        let _ = write_file_atomically(&active_dir.join("metadata.json"), json.as_bytes());
+        let cipd_version_json = serde_json::json!({
+            "package_name": CIPD_PACKAGE,
+            "instance_id": meta.instance_digest,
+            "version": meta.version,
+        });
+        if let Ok(cipd_bytes) = serde_json::to_vec_pretty(&cipd_version_json) {
+            let _ = write_file_atomically(&active_dir.join(".cipd_version"), &cipd_bytes);
+        }
+    }
+    Ok(())
 }
 
 /// Strips the pRPC XSSI protection prefix `)]}'` from a CIPD JSON response body.
@@ -139,6 +351,8 @@ pub fn parse_cipd_version_responses(
         .get("instance")
         .and_then(|i| i.get("hexDigest"))
         .and_then(|d| d.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
         .ok_or_else(|| "Missing instance.hexDigest in CIPD ResolveVersion response".to_string())?
         .to_string();
 
@@ -179,6 +393,77 @@ pub fn parse_cipd_version_responses(
         version: resolved_version,
         instance_digest: hex_digest,
     })
+}
+
+fn decode_hex_bytes(hex: &str) -> Option<Vec<u8>> {
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    let bytes = hex.as_bytes();
+    for chunk in bytes.chunks_exact(2) {
+        let hi = (chunk[0] as char).to_digit(16)?;
+        let lo = (chunk[1] as char).to_digit(16)?;
+        out.push(((hi << 4) | lo) as u8);
+    }
+    Some(out)
+}
+
+fn base64url_encode_no_pad(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+
+        out.push(ALPHABET[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHABET[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[((triple >> 6) & 0x3F) as usize] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[(triple & 0x3F) as usize] as char);
+        }
+    }
+    out
+}
+
+/// Converts a resolved `ScreenAiMetadata` into an immutable CIPD download URL pinned to the
+/// exact resolved instance digest (never falling back to mutable `latest`).
+pub fn build_cipd_instance_download_url(meta: &ScreenAiMetadata) -> Result<String, String> {
+    let digest = meta.instance_digest.trim();
+    if digest.is_empty() || digest.eq_ignore_ascii_case("latest") {
+        return Err(
+            "Cannot build immutable CIPD download URL: missing resolved instance_digest"
+                .to_string(),
+        );
+    }
+
+    // Standard CIPD SHA256 hexDigest (64 hex chars = 32 bytes) encodes to a base64url
+    // instance ID prefixed with 0x02 (HashAlgo_SHA256).
+    let instance_ref = if digest.len() == 64 && digest.chars().all(|c| c.is_ascii_hexdigit()) {
+        let raw_hash = decode_hex_bytes(digest)
+            .ok_or_else(|| "Invalid SHA256 hex digest in ScreenAiMetadata".to_string())?;
+        let mut payload = Vec::with_capacity(1 + raw_hash.len());
+        payload.push(0x02);
+        payload.extend_from_slice(&raw_hash);
+        base64url_encode_no_pad(&payload)
+    } else if digest
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+    {
+        digest.to_string()
+    } else {
+        return Err(format!(
+            "Invalid characters in Screen AI instance_digest: '{digest}'"
+        ));
+    };
+
+    Ok(format!(
+        "https://chrome-infra-packages.appspot.com/dl/{CIPD_PACKAGE}/+/{instance_ref}"
+    ))
 }
 
 /// Queries CIPD pRPC endpoints to resolve the latest `chromium/third_party/screen-ai/linux` version.
@@ -227,7 +512,70 @@ pub fn check_remote_screen_ai_version() -> Result<ScreenAiMetadata, String> {
     parse_cipd_version_responses(&resolve_body, describe_body.as_deref())
 }
 
-/// Downloads and extracts the latest Chrome Screen AI Linux package from CIPD into `target_dir`.
+fn sanitize_version_dir_name(meta: &ScreenAiMetadata) -> String {
+    let sanitize = |s: &str| -> String {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>()
+            .trim_matches('.')
+            .to_string()
+    };
+
+    let ver = sanitize(meta.version.trim());
+    let dig = sanitize(meta.instance_digest.trim());
+    let short_dig = &dig[..dig.len().min(12)];
+
+    match (ver.is_empty(), short_dig.is_empty()) {
+        (false, false) if ver != short_dig => format!("{ver}-{short_dig}"),
+        (false, _) => ver,
+        (true, false) => short_dig.to_string(),
+        (true, true) => "installed".to_string(),
+    }
+}
+
+struct StagingCleanupGuard {
+    staging_dir: PathBuf,
+    committed: bool,
+}
+
+impl StagingCleanupGuard {
+    fn new(staging_dir: PathBuf) -> Self {
+        Self {
+            staging_dir,
+            committed: false,
+        }
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for StagingCleanupGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_dir_all(&self.staging_dir);
+            if let Some(versions_dir) = self.staging_dir.parent() {
+                if versions_dir
+                    .read_dir()
+                    .ok()
+                    .is_some_and(|mut it| it.next().is_none())
+                {
+                    let _ = std::fs::remove_dir(versions_dir);
+                }
+            }
+        }
+    }
+}
+
+/// Downloads and installs the resolved Chrome Screen AI Linux package from CIPD into `target_dir`
+/// using a staged versioned directory and atomic activation.
 pub fn download_and_install_screen_ai<F>(
     target_dir: &Path,
     progress_cb: F,
@@ -242,10 +590,8 @@ where
         "Checking latest Chrome Screen AI version...".to_string(),
         0.02,
     );
-    let meta = check_remote_screen_ai_version().unwrap_or_else(|_| ScreenAiMetadata {
-        version: "latest".to_string(),
-        instance_digest: String::new(),
-    });
+    let meta = check_remote_screen_ai_version()?;
+    let download_url = build_cipd_instance_download_url(&meta)?;
 
     progress_cb(
         format!("Downloading Chrome Screen AI ({})...", meta.version),
@@ -258,7 +604,7 @@ where
         .build();
 
     let resp = agent
-        .get(CIPD_DOWNLOAD_URL)
+        .get(&download_url)
         .call()
         .map_err(|e| format!("Failed to download Chrome Screen AI package: {e}"))?;
 
@@ -267,8 +613,13 @@ where
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(78_000_000);
 
-    let tmp_zip_path = target_dir.join("screen_ai_download.zip.tmp");
-    {
+    let seq = STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_zip_path = target_dir.join(format!(
+        ".screen_ai_download_{}_{}.zip.tmp",
+        std::process::id(),
+        seq
+    ));
+    let download_res = (|| -> Result<(), String> {
         let mut out_file = std::fs::File::create(&tmp_zip_path)
             .map_err(|e| format!("Failed to create temporary zip file: {e}"))?;
         let mut reader = resp.into_reader();
@@ -305,6 +656,12 @@ where
         out_file
             .flush()
             .map_err(|e| format!("Failed to flush temporary zip file: {e}"))?;
+        Ok(())
+    })();
+
+    if let Err(e) = download_res {
+        let _ = std::fs::remove_file(&tmp_zip_path);
+        return Err(e);
     }
 
     progress_cb(
@@ -312,20 +669,17 @@ where
         0.76,
     );
 
-    let extract_result = extract_screen_ai_archive(&tmp_zip_path, target_dir, &progress_cb);
+    let install_result = install_screen_ai_archive(&tmp_zip_path, target_dir, &meta, &progress_cb);
     let _ = std::fs::remove_file(&tmp_zip_path);
-    extract_result?;
-
-    save_installed_metadata(target_dir, &meta)?;
-    update_active_model_dir(target_dir);
+    install_result?;
 
     progress_cb("Chrome Screen AI local model ready.".to_string(), 1.0);
     Ok(meta)
 }
 
-fn extract_screen_ai_archive<F>(
+fn extract_zip_into_staging_dir<F>(
     zip_path: &Path,
-    target_dir: &Path,
+    staging_dir: &Path,
     progress_cb: &F,
 ) -> Result<(), String>
 where
@@ -348,7 +702,7 @@ where
             continue;
         }
 
-        // Strip leading "resources/" prefix so model files sit directly in target_dir
+        // Strip leading "resources/" prefix so model files sit directly in staging_dir
         let rel_str = raw_name
             .strip_prefix("resources/")
             .unwrap_or(raw_name.as_str());
@@ -361,10 +715,12 @@ where
             .components()
             .all(|c| matches!(c, Component::Normal(_)))
         {
-            continue;
+            return Err(format!(
+                "Refusing to extract unsafe archive entry path: '{raw_name}'"
+            ));
         }
 
-        let out_path = target_dir.join(rel_path);
+        let out_path = staging_dir.join(rel_path);
         if entry.is_dir() {
             std::fs::create_dir_all(&out_path)
                 .map_err(|e| format!("Failed to create directory {}: {e}", out_path.display()))?;
@@ -376,16 +732,13 @@ where
                 .map_err(|e| format!("Failed to create parent dir {}: {e}", parent.display()))?;
         }
 
-        let tmp_out = out_path.with_extension("extract_tmp");
-        {
-            let mut out_file = std::fs::File::create(&tmp_out)
-                .map_err(|e| format!("Failed to create file {}: {e}", tmp_out.display()))?;
-            std::io::copy(&mut entry, &mut out_file)
-                .map_err(|e| format!("Failed to extract {}: {e}", out_path.display()))?;
-            out_file
-                .flush()
-                .map_err(|e| format!("Failed to flush {}: {e}", out_path.display()))?;
-        }
+        let mut out_file = std::fs::File::create(&out_path)
+            .map_err(|e| format!("Failed to create file {}: {e}", out_path.display()))?;
+        std::io::copy(&mut entry, &mut out_file)
+            .map_err(|e| format!("Failed to extract {}: {e}", out_path.display()))?;
+        out_file
+            .flush()
+            .map_err(|e| format!("Failed to flush {}: {e}", out_path.display()))?;
 
         #[cfg(unix)]
         if out_path
@@ -394,11 +747,8 @@ where
             .is_some_and(|n| n.ends_with(".so"))
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&tmp_out, std::fs::Permissions::from_mode(0o755));
+            let _ = std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(0o755));
         }
-
-        std::fs::rename(&tmp_out, &out_path)
-            .map_err(|e| format!("Failed to finalize {}: {e}", out_path.display()))?;
 
         let frac = (i + 1) as f32 / total_entries as f32;
         progress_cb(
@@ -411,14 +761,141 @@ where
         );
     }
 
-    if !is_screen_ai_installed(target_dir) {
-        return Err(
-            "Extracted archive did not contain libchromescreenai.so and files_list_ocr.txt"
-                .to_string(),
-        );
+    validate_staged_screen_ai_dir(staging_dir)
+}
+
+/// Extracts a Chrome Screen AI ZIP archive into a staged versioned subdirectory under `target_dir`,
+/// validates `libchromescreenai.so` (ELF magic) and all files listed in `files_list_ocr.txt` /
+/// `manifest.json`, writes `.cipd_version` and `metadata.json`, and atomically activates the new
+/// version without mutating any currently pinned runtime directory.
+pub fn install_screen_ai_archive<F>(
+    zip_path: &Path,
+    target_dir: &Path,
+    meta: &ScreenAiMetadata,
+    progress_cb: &F,
+) -> Result<PathBuf, String>
+where
+    F: Fn(String, f32),
+{
+    let versions_dir = target_dir.join("versions");
+    std::fs::create_dir_all(&versions_dir)
+        .map_err(|e| format!("Failed to create {}: {e}", versions_dir.display()))?;
+
+    let version_id = sanitize_version_dir_name(meta);
+    let seq = STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
+    let staging_dir = versions_dir.join(format!(
+        ".staging-{}-{}-{}",
+        version_id,
+        std::process::id(),
+        seq
+    ));
+    if staging_dir.exists() {
+        let _ = std::fs::remove_dir_all(&staging_dir);
+    }
+    std::fs::create_dir_all(&staging_dir).map_err(|e| {
+        format!(
+            "Failed to create staging dir {}: {e}",
+            staging_dir.display()
+        )
+    })?;
+
+    let mut guard = StagingCleanupGuard::new(staging_dir.clone());
+
+    extract_zip_into_staging_dir(zip_path, &staging_dir, progress_cb)?;
+
+    let meta_json = serde_json::to_string_pretty(meta)
+        .map_err(|e| format!("Failed to serialize Screen AI metadata: {e}"))?;
+    std::fs::write(staging_dir.join("metadata.json"), &meta_json)
+        .map_err(|e| format!("Failed to write staged metadata.json: {e}"))?;
+
+    let cipd_version_json = serde_json::json!({
+        "package_name": CIPD_PACKAGE,
+        "instance_id": meta.instance_digest,
+        "version": meta.version,
+    });
+    let cipd_version_str = serde_json::to_string_pretty(&cipd_version_json)
+        .map_err(|e| format!("Failed to serialize .cipd_version: {e}"))?;
+    std::fs::write(staging_dir.join(".cipd_version"), cipd_version_str)
+        .map_err(|e| format!("Failed to write staged .cipd_version: {e}"))?;
+
+    let final_version_dir = versions_dir.join(&version_id);
+
+    // If the exact same version_id directory is currently the pinned runtime directory,
+    // keep that directory intact and use a distinct suffixed version directory.
+    let final_version_dir = if active_pinned_runtime_dir()
+        .as_deref()
+        .is_some_and(|pinned| pinned == final_version_dir.as_path())
+    {
+        versions_dir.join(format!("{version_id}-r{seq}"))
+    } else {
+        final_version_dir
+    };
+    let final_version_name = final_version_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&version_id)
+        .to_string();
+
+    let backup_dir = if final_version_dir.exists() {
+        let bak = versions_dir.join(format!(
+            ".backup-{}-{}-{}",
+            final_version_name,
+            std::process::id(),
+            seq
+        ));
+        let _ = std::fs::remove_dir_all(&bak);
+        std::fs::rename(&final_version_dir, &bak).map_err(|e| {
+            format!(
+                "Failed to move existing version dir {} aside: {e}",
+                final_version_dir.display()
+            )
+        })?;
+        Some(bak)
+    } else {
+        None
+    };
+
+    if let Err(e) = std::fs::rename(&staging_dir, &final_version_dir) {
+        if let Some(ref bak) = backup_dir {
+            let _ = std::fs::rename(bak, &final_version_dir);
+        }
+        return Err(format!(
+            "Failed to atomically activate staged Screen AI directory {}: {e}",
+            final_version_dir.display()
+        ));
     }
 
-    Ok(())
+    guard.commit();
+    if let Some(bak) = backup_dir {
+        let _ = std::fs::remove_dir_all(bak);
+    }
+
+    write_file_atomically(
+        &target_dir.join("active_version"),
+        final_version_name.as_bytes(),
+    )?;
+    write_file_atomically(&target_dir.join("metadata.json"), meta_json.as_bytes())?;
+
+    // Only update ACTIVE_MODEL_DIR if no native runtime is currently pinned in this process.
+    update_active_model_dir_if_unpinned(&final_version_dir);
+
+    Ok(final_version_dir)
+}
+
+#[cfg(test)]
+fn extract_screen_ai_archive<F>(
+    zip_path: &Path,
+    target_dir: &Path,
+    progress_cb: &F,
+) -> Result<(), String>
+where
+    F: Fn(String, f32),
+{
+    let existing_meta = load_installed_metadata(target_dir).unwrap_or_else(|| ScreenAiMetadata {
+        version: "installed".to_string(),
+        instance_digest: String::new(),
+    });
+    install_screen_ai_archive(zip_path, target_dir, &existing_meta, progress_cb).map(|_| ())
 }
 
 /// Spawns a background thread to check if a newer Chrome Screen AI package is available on CIPD.
@@ -528,14 +1005,128 @@ pub struct SkBitmap {
 static DUMMY_VTABLE: [usize; 16] = [0; 16];
 
 static ACTIVE_MODEL_DIR: OnceLock<RwLock<PathBuf>> = OnceLock::new();
+static PINNED_RUNTIME_STATE: OnceLock<RwLock<Option<ActiveRuntimePin>>> = OnceLock::new();
 
 fn active_model_dir_lock() -> &'static RwLock<PathBuf> {
-    ACTIVE_MODEL_DIR.get_or_init(|| RwLock::new(resolve_screen_ai_directory()))
+    ACTIVE_MODEL_DIR.get_or_init(|| {
+        let base = resolve_screen_ai_directory();
+        RwLock::new(resolve_active_version_dir(&base))
+    })
 }
 
-fn update_active_model_dir(dir: &Path) {
+fn pinned_runtime_state_lock() -> &'static RwLock<Option<ActiveRuntimePin>> {
+    PINNED_RUNTIME_STATE.get_or_init(|| RwLock::new(None))
+}
+
+fn active_pinned_runtime_dir() -> Option<PathBuf> {
+    pinned_runtime_state_lock()
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().map(|p| p.runtime_dir.clone()))
+}
+
+fn update_active_model_dir_if_unpinned(dir: &Path) {
+    if active_pinned_runtime_dir().is_some() {
+        return;
+    }
+    let concrete = resolve_active_version_dir(dir);
     if let Ok(mut guard) = active_model_dir_lock().write() {
-        *guard = dir.to_path_buf();
+        *guard = concrete;
+    }
+}
+
+/// Returns the immutable model directory currently serving the active Screen AI callbacks.
+pub fn active_runtime_model_dir() -> PathBuf {
+    if let Some(pinned_dir) = active_pinned_runtime_dir() {
+        return pinned_dir;
+    }
+    active_model_dir_lock()
+        .read()
+        .map(|g| resolve_active_version_dir(&g))
+        .unwrap_or_else(|_| resolve_active_version_dir(&resolve_screen_ai_directory()))
+}
+
+/// Returns the metadata of the Screen AI version currently loaded/pinned in this process, if any.
+#[allow(dead_code)]
+pub fn active_loaded_screen_ai_metadata() -> Option<ScreenAiMetadata> {
+    pinned_runtime_state_lock()
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().map(|p| p.metadata.clone()))
+}
+
+/// Returns true if a newer Screen AI version has been installed into `dir` on disk than the
+/// version currently pinned by the loaded runtime in this process (meaning a restart is needed
+/// to load the new `libchromescreenai.so`).
+pub fn is_screen_ai_restart_required(dir: &Path) -> bool {
+    let Some(pin) = pinned_runtime_state_lock()
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
+    else {
+        return false;
+    };
+    let disk_version_dir = resolve_active_version_dir(dir);
+    if disk_version_dir != pin.runtime_dir {
+        return true;
+    }
+    if let Some(disk_meta) = load_installed_metadata(dir) {
+        if !disk_meta.instance_digest.is_empty() && !pin.metadata.instance_digest.is_empty() {
+            return disk_meta.instance_digest != pin.metadata.instance_digest;
+        }
+        return disk_meta.version != pin.metadata.version;
+    }
+    false
+}
+
+/// Pins the process-wide Screen AI file callbacks to the concrete active version directory inside
+/// `model_dir` if not already pinned. Once pinned, subsequent installs on disk will not mutate or
+/// redirect the directory read by the running native library until `reset_pinned_runtime_state`
+/// (or process restart).
+pub fn pin_runtime_to_installed_version(model_dir: &Path) -> Result<ActiveRuntimePin, String> {
+    if let Some(existing) = pinned_runtime_state_lock()
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
+    {
+        return Ok(existing);
+    }
+
+    let concrete_dir = resolve_active_version_dir(model_dir);
+    validate_staged_screen_ai_dir(&concrete_dir)?;
+
+    let metadata = load_installed_metadata(&concrete_dir)
+        .or_else(|| load_installed_metadata(model_dir))
+        .unwrap_or_else(|| ScreenAiMetadata {
+            version: "installed".to_string(),
+            instance_digest: String::new(),
+        });
+
+    let pin = ActiveRuntimePin {
+        base_dir: model_dir.to_path_buf(),
+        runtime_dir: concrete_dir.clone(),
+        metadata,
+    };
+
+    if let Ok(mut dir_guard) = active_model_dir_lock().write() {
+        *dir_guard = concrete_dir;
+    }
+    if let Ok(mut pin_guard) = pinned_runtime_state_lock().write() {
+        if pin_guard.is_none() {
+            *pin_guard = Some(pin.clone());
+        } else if let Some(ref existing) = *pin_guard {
+            return Ok(existing.clone());
+        }
+    }
+
+    Ok(pin)
+}
+
+/// Clears the pinned runtime state (used to simulate process restart in tests).
+#[allow(dead_code)]
+pub fn reset_pinned_runtime_state() {
+    if let Ok(mut pin_guard) = pinned_runtime_state_lock().write() {
+        *pin_guard = None;
     }
 }
 
@@ -546,11 +1137,10 @@ extern "C" fn get_file_content_size_cb(relative_file_path: *const c_char) -> u32
     let Ok(rel_str) = unsafe { CStr::from_ptr(relative_file_path) }.to_str() else {
         return 0;
     };
-    let dir = match active_model_dir_lock().read() {
-        Ok(g) => g.clone(),
-        Err(_) => return 0,
-    };
-    let Some(full_path) = resolve_model_file_path(&dir, rel_str) else {
+    let dir = active_runtime_model_dir();
+    let Some(full_path) = resolve_model_file_path_in_concrete_dir(&dir, rel_str)
+        .or_else(|| resolve_model_file_path(&dir, rel_str))
+    else {
         tracing::warn!("Screen AI requested missing model file size: {}", rel_str);
         return 0;
     };
@@ -570,11 +1160,10 @@ extern "C" fn get_file_content_cb(
     let Ok(rel_str) = unsafe { CStr::from_ptr(relative_file_path) }.to_str() else {
         return;
     };
-    let dir = match active_model_dir_lock().read() {
-        Ok(g) => g.clone(),
-        Err(_) => return,
-    };
-    let Some(full_path) = resolve_model_file_path(&dir, rel_str) else {
+    let dir = active_runtime_model_dir();
+    let Some(full_path) = resolve_model_file_path_in_concrete_dir(&dir, rel_str)
+        .or_else(|| resolve_model_file_path(&dir, rel_str))
+    else {
         tracing::warn!(
             "Screen AI requested missing model file content: {}",
             rel_str
@@ -621,14 +1210,16 @@ fn ensure_runtime_loaded_and_initialized(
     guard: &mut Option<ScreenAiLibrary>,
     model_dir: &Path,
 ) -> Result<u32, String> {
-    update_active_model_dir(model_dir);
+    let pin = pin_runtime_to_installed_version(model_dir)?;
+    let pinned_dir = &pin.runtime_dir;
 
     if guard.is_none() {
-        let so_path =
-            resolve_model_file_path(model_dir, "libchromescreenai.so").ok_or_else(|| {
+        let so_path = resolve_model_file_path_in_concrete_dir(pinned_dir, "libchromescreenai.so")
+            .or_else(|| resolve_model_file_path(pinned_dir, "libchromescreenai.so"))
+            .ok_or_else(|| {
                 format!(
                     "Chrome Screen AI library not found in {}",
-                    model_dir.display()
+                    pinned_dir.display()
                 )
             })?;
 
@@ -1618,6 +2209,234 @@ mod tests {
         assert_eq!(loaded, meta);
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    fn write_screen_ai_test_zip(zip_path: &Path, entries: &[(&str, &[u8])]) {
+        let file = std::fs::File::create(zip_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, bytes) in entries {
+            zip.start_file(*name, options).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    #[test]
+    fn test_staged_screen_ai_extraction_failures_preserve_existing_installation() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let target_dir = tmp_dir.path().join("screen_ai");
+
+        // 1. Seed a valid v1 installation
+        let v1_zip = tmp_dir.path().join("v1.zip");
+        write_screen_ai_test_zip(
+            &v1_zip,
+            &[
+                ("resources/libchromescreenai.so", b"\x7fELF-valid-v1-so"),
+                ("resources/files_list_ocr.txt", b"gocr/model.tflite\n"),
+                ("resources/gocr/model.tflite", b"v1-model-weights"),
+            ],
+        );
+        let v1_meta = ScreenAiMetadata {
+            version: "153.01".to_string(),
+            instance_digest: "111111111111".to_string(),
+        };
+        install_screen_ai_archive(&v1_zip, &target_dir, &v1_meta, &|_, _| {}).unwrap();
+        assert!(is_screen_ai_installed(&target_dir));
+        assert_eq!(load_installed_metadata(&target_dir), Some(v1_meta.clone()));
+
+        let assert_v1_intact = |target_dir: &Path| {
+            assert!(is_screen_ai_installed(target_dir));
+            assert_eq!(load_installed_metadata(target_dir), Some(v1_meta.clone()));
+            let model_path = resolve_model_file_path(target_dir, "gocr/model.tflite").unwrap();
+            assert_eq!(std::fs::read(model_path).unwrap(), b"v1-model-weights");
+            let so_path = resolve_model_file_path(target_dir, "libchromescreenai.so").unwrap();
+            assert_eq!(std::fs::read(so_path).unwrap(), b"\x7fELF-valid-v1-so");
+            // Ensure no leftover .staging-* directories remain
+            if let Ok(entries) = std::fs::read_dir(target_dir.join("versions")) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    assert!(
+                        !name_str.starts_with(".staging-"),
+                        "Leftover staging dir found: {name_str}"
+                    );
+                }
+            }
+        };
+
+        let bad_meta = ScreenAiMetadata {
+            version: "153.99".to_string(),
+            instance_digest: "999999999999".to_string(),
+        };
+
+        // Case (a): Corrupt non-ZIP archive
+        let corrupt_zip = tmp_dir.path().join("corrupt.zip");
+        std::fs::write(&corrupt_zip, b"not a zip archive at all").unwrap();
+        assert!(
+            install_screen_ai_archive(&corrupt_zip, &target_dir, &bad_meta, &|_, _| {}).is_err()
+        );
+        assert_v1_intact(&target_dir);
+
+        // Case (b): libchromescreenai.so without ELF magic header
+        let non_elf_zip = tmp_dir.path().join("non_elf.zip");
+        write_screen_ai_test_zip(
+            &non_elf_zip,
+            &[
+                (
+                    "resources/libchromescreenai.so",
+                    b"NOT_AN_ELF_SHARED_OBJECT",
+                ),
+                ("resources/files_list_ocr.txt", b"gocr/model.tflite\n"),
+                ("resources/gocr/model.tflite", b"v2-model-weights"),
+            ],
+        );
+        assert!(
+            install_screen_ai_archive(&non_elf_zip, &target_dir, &bad_meta, &|_, _| {}).is_err()
+        );
+        assert_v1_intact(&target_dir);
+
+        // Case (c): files_list_ocr.txt references a missing model file
+        let missing_model_zip = tmp_dir.path().join("missing_model.zip");
+        write_screen_ai_test_zip(
+            &missing_model_zip,
+            &[
+                ("resources/libchromescreenai.so", b"\x7fELF-valid-v2-so"),
+                (
+                    "resources/files_list_ocr.txt",
+                    b"gocr/model.tflite\ngocr/missing_detector.tflite\n",
+                ),
+                ("resources/gocr/model.tflite", b"v2-model-weights"),
+            ],
+        );
+        assert!(
+            install_screen_ai_archive(&missing_model_zip, &target_dir, &bad_meta, &|_, _| {})
+                .is_err()
+        );
+        assert_v1_intact(&target_dir);
+
+        // Case (d): manifest.json references a missing file
+        let bad_manifest_zip = tmp_dir.path().join("bad_manifest.zip");
+        write_screen_ai_test_zip(
+            &bad_manifest_zip,
+            &[
+                ("resources/libchromescreenai.so", b"\x7fELF-valid-v2-so"),
+                ("resources/files_list_ocr.txt", b"gocr/model.tflite\n"),
+                ("resources/gocr/model.tflite", b"v2-model-weights"),
+                (
+                    "resources/manifest.json",
+                    br#"{"files":["gocr/model.tflite","gocr/missing_manifest_file.tflite"]}"#,
+                ),
+            ],
+        );
+        assert!(
+            install_screen_ai_archive(&bad_manifest_zip, &target_dir, &bad_meta, &|_, _| {})
+                .is_err()
+        );
+        assert_v1_intact(&target_dir);
+    }
+
+    #[test]
+    fn test_pinned_runtime_isolation_across_versioned_update() {
+        use std::ffi::CString;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let target_dir = tmp_dir.path().join("screen_ai");
+
+        reset_pinned_runtime_state();
+
+        // 1. Install v1 and pin runtime to v1
+        let v1_zip = tmp_dir.path().join("v1.zip");
+        write_screen_ai_test_zip(
+            &v1_zip,
+            &[
+                ("resources/libchromescreenai.so", b"\x7fELF-v1-so"),
+                ("resources/files_list_ocr.txt", b"gocr/model.tflite\n"),
+                ("resources/gocr/model.tflite", b"model-v1-weights"),
+            ],
+        );
+        let v1_meta = ScreenAiMetadata {
+            version: "153.01".to_string(),
+            instance_digest: "aaaa11112222".to_string(),
+        };
+        let v1_dir = install_screen_ai_archive(&v1_zip, &target_dir, &v1_meta, &|_, _| {}).unwrap();
+        let pin = pin_runtime_to_installed_version(&target_dir).unwrap();
+        assert_eq!(pin.runtime_dir, v1_dir);
+        assert_eq!(active_loaded_screen_ai_metadata(), Some(v1_meta.clone()));
+        assert!(!is_screen_ai_restart_required(&target_dir));
+
+        let c_rel = CString::new("gocr/model.tflite").unwrap();
+        let read_via_cb = || -> Vec<u8> {
+            let sz = get_file_content_size_cb(c_rel.as_ptr());
+            let mut buf = vec![0u8; sz as usize];
+            get_file_content_cb(c_rel.as_ptr(), sz, buf.as_mut_ptr());
+            buf
+        };
+        assert_eq!(read_via_cb(), b"model-v1-weights");
+
+        // 2. Install v2 while v1 runtime is still pinned
+        let v2_zip = tmp_dir.path().join("v2.zip");
+        write_screen_ai_test_zip(
+            &v2_zip,
+            &[
+                ("resources/libchromescreenai.so", b"\x7fELF-v2-so"),
+                ("resources/files_list_ocr.txt", b"gocr/model.tflite\n"),
+                ("resources/gocr/model.tflite", b"model-v2-updated-weights"),
+            ],
+        );
+        let v2_meta = ScreenAiMetadata {
+            version: "153.05".to_string(),
+            instance_digest: "bbbb33334444".to_string(),
+        };
+        let v2_dir = install_screen_ai_archive(&v2_zip, &target_dir, &v2_meta, &|_, _| {}).unwrap();
+        assert_ne!(v1_dir, v2_dir);
+
+        // Disk metadata reflects v2, while active loaded runtime remains pinned to v1
+        assert_eq!(load_installed_metadata(&target_dir), Some(v2_meta.clone()));
+        assert_eq!(active_loaded_screen_ai_metadata(), Some(v1_meta.clone()));
+        assert!(is_screen_ai_restart_required(&target_dir));
+        assert_eq!(active_runtime_model_dir(), v1_dir);
+        assert_eq!(
+            read_via_cb(),
+            b"model-v1-weights",
+            "Pinned runtime callbacks must continue reading v1 model files until restart"
+        );
+
+        // 3. Simulate restart -> runtime pins to v2 and reads v2 model files
+        reset_pinned_runtime_state();
+        let pin2 = pin_runtime_to_installed_version(&target_dir).unwrap();
+        assert_eq!(pin2.runtime_dir, v2_dir);
+        assert_eq!(active_loaded_screen_ai_metadata(), Some(v2_meta));
+        assert!(!is_screen_ai_restart_required(&target_dir));
+        assert_eq!(read_via_cb(), b"model-v2-updated-weights");
+
+        reset_pinned_runtime_state();
+    }
+
+    #[test]
+    fn test_build_cipd_instance_download_url_rejects_mutable_and_encodes_sha256() {
+        let empty_meta = ScreenAiMetadata {
+            version: "latest".to_string(),
+            instance_digest: String::new(),
+        };
+        assert!(build_cipd_instance_download_url(&empty_meta).is_err());
+
+        let latest_meta = ScreenAiMetadata {
+            version: "latest".to_string(),
+            instance_digest: "latest".to_string(),
+        };
+        assert!(build_cipd_instance_download_url(&latest_meta).is_err());
+
+        let valid_sha256 = ScreenAiMetadata {
+            version: "153.05".to_string(),
+            instance_digest: "cd837ed33b7011223344556677889900aabbccddeeff00112233445566778899"
+                .to_string(),
+        };
+        let url = build_cipd_instance_download_url(&valid_sha256).unwrap();
+        assert!(url.starts_with(
+            "https://chrome-infra-packages.appspot.com/dl/chromium/third_party/screen-ai/linux/+/"
+        ));
+        assert!(!url.ends_with("/latest"));
     }
 
     #[test]

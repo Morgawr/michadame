@@ -90,6 +90,10 @@ impl WorkQueue {
         }
         self.free.try_recv().ok()
     }
+    #[allow(dead_code)]
+    pub fn has_buffer(&self, generation: u64) -> bool {
+        self.generation.load(Ordering::Acquire) == generation && !self.free.is_empty()
+    }
     pub fn submit(
         &self,
         frame: VideoFrame,
