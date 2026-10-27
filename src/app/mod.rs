@@ -353,7 +353,7 @@ impl AppState {
     ///
     /// Automatically pauses when:
     /// - The dictionary popup is open (`self.dict.popup.is_some()`)
-    /// - The cursor is hovering over an OCR box (`self.ocr.is_box_hovered`)
+    /// - The cursor is hovering over a visible OCR box (`self.ocr.is_box_hovered && !self.ocr.hide_overlay`)
     /// - The drawing whiteboard is open (`self.whiteboard.open`)
     pub fn handle_constant_ocr_scanning(&mut self, ctx: &egui::Context) -> bool {
         if !self.ocr.is_constant_scanning_active() || !self.ui.video_window_open {
@@ -370,8 +370,9 @@ impl AppState {
             return false;
         }
 
-        let is_paused =
-            self.dict.popup.is_some() || self.ocr.is_box_hovered || self.whiteboard.open;
+        let is_paused = self.dict.popup.is_some()
+            || (self.ocr.is_box_hovered && !self.ocr.hide_overlay)
+            || self.whiteboard.open;
         if is_paused {
             self.ocr.was_constant_scan_paused = true;
             self.ocr.next_constant_scan_time = None;
@@ -962,7 +963,7 @@ impl eframe::App for AppState {
                 Ok(lines) => {
                     if constant_active {
                         let is_paused = self.dict.popup.is_some()
-                            || self.ocr.is_box_hovered
+                            || (self.ocr.is_box_hovered && !self.ocr.hide_overlay)
                             || self.whiteboard.open;
                         if !is_paused {
                             let updated = self.ocr.apply_constant_scan_lines(lines);
@@ -1631,7 +1632,8 @@ mod tests {
         assert!(!state.handle_constant_ocr_scanning(&ctx));
         state.ocr.is_processing.store(false, Ordering::Release);
 
-        // 3. Pauses when hovering over an OCR box, dictionary popup is open, or whiteboard is open
+        // 3. Pauses when hovering over a visible OCR box, dictionary popup is open, or whiteboard is open
+        state.ocr.hide_overlay = false;
         state.ocr.is_box_hovered = true;
         assert!(!state.handle_constant_ocr_scanning(&ctx));
         assert!(state.ocr.was_constant_scan_paused);
@@ -1643,7 +1645,16 @@ mod tests {
         assert!(!state.ocr.was_constant_scan_paused);
         assert!(state.ocr.next_constant_scan_time.is_some());
 
-        // 5. Remote model never triggers constant scanning
+        // 5. When hide_overlay is enabled, hovering an invisible OCR box does NOT pause scanning
+        state.ocr.next_constant_scan_time = None;
+        state.ocr.hide_overlay = true;
+        state.ocr.is_box_hovered = true;
+        assert!(state.handle_constant_ocr_scanning(&ctx));
+        assert!(!state.ocr.was_constant_scan_paused);
+        assert!(state.ocr.capture_requested.load(Ordering::Acquire));
+        state.ocr.capture_requested.store(false, Ordering::Release);
+
+        // 6. Remote model never triggers constant scanning
         state.ocr.set_backend(crate::ocr::OcrBackend::GoogleLens);
         assert!(!state.handle_constant_ocr_scanning(&ctx));
         assert!(state.ocr.next_constant_scan_time.is_none());
