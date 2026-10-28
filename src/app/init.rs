@@ -3,8 +3,11 @@ use crate::config;
 use eframe::egui;
 use std::sync::{Arc, Mutex};
 
-pub fn init_app_state(cc: &eframe::CreationContext) -> AppState {
+pub fn init_app_state(cc: &eframe::CreationContext, steam_deck: bool) -> AppState {
     let mut state = AppState::default();
+    if steam_deck {
+        state.steam_deck = Some(crate::steam_deck::SteamDeckState::default());
+    }
 
     let ctx_clone = cc.egui_ctx.clone();
     crate::ui::setup_style(&ctx_clone);
@@ -21,8 +24,13 @@ pub fn init_app_state(cc: &eframe::CreationContext) -> AppState {
         .load_texture("logo", logo_color_image, Default::default());
     state.logo_texture = Some(logo_texture);
 
-    let config_path = confy::get_configuration_file_path("michadame", None).ok();
-    match confy::load::<config::MichadameConfig>("michadame", None) {
+    let config_path = config::configuration_path(&state).ok();
+    match config_path
+        .as_ref()
+        .ok_or_else(|| "Could not locate configuration".to_string())
+        .and_then(|path| {
+            confy::load_path::<config::MichadameConfig>(path).map_err(|e| e.to_string())
+        }) {
         Ok(loaded_cfg) => {
             if let Some(ref path) = config_path {
                 config::persistence::create_rotating_backup(path);
@@ -41,6 +49,10 @@ pub fn init_app_state(cc: &eframe::CreationContext) -> AppState {
             let default_cfg = config::MichadameConfig::default();
             config::apply_config(&mut state, &default_cfg);
         }
+    }
+
+    if steam_deck {
+        crate::steam_deck::configure(&mut state, &cc.egui_ctx);
     }
 
     let default_cfg_applied = state.config_load_error.is_some();
@@ -68,26 +80,28 @@ pub fn init_app_state(cc: &eframe::CreationContext) -> AppState {
 
     let egui_ctx = cc.egui_ctx.clone();
     state.ocr.start_worker(Some(egui_ctx.clone()));
-    let (tx, rx) = crossbeam_channel::unbounded();
-    state.device_scan_receiver = Some(rx);
-    std::thread::spawn(move || {
-        let video_result = crate::devices::video::find_video_devices();
-        let audio_result = crate::devices::audio::find_audio_devices();
-        let usb_result = crate::devices::usb::find_usb_devices();
+    if !steam_deck {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        state.device_scan_receiver = Some(rx);
+        std::thread::spawn(move || {
+            let video_result = crate::devices::video::find_video_devices();
+            let audio_result = crate::devices::audio::find_audio_devices();
+            let usb_result = crate::devices::usb::find_usb_devices();
 
-        let result: crate::devices::DeviceScanResult = (|| {
-            let video_devices = video_result?;
-            let audio_sources = audio_result?;
-            let usb_devices = usb_result?;
-            Ok((video_devices, audio_sources, usb_devices))
-        })();
+            let result: crate::devices::DeviceScanResult = (|| {
+                let video_devices = video_result?;
+                let audio_sources = audio_result?;
+                let usb_devices = usb_result?;
+                Ok((video_devices, audio_sources, usb_devices))
+            })();
 
-        if let Err(e) = &result {
-            tracing::error!("Device scan failed: {:?}", e);
-        };
-        let _ = tx.send(result);
-        egui_ctx.request_repaint();
-    });
+            if let Err(e) = &result {
+                tracing::error!("Device scan failed: {:?}", e);
+            };
+            let _ = tx.send(result);
+            egui_ctx.request_repaint();
+        });
+    }
 
     let video_texture = {
         let tex_manager = cc.egui_ctx.tex_manager();

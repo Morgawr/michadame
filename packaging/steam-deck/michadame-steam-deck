@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+bundle_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# Steam's injected GLX overlay crashed the viewer in glXSwapBuffers when the
+# nested game exited. Game Mode provides its own system menus. The headless
+# launcher also isolates its injected overlay; preserve other preloaded libraries.
+if [ -n "${LD_PRELOAD:-}" ]; then
+    read -r -a preloads <<< "${LD_PRELOAD//:/ }"
+    kept_preloads=()
+    for library in "${preloads[@]}"; do
+        case "$library" in
+            */gameoverlayrenderer.so|gameoverlayrenderer.so) ;;
+            *) kept_preloads+=("$library") ;;
+        esac
+    done
+    if [ "${#kept_preloads[@]}" -gt 0 ]; then
+        export LD_PRELOAD="${kept_preloads[*]}"
+    else
+        unset LD_PRELOAD
+    fi
+fi
+export DISABLE_VK_LAYER_VALVE_steam_overlay_1=1
+if [ "${1:-}" = --check ]; then
+    failed=0
+    for program in steam gamescope gamescopectl; do
+        if command -v "$program" >/dev/null; then
+            printf 'OK: %s\n' "$program"
+        else
+            printf 'Missing SteamOS component: %s\n' "$program" >&2
+            failed=1
+        fi
+    done
+    if ! ldd "$bundle_dir/bin/michadame" | tee /dev/stderr | grep -q 'not found'; then
+        printf 'OK: application libraries resolve\n'
+    else
+        failed=1
+    fi
+    "$bundle_dir/bin/pactl" info || failed=1
+    "$bundle_dir/bin/ffmpeg" -hide_banner -encoders 2>/dev/null | grep h264_vaapi || failed=1
+    exit "$failed"
+fi
+exec "$bundle_dir/bin/michadame" --steam-deck "$@"

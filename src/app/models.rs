@@ -747,6 +747,7 @@ impl WebcamState {
 }
 
 pub struct AppState {
+    pub steam_deck: Option<crate::steam_deck::SteamDeckState>,
     pub replay: crate::replay::Replay,
     pub hardware: HardwareState,
     pub ui: UiState,

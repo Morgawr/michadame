@@ -50,19 +50,19 @@ pub fn draw_bank_window(state: &mut AppState, ctx: &egui::Context) {
     );
 }
 
-fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
+pub(crate) fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
     // Keyboard: Esc closes the enlarged screenshot or add-name dialog; B closes the window.
     if state.bank.enlarged.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         state.bank.enlarged = None;
     } else if state.bank.add_name_dialog.open && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         state.bank.add_name_dialog.open = false;
-    } else if crate::ui::check_toggle_key(ctx, egui::Key::B) {
+    } else if state.steam_deck.is_none() && crate::ui::check_toggle_key(ctx, egui::Key::B) {
         state.bank.window_open = false;
         state.bank.enlarged = None;
         return;
     }
 
-    if crate::ui::check_toggle_key(ctx, egui::Key::L) {
+    if state.steam_deck.is_none() && crate::ui::check_toggle_key(ctx, egui::Key::L) {
         state.ui.studio_window_open = !state.ui.studio_window_open;
     }
 
@@ -503,7 +503,11 @@ fn draw_row(
                                         state.bank.pending_delete = Some(entry.id);
                                     }
                                     ui.add_space(8.0);
-                                    if let Some(clip_url) = &entry.twitch_clip_url {
+                                    if let Some(clip_url) = entry
+                                        .twitch_clip_url
+                                        .as_ref()
+                                        .filter(|_| state.steam_deck.is_none())
+                                    {
                                         let clip_btn = ui.link(
                                             RichText::new("🎬 Clip")
                                                 .color(Color32::from_rgb(168, 85, 247))
@@ -782,6 +786,11 @@ pub fn draw_tag_setting(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     if !committed {
         return false;
     }
+    commit_tag_setting(state)
+}
+
+/// Commit edits when a settings page is hidden or its explicit save button is used.
+pub(crate) fn commit_tag_setting(state: &mut AppState) -> bool {
     let bank = &mut state.bank;
     bank.current_tag =
         tags::canonicalize_tag(&bank.current_tag, &bank.known_tags).unwrap_or_default();

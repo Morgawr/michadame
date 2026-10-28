@@ -4,6 +4,17 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub fn configuration_path(state: &AppState) -> Result<PathBuf, confy::ConfyError> {
+    confy::get_configuration_file_path(
+        if state.steam_deck.is_some() {
+            "michadame-steam-deck"
+        } else {
+            "michadame"
+        },
+        None,
+    )
+}
+
 fn set_private_file_permissions(path: &Path) {
     #[cfg(unix)]
     {
@@ -291,6 +302,12 @@ pub fn sync_active_profile_in_state(state: &mut AppState) {
         state.pc98_profile = current_profile_data;
     } else if state.pc88.is_active {
         state.pc88_profile = current_profile_data;
+    } else if let Some(deck) = &state.steam_deck {
+        match deck.source {
+            crate::steam_deck::Source::Steam => state.gamescope_profile = current_profile_data,
+            crate::steam_deck::Source::Pc88 => state.pc88_profile = current_profile_data,
+            crate::steam_deck::Source::Pc98 => state.pc98_profile = current_profile_data,
+        }
     } else {
         state
             .profiles
@@ -312,7 +329,7 @@ pub fn flush_pending_config(state: &mut AppState) {
     if cfg!(test) {
         return;
     }
-    let Ok(path) = confy::get_configuration_file_path("michadame", None) else {
+    let Ok(path) = configuration_path(state) else {
         tracing::error!("Failed to get configuration file path for save_config");
         return;
     };
@@ -437,6 +454,24 @@ pub fn save_global_hardware_config_at(
         cfg.pc88_profile = Some(state.pc88_profile.clone());
     }
 
+    if let Some(deck) = &state.steam_deck {
+        cfg.video_device = None;
+        cfg.usb_device = None;
+        cfg.video_resolution = None;
+        cfg.video_framerate = None;
+        cfg.reset_usb_on_startup = Some(false);
+        cfg.video_profile = None;
+        cfg.gamescope_profile = Some(state.gamescope_profile.clone());
+        cfg.pc88_profile = Some(state.pc88_profile.clone());
+        cfg.pc98_profile = Some(state.pc98_profile.clone());
+        // save_global_hardware_config_at can also be called without sync_active_profile.
+        let current_profile_data = build_profile_from_state(state);
+        match deck.source {
+            crate::steam_deck::Source::Steam => cfg.gamescope_profile = Some(current_profile_data),
+            crate::steam_deck::Source::Pc88 => cfg.pc88_profile = Some(current_profile_data),
+            crate::steam_deck::Source::Pc98 => cfg.pc98_profile = Some(current_profile_data),
+        }
+    }
     store_config_atomic_at(path, &cfg)
 }
 
@@ -723,6 +758,9 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) -> bool {
 }
 
 pub fn apply_hardware_devices_from_config(state: &mut AppState, cfg: &MichadameConfig) {
+    if state.steam_deck.is_some() {
+        return;
+    }
     if let Some(saved_device) = &cfg.video_device {
         if state.hardware.video_devices.contains(saved_device) {
             state.hardware.selected_video_device = saved_device.clone();
@@ -868,7 +906,9 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     state.bank.current_tag = cfg.bank_current_tag.clone().unwrap_or_default();
     state.bank.saved_current_tag = state.bank.current_tag.clone();
     state.bank.compact_mode = cfg.bank_compact_mode.unwrap_or(false);
-    state.twitch.apply_config(cfg.twitch.clone());
+    if state.steam_deck.is_none() {
+        state.twitch.apply_config(cfg.twitch.clone());
+    }
     state.mic.config = cfg.mic.clone();
     if let Some(defaults) = &cfg.default_halo {
         state.halo_defaults = defaults.clone();
@@ -886,6 +926,9 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
         .set_reactive_listening(state.audio_reactive.enabled);
 
     state.webcam.config = cfg.webcam.clone();
+    if state.steam_deck.is_some() {
+        crate::steam_deck::enforce_restrictions(state);
+    }
     apply_hardware_devices_from_config(state, cfg);
 
     state.active_profile = cfg.active_profile.clone();

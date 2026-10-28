@@ -659,9 +659,9 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     changed
 }
 
-fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool) {
+pub(crate) fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool) {
     technical_group(ui, "Quick OCR:", |ui| {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.add_sized(
                 [130.0, 18.0],
                 egui::Label::new(
@@ -717,6 +717,17 @@ fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool
 
         let is_syncing_sa = state.ocr.is_syncing_screen_ai.load(Ordering::Relaxed);
         if state.ocr.backend == crate::ocr::OcrBackend::LocalScreenAi || is_syncing_sa {
+            if let Some(error) = state
+                .ocr
+                .screen_ai_sync_error
+                .as_ref()
+                .filter(|_| state.steam_deck.is_none())
+            {
+                ui.colored_label(
+                    egui::Color32::LIGHT_RED,
+                    format!("Model installation failed: {error}"),
+                );
+            }
             ui.add_space(4.0);
             if state.ocr.screen_ai_update_available
                 && state.ocr.screen_ai_installed_metadata.is_some()
@@ -761,7 +772,7 @@ fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool
                 };
                 ui.add(egui::ProgressBar::new(prog).text(msg).animate(true));
             } else {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let button_text = if state.ocr.screen_ai_installed_metadata.is_none() {
                         "Download Local OCR Model (!)"
                     } else if state.ocr.screen_ai_update_available {
@@ -895,7 +906,7 @@ fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool
                             "Jitter Tolerance:",
                             jitter_slider,
                             Some(
-                                "Maximum bounding-box position/size difference (as % of screen dimensions) ignored when text contents are unchanged.\nHigher values prevent box flickering and keep drop-off cooldown active across noisy frames.",
+                                "Maximum text-box position/size difference (as % of screen dimensions) treated as the same content for scan cooldown.\nHigher values keep the cooldown active across noisy frames. Text positions and character selection always follow the latest scan.",
                             ),
                         )
                         .changed()
@@ -979,8 +990,9 @@ fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool
             }
         });
 
-        two_columns(ui, |col1, _col2| {
-            if col1
+        if state.steam_deck.is_none() {
+            two_columns(ui, |col1, _col2| {
+                if col1
                 .checkbox(
                     &mut state.twitch.config.share_mined_words_to_chat,
                     "Share mined words to Twitch chat (when live)",
@@ -993,10 +1005,11 @@ fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool
                 crate::config::save_config(state);
                 *changed = true;
             }
-        });
+            });
+        }
 
         if !constant_scan_active && state.ocr.is_processing.load(Ordering::Relaxed) {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.spinner();
                 ui.label(format!(
                     "Processing OCR with {}...",
@@ -1050,7 +1063,7 @@ fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool
                 };
                 ui.add(egui::ProgressBar::new(prog).text(msg).animate(true));
             } else {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let button_text = if state.dict.update_available {
                         "Sync Jitendex Dictionary (!)"
                     } else {
@@ -1124,7 +1137,7 @@ fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool
                 };
                 ui.add(egui::ProgressBar::new(prog).text(msg).animate(true));
             } else {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let button_text = if state.dict.freq_update_available {
                         "Sync Jiten Frequency (!)"
                     } else {
@@ -1182,6 +1195,17 @@ fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool
             ui.add_space(3.0);
 
             let is_pitch_importing = state.dict.is_pitch_importing.load(Ordering::Relaxed);
+            if let Some(error) = state
+                .dict
+                .pitch_import_error
+                .as_ref()
+                .filter(|_| state.steam_deck.is_none())
+            {
+                ui.colored_label(
+                    egui::Color32::LIGHT_RED,
+                    format!("Pitch import failed: {error}"),
+                );
+            }
             if is_pitch_importing {
                 let (msg, prog) = if let Ok(lock) = state.dict.pitch_import_progress.lock() {
                     lock.clone()
@@ -1191,7 +1215,7 @@ fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool
                 };
                 ui.add(egui::ProgressBar::new(prog).text(msg).animate(true));
             } else {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let btn_label = if state.dict.installed_pitch_metadata.is_some() {
                         "Replace Pitch Dictionary…"
                     } else {
@@ -1204,7 +1228,19 @@ fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool
                         )
                         .clicked()
                     {
-                        if let Some(path) = rfd::FileDialog::new()
+                        if let Some(deck) = &mut state.steam_deck {
+                            let (tx, rx) = crossbeam_channel::bounded(1);
+                            deck.pitch_picker = Some(rx);
+                            deck.file_picker = Some(crate::ui::file_picker::FilePicker::new(
+                                "Import pitch dictionary",
+                                std::path::Path::new(""),
+                                false,
+                                Some("zip"),
+                                move |path| {
+                                    let _ = tx.send(path);
+                                },
+                            ));
+                        } else if let Some(path) = rfd::FileDialog::new()
                             .add_filter("Yomitan Dictionary (.zip)", &["zip"])
                             .pick_file()
                         {

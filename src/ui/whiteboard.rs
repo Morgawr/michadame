@@ -729,6 +729,7 @@ pub fn draw_whiteboard(state: &mut AppState, ctx: &egui::Context, screen_rect: R
                                 );
                             }
 
+                            if state.steam_deck.is_none() {
                             let clip_btn = egui::Button::new(
                                 egui::RichText::new("++")
                                     .monospace()
@@ -770,6 +771,7 @@ pub fn draw_whiteboard(state: &mut AppState, ctx: &egui::Context, screen_rect: R
                                 crate::ocr::overlay::execute_popup_mine_action(
                                     state, ctx, 0, true,
                                 );
+                            }
                             }
                         });
                     });

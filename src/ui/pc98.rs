@@ -19,7 +19,7 @@ pub fn draw_pc98_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         .rounding(egui::Rounding::ZERO)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(
                     egui::RichText::new("Retro PC System:")
                         .monospace()
@@ -75,6 +75,15 @@ pub fn draw_pc98_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         && state.retro_pc_system != sys
                     {
                         state.retro_pc_system = sys;
+                        if state.steam_deck.is_some() && !state.ui.video_window_open {
+                            crate::steam_deck::change_source(
+                                state,
+                                match sys {
+                                    RetroPcSystem::Pc88 => crate::steam_deck::Source::Pc88,
+                                    RetroPcSystem::Pc98 => crate::steam_deck::Source::Pc98,
+                                },
+                            );
+                        }
                         config::save_config(state);
                         changed = true;
                     }
@@ -103,7 +112,7 @@ fn draw_pc98_system_section(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         ui,
         "NEC PC-9801 / PC-9821 Emulator (Neko Project II Kai):",
         |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
             if state.pc98.is_active {
                 let stop_btn = egui::Button::new(
                     egui::RichText::new("⏹ Power Off PC-98")
@@ -185,7 +194,7 @@ fn draw_pc98_system_section(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
             if let Some(ref status) = state.pc98.status_message {
                 ui.add_space(4.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.spinner();
                     ui.label(
                         egui::RichText::new(status)
@@ -585,7 +594,7 @@ fn draw_pc98_system_section(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
 fn draw_game_library_section(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool) {
     // 1. Root Games Folder row
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.add_sized(
             [140.0, 20.0],
             egui::Label::new(
@@ -599,7 +608,14 @@ fn draw_game_library_section(ui: &mut egui::Ui, state: &mut AppState, changed: &
         let avail = (ui.available_width() - 165.0).max(120.0);
         if ui
             .add_sized(
-                [avail, 20.0],
+                [
+                    avail,
+                    if state.steam_deck.is_some() {
+                        40.0
+                    } else {
+                        20.0
+                    },
+                ],
                 egui::TextEdit::singleline(&mut state.pc98.config.games_dir)
                     .hint_text("/path/to/PC98/GameList"),
             )
@@ -633,7 +649,7 @@ fn draw_game_library_section(ui: &mut egui::Ui, state: &mut AppState, changed: &
     });
 
     // 2. Base Bootable DOS Drive row
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.add_sized(
             [140.0, 20.0],
             egui::Label::new(
@@ -647,7 +663,14 @@ fn draw_game_library_section(ui: &mut egui::Ui, state: &mut AppState, changed: &
         let avail = (ui.available_width() - 135.0).max(120.0);
         if ui
             .add_sized(
-                [avail, 20.0],
+                [
+                    avail,
+                    if state.steam_deck.is_some() {
+                        40.0
+                    } else {
+                        20.0
+                    },
+                ],
                 egui::TextEdit::singleline(&mut state.pc98.config.dos_hdd_path)
                     .hint_text("Master_MSDOS62.hdi (used for non-bootable DOS games)"),
             )
@@ -701,7 +724,7 @@ fn draw_game_library_section(ui: &mut egui::Ui, state: &mut AppState, changed: &
 
     let mut newly_picked_idx: Option<usize> = None;
 
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let label_text = if total_games > 0 {
             if has_active_filter {
                 format!("Select Game ({}/{total_games}):", filtered_indices.len())
@@ -906,7 +929,10 @@ fn draw_game_library_section(ui: &mut egui::Ui, state: &mut AppState, changed: &
     if let Some(idx) = selected_idx {
         let game = state.pc98.games_list[idx].clone();
 
-        if game.boot_mode.requires_dos_hdd() && state.pc98.config.dos_hdd_path.trim().is_empty() {
+        if state.steam_deck.is_none()
+            && game.boot_mode.requires_dos_hdd()
+            && state.pc98.config.dos_hdd_path.trim().is_empty()
+        {
             ui.add_space(2.0);
             ui.label(
                 egui::RichText::new(
@@ -951,7 +977,7 @@ fn draw_game_library_section(ui: &mut egui::Ui, state: &mut AppState, changed: &
         // Quick floppy swapper when the selected game has multiple floppy disks
         if game.floppies.len() > 1 {
             ui.add_space(2.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.add_sized(
                     [140.0, 20.0],
                     egui::Label::new(
@@ -1025,7 +1051,7 @@ fn draw_media_row(
     live_swappable: bool,
     changed: &mut bool,
 ) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.add_sized(
             [140.0, 20.0],
             egui::Label::new(
@@ -1048,7 +1074,14 @@ fn draw_media_row(
 
         let avail = (ui.available_width() - 135.0).max(120.0);
         let text_resp = ui.add_sized(
-            [avail, 20.0],
+            [
+                avail,
+                if state.steam_deck.is_some() {
+                    40.0
+                } else {
+                    20.0
+                },
+            ],
             egui::TextEdit::singleline(path_ref).hint_text(hint),
         );
         if text_resp.changed() {
@@ -1131,7 +1164,7 @@ fn draw_pc88_system_section(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     let mut changed = false;
 
     technical_group(ui, "NEC PC-8801 Emulator (Quasi88):", |ui| {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if state.pc88.is_active {
                 let stop_btn = egui::Button::new(
                     egui::RichText::new("⏹ Power Off PC-88")
@@ -1205,7 +1238,7 @@ fn draw_pc88_system_section(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
         if let Some(ref status) = state.pc88.status_message {
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.spinner();
                 ui.label(
                     egui::RichText::new(status)
@@ -1571,7 +1604,7 @@ fn draw_pc88_system_section(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
 fn draw_pc88_game_library_section(ui: &mut egui::Ui, state: &mut AppState, changed: &mut bool) {
     // 1. Root Games Folder row
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.add_sized(
             [140.0, 20.0],
             egui::Label::new(
@@ -1585,7 +1618,14 @@ fn draw_pc88_game_library_section(ui: &mut egui::Ui, state: &mut AppState, chang
         let avail = (ui.available_width() - 165.0).max(120.0);
         if ui
             .add_sized(
-                [avail, 20.0],
+                [
+                    avail,
+                    if state.steam_deck.is_some() {
+                        40.0
+                    } else {
+                        20.0
+                    },
+                ],
                 egui::TextEdit::singleline(&mut state.pc88.config.games_dir)
                     .hint_text("/path/to/PC88/GameList"),
             )
@@ -1637,7 +1677,7 @@ fn draw_pc88_game_library_section(ui: &mut egui::Ui, state: &mut AppState, chang
 
     let mut newly_picked_idx: Option<usize> = None;
 
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let label_text = if total_games > 0 {
             if has_active_filter {
                 format!("Select Game ({}/{total_games}):", filtered_indices.len())
@@ -1901,7 +1941,7 @@ fn draw_pc88_game_library_section(ui: &mut egui::Ui, state: &mut AppState, chang
                 .collect();
 
             ui.add_space(2.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.add_sized(
                     [140.0, 20.0],
                     egui::Label::new(
@@ -1977,7 +2017,7 @@ fn draw_pc88_media_row(
     live_swappable: bool,
     changed: &mut bool,
 ) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.add_sized(
             [140.0, 20.0],
             egui::Label::new(
@@ -1997,7 +2037,14 @@ fn draw_pc88_media_row(
 
         let avail = (ui.available_width() - 135.0).max(120.0);
         let text_resp = ui.add_sized(
-            [avail, 20.0],
+            [
+                avail,
+                if state.steam_deck.is_some() {
+                    40.0
+                } else {
+                    20.0
+                },
+            ],
             egui::TextEdit::singleline(path_ref).hint_text(hint),
         );
         if text_resp.changed() {
@@ -2167,7 +2214,7 @@ fn draw_save_states_section(
         let thumb_h = (thumb_w * (200.0 / 320.0)).round();
 
         for row in 0..2 {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = spacing;
                 for col in 0..cols {
                     let idx = row * cols + col;
@@ -2209,7 +2256,7 @@ fn draw_save_states_section(
                             ui.set_max_width(thumb_w);
                             ui.vertical(|ui| {
                                 // Card header: Slot number + size/empty badge
-                                ui.horizontal(|ui| {
+                                ui.horizontal_wrapped(|ui| {
                                     let badge_text = if is_sel {
                                         format!("▶ SLOT {}", slot)
                                     } else {
@@ -2389,7 +2436,7 @@ fn draw_save_states_section(
                                 let main_btn_w = ((thumb_w - del_w - btn_gap * 2.0) * 0.5)
                                     .floor()
                                     .max(24.0);
-                                ui.horizontal(|ui| {
+                                ui.horizontal_wrapped(|ui| {
                                     ui.spacing_mut().item_spacing.x = btn_gap;
                                     if ui
                                         .add_enabled(

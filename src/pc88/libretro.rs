@@ -790,7 +790,7 @@ unsafe extern "C" fn bridge_input_poll_cb() {
 unsafe extern "C" fn bridge_input_state_cb(
     _port: c_uint,
     device: c_uint,
-    _index: c_uint,
+    index: c_uint,
     id: c_uint,
 ) -> i16 {
     let Ok(guard) = ACTIVE_PC88_BRIDGE.lock() else {
@@ -800,6 +800,14 @@ unsafe extern "C" fn bridge_input_state_cb(
         return 0;
     };
 
+    if (device & 0xff) == crate::pc98::input::RETRO_DEVICE_ANALOG {
+        return ctx
+            .input_state
+            .lock()
+            .map(|input| input.controller_value(device, index, id))
+            .unwrap_or(0);
+    }
+
     match device & 0xFF {
         RETRO_DEVICE_JOYPAD => {
             if id == RETRO_DEVICE_ID_JOYPAD_SELECT
@@ -808,7 +816,10 @@ unsafe extern "C" fn bridge_input_state_cb(
             {
                 1
             } else {
-                0
+                ctx.input_state
+                    .lock()
+                    .map(|input| input.controller_value(device, index, id))
+                    .unwrap_or(0)
             }
         }
         RETRO_DEVICE_KEYBOARD => {

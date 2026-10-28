@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use std::process::Command;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
@@ -13,13 +12,15 @@ pub struct GamescopeAudioHandle {
 impl Drop for GamescopeAudioHandle {
     fn drop(&mut self) {
         if let Some(ref id) = self.module_id {
-            let _ = Command::new("pactl").args(["unload-module", id]).output();
+            let _ = crate::portable::helper_command("pactl")
+                .args(["unload-module", id])
+                .output();
         }
     }
 }
 
 pub fn ensure_gamescope_sink() -> Result<Option<String>> {
-    let output = Command::new("pactl")
+    let output = crate::portable::helper_command("pactl")
         .args(["list", "sinks", "short"])
         .output()
         .context("Failed to run pactl to inspect audio sinks")?;
@@ -30,7 +31,7 @@ pub fn ensure_gamescope_sink() -> Result<Option<String>> {
         return Ok(None);
     }
 
-    let load_output = Command::new("pactl")
+    let load_output = crate::portable::helper_command("pactl")
         .args([
             "load-module",
             "module-null-sink",

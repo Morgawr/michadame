@@ -441,14 +441,14 @@ pub fn build_cipd_instance_download_url(meta: &ScreenAiMetadata) -> Result<Strin
         );
     }
 
-    // Standard CIPD SHA256 hexDigest (64 hex chars = 32 bytes) encodes to a base64url
-    // instance ID prefixed with 0x02 (HashAlgo_SHA256).
+    // CIPD ObjectRefToInstanceID encodes SHA256 as base64url(digest || hash_algo).
+    // The algorithm byte is a suffix, not a prefix.
     let instance_ref = if digest.len() == 64 && digest.chars().all(|c| c.is_ascii_hexdigit()) {
         let raw_hash = decode_hex_bytes(digest)
             .ok_or_else(|| "Invalid SHA256 hex digest in ScreenAiMetadata".to_string())?;
         let mut payload = Vec::with_capacity(1 + raw_hash.len());
-        payload.push(0x02);
         payload.extend_from_slice(&raw_hash);
+        payload.push(0x02);
         base64url_encode_no_pad(&payload)
     } else if digest
         .chars()
@@ -2429,20 +2429,40 @@ mod tests {
 
         let valid_sha256 = ScreenAiMetadata {
             version: "153.05".to_string(),
-            instance_digest: "cd837ed33b7011223344556677889900aabbccddeeff00112233445566778899"
+            instance_digest: "cd837ed33b7098f1c65f22c4618c79a98dc86e50b58fd7f2d3cae94cf9ce36ac"
                 .to_string(),
         };
         let url = build_cipd_instance_download_url(&valid_sha256).unwrap();
-        assert!(url.starts_with(
-            "https://chrome-infra-packages.appspot.com/dl/chromium/third_party/screen-ai/linux/+/"
-        ));
-        assert!(!url.ends_with("/latest"));
+        // Known CIPD instance ID resolved from the upstream registry. Checking
+        // only the URL prefix previously missed an invalid hash encoding.
+        assert_eq!(url,
+            "https://chrome-infra-packages.appspot.com/dl/chromium/third_party/screen-ai/linux/+/zYN-0ztwmPHGXyLEYYx5qY3IblC1j9fy08rpTPnONqwC");
+    }
+
+    #[test]
+    #[ignore = "downloads the live Screen AI package; requires MICHADAME_TEST_SCREEN_AI_DIR"]
+    fn download_and_initialize_screen_ai() {
+        let target = std::env::var_os("MICHADAME_TEST_SCREEN_AI_DIR")
+            .expect("Set MICHADAME_TEST_SCREEN_AI_DIR to a disposable installation directory");
+        let target = Path::new(&target);
+        let metadata = download_and_install_screen_ai(target, |message, _| {
+            eprintln!("{message}");
+        })
+        .expect("Screen AI download and installation failed");
+        assert!(is_screen_ai_installed(target));
+        assert_eq!(load_installed_metadata(target), Some(metadata));
+        let max_dimension =
+            warmup_screen_ai(target).expect("Downloaded Screen AI failed to initialize");
+        assert!(max_dimension >= 1024);
+        eprintln!("Downloaded Screen AI initialized; maximum dimension: {max_dimension}");
     }
 
     #[test]
     #[ignore]
     fn test_live_screen_ai_ocr_execution() {
-        let model_dir = resolve_screen_ai_directory();
+        let model_dir = std::env::var_os("MICHADAME_TEST_SCREEN_AI_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(resolve_screen_ai_directory);
         if !is_screen_ai_installed(&model_dir) {
             return;
         }

@@ -1047,7 +1047,7 @@ unsafe extern "C" fn retro_input_poll_cb() {
 unsafe extern "C" fn retro_input_state_cb(
     _port: c_uint,
     device: c_uint,
-    _index: c_uint,
+    index: c_uint,
     id: c_uint,
 ) -> i16 {
     let Ok(guard) = ACTIVE_BRIDGE.lock() else {
@@ -1056,6 +1056,14 @@ unsafe extern "C" fn retro_input_state_cb(
     let Some(ctx) = guard.as_ref() else {
         return 0;
     };
+
+    if matches!(device & 0xff, 1 | 5) {
+        return ctx
+            .input_state
+            .lock()
+            .map(|input| input.controller_value(device, index, id))
+            .unwrap_or(0);
+    }
 
     match device {
         RETRO_DEVICE_KEYBOARD => {

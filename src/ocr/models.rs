@@ -292,6 +292,8 @@ pub fn are_ocr_boxes_equivalent(prev: &[OcrBox], next: &[OcrBox], jitter_toleran
 
 /// State of the OCR system in the application.
 pub struct OcrState {
+    /// Geometry used by the most recent clean capture/display pipeline.
+    pub capture_projection: Option<crate::video::gpu::geometry::OcrProjection>,
     /// Selected OCR backend (remote Google Lens or local Chrome Screen AI).
     pub backend: OcrBackend,
     /// Atomic representation of `backend` shared with the persistent background worker thread.
@@ -328,6 +330,8 @@ pub struct OcrState {
     pub is_syncing_screen_ai: Arc<AtomicBool>,
     /// Current Screen AI download/sync progress: (Status message, fraction 0.0..1.0).
     pub screen_ai_sync_progress: Arc<Mutex<Option<(String, f32)>>>,
+    /// Last model installation failure, retained in settings until a retry.
+    pub screen_ai_sync_error: Option<String>,
     /// Channel sender for Screen AI sync/update worker events.
     pub screen_ai_event_tx: crossbeam_channel::Sender<crate::ocr::screen_ai::ScreenAiEvent>,
     /// Channel receiver for Screen AI sync/update worker events.
@@ -478,12 +482,9 @@ impl OcrState {
 
     /// Processes a completed constant OCR scan result (`lines`).
     ///
-    /// - If the resulting boxes match the previous scan within `self.jitter_tolerance` (or both are
-    ///   empty "no text"), the outcome is discarded without updating `boxes`, the drop-off counter
-    ///   is incremented, and this method returns `false`.
-    /// - If the resulting boxes differ from the previous scan (or this is the first scan), `boxes`
-    ///   and `raw_lines` are updated (preserving stationary boxes' coordinates so unchanged regions
-    ///   do not flicker), the drop-off counter is reset to `0`, and this method returns `true`.
+    /// Text/block identity controls scan backoff. Geometry always comes from the
+    /// latest accepted scan, including refined character spans in unchanged text.
+    /// Returns whether the visible boxes changed and need repainting.
     pub fn apply_constant_scan_lines(&mut self, lines: Vec<ParsedLine>) -> bool {
         let now = Instant::now();
         let safe_sticky = if self.sticky_distance.is_finite() {
@@ -493,38 +494,21 @@ impl OcrState {
         };
         let new_boxes = crate::ocr::lens::group_lines_into_blocks(&lines, safe_sticky);
         let tol = self.jitter_tolerance;
-        if self.has_previous_constant_scan && are_ocr_boxes_equivalent(&self.boxes, &new_boxes, tol)
-        {
+        let same_content = self.has_previous_constant_scan
+            && are_ocr_boxes_equivalent(&self.boxes, &new_boxes, tol);
+        if same_content {
             self.consecutive_same_scans = self.consecutive_same_scans.saturating_add(1);
-            self.next_constant_scan_time = Some(now + self.current_constant_scan_delay());
-            return false;
+        } else {
+            self.consecutive_same_scans = 0;
         }
-
-        let changed = !are_ocr_boxes_equivalent(&self.boxes, &new_boxes, tol);
-        let mut used_prev = vec![false; self.boxes.len()];
-        let stabilized_boxes: Vec<OcrBox> = new_boxes
-            .into_iter()
-            .map(|nb| {
-                if let Some((idx, prev_box)) = self
-                    .boxes
-                    .iter()
-                    .enumerate()
-                    .find(|(i, pb)| !used_prev[*i] && is_same_ocr_box(pb, &nb, tol))
-                {
-                    used_prev[idx] = true;
-                    prev_box.clone()
-                } else {
-                    nb
-                }
-            })
-            .collect();
-
+        let changed = self.boxes != new_boxes;
         self.has_previous_constant_scan = true;
-        self.consecutive_same_scans = 0;
         self.raw_lines = lines;
-        self.boxes = stabilized_boxes;
-        self.last_copied_index = None;
-        self.copy_feedback_time = None;
+        self.boxes = new_boxes;
+        if changed {
+            self.last_copied_index = None;
+            self.copy_feedback_time = None;
+        }
         self.last_error = None;
         if self.boxes.is_empty() {
             self.last_scan_time = None;
@@ -564,6 +548,7 @@ impl OcrState {
         if self.is_syncing_screen_ai.load(Ordering::Relaxed) {
             return;
         }
+        self.screen_ai_sync_error = None;
         crate::ocr::screen_ai::spawn_sync_screen_ai(
             self.screen_ai_dir.clone(),
             self.is_syncing_screen_ai.clone(),
@@ -832,6 +817,7 @@ impl Default for OcrState {
         let screen_ai_update_available = screen_ai_installed_metadata.is_none();
 
         Self {
+            capture_projection: None,
             backend: OcrBackend::default(),
             backend_shared: Arc::new(AtomicU8::new(OcrBackend::default().as_u8())),
             constant_scanning: false,
@@ -850,6 +836,7 @@ impl Default for OcrState {
             is_checking_screen_ai_update: Arc::new(AtomicBool::new(false)),
             is_syncing_screen_ai: Arc::new(AtomicBool::new(false)),
             screen_ai_sync_progress: Arc::new(Mutex::new(None)),
+            screen_ai_sync_error: None,
             screen_ai_event_tx: sa_tx,
             screen_ai_event_rx: Some(sa_rx),
             capture_requested: Arc::new(AtomicBool::new(false)),
@@ -1342,23 +1329,70 @@ mod tests {
         assert_eq!(state.boxes.len(), 1);
         assert_eq!(state.consecutive_same_scans, 0);
 
-        // 4. Same text on next scan (with tiny jitter): discarded, boxes untouched, backoff increments
+        // 4. Same text: refresh geometry while keeping content-based backoff.
         let jittered_line = ParsedLine {
             center_x: 0.505,
             ..line
         };
-        let prev_scan_time = state.last_scan_time;
         let updated = state.apply_constant_scan_lines(vec![jittered_line]);
-        assert!(!updated);
+        assert!(updated);
         assert_eq!(state.consecutive_same_scans, 1);
-        assert_eq!(state.last_scan_time, prev_scan_time);
-        assert!((state.boxes[0].center_x - 0.5).abs() < 1e-6);
+        assert!((state.boxes[0].center_x - 0.505).abs() < 1e-6);
 
         // 5. Text disappears (empty scan after non-empty): clears boxes and resets backoff
         let updated = state.apply_constant_scan_lines(Vec::new());
         assert!(updated);
         assert!(state.boxes.is_empty());
         assert_eq!(state.consecutive_same_scans, 0);
+    }
+
+    #[test]
+    fn constant_scans_refresh_character_spans_and_moved_boxes() {
+        let mut state = OcrState::default();
+        let mut line = ParsedLine {
+            text: "日本語".into(),
+            center_x: 0.5,
+            center_y: 0.8,
+            width: 0.3,
+            height: 0.04,
+            char_spans: vec![(0.35, 0.45), (0.45, 0.55), (0.55, 0.65)],
+            ..Default::default()
+        };
+        assert!(state.apply_constant_scan_lines(vec![line.clone()]));
+        // The block's text and outside bounds are identical; only a character
+        // boundary was refined by OCR. It still needs to replace the hit cells.
+        line.char_spans[0].1 += 6.0 / 1280.0;
+        line.char_spans[1].0 += 6.0 / 1280.0;
+        assert!(state.apply_constant_scan_lines(vec![line.clone()]));
+        assert_eq!(state.consecutive_same_scans, 1);
+        assert_eq!(state.raw_lines, vec![line.clone()]);
+        assert_eq!(state.boxes[0].lines[0].char_spans, line.char_spans);
+        line.center_x += 12.0 / 1280.0;
+        for (start, end) in &mut line.char_spans {
+            *start += 12.0 / 1280.0;
+            *end += 12.0 / 1280.0;
+        }
+        assert!(state.apply_constant_scan_lines(vec![line.clone()]));
+        assert_eq!(state.boxes[0].center_x, line.center_x);
+        assert!(!state.apply_constant_scan_lines(vec![line.clone()]));
+        // Updating an unrelated block must not restore an old clone of this one.
+        line.char_spans[0].1 += 2.0 / 1280.0;
+        let other = ParsedLine {
+            text: "別".into(),
+            center_x: 0.2,
+            center_y: 0.1,
+            width: 0.02,
+            height: 0.02,
+            paragraph_idx: 1,
+            ..Default::default()
+        };
+        assert!(state.apply_constant_scan_lines(vec![line.clone(), other]));
+        let block = state
+            .boxes
+            .iter()
+            .find(|b| b.text.contains("日本語"))
+            .unwrap();
+        assert_eq!(block.lines[0].char_spans, line.char_spans);
     }
 
     #[test]

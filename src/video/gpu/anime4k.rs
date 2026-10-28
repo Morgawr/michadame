@@ -274,17 +274,7 @@ impl Anime4kUpscaler {
         target_width: u32,
         target_height: u32,
     ) -> (u32, u32) {
-        let mut w = width;
-        let mut h = height;
-        if target_width == 0 || target_height == 0 {
-            return (w, h);
-        }
-        // Anime4K is tuned to only trigger 2x upscale if target is noticeably larger (at least 1.2x)
-        while w * 6 < target_width * 5 && h * 6 < target_height * 5 {
-            w *= 2;
-            h *= 2;
-        }
-        (w, h)
+        super::geometry::anime4k_size((width, height), (target_width, target_height))
     }
 
     pub fn upscale(

@@ -556,15 +556,11 @@ impl PitchDatabase {
                             "Invalid pitch row #{row_idx} in {name}: expected at least 3 elements"
                         );
                     }
-                    let row_term = row_arr[0]
-                        .as_str()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "Invalid pitch row #{row_idx} in {name}: term must be a non-empty string"
-                            )
-                        })?;
+                    let row_term = row_arr[0].as_str().map(str::trim).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Invalid pitch row #{row_idx} in {name}: term must be a string"
+                        )
+                    })?;
                     let mode = row_arr[1].as_str().ok_or_else(|| {
                         anyhow::anyhow!(
                             "Invalid pitch row #{row_idx} in {name}: mode must be a string"
@@ -713,7 +709,11 @@ fn read_zip_entry_json(file: &mut zip::read::ZipFile<'_>) -> Result<serde_json::
     let mut buf = Vec::with_capacity(file.size() as usize);
     match file.read_to_end(&mut buf) {
         Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::InvalidData && !buf.is_empty() => {
+        Err(e)
+            if e.kind() == std::io::ErrorKind::InvalidData
+                && e.to_string() == "Invalid checksum"
+                && buf.len() as u64 == file.size() =>
+        {
             tracing::warn!(
                 "Ignoring ZIP CRC-32 mismatch for '{}' ({} bytes read): {e}",
                 file.name(),
@@ -722,6 +722,13 @@ fn read_zip_entry_json(file: &mut zip::read::ZipFile<'_>) -> Result<serde_json::
         }
         Err(e) => return Err(e).context("Failed to read entry from zip archive"),
     }
+    anyhow::ensure!(
+        buf.len() as u64 == file.size(),
+        "Incomplete ZIP entry '{}': expected {} bytes, read {}",
+        file.name(),
+        file.size(),
+        buf.len()
+    );
     let slice = buf.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&buf);
     serde_json::from_slice(slice).context("Invalid JSON syntax")
 }
@@ -739,16 +746,21 @@ pub fn parse_pitch_entry(item: &serde_json::Value) -> Option<(String, String, Ve
         return None;
     }
 
-    let term = arr[0].as_str()?.trim().to_string();
-    if term.is_empty() {
-        return None;
-    }
+    let mut term = arr[0].as_str()?.trim().to_string();
     let mode = arr[1].as_str()?;
     if mode != "pitch" {
         return None;
     }
 
     let meta = &arr[2];
+    // NHK includes reading-only records with an empty headword. Preserve these
+    // accents under their reading so they can be found by kana lookups.
+    if term.is_empty() {
+        term = meta.get("reading")?.as_str()?.trim().to_string();
+        if term.is_empty() {
+            return None;
+        }
+    }
 
     // Fallback: [term, "pitch", 0] or [term, "pitch", "LHH"]
     if let Some(pattern) = parse_pitch_pattern(meta) {
@@ -1149,6 +1161,86 @@ mod tests {
     }
 
     #[test]
+    fn reading_only_pitch_records_require_a_nonempty_reading() {
+        let row = serde_json::json!(["", "pitch", {"reading": " あくらつ ", "pitches": [{"position": 0}]}]);
+        let (term, reading, pitches) = parse_pitch_entry(&row).unwrap();
+        assert_eq!(term, "あくらつ");
+        assert_eq!(reading, "あくらつ");
+        assert_eq!(pitches[0].pattern, PitchPattern::Downstep(0));
+        for invalid in [
+            serde_json::json!(["", "pitch", 0]),
+            serde_json::json!(["", "pitch", {"reading": " ", "pitches": [{"position": 0}]}]),
+            serde_json::json!([null, "pitch", {"reading": "あくらつ", "pitches": [{"position": 0}]}]),
+        ] {
+            assert!(parse_pitch_entry(&invalid).is_none());
+        }
+    }
+
+    #[test]
+    fn truncated_zip_entry_with_valid_json_is_rejected() {
+        use std::io::{Cursor, Write};
+        let payload = br#"{"title":"Incomplete archive"}"#;
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                "index.json",
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Deflated),
+            )
+            .unwrap();
+        writer.write_all(payload).unwrap();
+        let mut raw = writer.finish().unwrap().into_inner();
+        // Preserve valid JSON and CRC, but declare more uncompressed data than
+        // the stream contains. A parsed JSON prefix must not hide truncation.
+        for i in 0..raw.len().saturating_sub(28) {
+            let offset = if &raw[i..i + 4] == b"PK\x03\x04" {
+                Some(i + 22)
+            } else if &raw[i..i + 4] == b"PK\x01\x02" {
+                Some(i + 24)
+            } else {
+                None
+            };
+            if let Some(offset) = offset {
+                raw[offset..offset + 4]
+                    .copy_from_slice(&((payload.len() + 16) as u32).to_le_bytes());
+            }
+        }
+        let mut archive = zip::ZipArchive::new(Cursor::new(raw)).unwrap();
+        let error = read_zip_entry_json(&mut archive.by_index(0).unwrap()).unwrap_err();
+        assert!(format!("{error:#}").contains("Incomplete ZIP entry"));
+    }
+
+    #[test]
+    #[ignore = "requires a local pitch dictionary supplied via MICHADAME_TEST_PITCH_ZIP"]
+    fn import_local_pitch_archive() {
+        let zip_path = std::env::var_os("MICHADAME_TEST_PITCH_ZIP")
+            .expect("Set MICHADAME_TEST_PITCH_ZIP to the archive to validate");
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("pitch.db");
+        let meta = PitchDatabase::build_from_zip(Path::new(&zip_path), &db_path, |message, _| {
+            eprintln!("{message}");
+        })
+        .unwrap();
+        assert!(meta.total_entries > 0);
+        let db = PitchDatabase::open(&db_path).unwrap();
+        eprintln!(
+            "Imported {} entries from {}",
+            meta.total_entries, meta.title
+        );
+        if meta.title == "NHK" {
+            assert_eq!(meta.total_entries, 84_242);
+            let rows: usize = db
+                .conn
+                .query_row("SELECT COUNT(*) FROM pitches", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(rows, 73_100);
+            assert!(!db.get_pitches("ああ", "ああ").is_empty());
+            assert!(!db.get_pitches("来世", "らいせ").is_empty());
+            assert!(!db.get_pitches("あくらつ", "あくらつ").is_empty());
+        }
+    }
+
+    #[test]
     fn test_build_pitch_database_tolerates_mismatched_zip_crc32() {
         use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
@@ -1165,7 +1257,7 @@ mod tests {
                 .unwrap();
             zip.start_file("term_meta_bank_1.json", options).unwrap();
             zip.write_all(
-                r#"[["猫","pitch",{"reading":"ねこ","pitches":[{"position":1}]}]]"#.as_bytes(),
+                r#"[["猫","pitch",{"reading":"ねこ","pitches":[{"position":1}]}],["","pitch",{"reading":"あくらつ","pitches":[{"position":0}]}]]"#.as_bytes(),
             )
             .unwrap();
             zip.finish().unwrap();
@@ -1187,11 +1279,15 @@ mod tests {
 
         let meta = PitchDatabase::build_from_zip(&zip_path, &db_path, |_, _| {}).unwrap();
         assert_eq!(meta.title, "Repacked Pitch");
-        assert_eq!(meta.total_entries, 1);
+        assert_eq!(meta.total_entries, 2);
 
         let db = PitchDatabase::open(&db_path).unwrap();
         let pitches = db.get_pitches("猫", "ねこ");
         assert_eq!(pitches.len(), 1);
         assert_eq!(pitches[0].pattern, PitchPattern::Downstep(1));
+        assert_eq!(
+            db.get_pitches("あくらつ", "あくらつ")[0].pattern,
+            PitchPattern::Downstep(0)
+        );
     }
 }

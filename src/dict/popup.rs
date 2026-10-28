@@ -70,6 +70,7 @@ pub fn draw_dict_popup(
     video_rect: egui::Rect,
     show_highlight: bool,
     popup_under_crt: bool,
+    scale: f32,
     mine_status: impl Fn(&super::models::TermEntry) -> crate::bank::MineStatus,
     is_mined: impl Fn(&super::models::TermEntry) -> bool,
     can_clip: bool,
@@ -97,8 +98,8 @@ pub fn draw_dict_popup(
     }
 
     // 2. Compute popup window dimensions & smart placement (scaled ~1.7x)
-    let desired_popup_width = 980.0f32;
-    let desired_popup_height = 760.0f32;
+    let desired_popup_width = 980.0f32 * scale;
+    let desired_popup_height = 760.0f32 * scale;
 
     let placement = calculate_popup_placement(
         popup.word_rect,
@@ -122,10 +123,31 @@ pub fn draw_dict_popup(
         )
     };
 
+    // Scale the complete popup, including fonts, action buttons, spacing and
+    // hit testing. The highlighted OCR word remains in video coordinates.
+    let transform = if scale == 1.0 {
+        egui::emath::TSTransform::IDENTITY
+    } else {
+        egui::emath::TSTransform::new(placement.pos.to_vec2(), scale)
+    };
+    ui.ctx().set_transform_layer(layer_id, transform);
+    let local_width = placement.width / scale;
+    let local_height = placement.height / scale;
+
     let area_response = egui::Area::new(layer_id.id)
-        .fixed_pos(placement.pos)
+        .fixed_pos(if scale == 1.0 {
+            placement.pos
+        } else {
+            egui::Pos2::ZERO
+        })
         .order(layer_id.order)
         .show(ui.ctx(), |ui| {
+            if scale != 1.0 {
+                // Area's initial bounds are in screen coordinates; this layer
+                // lays out the full-size content in its own local coordinates.
+                ui.set_max_size(egui::vec2(local_width + 48.0, local_height + 36.0));
+                ui.set_clip_rect(transform.inverse() * video_rect);
+            }
             let frame = egui::Frame::none()
                 .fill(POPUP_BG)
                 .stroke(Stroke::new(1.5, POPUP_STROKE))
@@ -139,11 +161,11 @@ pub fn draw_dict_popup(
                 .inner_margin(egui::Margin::symmetric(24.0, 18.0));
 
             let response = frame.show(ui, |ui| {
-                ui.set_width(placement.width);
-                ui.set_max_height(placement.height);
+                ui.set_width(local_width);
+                ui.set_max_height(local_height);
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 5.0);
 
-                let scroll_max_h = (placement.height - 36.0).max(40.0);
+                let scroll_max_h = (local_height - 36.0).max(40.0);
 
                 // While the popup is open, mouse-wheel scrolling anywhere goes to the popup.
                 // When the pointer is over the popup, egui's ScrollArea handles it natively;
@@ -186,8 +208,8 @@ pub fn draw_dict_popup(
                     scroll_area = scroll_area.vertical_scroll_offset(0.0);
                 } else if external_scroll != 0.0 {
                     let current: f32 = ui.ctx().data(|d| d.get_temp(offset_key)).unwrap_or(0.0);
-                    scroll_area =
-                        scroll_area.vertical_scroll_offset((current - external_scroll).max(0.0));
+                    scroll_area = scroll_area
+                        .vertical_scroll_offset((current - external_scroll / scale).max(0.0));
                 }
                 let scroll_output = scroll_area.show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(8.0, 5.0);
@@ -222,14 +244,14 @@ pub fn draw_dict_popup(
             });
 
             if let Some(ptr) = ui.input(|i| i.pointer.hover_pos()) {
-                if response.response.rect.contains(ptr) {
+                if (transform * response.response.rect).contains(ptr) {
                     is_pointer_in_popup = true;
                 }
             }
         });
 
     let primitives = if popup_under_crt {
-        let clipped_shapes = ui
+        let mut clipped_shapes = ui
             .ctx()
             .graphics_mut(|g| {
                 g.get_mut(layer_id)
@@ -243,6 +265,10 @@ pub fn draw_dict_popup(
         if clipped_shapes.is_empty() {
             Vec::new()
         } else {
+            for clipped in &mut clipped_shapes {
+                clipped.clip_rect = transform * clipped.clip_rect;
+                clipped.shape.transform(transform);
+            }
             ui.ctx()
                 .tessellate(clipped_shapes, ui.ctx().pixels_per_point())
         }
@@ -254,7 +280,7 @@ pub fn draw_dict_popup(
     };
 
     // 4. Update whether the user is interacting with the popup window
-    popup.popup_rect = Some(area_response.response.rect);
+    popup.popup_rect = Some(transform * area_response.response.rect);
     popup.is_popup_hovered = is_pointer_in_popup;
     if let Some(ptr) = ui.input(|i| i.pointer.hover_pos()) {
         let now = std::time::Instant::now();
@@ -468,6 +494,107 @@ pub fn calculate_crt_popup_safe_area(
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn deck_scaled_popup_keeps_mining_hit_target_and_crt_geometry_aligned() {
+        for under_crt in [false, true] {
+            let ctx = egui::Context::default();
+            let mut fonts = egui::FontDefinitions::default();
+            let family = fonts.families[&egui::FontFamily::Proportional].clone();
+            fonts
+                .families
+                .insert(egui::FontFamily::Name("GothicCJK".into()), family);
+            ctx.set_fonts(fonts);
+            let video = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(591.0, 369.0));
+            let word = egui::Rect::from_min_size(egui::pos2(200.0, 180.0), egui::vec2(40.0, 20.0));
+            let mut popup = Some(DictPopupState {
+                matched_term: "test".into(),
+                source_text: "test".into(),
+                char_range: (0, 4),
+                word_rect: word,
+                extra_word_rects: vec![],
+                box_rect: word,
+                entries: vec![super::super::models::TermEntry {
+                    term: "test".into(),
+                    reading: String::new(),
+                    definition_tags: None,
+                    rules: String::new(),
+                    score: 0.0,
+                    glossary: vec![super::super::models::GlossaryEntry::Text(
+                        "A compact definition".into(),
+                    )],
+                    sequence: 1,
+                    term_tags: None,
+                    inflection_reasons: vec![],
+                    frequency: None,
+                    pitches: vec![],
+                    custom_name_id: None,
+                    custom_tag: None,
+                }],
+                is_popup_hovered: false,
+                popup_rect: None,
+                last_hover_time: Instant::now(),
+                last_word_hover_time: Instant::now(),
+            });
+            let mut draw = |events: Vec<egui::Event>| {
+                let mut result = (None, Vec::new());
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(video),
+                        events,
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            result = draw_dict_popup(
+                                ui,
+                                &mut popup,
+                                video,
+                                true,
+                                under_crt,
+                                0.2,
+                                |_| crate::bank::MineStatus::Available,
+                                |_| false,
+                                false,
+                            );
+                        });
+                    },
+                );
+                (result, popup.as_ref().unwrap().popup_rect.unwrap())
+            };
+            let mut rect = video;
+            for frame in 0..4 {
+                let (result, bounds) = draw(vec![]);
+                rect = bounds;
+                assert_eq!(result.0, None);
+                // Area uses its first frame to measure the popup invisibly.
+                if frame > 0 {
+                    assert_eq!(!result.1.is_empty(), under_crt);
+                }
+            }
+            assert!(rect.width() < 220.0, "{rect:?}");
+            assert!(rect.height() < 170.0, "{rect:?}");
+            assert!(video.contains_rect(rect), "{rect:?}");
+            let point = egui::pos2(
+                rect.right() - (24.0 + 28.0) * 0.2,
+                rect.top() + (18.0 + 28.0) * 0.2,
+            );
+            for pressed in [true, false] {
+                let ((action, _), _) = draw(vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                if !pressed {
+                    assert_eq!(action, Some(PopupAction::Mine(0)));
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_calculate_crt_popup_safe_area_insets() {
@@ -724,6 +851,7 @@ mod tests {
                     video_rect,
                     true,
                     false,
+                    1.0,
                     |_| crate::bank::MineStatus::Available,
                     |_| false,
                     false,
@@ -736,6 +864,7 @@ mod tests {
                     video_rect,
                     true,
                     false,
+                    1.0,
                     |_| crate::bank::MineStatus::Available,
                     |_| false,
                     true,

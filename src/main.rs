@@ -7,7 +7,9 @@ pub mod gamescope;
 mod ocr;
 pub mod pc88;
 pub mod pc98;
+mod portable;
 mod replay;
+mod steam_deck;
 mod twitch;
 mod ui;
 mod video;
@@ -16,8 +18,19 @@ use anyhow::Result;
 use eframe::egui;
 
 fn main() -> Result<(), eframe::Error> {
+    crate::portable::initialize();
     // Setup logging
-    tracing_subscriber::fmt::init();
+    let steam_deck = std::env::args_os().any(|arg| arg == "--steam-deck");
+    if steam_deck {
+        crate::steam_deck::logging::initialize();
+    } else {
+        tracing_subscriber::fmt::init();
+    }
+    // Game Mode identifies the viewer by its X11 STEAM_GAME property. Choose
+    // Xwayland when available, before the UI or any worker threads are started.
+    if steam_deck && std::env::var_os("DISPLAY").is_some() {
+        std::env::remove_var("WAYLAND_DISPLAY");
+    }
 
     // --- Load Icon ---
     let icon = image::load_from_memory(include_bytes!("../assets/logo.png"))
@@ -25,22 +38,28 @@ fn main() -> Result<(), eframe::Error> {
         .to_rgba8();
     let (icon_width, icon_height) = icon.dimensions();
 
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([640.0, 480.0]) // Default starting size for the video window
+        .with_min_inner_size([320.0, 240.0])
+        .with_icon(egui::IconData {
+            rgba: icon.into_raw(),
+            width: icon_width,
+            height: icon_height,
+        });
+    if steam_deck {
+        viewport = viewport
+            .with_inner_size([1280.0, 800.0])
+            .with_fullscreen(true);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([640.0, 480.0]) // Default starting size for the video window
-            .with_min_inner_size([320.0, 240.0])
-            .with_icon(egui::IconData {
-                rgba: icon.into_raw(),
-                width: icon_width,
-                height: icon_height,
-            }),
-        persist_window: true,
-        vsync: false,
+        viewport,
+        persist_window: !steam_deck,
+        vsync: steam_deck,
         ..Default::default()
     };
 
     // Create a closure that will be called once to create the App state.
-    let creator = |cc: &eframe::CreationContext| {
+    let creator = move |cc: &eframe::CreationContext| {
         // --- Embed a local font for 100% robust character support ---
         let mut fonts = egui::FontDefinitions::default();
 
@@ -92,7 +111,7 @@ fn main() -> Result<(), eframe::Error> {
             ]);
 
         cc.egui_ctx.set_fonts(fonts);
-        Box::new(app::init_app_state(cc)) as Box<dyn eframe::App>
+        Box::new(app::init_app_state(cc, steam_deck)) as Box<dyn eframe::App>
     };
 
     let res = eframe::run_native("Michadame Viewer", options, Box::new(creator));

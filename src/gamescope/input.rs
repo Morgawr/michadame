@@ -135,7 +135,11 @@ pub fn find_gamescope_ei_socket() -> PathBuf {
 impl GamescopeInputClient {
     pub fn connect() -> Result<Self> {
         let socket_path_buf = find_gamescope_ei_socket();
-        let socket_path = socket_path_buf.to_string_lossy().to_string();
+        Self::connect_to(&socket_path_buf)
+    }
+
+    pub fn connect_to(path: &std::path::Path) -> Result<Self> {
+        let socket_path = path.to_string_lossy().to_string();
 
         let c_socket = CString::new(socket_path.clone())
             .context("Failed to format socket path into CString")?;

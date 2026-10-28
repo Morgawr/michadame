@@ -8,12 +8,14 @@ pub mod debug;
 pub mod devices;
 pub mod dialogs;
 pub mod fft_mask;
+pub mod file_picker;
 pub mod filters;
 pub mod mic;
 pub mod networking;
 pub mod niconico;
 pub mod pc98;
 pub mod profiles;
+pub mod steam_deck;
 pub mod studio;
 pub mod tag_input;
 pub mod twitch;
@@ -196,7 +198,8 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
             }
 
             let max_panel_w = ui.available_width();
-            egui::ScrollArea::vertical()
+            egui::ScrollArea::both()
+                .id_source("desktop_settings_scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.set_max_width(max_panel_w);

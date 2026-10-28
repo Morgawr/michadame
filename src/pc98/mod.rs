@@ -131,6 +131,8 @@ pub enum Pc98Event {
 }
 
 pub struct Pc98InputState {
+    pub joypad_buttons: u16,
+    pub analog_axes: [[i16; 2]; 2],
     pub keys: [bool; 512],
     pub mouse_dx: i32,
     pub mouse_dy: i32,
@@ -146,6 +148,8 @@ pub struct Pc98InputState {
 impl Default for Pc98InputState {
     fn default() -> Self {
         Self {
+            joypad_buttons: 0,
+            analog_axes: [[0; 2]; 2],
             keys: [false; 512],
             mouse_dx: 0,
             mouse_dy: 0,
@@ -160,7 +164,25 @@ impl Default for Pc98InputState {
 }
 
 impl Pc98InputState {
+    pub fn controller_value(&self, device: u32, index: u32, id: u32) -> i16 {
+        match device & 0xff {
+            input::RETRO_DEVICE_JOYPAD if id == 256 => self.joypad_buttons as i16,
+            input::RETRO_DEVICE_JOYPAD if id < 16 => {
+                i16::from(self.joypad_buttons & (1 << id) != 0)
+            }
+            input::RETRO_DEVICE_ANALOG => self
+                .analog_axes
+                .get(index as usize)
+                .and_then(|axis| axis.get(id as usize))
+                .copied()
+                .unwrap_or(0),
+            _ => 0,
+        }
+    }
+
     pub fn release_all(&mut self) {
+        self.joypad_buttons = 0;
+        self.analog_axes = [[0; 2]; 2];
         self.keys.fill(false);
         self.mouse_dx = 0;
         self.mouse_dy = 0;

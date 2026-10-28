@@ -20,7 +20,8 @@ pub fn draw_fft_mask_editor(state: &mut AppState, ctx: &egui::Context) -> bool {
     egui::Window::new("FFT Mask Editor")
         .open(&mut window_open)
         .resizable(true)
-        .default_size([512.0, 600.0])
+        .default_size(egui::vec2(512.0, 600.0).min(ctx.screen_rect().size() - egui::vec2(32.0, 48.0)))
+        .max_size((ctx.screen_rect().size() - egui::vec2(32.0, 48.0)).max(egui::vec2(240.0, 200.0)))
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Brush size:");

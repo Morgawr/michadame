@@ -1,4 +1,6 @@
 fn main() {
+    println!("cargo:rerun-if-changed=src/steam_deck/window.c");
+    println!("cargo:rerun-if-changed=src/steam_deck/capture.c");
     println!("cargo:rerun-if-changed=src/gamescope/pipewire_dma.c");
     println!("cargo:rerun-if-changed=src/gamescope/pipewire_dma.h");
     println!("cargo:rerun-if-changed=src/gamescope/x11_cursor.c");
@@ -20,9 +22,15 @@ fn main() {
     let mut build = cc::Build::new();
     build.file("src/gamescope/pipewire_dma.c");
     build.file("src/gamescope/x11_cursor.c");
+    build.file("src/steam_deck/window.c");
+    build.file("src/steam_deck/capture.c");
     build.include("src/gamescope");
     for include in &pw.include_paths {
         build.include(include);
+        let version_header = include.join("pipewire/version.h");
+        if version_header.is_file() {
+            println!("cargo:rerun-if-changed={}", version_header.display());
+        }
     }
     for include in &x11.include_paths {
         build.include(include);

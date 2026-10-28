@@ -11,6 +11,9 @@ use video::decoder::VideoThreadEvent;
 
 impl AppState {
     pub fn start_stream(&mut self, ctx: &egui::Context) {
+        if self.steam_deck.is_some() {
+            return;
+        }
         if self.hardware.active_audio_stream.is_some() || self.video_thread.is_some() {
             tracing::warn!("Stream already active, ignoring start request.");
             return;
@@ -223,7 +226,7 @@ impl AppState {
     pub fn stop_stream(&mut self, ctx: &egui::Context) {
         ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
         ctx.set_cursor_icon(egui::CursorIcon::Default);
-        if self.ui.is_fullscreen {
+        if self.steam_deck.is_none() && self.ui.is_fullscreen {
             self.ui.is_fullscreen = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         }
@@ -302,7 +305,11 @@ impl AppState {
             if let Some(prev_name) = self.previous_normal_profile.take() {
                 self.active_profile = prev_name;
             }
-            let profile_to_apply = self.profiles.get(&self.active_profile).cloned();
+            let profile_to_apply = self
+                .steam_deck
+                .is_none()
+                .then(|| self.profiles.get(&self.active_profile).cloned())
+                .flatten();
             if let Some(profile) = profile_to_apply {
                 crate::config::apply_profile_to_state(self, &profile);
             }
@@ -313,6 +320,11 @@ impl AppState {
     }
 
     pub fn stop_gamescope_hook(&mut self) {
+        if let Some(deck) = &mut self.steam_deck {
+            deck.video_capture = None;
+            deck.viewer_lease = None;
+            deck.launch_started = None;
+        }
         if self.gamescope_hook.as_ref().map_or(false, |g| g.is_active) {
             // Save gamescope profile changes while gamescope_hook is still active
             self.gamescope_profile = crate::config::build_profile_from_state(self);
@@ -321,6 +333,18 @@ impl AppState {
         }
 
         if let Some(mut hook) = self.gamescope_hook.take() {
+            if let Some(deck) = &mut self.steam_deck {
+                if let Some(client) = &mut hook.input_client {
+                    for key in deck.forwarded_keys.drain() {
+                        if let Some(code) = crate::gamescope::input::egui_key_to_evdev(key) {
+                            client.send_key(code, false);
+                        }
+                    }
+                }
+                hook.release_all_inputs();
+                deck.mouse_buttons = [false; 3];
+            }
+            crate::steam_deck::launch::restore_viewer(self);
             hook.is_active = false;
             drop(hook.dma_handle.take());
             drop(hook.egl_importer.take());
@@ -335,7 +359,11 @@ impl AppState {
             if let Some(prev_name) = self.previous_gamescope_normal_profile.take() {
                 self.active_profile = prev_name;
             }
-            let profile_to_apply = self.profiles.get(&self.active_profile).cloned();
+            let profile_to_apply = self
+                .steam_deck
+                .is_none()
+                .then(|| self.profiles.get(&self.active_profile).cloned())
+                .flatten();
             if let Some(profile) = profile_to_apply {
                 crate::config::apply_profile_to_state(self, &profile);
             }
@@ -389,7 +417,12 @@ impl AppState {
                 .cloned()
             {
                 let script = self.gamescope_launcher_script.clone();
-                if let Err(e) = crate::gamescope::steam::launch_steam_game(&game, &script) {
+                let launched = if self.steam_deck.is_some() {
+                    crate::steam_deck::launch::prepare(self, &game)
+                } else {
+                    crate::gamescope::steam::launch_steam_game(&game, &script)
+                };
+                if let Err(e) = launched {
                     self.error(format!("Failed to launch Steam game '{}': {e}", game.name));
                     return;
                 }
@@ -402,6 +435,10 @@ impl AppState {
         self.profiles
             .insert(self.active_profile.clone(), current_normal);
         self.previous_gamescope_normal_profile = Some(self.active_profile.clone());
+        if let Some(deck) = &mut self.steam_deck {
+            deck.source = crate::steam_deck::Source::Steam;
+            deck.tab = crate::steam_deck::Tab::Game;
+        }
         // Apply dedicated gamescope profile
         crate::config::apply_profile_to_state(self, &self.gamescope_profile.clone());
 
@@ -425,11 +462,15 @@ impl AppState {
         });
 
         // 1. Start Gamescope video reader via native zero-copy PipeWire DMA-BUF + EGL stream.
-        let mut dma_handle = crate::gamescope::pipewire_dma::start_gamescope_dma_stream(
-            None,
-            request_repaint.clone(),
-            self.hardware.video_queue_drops.clone(),
-        );
+        let mut dma_handle = if self.steam_deck.is_some() {
+            None
+        } else {
+            crate::gamescope::pipewire_dma::start_gamescope_dma_stream(
+                None,
+                request_repaint.clone(),
+                self.hardware.video_queue_drops.clone(),
+            )
+        };
         let egl_importer = if dma_handle.is_some() {
             crate::gamescope::egl::EglDmaBufImporter::new()
                 .map(|imp| std::sync::Arc::new(std::sync::Mutex::new(imp)))
@@ -445,7 +486,7 @@ impl AppState {
             tracing::info!(
                 "Native PipeWire DMA-BUF zero-copy pipeline initialized for Gamescope video"
             );
-        } else {
+        } else if self.steam_deck.is_none() {
             tracing::warn!("Gamescope DMA-BUF pipeline not ready yet; will retry until ready");
         }
         let video_handle = None;
@@ -473,26 +514,40 @@ impl AppState {
         };
 
         // 3. Connect EIS input client
-        let input_client = match crate::gamescope::input::GamescopeInputClient::connect() {
-            Ok(client) => Some(client),
-            Err(e) => {
-                tracing::warn!("Failed to initialize Gamescope EIS input client: {e}");
-                None
+        let input_client = if self.steam_deck.is_some() {
+            None
+        } else {
+            match crate::gamescope::input::GamescopeInputClient::connect() {
+                Ok(client) => Some(client),
+                Err(e) => {
+                    tracing::warn!("Failed to initialize Gamescope EIS input client: {e}");
+                    None
+                }
             }
         };
 
         // 4. Initialize X11 cursor monitor for automatic camera capture
-        let x11_cursor_monitor = if let Some(disp) =
+        let x11_cursor_monitor = if let Some(disp) = if self.steam_deck.is_some() {
+            None
+        } else {
             crate::gamescope::x11_cursor::find_gamescope_x_display()
-        {
+        } {
             tracing::info!("Found Gamescope X11 display: {disp}, starting cursor monitor");
             crate::gamescope::x11_cursor::GamescopeX11CursorMonitor::start(&disp)
         } else {
-            tracing::warn!("Gamescope X11 display not detected; automatic cursor capture disabled");
+            if self.steam_deck.is_none() {
+                tracing::warn!(
+                    "Gamescope X11 display not detected; automatic cursor capture disabled"
+                );
+            }
             None
         };
 
-        let initial_resolution = crate::gamescope::video::detect_gamescope_resolution();
+        let initial_resolution = if self.steam_deck.is_some() {
+            (1280, 800)
+        } else {
+            crate::gamescope::video::detect_gamescope_resolution()
+        };
         let now = std::time::Instant::now();
 
         self.gamescope_hook = Some(crate::gamescope::GamescopeHookState {
@@ -513,11 +568,28 @@ impl AppState {
             last_dma_retry: Some(now),
         });
 
-        self.info("Gamescope hook started (4K 60Hz). Mouse/keyboard passthrough active (Shift+Tab to release).");
+        self.info(if self.steam_deck.is_some() { "Waiting for Steam game capture. L5 hooks/unhooks the cursor." } else { "Gamescope hook started (4K 60Hz). Mouse/keyboard passthrough active (Shift+Tab to release)." });
         ctx.request_repaint();
     }
 
     pub fn poll_gamescope_dma_retry(&mut self, ctx: &egui::Context) {
+        if self.steam_deck.is_some() {
+            crate::steam_deck::launch::poll(self, ctx);
+            crate::steam_deck::capture::poll(self, ctx);
+            let deck = self.steam_deck.as_ref().unwrap();
+            if self.latest_frame.is_none() {
+                if deck
+                    .launch_started
+                    .is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(300))
+                    && self.gamescope_hook.is_some()
+                {
+                    self.error("Steam game capture did not become available within five minutes. Check the Deck launch log and Steam dialogs.");
+                    self.stop_stream(ctx);
+                }
+                return;
+            }
+            return;
+        }
         const MAX_DMA_RETRIES: u32 = 15;
         const DMA_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -564,7 +636,9 @@ impl AppState {
                     repaint_ctx.request_repaint();
                 });
                 let mut dma_handle = crate::gamescope::pipewire_dma::start_gamescope_dma_stream(
-                    None,
+                    self.steam_deck
+                        .as_ref()
+                        .and_then(|d| d.capture_target.as_deref()),
                     request_repaint,
                     self.hardware.video_queue_drops.clone(),
                 );
@@ -628,7 +702,7 @@ impl AppState {
     }
 
     pub fn sync_mic_stream(&mut self) {
-        if !self.mic.config.enabled {
+        if self.steam_deck.is_some() || !self.mic.config.enabled {
             if self.mic.active_stream.is_some() {
                 self.info("Microphone stream stopped.");
                 self.mic.active_stream = None;
@@ -674,7 +748,7 @@ impl AppState {
     }
 
     pub fn sync_webcam_stream(&mut self, ctx: Option<&egui::Context>) {
-        if !self.webcam.config.enabled {
+        if self.steam_deck.is_some() || !self.webcam.config.enabled {
             if self.webcam.active_stream.is_some() {
                 self.info("Webcam stream stopped.");
                 self.webcam.active_stream = None;
@@ -773,6 +847,9 @@ impl AppState {
     }
 
     pub fn start_video_file(&mut self, path: &std::path::Path, ctx: &egui::Context) {
+        if self.steam_deck.is_some() {
+            return;
+        }
         self.stop_stream_resources();
 
         // Probe video file container for native dimensions, duration, and framerate
@@ -897,6 +974,9 @@ impl AppState {
     }
 
     pub fn open_video_file_dialog(&mut self, ctx: &egui::Context) {
+        if self.steam_deck.is_some() {
+            return;
+        }
         let (tx, rx) = crossbeam_channel::bounded(1);
         self.video_file_dialog_receiver = Some(rx);
         let ctx_clone = ctx.clone();
@@ -960,8 +1040,10 @@ impl AppState {
                     self.error(format!("Video file playback failed: {err}"));
                     self.stop_video_file();
                     self.fullscreen_toggle_frame_count = None;
-                    self.ui.is_fullscreen = false;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                    if self.steam_deck.is_none() {
+                        self.ui.is_fullscreen = false;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                    }
                     self.ui.video_window_open = false;
                     self.ui.control_window_open = true;
                 }
@@ -1005,6 +1087,10 @@ impl AppState {
 
     pub fn start_pc98_mode(&mut self, ctx: &egui::Context) {
         self.stop_stream_resources();
+        if let Some(deck) = &mut self.steam_deck {
+            deck.source = crate::steam_deck::Source::Pc98;
+            deck.tab = crate::steam_deck::Tab::Game;
+        }
 
         // Stash current normal profile and capture card parameters
         let current_normal = crate::config::build_profile_from_state(self);
@@ -1019,11 +1105,13 @@ impl AppState {
 
         self.hardware.selected_resolution = (640, 400);
         self.hardware.selected_framerate = 56;
-        let new_size = egui::vec2(800.0, 600.0);
-        ctx.send_viewport_cmd_to(
-            egui::ViewportId::ROOT,
-            egui::ViewportCommand::InnerSize(new_size),
-        );
+        if self.steam_deck.is_none() {
+            let new_size = egui::vec2(800.0, 600.0);
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::InnerSize(new_size),
+            );
+        }
 
         let (frame_tx, frame_rx) = crossbeam_channel::bounded(2);
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
@@ -1120,7 +1208,11 @@ impl AppState {
             if let Some(prev_name) = self.previous_pc98_normal_profile.take() {
                 self.active_profile = prev_name;
             }
-            let profile_to_apply = self.profiles.get(&self.active_profile).cloned();
+            let profile_to_apply = self
+                .steam_deck
+                .is_none()
+                .then(|| self.profiles.get(&self.active_profile).cloned())
+                .flatten();
             if let Some(profile) = profile_to_apply {
                 crate::config::apply_profile_to_state(self, &profile);
             }
@@ -1268,8 +1360,10 @@ impl AppState {
                     ));
                     ctx.set_cursor_icon(egui::CursorIcon::Default);
                     self.fullscreen_toggle_frame_count = None;
-                    self.ui.is_fullscreen = false;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                    if self.steam_deck.is_none() {
+                        self.ui.is_fullscreen = false;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                    }
                     self.error(format!("PC-98 emulator error: {err}"));
                     self.stop_pc98_mode();
                     self.ui.video_window_open = false;
@@ -1291,6 +1385,18 @@ impl AppState {
     ) {
         let (tx, rx) = crossbeam_channel::bounded(1);
         self.pc98.file_picker_rx = Some(rx);
+        if let Some(deck) = &mut self.steam_deck {
+            deck.file_picker = Some(crate::ui::file_picker::FilePicker::new(
+                "Select PC-98 media or games folder",
+                std::path::Path::new(&self.pc98.config.games_dir),
+                slot == crate::pc98::Pc98MediaSlot::GamesDir,
+                None,
+                move |path| {
+                    let _ = tx.send((slot, path));
+                },
+            ));
+            return;
+        }
         let ctx_clone = ctx.clone();
         let _ = std::thread::Builder::new()
             .name("pc98-media-picker".to_string())
@@ -1347,6 +1453,10 @@ impl AppState {
 
     pub fn start_pc88_mode(&mut self, ctx: &egui::Context) {
         self.stop_stream_resources();
+        if let Some(deck) = &mut self.steam_deck {
+            deck.source = crate::steam_deck::Source::Pc88;
+            deck.tab = crate::steam_deck::Tab::Game;
+        }
 
         // Stash current normal profile and capture card parameters
         let current_normal = crate::config::build_profile_from_state(self);
@@ -1361,11 +1471,13 @@ impl AppState {
 
         self.hardware.selected_resolution = (640, 400);
         self.hardware.selected_framerate = 56;
-        let new_size = egui::vec2(800.0, 600.0);
-        ctx.send_viewport_cmd_to(
-            egui::ViewportId::ROOT,
-            egui::ViewportCommand::InnerSize(new_size),
-        );
+        if self.steam_deck.is_none() {
+            let new_size = egui::vec2(800.0, 600.0);
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::InnerSize(new_size),
+            );
+        }
 
         let (frame_tx, frame_rx) = crossbeam_channel::bounded(2);
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
@@ -1463,7 +1575,11 @@ impl AppState {
             if let Some(prev_name) = self.previous_pc88_normal_profile.take() {
                 self.active_profile = prev_name;
             }
-            let profile_to_apply = self.profiles.get(&self.active_profile).cloned();
+            let profile_to_apply = self
+                .steam_deck
+                .is_none()
+                .then(|| self.profiles.get(&self.active_profile).cloned())
+                .flatten();
             if let Some(profile) = profile_to_apply {
                 crate::config::apply_profile_to_state(self, &profile);
             }
@@ -1585,8 +1701,10 @@ impl AppState {
                     ));
                     ctx.set_cursor_icon(egui::CursorIcon::Default);
                     self.fullscreen_toggle_frame_count = None;
-                    self.ui.is_fullscreen = false;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                    if self.steam_deck.is_none() {
+                        self.ui.is_fullscreen = false;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                    }
                     self.error(format!("PC-88 emulator error: {err}"));
                     self.stop_pc88_mode();
                     self.ui.video_window_open = false;
@@ -1608,6 +1726,18 @@ impl AppState {
     ) {
         let (tx, rx) = crossbeam_channel::bounded(1);
         self.pc88.file_picker_rx = Some(rx);
+        if let Some(deck) = &mut self.steam_deck {
+            deck.file_picker = Some(crate::ui::file_picker::FilePicker::new(
+                "Select PC-88 media or games folder",
+                std::path::Path::new(&self.pc88.config.games_dir),
+                slot == crate::pc88::Pc88MediaSlot::GamesDir,
+                None,
+                move |path| {
+                    let _ = tx.send((slot, path));
+                },
+            ));
+            return;
+        }
         let ctx_clone = ctx.clone();
         let _ = std::thread::Builder::new()
             .name("pc88-media-picker".to_string())

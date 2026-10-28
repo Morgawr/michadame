@@ -3,7 +3,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+#[cfg(test)]
+use std::process::Command;
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const WRAPPER_MARKER: &str = "# MICHADAME_WRAPPER_V1";
@@ -293,6 +295,51 @@ pub fn build_ephemeral_wrapper_script_with_session(
     session_id: &str,
     real_digest: &str,
 ) -> String {
+    build_wrapper(
+        steam_root,
+        appid,
+        launcher_script,
+        michadame_pid,
+        session_id,
+        real_digest,
+        false,
+    )
+}
+
+fn build_wrapper(
+    steam_root: &Path,
+    appid: &str,
+    launcher_script: &Path,
+    michadame_pid: u32,
+    session_id: &str,
+    real_digest: &str,
+    deck: bool,
+) -> String {
+    if deck {
+        return include_str!("../../scripts/michadame-steam-deck-wrapper.sh")
+            .replace("@SESSION_HEADER@", &session_id.replace(['\n', '\r'], ""))
+            .replace("@DIGEST_HEADER@", &real_digest.replace(['\n', '\r'], ""))
+            .replace(
+                "@STEAM_ROOT@",
+                &shell_single_quote(&steam_root.to_string_lossy()),
+            )
+            .replace("@APPID@", &shell_single_quote(appid))
+            .replace("@PID@", &michadame_pid.to_string())
+            .replace("@SESSION@", &shell_single_quote(session_id))
+            .replace(
+                "@LAUNCHER@",
+                &shell_single_quote(&launcher_script.to_string_lossy()),
+            )
+            .replace(
+                "@FLOCK@",
+                &shell_single_quote(&crate::portable::helper_path("flock").to_string_lossy()),
+            );
+    }
+    let nesting_guard = if deck {
+        "[ \"${PULSE_SINK:-}\" = \"michadame_gamescope\" ]"
+    } else {
+        "[ -n \"${GAMESCOPE_WAYLAND_DISPLAY:-}\" ] || [ \"${PULSE_SINK:-}\" = \"michadame_gamescope\" ]"
+    };
     let clean_session: String = session_id
         .chars()
         .filter(|&c| c != '\n' && c != '\r')
@@ -360,7 +407,7 @@ pub fn build_ephemeral_wrapper_script_with_session(
 \n\
     restore_all\n\
 \n\
-    if [ -n \"${{GAMESCOPE_WAYLAND_DISPLAY:-}}\" ] || [ \"${{PULSE_SINK:-}}\" = \"michadame_gamescope\" ]; then\n\
+    if {nesting_guard}; then\n\
         exec \"$SELF\" \"$@\"\n\
     fi\n\
 \n\
@@ -554,6 +601,24 @@ pub fn arm_steam_launch_wrapper_in_roots_with_session(
     michadame_pid: u32,
     session_id: &str,
 ) -> Result<Vec<PathBuf>> {
+    arm_wrapper(
+        roots,
+        appid,
+        launcher_script,
+        michadame_pid,
+        session_id,
+        false,
+    )
+}
+
+fn arm_wrapper(
+    roots: &[PathBuf],
+    appid: &str,
+    launcher_script: &Path,
+    michadame_pid: u32,
+    session_id: &str,
+    deck: bool,
+) -> Result<Vec<PathBuf>> {
     if session_id.trim().is_empty() {
         anyhow::bail!("Wrapper session ID must not be empty");
     }
@@ -619,13 +684,14 @@ pub fn arm_steam_launch_wrapper_in_roots_with_session(
                     session_id: session_id.to_string(),
                     real_digest: real_digest.clone(),
                 };
-                let script_content = build_ephemeral_wrapper_script_with_session(
+                let script_content = build_wrapper(
                     root,
                     appid,
                     launcher_script,
                     michadame_pid,
                     session_id,
                     &real_digest,
+                    deck,
                 );
 
                 fs::write(&tmp_path, script_content.as_bytes()).with_context(|| {
@@ -681,6 +747,14 @@ pub fn arm_steam_launch_wrapper_in_roots_with_session(
 }
 
 pub fn launch_steam_game(game: &SteamGame, launcher_script_str: &str) -> Result<()> {
+    launch_game(game, launcher_script_str, false)
+}
+
+pub fn launch_steam_deck_game(game: &SteamGame, launcher_script: &str) -> Result<()> {
+    launch_game(game, launcher_script, true)
+}
+
+fn launch_game(game: &SteamGame, launcher_script_str: &str, deck: bool) -> Result<()> {
     let trimmed = launcher_script_str.trim();
     if trimmed.is_empty() {
         anyhow::bail!(
@@ -702,13 +776,7 @@ pub fn launch_steam_game(game: &SteamGame, launcher_script_str: &str) -> Result<
 
     let pid = std::process::id();
     let session_id = next_wrapper_session_id(pid);
-    let armed = arm_steam_launch_wrapper_in_roots_with_session(
-        &roots,
-        &game.appid,
-        &launcher_path,
-        pid,
-        &session_id,
-    )?;
+    let armed = arm_wrapper(&roots, &game.appid, &launcher_path, pid, &session_id, deck)?;
     if armed.is_empty() {
         anyhow::bail!("Could not find steam-launch-wrapper in Steam installation.");
     }
@@ -723,7 +791,7 @@ pub fn launch_steam_game(game: &SteamGame, launcher_script_str: &str) -> Result<
         session_id
     );
 
-    if let Err(e) = Command::new("steam")
+    if let Err(e) = crate::portable::host_command("steam")
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -740,7 +808,7 @@ pub fn launch_steam_game(game: &SteamGame, launcher_script_str: &str) -> Result<
     let _ = std::thread::Builder::new()
         .name("steam-wrapper-restore".to_string())
         .spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(30));
+            std::thread::sleep(std::time::Duration::from_secs(if deck { 300 } else { 30 }));
             restore_steam_launch_wrappers_for_session(&roots_clone, Some(&session_id));
         });
 
@@ -750,6 +818,121 @@ pub fn launch_steam_game(game: &SteamGame, launcher_script_str: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deck_hook_survives_unrelated_launches_and_different_pid_namespaces() {
+        let root = tempfile::tempdir().unwrap();
+        for sub in ["steamrt64", "ubuntu12_32"] {
+            let dir = root.path().join(sub);
+            fs::create_dir(&dir).unwrap();
+            let wrapper = dir.join("steam-launch-wrapper");
+            fs::write(&wrapper, "#!/bin/sh\nprintf ORIGINAL_GAME\n").unwrap();
+            fs::set_permissions(wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let launcher = root.path().join("launcher.sh");
+        fs::write(&launcher, "#!/bin/sh\nprintf NESTED_GAME\n").unwrap();
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
+        let lease =
+            crate::steam_deck::launch::hold_lease(&root.path().join("viewer.lock")).unwrap();
+        // This PID cannot identify the viewer; the shared lease must be used.
+        arm_wrapper(
+            &[root.path().to_path_buf()],
+            "1234",
+            &launcher,
+            u32::MAX,
+            "namespace-test",
+            true,
+        )
+        .unwrap();
+        let wrapper = root.path().join("steamrt64/steam-launch-wrapper");
+        let unrelated = Command::new(&wrapper)
+            .arg("AppId=9999")
+            .env("SteamAppId", "1234")
+            .output()
+            .unwrap();
+        assert!(unrelated.status.success());
+        assert_eq!(unrelated.stdout, b"ORIGINAL_GAME");
+        assert!(fs::read_to_string(&wrapper)
+            .unwrap()
+            .contains(WRAPPER_MARKER));
+        let install = Command::new(&wrapper)
+            .args(["AppId=1234", "Install=1"])
+            .output()
+            .unwrap();
+        assert_eq!(install.stdout, b"ORIGINAL_GAME");
+        assert!(fs::read_to_string(&wrapper)
+            .unwrap()
+            .contains(WRAPPER_MARKER));
+        // Some Steam paths supply AppID through the environment only. An outer
+        // Gamescope/null sink is expected in Game Mode and must not skip nesting.
+        let target = Command::new(&wrapper)
+            .arg("--")
+            .env("SteamAppId", "1234")
+            .env("PULSE_SINK", "michadame_gamescope")
+            .env("GAMESCOPE_WAYLAND_DISPLAY", "gamescope-outer")
+            .output()
+            .unwrap();
+        assert!(
+            target.status.success(),
+            "{}",
+            String::from_utf8_lossy(&target.stderr)
+        );
+        assert_eq!(target.stdout, b"NESTED_GAME");
+        for sub in ["steamrt64", "ubuntu12_32"] {
+            assert!(!root
+                .path()
+                .join(sub)
+                .join("steam-launch-wrapper.real")
+                .exists());
+        }
+        drop(lease);
+    }
+
+    #[test]
+    fn deck_wrapper_nests_under_steamos_while_desktop_wrapper_keeps_its_guard() {
+        for deck in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let runtime = root.path().join("steamrt64");
+            fs::create_dir(&runtime).unwrap();
+            let launcher = root.path().join("launcher.sh");
+            fs::write(&launcher, "#!/bin/sh\nprintf 'NESTED_GAME'\n").unwrap();
+            fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
+            let wrapper = runtime.join("steam-launch-wrapper");
+            let real = runtime.join("steam-launch-wrapper.real");
+            fs::write(&real, "#!/bin/sh\nprintf 'ORIGINAL_GAME'\n").unwrap();
+            fs::set_permissions(&real, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::write(
+                &wrapper,
+                build_wrapper(
+                    root.path(),
+                    "1234",
+                    &launcher,
+                    std::process::id(),
+                    "deck-test",
+                    "unused",
+                    deck,
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+            let output = Command::new(&wrapper)
+                .arg("AppId=1234")
+                .env("GAMESCOPE_WAYLAND_DISPLAY", "gamescope-outer")
+                .env_remove("PULSE_SINK")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                if deck { "NESTED_GAME" } else { "ORIGINAL_GAME" }
+            );
+            assert!(!real.exists());
+        }
+    }
 
     #[test]
     fn test_parse_library_folders_and_acf() {

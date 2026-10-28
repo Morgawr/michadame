@@ -42,7 +42,7 @@ pub fn execute_popup_mine_action(
         return false;
     }
 
-    if with_clip {
+    if with_clip && state.steam_deck.is_none() {
         let clip_title = crate::twitch::clips::format_clip_title(&term, &reading, tag.as_deref());
         if let Err(e) = state.twitch.request_clip(clip_title, Some(request_id), ctx) {
             state.error(format!("Could not create Twitch clip: {e}"));
@@ -83,7 +83,14 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         }
     }
 
-    let pointer_pos = ui.input(|i| i.pointer.hover_pos());
+    let pointer_pos = ui.input(|i| {
+        i.pointer
+            .hover_pos()
+            .or(i.pointer.interact_pos())
+            .or(i.pointer.latest_pos())
+    });
+    let deck_mode = state.steam_deck.is_some();
+    let mut tapped_word = false;
     let whiteboard_open = state.whiteboard.open;
     let hide_for_mining_capture = state.bank.has_pending() && state.whiteboard.is_visible();
     // The dictionary popup "eats" pointer events: if the cursor is currently over the
@@ -125,7 +132,9 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         let response = ui.interact(box_rect, box_id, ocr_sense);
 
         let is_recently_copied = state.ocr.last_copied_index == Some(idx);
-        let is_hovered = response.hovered() && !pointer_in_popup && !whiteboard_open;
+        let is_hovered = (response.hovered() || (deck_mode && response.clicked()))
+            && !pointer_in_popup
+            && !whiteboard_open;
         let is_active_popup_box = state.dict.popup.as_ref().map_or(false, |p| {
             box_rect.expand(2.0).contains(p.word_rect.center())
         });
@@ -221,8 +230,12 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         }
 
         if response.clicked() && !pointer_in_popup && !whiteboard_open {
-            copied_text = Some(ocr_box.text.clone());
-            copied_index = Some(idx);
+            if deck_mode {
+                tapped_word = true;
+            } else {
+                copied_text = Some(ocr_box.text.clone());
+                copied_index = Some(idx);
+            }
         }
 
         // Fallback tooltip only if no dictionary is installed
@@ -321,10 +334,26 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
                 .map(|p| p.is_popup_hovered)
                 .unwrap_or(false));
 
+    if tapped_word {
+        state.steam_deck.as_mut().unwrap().pinned_dictionary = true;
+        state.dict.popup = None;
+    } else if deck_mode
+        && ui.input(|i| i.pointer.primary_clicked())
+        && !pointer_in_popup
+        && !hovered_any_box
+    {
+        state.dict.popup = None;
+        state.steam_deck.as_mut().unwrap().pinned_dictionary = false;
+    }
+    let pinned = state
+        .steam_deck
+        .as_ref()
+        .is_some_and(|deck| deck.pinned_dictionary);
     let grace_period = std::time::Duration::from_millis(450);
 
     // If mouse is inside the popup or the whiteboard is open, keep it open!
-    if !is_popup_currently_hovered && !whiteboard_open {
+    if (tapped_word || !is_popup_currently_hovered) && !whiteboard_open && (!pinned || tapped_word)
+    {
         if let Some(pos) = pointer_pos {
             if hovered_any_box {
                 let has_db = state.dict.db.lock().map(|g| g.is_some()).unwrap_or(false);
@@ -446,9 +475,14 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
             target_rect,
             !state.ocr.hide_overlay,
             state.dict.popup_under_crt,
+            if deck_mode {
+                crate::steam_deck::dictionary_scale(ui.ctx())
+            } else {
+                1.0
+            },
             |entry| bank.status(&entry.term, &entry.reading, &popup_sentence),
             |entry| bank.is_entry_mined(&entry.term, &entry.reading, entry.sequence),
-            state.twitch.is_stream_live(),
+            !deck_mode && state.twitch.is_stream_live(),
         )
     };
 
@@ -503,100 +537,94 @@ fn paint_ocr_text_line(
         return;
     }
 
-    let line_w = (max_x - min_x).max(1.0);
-    let line_h = (max_y - min_y).max(1.0);
+    let line_w = (max_x - min_x).max(0.0);
+    let line_h = (max_y - min_y).max(0.0);
     let use_spans = char_spans.len() == chars.len();
-
-    // Estimate effective character count so narrow punctuation (、, 。, 「, 」) does not
-    // artificially shrink the font size when computing char_w / char_h.
-    let effective_char_count: f32 = chars
+    let effective_char_count = chars
         .iter()
         .map(|&c| crate::ocr::lens::char_natural_weight(c))
         .sum::<f32>()
         .max(1.0);
-
-    if is_vertical {
-        let char_h = line_h / effective_char_count;
-        let uniform_char_h = line_h / chars.len() as f32;
-        let font_size = (line_w * 0.85).min(char_h * 1.25).clamp(10.0, 72.0);
-        let font_id = egui::FontId::new(font_size, egui::FontFamily::Name("GothicCJK".into()));
-        let center_x = (min_x + max_x) / 2.0;
-
-        for (i, &c) in chars.iter().enumerate() {
-            if c.is_whitespace() {
-                continue;
-            }
-            let center_y = if use_spans {
-                let (s0, s1) = char_spans[i];
-                let y0 = video_rect.min.y + s0 * video_rect.height();
-                let y1 = video_rect.min.y + s1 * video_rect.height();
-                (y0 + y1) * 0.5
-            } else {
-                min_y + (i as f32 + 0.5) * uniform_char_h
-            };
-            painter.text(
-                egui::pos2(center_x, center_y),
-                egui::Align2::CENTER_CENTER,
-                c.to_string(),
-                font_id.clone(),
-                text_color,
-            );
-        }
+    let font_size = if is_vertical {
+        (line_w * 0.85).min(line_h / effective_char_count * 1.25)
     } else {
-        let char_w = line_w / effective_char_count;
-        let uniform_char_w = line_w / chars.len() as f32;
-        let font_size = (line_h * 0.85).min(char_w * 1.25).clamp(10.0, 72.0);
-        let font_id = egui::FontId::new(font_size, egui::FontFamily::Name("GothicCJK".into()));
-        let center_y = (min_y + max_y) / 2.0;
+        (line_h * 0.85).min(line_w / effective_char_count * 1.25)
+    }
+    .min(72.0);
 
-        for (i, &c) in chars.iter().enumerate() {
-            if c.is_whitespace() {
-                continue;
-            }
-            let center_x = if use_spans {
-                let (s0, s1) = char_spans[i];
-                let x0 = video_rect.min.x + s0 * video_rect.width();
-                let x1 = video_rect.min.x + s1 * video_rect.width();
-                let cw = (x1 - x0).max(0.0);
-                (x0 + x1) * 0.5 + punct_ink_offset_x(c, font_size, cw)
-            } else {
-                min_x + (i as f32 + 0.5) * uniform_char_w
-            };
-            painter.text(
-                egui::pos2(center_x, center_y),
-                egui::Align2::CENTER_CENTER,
-                c.to_string(),
-                font_id.clone(),
-                text_color,
-            );
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_whitespace() {
+            continue;
         }
+        let cell = if is_vertical {
+            let (y0, y1) = if use_spans {
+                let (s0, s1) = char_spans[i];
+                (
+                    video_rect.min.y + s0 * video_rect.height(),
+                    video_rect.min.y + s1 * video_rect.height(),
+                )
+            } else {
+                let height = line_h / chars.len() as f32;
+                (min_y + i as f32 * height, min_y + (i + 1) as f32 * height)
+            };
+            egui::Rect::from_min_max(egui::pos2(min_x, y0), egui::pos2(max_x, y1))
+        } else {
+            let (x0, x1) = if use_spans {
+                let (s0, s1) = char_spans[i];
+                (
+                    video_rect.min.x + s0 * video_rect.width(),
+                    video_rect.min.x + s1 * video_rect.width(),
+                )
+            } else {
+                let width = line_w / chars.len() as f32;
+                (min_x + i as f32 * width, min_x + (i + 1) as f32 * width)
+            };
+            egui::Rect::from_min_max(egui::pos2(x0, min_y), egui::pos2(x1, max_y))
+        };
+        paint_ocr_glyph(painter, c, cell, font_size, text_color);
     }
 }
 
-/// Compensates for off-center CJK punctuation ink inside fullwidth 1-em font glyphs when
-/// Google Lens returns a tight bounding box around the punctuation mark's visible ink.
-///
-/// In `NotoSansJP-Regular.ttf` (`GothicCJK`):
-/// - Closing/comma/period punctuation (`。`, `、`, `」`, `』`, `）`, `】`) has its visible ink
-///   centered at `~0.20 em` (`-0.30 * font_size` from the `1.0 em` advance center).
-/// - Opening brackets (`「`, `『`, `（`, `【`) have their visible ink centered at `~0.80 em`
-///   (`+0.30 * font_size` from the `1.0 em` advance center).
-///
-/// When `char_width_px` is narrow (`~0.35 * font_size`, wrapping only the ink), we shift the
-/// `CENTER_CENTER` draw anchor by `±0.30 * font_size` so the rendered ink lands inside `[x0, x1]`.
-/// When `char_width_px >= font_size` (a full 1-em cell), the offset smoothly decays to `0.0`.
-fn punct_ink_offset_x(c: char, font_size: f32, char_width_px: f32) -> f32 {
-    if font_size <= 0.0 {
-        return 0.0;
+/// Fit the actual font ink to its OCR hit cell. Logical minimum font sizes and
+/// typographic advance widths can otherwise put visible ink in a neighbor's
+/// selection cell, particularly at fractional/high DPI and for punctuation.
+fn paint_ocr_glyph(
+    painter: &egui::Painter,
+    character: char,
+    cell: egui::Rect,
+    mut font_size: f32,
+    color: egui::Color32,
+) {
+    if !cell.is_finite()
+        || cell.width() <= 0.0
+        || cell.height() <= 0.0
+        || !font_size.is_finite()
+        || font_size <= 0.0
+    {
+        return;
     }
-    let t = ((font_size - char_width_px) / (0.65 * font_size)).clamp(0.0, 1.0);
-    match c {
-        '。' | '、' | '，' | '．' | '」' | '』' | '）' | '】' | '〉' | '》' | '〕' | '］'
-        | '｝' => 0.30 * font_size * t,
-        '「' | '『' | '（' | '【' | '〈' | '《' | '〔' | '［' | '｛' => {
-            -0.30 * font_size * t
+    let mut galley;
+    // Font rasterization rounds to physical pixels, so remeasure after sizing.
+    for attempt in 0..3 {
+        galley = painter.layout_no_wrap(
+            character.to_string(),
+            egui::FontId::new(font_size, egui::FontFamily::Name("GothicCJK".into())),
+            color,
+        );
+        let ink = galley.mesh_bounds;
+        if !ink.is_positive() {
+            return;
         }
-        _ => 0.0,
+        let fit = (cell.width() / ink.width())
+            .min(cell.height() / ink.height())
+            .min(1.0);
+        if fit >= 0.999 || attempt == 2 {
+            let origin = cell.center() - ink.center().to_vec2();
+            // Clipping also covers subpixel rounding and very narrow OCR spans.
+            painter.with_clip_rect(cell).galley(origin, galley, color);
+            return;
+        }
+        font_size *= fit * 0.98;
     }
 }
 
@@ -604,6 +632,225 @@ fn punct_ink_offset_x(c: char, font_size: f32, char_width_px: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::ocr::{OcrBox, ParsedLine, WritingDirection};
+
+    fn japanese_context(ppp: f32) -> egui::Context {
+        let ctx = egui::Context::default();
+        ctx.set_pixels_per_point(ppp);
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "test_jp".into(),
+            egui::FontData::from_static(include_bytes!("../../assets/NotoSansJP-Regular.ttf")),
+        );
+        fonts.families.insert(
+            egui::FontFamily::Name("GothicCJK".into()),
+            vec!["test_jp".into()],
+        );
+        ctx.set_fonts(fonts);
+        ctx
+    }
+
+    #[test]
+    fn rasterized_ocr_ink_selects_its_character_at_fractional_dpi() {
+        let characters = ['日', '本', '語'];
+        let names: Vec<_> = characters
+            .iter()
+            .enumerate()
+            .map(|(i, c)| crate::bank::database::CustomNameEntry {
+                id: i as i64 + 1,
+                created_at: 0,
+                kanji: c.to_string(),
+                furigana: String::new(),
+                source_tag: None,
+                notes: None,
+            })
+            .collect();
+        for ppp in [1.0, 13.0 / 12.0, 1.25, 1.5, 13.0 / 6.0, 2.5, 3.0] {
+            for vertical in [false, true] {
+                for precise_spans in [false, true] {
+                    let ctx = japanese_context(ppp);
+                    let video = egui::Rect::from_min_size(
+                        egui::pos2(17.0, 9.0),
+                        egui::vec2(1280.0 / ppp, 800.0 / ppp),
+                    );
+                    let line_rect = egui::Rect::from_min_size(
+                        video.min + egui::vec2(100.0 / ppp, 100.0 / ppp),
+                        if vertical {
+                            egui::vec2(16.0 / ppp, 48.0 / ppp)
+                        } else {
+                            egui::vec2(48.0 / ppp, 16.0 / ppp)
+                        },
+                    );
+                    let spans: Vec<_> = if precise_spans {
+                        (0..3)
+                            .map(|i| {
+                                (
+                                    (100.0 + i as f32 * 16.0)
+                                        / if vertical { 800.0 } else { 1280.0 },
+                                    (116.0 + i as f32 * 16.0)
+                                        / if vertical { 800.0 } else { 1280.0 },
+                                )
+                            })
+                            .collect()
+                    } else {
+                        vec![]
+                    };
+                    let line = ParsedLine {
+                        text: "日本語".into(),
+                        center_x: (line_rect.center().x - video.min.x) / video.width(),
+                        center_y: (line_rect.center().y - video.min.y) / video.height(),
+                        width: line_rect.width() / video.width(),
+                        height: line_rect.height() / video.height(),
+                        writing_direction: if vertical {
+                            WritingDirection::TopToBottom
+                        } else {
+                            WritingDirection::LeftToRight
+                        },
+                        char_spans: spans.clone(),
+                        ..Default::default()
+                    };
+                    let ocr_box = OcrBox {
+                        text: line.text.clone(),
+                        center_x: line.center_x,
+                        center_y: line.center_y,
+                        width: line.width,
+                        height: line.height,
+                        writing_direction: line.writing_direction,
+                        lines: vec![line],
+                    };
+                    let output = ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                video.max.to_vec2(),
+                            )),
+                            ..Default::default()
+                        },
+                        |ctx| {
+                            paint_ocr_text_line(
+                                &ctx.layer_painter(egui::LayerId::background()),
+                                "日本語",
+                                &spans,
+                                video,
+                                line_rect.left(),
+                                line_rect.right(),
+                                line_rect.top(),
+                                line_rect.bottom(),
+                                egui::Color32::WHITE,
+                                vertical,
+                            );
+                        },
+                    );
+                    let atlas = output
+                        .textures_delta
+                        .set
+                        .iter()
+                        .find_map(|(_, delta)| {
+                            if let egui::ImageData::Font(image) = &delta.image {
+                                Some(image)
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap();
+                    let mut samples = 0;
+                    for shape in &output.shapes {
+                        let egui::Shape::Text(text) = &shape.shape else {
+                            continue;
+                        };
+                        let expected = characters
+                            .iter()
+                            .position(|c| c.to_string() == text.galley.job.text)
+                            .unwrap();
+                        let mesh = &text.galley.rows[0].visuals.mesh;
+                        let first = &mesh.vertices[0];
+                        let last = &mesh.vertices[3];
+                        for y in first.uv.y as usize..last.uv.y as usize {
+                            for x in first.uv.x as usize..last.uv.x as usize {
+                                if atlas.pixels[y * atlas.size[0] + x] < 0.5 {
+                                    continue;
+                                }
+                                let point = text.pos
+                                    + first.pos.to_vec2()
+                                    + egui::vec2(
+                                        (x as f32 + 0.5 - first.uv.x) / (last.uv.x - first.uv.x)
+                                            * (last.pos.x - first.pos.x),
+                                        (y as f32 + 0.5 - first.uv.y) / (last.uv.y - first.uv.y)
+                                            * (last.pos.y - first.pos.y),
+                                    );
+                                if !shape.clip_rect.contains(point) {
+                                    continue;
+                                }
+                                let popup = crate::dict::lookup::lookup_word_at_pointer(
+                                    point,
+                                    std::slice::from_ref(&ocr_box),
+                                    video,
+                                    None,
+                                    None,
+                                    crate::dict::global_deinflector(),
+                                    &names,
+                                    None,
+                                    1,
+                                )
+                                .unwrap();
+                                assert_eq!(
+                                    popup.char_range,
+                                    (expected, expected + 1),
+                                    "ppp={ppp} vertical={vertical} point={point:?}"
+                                );
+                                samples += 1;
+                            }
+                        }
+                    }
+                    assert!(samples > 30, "No visible glyphs at ppp={ppp}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn punctuation_ink_fits_narrow_hit_cells() {
+        let ctx = japanese_context(13.0 / 6.0);
+        let cells: Vec<_> = (0..4)
+            .map(|i| {
+                egui::Rect::from_min_size(
+                    egui::pos2(10.0 + i as f32 * 10.0, 10.0),
+                    egui::vec2(3.0, 8.0),
+                )
+            })
+            .collect();
+        let output = ctx.run(Default::default(), |ctx| {
+            for (c, cell) in ['「', '。', '、', '」'].into_iter().zip(&cells) {
+                paint_ocr_glyph(
+                    &ctx.layer_painter(egui::LayerId::background()),
+                    c,
+                    *cell,
+                    32.0,
+                    egui::Color32::WHITE,
+                );
+            }
+        });
+        let shapes: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|shape| {
+                if let egui::Shape::Text(text) = &shape.shape {
+                    Some((shape, text))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(shapes.len(), cells.len());
+        for ((shape, text), cell) in shapes.into_iter().zip(cells) {
+            let visible = text
+                .galley
+                .mesh_bounds
+                .translate(text.pos.to_vec2())
+                .intersect(shape.clip_rect);
+            assert!(visible.is_positive());
+            assert!(cell.contains_rect(visible));
+        }
+    }
 
     #[test]
     fn test_box_coordinate_mapping() {
@@ -758,24 +1005,5 @@ mod tests {
         assert!(!state.ocr.hide_overlay);
         state.ocr.hide_overlay = true;
         assert!(state.ocr.hide_overlay);
-    }
-
-    #[test]
-    fn test_punct_ink_offset_compensates_narrow_boxes() {
-        let font_size = 30.0;
-        // Narrow ink box (0.35 * font_size = 10.5px): full compensation (±0.30 * 30 = ±9px)
-        let offset_period = punct_ink_offset_x('。', font_size, 10.5);
-        assert!((offset_period - 9.0).abs() < 0.01);
-
-        let offset_open_quote = punct_ink_offset_x('「', font_size, 10.5);
-        assert!((offset_open_quote + 9.0).abs() < 0.01);
-
-        // Full 1-em cell (30px): zero offset needed
-        assert_eq!(punct_ink_offset_x('。', font_size, 30.0), 0.0);
-        assert_eq!(punct_ink_offset_x('「', font_size, 30.0), 0.0);
-
-        // Regular kanji or ellipsis: always zero offset
-        assert_eq!(punct_ink_offset_x('軍', font_size, 10.5), 0.0);
-        assert_eq!(punct_ink_offset_x('…', font_size, 10.5), 0.0);
     }
 }

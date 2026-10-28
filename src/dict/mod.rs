@@ -64,6 +64,8 @@ pub struct DictState {
     pub is_pitch_importing: Arc<AtomicBool>,
     /// Current pitch dictionary import progress: (Status message, fraction 0.0..1.0).
     pub pitch_import_progress: Arc<Mutex<Option<(String, f32)>>>,
+    /// Last import failure, retained in settings until another import starts.
+    pub pitch_import_error: Option<String>,
 
     /// Local directory where dictionary database and temporary downloads are stored.
     pub dict_dir: PathBuf,
@@ -235,6 +237,7 @@ impl DictState {
             installed_pitch_metadata,
             is_pitch_importing,
             pitch_import_progress,
+            pitch_import_error: None,
             dict_dir,
             event_tx: tx,
             event_rx: Some(rx),
@@ -325,6 +328,7 @@ impl DictState {
         if self.is_pitch_importing.load(Ordering::Relaxed) {
             return;
         }
+        self.pitch_import_error = None;
 
         pitch::spawn_pitch_import(
             zip_path,

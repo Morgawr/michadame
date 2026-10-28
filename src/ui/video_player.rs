@@ -36,11 +36,16 @@ fn capture_frame_pixels(
 pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) {
     state.ocr.start_worker(Some(ctx.clone()));
 
+    let deck_mode = state.steam_deck.is_some();
+    let deck_background = state
+        .steam_deck
+        .as_ref()
+        .is_some_and(|deck| deck.tab != crate::steam_deck::Tab::Game);
     let is_gamescope = state.gamescope_hook.as_ref().map_or(false, |h| h.is_active);
     let is_pc98 = state.pc98.is_active;
     let is_pc88 = state.pc88.is_active;
     let mut passthrough_active = false;
-    if is_gamescope {
+    if !deck_mode && is_gamescope {
         let toggle_passthrough =
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
         if toggle_passthrough {
@@ -59,7 +64,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             .gamescope_hook
             .as_ref()
             .map_or(false, |h| h.passthrough_enabled);
-    } else if is_pc98 {
+    } else if !deck_mode && is_pc98 {
         let toggle_passthrough =
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
         if toggle_passthrough {
@@ -97,7 +102,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             ));
         }
         passthrough_active = state.pc98.passthrough_enabled;
-    } else if is_pc88 {
+    } else if !deck_mode && is_pc88 {
         let toggle_passthrough =
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
         if toggle_passthrough {
@@ -141,7 +146,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
     state.poll_gamescope_dma_retry(ctx);
     if let Some(hook) = &mut state.gamescope_hook {
         if hook.is_active {
-            hook.poll_late_connections();
+            if !deck_mode {
+                hook.poll_late_connections();
+            }
             if let Some(dma) = &hook.dma_handle {
                 while let Ok(frame) = dma.rx.try_recv() {
                     hook.current_dmabuf_frame = Some(std::sync::Arc::new(frame));
@@ -153,7 +160,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
     }
 
     // Space to capture OCR; Shift+Space to clear OCR boxes (suppressed when passthrough or constant scanning is active)
-    if !passthrough_active
+    if !deck_mode
+        && !passthrough_active
         && !state.ocr.is_constant_scanning_active()
         && !ctx.wants_keyboard_input()
         && ctx.input(|i| i.key_pressed(egui::Key::Space))
@@ -212,7 +220,6 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             .ocr
             .backend_shared
             .store(state.ocr.backend.as_u8(), Ordering::Release);
-        let ocr_dispatch = state.ocr.dispatch_handle();
         let mining_capture_this_frame = state.bank.has_pending();
         if mining_capture_this_frame {
             ctx.request_repaint();
@@ -230,6 +237,22 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         let is_showing_preroll = is_preroll_active && !preroll_fade_in;
         let is_showing_outro = is_outro_active && !outro_fade_out;
         let is_showing_roll = is_showing_preroll || is_showing_outro;
+        let ocr_projection = if is_showing_roll {
+            video::gpu::geometry::OcrProjection::default()
+        } else {
+            match filter {
+                CrtFilter::Lottes => {
+                    video::gpu::geometry::OcrProjection::lottes(state.crt.warp_x, state.crt.warp_y)
+                }
+                CrtFilter::Halo => video::gpu::geometry::OcrProjection::halo(
+                    state.halo.curvature,
+                    state.halo.halo_zoom,
+                ),
+                CrtFilter::Off => video::gpu::geometry::OcrProjection::default(),
+            }
+        };
+        state.update_ocr_projection(ocr_projection);
+        let ocr_dispatch = state.ocr.dispatch_handle();
         let active_frame = if is_showing_preroll {
             state.twitch.preroll_frame()
         } else if is_showing_outro {
@@ -277,12 +300,28 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         } else {
             state.video.horizontal_stretch
         };
+        let scaler =
+            crate::video::types::ScalerFilter::from_u8(state.scaler_filter.load(Ordering::Relaxed));
+        let mut fitted_res = if !is_showing_roll
+            && matches!(
+                scaler,
+                crate::video::types::ScalerFilter::Anime4kSmall
+                    | crate::video::types::ScalerFilter::Anime4kMedium
+                    | crate::video::types::ScalerFilter::Anime4kLarge
+            ) {
+            video::gpu::geometry::anime4k_size(res, (output_size.0 as u32, output_size.1 as u32))
+        } else {
+            res
+        };
+        if state.video.pixelate_filter_enabled && !is_showing_roll {
+            fitted_res = video::gpu::geometry::pixelate_size(fitted_res);
+        }
         let rendered_area_geom =
-            crate::video::gpu::geometry::RenderedArea::fit(res, output_size, h_stretch);
+            crate::video::gpu::geometry::RenderedArea::fit(fitted_res, output_size, h_stretch);
         let video_rect_min = response.rect.min
             + egui::vec2(
                 rendered_area_geom.x as f32 / ppp,
-                rendered_area_geom.y as f32 / ppp,
+                rendered_area_geom.top(output_size.1 as u32) as f32 / ppp,
             );
         let video_rect_size = egui::vec2(
             rendered_area_geom.width as f32 / ppp,
@@ -291,7 +330,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         let video_rect = egui::Rect::from_min_size(video_rect_min, video_rect_size);
 
         let is_window_focused = ctx.input(|i| i.focused);
-        if is_gamescope && passthrough_active {
+        if deck_mode {
+            crate::steam_deck::forward_inputs(state, ctx, video_rect);
+        } else if is_gamescope && passthrough_active {
             let is_cursor_hidden = state
                 .gamescope_hook
                 .as_ref()
@@ -464,13 +505,20 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 && !state.whiteboard.contains_pointer(Some(pos), response.rect)
         });
         let is_hovering_controls = is_hovering_video_controls(state, pointer_pos, response.rect);
-        let software_mouse_active =
-            is_software_mouse_active(state, is_on_crt_surface) && !is_hovering_controls;
-        let real_mouse_active = !software_mouse_active
+        let software_mouse_active = !deck_background
+            && is_software_mouse_active(state, is_on_crt_surface)
+            && !is_hovering_controls;
+        let real_mouse_active = !deck_background
+            && !software_mouse_active
             && is_window_focused
             && is_real_game_cursor_active(state, pointer_pos, video_rect, is_hovering_controls);
-        let passthrough_hide_host_cursor =
-            is_passthrough_host_cursor_hidden(state, pointer_pos, video_rect, is_hovering_controls);
+        let passthrough_hide_host_cursor = !deck_background
+            && is_passthrough_host_cursor_hidden(
+                state,
+                pointer_pos,
+                video_rect,
+                is_hovering_controls,
+            );
 
         let (software_mouse_pos, software_mouse_clip) = if software_mouse_active {
             let pos = pointer_pos.map(|pos| {
@@ -566,9 +614,10 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 let latest_dmabuf_frame_cb = latest_dmabuf_frame.clone();
                 let egl_importer_cb = egl_importer_cb.clone();
 
-                let capture_overlays = state.replay.config.capture_overlays;
+                let capture_overlays = state.replay.config.capture_overlays && !deck_background;
                 let webcam_enabled = state.webcam.config.enabled;
-                let whiteboard_visible = !is_roll_active && state.whiteboard.is_visible();
+                let whiteboard_visible =
+                    !deck_background && !is_roll_active && state.whiteboard.is_visible();
                 let stream_res = if let Some(hook) = &state.gamescope_hook {
                     if hook.is_active {
                         hook.resolution()
@@ -902,9 +951,10 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             let latest_dmabuf_frame_cb = latest_dmabuf_frame.clone();
             let egl_importer_cb = egl_importer_cb.clone();
 
-            let capture_overlays = state.replay.config.capture_overlays;
+            let capture_overlays = state.replay.config.capture_overlays && !deck_background;
             let webcam_enabled = state.webcam.config.enabled;
-            let whiteboard_visible = !is_roll_active && state.whiteboard.is_visible();
+            let whiteboard_visible =
+                !deck_background && !is_roll_active && state.whiteboard.is_visible();
             let stream_res = if let Some(hook) = &state.gamescope_hook {
                 if hook.is_active {
                     hook.resolution()
@@ -1064,19 +1114,19 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         }
 
         // Draw interactive OCR bounding box overlay on top of the video image
-        if !is_roll_active && !passthrough_active {
+        if !deck_background && !is_roll_active && !passthrough_active {
             crate::ocr::overlay::draw_ocr_overlay(ui, state, video_rect);
         } else {
             state.ocr.is_box_hovered = false;
         }
 
         // Niconico chat comments, drawn by the renderer under the CRT effects.
-        if !is_roll_active {
+        if !deck_mode && !is_roll_active {
             crate::ui::niconico::update(state, ctx, video_rect);
         }
 
         // Video alert notices, drawn by the renderer under the CRT effects.
-        if !is_roll_active {
+        if !deck_mode && !is_roll_active {
             crate::ui::alerts::update(state, ctx, video_rect);
         }
 
@@ -1093,7 +1143,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
         // Draw resizable whiteboard on Order::PanelResizeLine (above CRT borders, Niconico comments,
         // OCR boxes, and dictionary popups; below Webcam overlay, Debug window, and Twitch chat).
-        if !is_roll_active {
+        if !deck_background && !is_roll_active {
             crate::ui::whiteboard::draw_whiteboard(state, ctx, response.rect);
             if state.whiteboard.is_visible() && mining_capture_this_frame {
                 let bank_capture_cb = bank_capture.clone();
@@ -1127,7 +1177,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         }
 
         // Draw webcam overlay on top of everything (suppressed during pre-roll and outro)
-        if !is_roll_active {
+        if !deck_mode && !is_roll_active {
             crate::ui::webcam_overlay::draw_webcam_overlay(state, ui, ctx, response.rect);
         }
 
@@ -1204,8 +1254,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         // When capturing overlays in the replay buffer, when webcam or whiteboard is visible, or when broadcasting to Twitch,
         // capture the frame after egui has rendered the interactive OCR boxes, dictionary popup, whiteboard, and webcam overlay.
         let is_broadcasting = state.twitch.is_broadcasting() || state.twitch.broadcast.is_some();
-        let whiteboard_visible = !is_roll_active && state.whiteboard.is_visible();
-        let capture_replay_here = state.replay.config.capture_overlays
+        let whiteboard_visible =
+            !deck_background && !is_roll_active && state.whiteboard.is_visible();
+        let capture_replay_here = (!deck_background && state.replay.config.capture_overlays)
             || state.webcam.config.enabled
             || whiteboard_visible;
         if capture_replay_here || is_broadcasting {
@@ -1273,7 +1324,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             }
         }
 
-        if !passthrough_active
+        if !deck_mode
+            && !passthrough_active
             && response.double_clicked()
             && !state
                 .whiteboard

@@ -20,6 +20,7 @@ impl Default for AppState {
         let mut twitch = crate::twitch::TwitchState::default();
         twitch.audio_tap = Some(replay.audio.clone());
         Self {
+            steam_deck: None,
             replay,
             hardware: HardwareState {
                 video_queue_drops: Arc::new(AtomicU64::new(0)),
@@ -241,6 +242,30 @@ impl AppState {
         self.dict.popup = None;
     }
 
+    pub(crate) fn update_ocr_projection(
+        &mut self,
+        projection: crate::video::gpu::geometry::OcrProjection,
+    ) {
+        let changed = self
+            .ocr
+            .capture_projection
+            .replace(projection)
+            .is_some_and(|previous| previous != projection);
+        if changed {
+            // Reject in-flight results from the old coordinate space, and
+            // recapture a pending/manual scan using the new geometry.
+            let requested = self.ocr.capture_requested.load(Ordering::Acquire)
+                || self.ocr.is_processing.load(Ordering::Acquire);
+            self.clear_ocr();
+            self.ocr
+                .capture_requested
+                .store(requested, Ordering::Release);
+            if let Some(deck) = &mut self.steam_deck {
+                deck.pinned_dictionary = false;
+            }
+        }
+    }
+
     pub fn toggle_audio_reactive(&mut self) {
         self.audio_reactive.enabled = !self.audio_reactive.enabled;
         self.replay
@@ -447,6 +472,21 @@ impl AppState {
             return;
         }
 
+        if let Some(deck) = &mut self.steam_deck {
+            if deck
+                .last_frame_stats_log
+                .is_none_or(|last| now.duration_since(last).as_secs() >= 10)
+            {
+                deck.last_frame_stats_log = Some(now);
+                tracing::info!(
+                    "Steam Deck frame rates: UI={:.1} FPS, capture={:.1} FPS, UI limit={} FPS",
+                    self.gui_fps,
+                    self.video_fps,
+                    if self.ui.video_window_open { 60 } else { 30 }
+                );
+            }
+        }
+
         let audio_latency = self.hardware.audio_latency_ms.load(Ordering::Relaxed);
 
         let title = if let Some(player) = &self.video_player {
@@ -496,20 +536,30 @@ impl AppState {
     }
 
     pub fn info(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        if self.steam_deck.is_some() {
+            tracing::info!("{text}");
+            return;
+        }
         self.toasts.add(egui_toast::Toast {
             kind: egui_toast::ToastKind::Info,
             options: egui_toast::ToastOptions::default()
                 .duration(std::time::Duration::from_secs(3)),
-            text: text.into().into(),
+            text: text.into(),
         });
     }
 
     pub fn error(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        if self.steam_deck.is_some() {
+            tracing::error!("{text}");
+            return;
+        }
         self.toasts.add(egui_toast::Toast {
             kind: egui_toast::ToastKind::Error,
             options: egui_toast::ToastOptions::default()
                 .duration(std::time::Duration::from_secs(3)),
-            text: text.into().into(),
+            text: text.into(),
         });
     }
 
@@ -615,11 +665,19 @@ impl AppState {
         repaint_requested
     }
 
-    /// Updates the target time for the next 60 FPS presentation interval without blocking.
-    ///
-    /// Presentation timing is driven directly by frame arrivals (e.g. PipeWire DMA-BUF delivery)
-    /// rather than artificial thread sleep loops, eliminating scheduler jitter and microstutters.
+    /// Deck mode has a real presentation limit even when Xwayland ignores VSync.
+    /// Desktop mode retains its existing event-driven scheduling.
     pub fn pace_gui_frame(&mut self) {
+        if self.steam_deck.is_some() {
+            // Steam's Xwayland may ignore the swap interval. Keep an actual
+            // CPU-side limit as well, including the launcher and setup tabs.
+            if let Some(next) = self.next_gui_frame_time {
+                std::thread::sleep(next.saturating_duration_since(Instant::now()));
+            }
+            self.next_gui_frame_time =
+                Some(Instant::now() + crate::steam_deck::frame_interval(self.ui.video_window_open));
+            return;
+        }
         if self.ui.video_window_open {
             const TARGET_FRAME_DURATION: std::time::Duration =
                 std::time::Duration::from_nanos(1_000_000_000 / 60);
@@ -710,9 +768,10 @@ impl eframe::App for AppState {
         // If Gamescope hook or PC-98/PC-88 mode is active, ensure any widget focus captured by
         // Shift+Tab tab-navigation is cleared so hotkeys and passthrough work cleanly,
         // unless a dialog, Twitch overlay input, or controls window is open for explicit user text input.
-        if self.gamescope_hook.as_ref().map_or(false, |h| h.is_active)
-            || self.pc98.is_active
-            || self.pc88.is_active
+        if self.steam_deck.is_none()
+            && (self.gamescope_hook.as_ref().map_or(false, |h| h.is_active)
+                || self.pc98.is_active
+                || self.pc88.is_active)
         {
             if !self.ui.control_window_open
                 && !self.ui.show_stop_stream_dialog
@@ -733,20 +792,39 @@ impl eframe::App for AppState {
         let pc98_passthrough = (self.pc98.is_active && self.pc98.passthrough_enabled)
             || (self.pc88.is_active && self.pc88.passthrough_enabled);
 
-        if !gamescope_passthrough && !pc98_passthrough {
+        if self.steam_deck.is_none() && !gamescope_passthrough && !pc98_passthrough {
             self.replay.shortcuts(ctx);
         }
         let mut repaint_requested = false;
 
-        if self.ui.control_window_open {
+        if self.steam_deck.is_none() && self.ui.control_window_open {
+            let monitor = ctx
+                .input(|i| i.viewport().monitor_size)
+                .unwrap_or(egui::vec2(1920.0, 1080.0));
+            let compact = monitor.y < 850.0 || monitor.x < 1024.0;
+            let size = if compact {
+                egui::vec2(
+                    960.0_f32.min(monitor.x - 48.0).max(320.0),
+                    770.0_f32.min(monitor.y - 96.0).max(240.0),
+                )
+            } else {
+                egui::vec2(960.0, 770.0)
+            };
+            let mut controls_viewport = egui::ViewportBuilder::default()
+                .with_title("Michadame Controls")
+                .with_inner_size(size)
+                .with_min_inner_size(if compact {
+                    egui::vec2(320.0, 240.0)
+                } else {
+                    size
+                })
+                .with_resizable(compact);
+            if !compact {
+                controls_viewport = controls_viewport.with_max_inner_size(size);
+            }
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("control_window"),
-                egui::ViewportBuilder::default()
-                    .with_title("Michadame Controls")
-                    .with_inner_size([960.0, 770.0])
-                    .with_min_inner_size([960.0, 770.0])
-                    .with_max_inner_size([960.0, 770.0])
-                    .with_resizable(false),
+                controls_viewport,
                 |ctx, _class| {
                     self.ui.any_pointer_down |= ctx.input(|i| i.pointer.any_down());
 
@@ -759,26 +837,30 @@ impl eframe::App for AppState {
             );
         }
 
-        egui::CentralPanel::default()
-            .frame(egui::Frame::none())
-            .show(ctx, |ui| {
-                ui::draw_video_player(self, ui, ctx);
+        if self.steam_deck.is_some() {
+            repaint_requested |= ui::steam_deck::draw(self, ctx);
+        } else {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::none())
+                .show(ctx, |ui| {
+                    ui::draw_video_player(self, ui, ctx);
 
-                if self.ui.show_stop_stream_dialog {
-                    ui::dialogs::show_stop_stream_dialog(self, ctx, ui, ctx);
-                }
+                    if self.ui.show_stop_stream_dialog {
+                        ui::dialogs::show_stop_stream_dialog(self, ctx, ui, ctx);
+                    }
 
-                if self.ui.show_quit_dialog {
-                    ui::dialogs::show_quit_dialog(self, ctx, ui);
-                }
+                    if self.ui.show_quit_dialog {
+                        ui::dialogs::show_quit_dialog(self, ctx, ui);
+                    }
 
-                if !self.ui.control_window_open
-                    && self.config_load_error.is_some()
-                    && !self.ui.dismissed_config_error
-                {
-                    ui::dialogs::show_config_error_dialog(self, ctx, ui);
-                }
-            });
+                    if !self.ui.control_window_open
+                        && self.config_load_error.is_some()
+                        && !self.ui.dismissed_config_error
+                    {
+                        ui::dialogs::show_config_error_dialog(self, ctx, ui);
+                    }
+                });
+        }
 
         if let Some(count) = self.fullscreen_toggle_frame_count {
             match count {
@@ -802,9 +884,10 @@ impl eframe::App for AppState {
         let pc98_passthrough = (self.pc98.is_active && self.pc98.passthrough_enabled)
             || (self.pc88.is_active && self.pc88.passthrough_enabled);
 
-        if self.gamescope_hook.as_ref().map_or(false, |h| h.is_active)
-            || self.pc98.is_active
-            || self.pc88.is_active
+        if self.steam_deck.is_none()
+            && (self.gamescope_hook.as_ref().map_or(false, |h| h.is_active)
+                || self.pc98.is_active
+                || self.pc88.is_active)
         {
             if !self.ui.control_window_open
                 && !self.ui.show_stop_stream_dialog
@@ -820,7 +903,7 @@ impl eframe::App for AppState {
 
         // Video-window hotkeys must not fire while typing or while Gamescope/PC-98 passthrough is active.
         let typing = ctx.wants_keyboard_input();
-        if !gamescope_passthrough && !pc98_passthrough {
+        if self.steam_deck.is_none() && !gamescope_passthrough && !pc98_passthrough {
             if !typing && ctx.input(|i| i.key_pressed(egui::Key::F)) {
                 let is_fullscreen = !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(is_fullscreen));
@@ -928,7 +1011,7 @@ impl eframe::App for AppState {
         }
 
         if ctx.input(|i| i.viewport().close_requested()) {
-            if self.ui.video_window_open && !self.ui.show_quit_dialog {
+            if self.steam_deck.is_none() && self.ui.video_window_open && !self.ui.show_quit_dialog {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.ui.show_quit_dialog = true;
             }
@@ -952,7 +1035,7 @@ impl eframe::App for AppState {
         }
 
         let dropped_file = ctx.input(|i| i.raw.dropped_files.first().and_then(|f| f.path.clone()));
-        if let Some(path) = dropped_file {
+        if let Some(path) = dropped_file.filter(|_| self.steam_deck.is_none()) {
             self.start_video_file(&path, ctx);
             repaint_requested = true;
         }
@@ -1069,6 +1152,7 @@ impl eframe::App for AppState {
                     }
                     match result {
                         Ok(meta) => {
+                            self.ocr.screen_ai_sync_error = None;
                             self.ocr.screen_ai_installed_metadata = Some(meta.clone());
                             self.ocr.screen_ai_update_available = false;
                             let dir = self.ocr.screen_ai_dir.clone();
@@ -1090,6 +1174,7 @@ impl eframe::App for AppState {
                             }
                         }
                         Err(e) => {
+                            self.ocr.screen_ai_sync_error = Some(e.clone());
                             self.error(format!("Chrome Screen AI model sync failed: {e}"));
                         }
                     }
@@ -1202,6 +1287,7 @@ impl eframe::App for AppState {
                     match result {
                         Ok(meta) => match self.dict.reload_pitch_db(Some(meta.clone())) {
                             Ok(meta) => {
+                                self.dict.pitch_import_error = None;
                                 if let Ok(guard) = self.dict.pitch_db.lock() {
                                     if let Some(ref db) = *guard {
                                         let backfilled = self.bank.backfill_pitches(db);
@@ -1219,10 +1305,12 @@ impl eframe::App for AppState {
                                 ));
                             }
                             Err(e) => {
+                                self.dict.pitch_import_error = Some(format!("{e:#}"));
                                 self.error(e.to_string());
                             }
                         },
                         Err(e) => {
+                            self.dict.pitch_import_error = Some(e.clone());
                             self.error(format!("Pitch dictionary import failed: {e}"));
                         }
                     }
@@ -1244,29 +1332,33 @@ impl eframe::App for AppState {
         if self.bank.is_busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
-        ui::bank::draw_bank_window(self, ctx);
-        repaint_requested |= ui::studio::draw_studio_window(self, ctx);
+        if self.steam_deck.is_none() {
+            ui::bank::draw_bank_window(self, ctx);
+            repaint_requested |= ui::studio::draw_studio_window(self, ctx);
 
-        self.twitch.studio_active = self.ui.studio_window_open;
-        repaint_requested |= self.twitch.poll(ctx);
-        for (request_id, clip_url) in self.twitch.take_ready_mined_clips() {
-            if let Err(e) = self.bank.attach_twitch_clip(request_id, &clip_url) {
-                tracing::warn!("Mining bank: failed to attach Twitch clip: {e}");
-                self.error(format!("Failed to attach Twitch clip: {e}"));
+            self.twitch.studio_active = self.ui.studio_window_open;
+            repaint_requested |= self.twitch.poll(ctx);
+            for (request_id, clip_url) in self.twitch.take_ready_mined_clips() {
+                if let Err(e) = self.bank.attach_twitch_clip(request_id, &clip_url) {
+                    tracing::warn!("Mining bank: failed to attach Twitch clip: {e}");
+                    self.error(format!("Failed to attach Twitch clip: {e}"));
+                }
             }
-        }
-        for (is_error, message) in self.twitch.take_notifications() {
-            if is_error {
-                self.error(message);
-            } else {
-                self.info(message);
+            for (is_error, message) in self.twitch.take_notifications() {
+                if is_error {
+                    self.error(message);
+                } else {
+                    self.info(message);
+                }
             }
+            ui::twitch_overlay::draw(self, ctx);
         }
-        ui::twitch_overlay::draw(self, ctx);
 
         self.update_fps_counters(ctx);
-        ui::debug::draw(self, ctx);
-        self.toasts.show(ctx);
+        if self.steam_deck.is_none() {
+            ui::debug::draw(self, ctx);
+            self.toasts.show(ctx);
+        }
 
         self.ui.in_egui_frame = false;
         if self.ui.config_save_pending && !self.ui.any_pointer_down {
@@ -1658,6 +1750,32 @@ mod tests {
         state.ocr.set_backend(crate::ocr::OcrBackend::GoogleLens);
         assert!(!state.handle_constant_ocr_scanning(&ctx));
         assert!(state.ocr.next_constant_scan_time.is_none());
+    }
+
+    #[test]
+    fn changing_crt_geometry_rejects_old_ocr_and_reschedules_pending_capture() {
+        use crate::video::gpu::geometry::OcrProjection;
+        let mut state = AppState::default();
+        state.update_ocr_projection(OcrProjection::default());
+        let generation = state.ocr.current_generation();
+        state.ocr.active_request_id.store(7, Ordering::Release);
+        state.ocr.is_processing.store(true, Ordering::Release);
+        state.update_ocr_projection(OcrProjection::lottes(0.031, 0.041));
+        assert!(state.ocr.current_generation() > generation);
+        assert!(state.ocr.capture_requested.load(Ordering::Acquire));
+        let stale = crate::ocr::OcrWorkerResult {
+            request_id: 7,
+            generation,
+            backend: crate::ocr::OcrBackend::GoogleLens,
+            constant_scan: false,
+            result: Ok(vec![]),
+        };
+        assert!(!state.ocr.accept_worker_result(&stale));
+        let generation = state.ocr.current_generation();
+        state.update_ocr_projection(OcrProjection::lottes(0.031, 0.041));
+        assert_eq!(state.ocr.current_generation(), generation);
+        state.update_ocr_projection(OcrProjection::halo(true, 95.0));
+        assert!(state.ocr.current_generation() > generation);
     }
 
     #[test]

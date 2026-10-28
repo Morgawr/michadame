@@ -1,6 +1,6 @@
 use super::anime4k::{Anime4kUpscaler, Anime4kVariant};
 use super::fft_filter::FftFilter;
-use super::geometry::RenderedArea;
+use super::geometry::{OcrProjection, RenderedArea};
 use super::halo::HaloRenderer;
 use super::params::{
     AudioReactiveShaderParams, CathodeInterferenceShaderParams, GlassShaderParams,
@@ -13,8 +13,6 @@ use eframe::glow::{self, HasContext};
 use ffmpeg_next::format::Pixel;
 use std::num::NonZero;
 use std::sync::{Arc, Mutex};
-
-const PIXELATE_TARGET_HEIGHT: u32 = 480;
 
 pub const RETRO_CURSOR_WIDTH: u32 = 16;
 pub const RETRO_CURSOR_HEIGHT: u32 = 24;
@@ -145,6 +143,9 @@ pub struct CrtFilterRenderer {
     final_border_crop_loc: glow::UniformLocation,
     passthrough_border_crop_loc: glow::UniformLocation,
     passthrough_input_is_srgb_loc: Option<glow::UniformLocation>,
+    passthrough_ocr_warp_loc: glow::UniformLocation,
+    passthrough_ocr_zoom_loc: glow::UniformLocation,
+    passthrough_image_aspect_loc: glow::UniformLocation,
 
     cathode_prog: glow::Program,
     cathode_output_res_loc: glow::UniformLocation,
@@ -338,15 +339,7 @@ fn intermediate_texture_internal_format(pass_index: usize) -> u32 {
 }
 
 fn pixelate_subrender_size(width: u32, height: u32) -> (u32, u32) {
-    if width == 0 || height == 0 {
-        return (1, 1);
-    }
-
-    let target_height = height.clamp(1, PIXELATE_TARGET_HEIGHT);
-    let target_width = (width as u64 * target_height as u64)
-        .div_ceil(height as u64)
-        .max(1) as u32;
-    (target_width, target_height)
+    super::geometry::pixelate_size((width, height))
 }
 
 fn pass_texture_dimensions(
@@ -648,6 +641,15 @@ impl CrtFilterRenderer {
                 .unwrap();
             let passthrough_input_is_srgb_loc =
                 gl.get_uniform_location(passthrough_prog, "input_is_srgb");
+            let passthrough_ocr_warp_loc = gl
+                .get_uniform_location(passthrough_prog, "ocr_warp")
+                .unwrap();
+            let passthrough_ocr_zoom_loc = gl
+                .get_uniform_location(passthrough_prog, "ocr_zoom")
+                .unwrap();
+            let passthrough_image_aspect_loc = gl
+                .get_uniform_location(passthrough_prog, "image_aspect")
+                .unwrap();
 
             let cathode_output_res_loc = gl
                 .get_uniform_location(cathode_prog, "outputResolution")
@@ -1014,6 +1016,9 @@ impl CrtFilterRenderer {
                 final_border_crop_loc,
                 passthrough_border_crop_loc,
                 passthrough_input_is_srgb_loc,
+                passthrough_ocr_warp_loc,
+                passthrough_ocr_zoom_loc,
+                passthrough_image_aspect_loc,
                 median_prog,
                 median_mix_loc,
                 deinterlace_prog,
@@ -2235,7 +2240,11 @@ impl CrtFilterRenderer {
                 let clean_area = self.draw_passthrough_internal(
                     gl,
                     current_video_texture,
-                    current_res,
+                    if run_pixelate {
+                        pixelate_subrender_size(current_res.0, current_res.1)
+                    } else {
+                        current_res
+                    },
                     output_size,
                     [0.0, 0.0, 0.0],
                     params.horizontal_stretch,
@@ -2244,6 +2253,13 @@ impl CrtFilterRenderer {
                     params.border_crop,
                     Some(self.post_fbos[0]),
                     input_is_srgb,
+                    if run_lottes {
+                        OcrProjection::lottes(params.warp_x, params.warp_y)
+                    } else if run_halo {
+                        OcrProjection::halo(halo_params.curvature, halo_params.halo_zoom)
+                    } else {
+                        OcrProjection::default()
+                    },
                 );
                 self.last_ocr_capture = read_framebuffer_pixels_raw(gl, clean_area);
                 gl.bind_framebuffer(glow::FRAMEBUFFER, None);
@@ -2360,6 +2376,13 @@ impl CrtFilterRenderer {
                     params.horizontal_stretch,
                 );
                 gl.uniform_1_f32(Some(&self.passthrough_vibrance_loc), params.vibrance);
+                // This program may have just rendered a curved OCR capture.
+                gl.uniform_2_f32(Some(&self.passthrough_ocr_warp_loc), 0.0, 0.0);
+                gl.uniform_1_f32(Some(&self.passthrough_ocr_zoom_loc), 1.0);
+                gl.uniform_1_f32(
+                    Some(&self.passthrough_image_aspect_loc),
+                    final_input_res.0 as f32 / final_input_res.1 as f32,
+                );
                 gl.uniform_1_i32(
                     Some(&self.passthrough_scaler_filter_loc),
                     params.scaler_filter as i32,
@@ -2389,6 +2412,7 @@ impl CrtFilterRenderer {
                     params.border_crop,
                     upstream_target_fbo,
                     input_is_srgb,
+                    OcrProjection::default(),
                 );
             }
 
@@ -2531,6 +2555,7 @@ impl CrtFilterRenderer {
                 border_crop,
                 upstream_target_fbo,
                 input_is_srgb,
+                OcrProjection::default(),
             );
 
             if self.capture_ocr_next_paint {
@@ -2579,12 +2604,23 @@ impl CrtFilterRenderer {
         border_crop: [f32; 4],
         target_fbo: Option<glow::Framebuffer>,
         input_is_srgb: bool,
+        ocr_projection: OcrProjection,
     ) -> RenderedArea {
         let final_input_texture = video_texture;
 
         gl.bind_framebuffer(glow::FRAMEBUFFER, target_fbo);
         gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
         gl.use_program(Some(self.passthrough_prog));
+        gl.uniform_1_f32(
+            Some(&self.passthrough_image_aspect_loc),
+            resolution.0 as f32 / resolution.1 as f32,
+        );
+        gl.uniform_2_f32(
+            Some(&self.passthrough_ocr_warp_loc),
+            ocr_projection.warp[0],
+            ocr_projection.warp[1],
+        );
+        gl.uniform_1_f32(Some(&self.passthrough_ocr_zoom_loc), ocr_projection.zoom);
         gl.active_texture(glow::TEXTURE0);
         gl.bind_texture(glow::TEXTURE_2D, Some(final_input_texture));
 
@@ -3537,8 +3573,154 @@ impl CrtFilterRenderer {
 }
 
 #[cfg(test)]
+#[path = "../../../tests/support/software_gl.rs"]
+mod software_gl;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "opt-in Mesa software EGL readback; set LIBGL_ALWAYS_SOFTWARE=1 EGL_PLATFORM=surfaceless"]
+    fn clean_ocr_capture_matches_crt_display_geometry() {
+        let egl = software_gl::SoftwareGl::new(1280, 801);
+        // egui_glow's painter API takes Arc even for a single-threaded context.
+        #[allow(clippy::arc_with_non_send_sync)]
+        let gl = Arc::new(egl.context());
+        println!("GL renderer: {}", unsafe {
+            gl.get_parameter_string(glow::RENDERER)
+        });
+        let mut painter = egui_glow::Painter::new(gl.clone(), "", None).unwrap();
+        let mut renderer = CrtFilterRenderer::new(&gl);
+        for (source_width, source_height) in
+            [(1280u32, 800u32), (1280, 720), (1920, 1080), (301, 241)]
+        {
+            let marker_x = source_width * 9 / 10;
+            let marker_y = source_height * 4 / 5;
+            let mut pixels = vec![0u8; (source_width * source_height * 4) as usize];
+            for pixel in pixels.chunks_exact_mut(4) {
+                pixel[3] = 255;
+            }
+            // A colored marker near the edge exposes the old 5-6px curvature error.
+            for y in marker_y - 8..marker_y + 8 {
+                for x in marker_x - 8..marker_x + 8 {
+                    let i = ((y * source_width + x) * 4) as usize;
+                    pixels[i] = 255;
+                }
+            }
+            let mut frame = RawFrame {
+                captured_at: 1,
+                rate: crate::replay::config::Rate { num: 60, den: 1 },
+                width: source_width,
+                height: source_height,
+                data: pixels,
+                format: Pixel::RGBA,
+                color_range: crate::video::types::ColorRange::Full,
+            };
+            let params = ShaderParams {
+                shadow_mask: 0.0,
+                bloom_amount: 0.0,
+                ..Default::default()
+            };
+            let cathode = CathodeInterferenceShaderParams::default();
+            fn marker(pixels: &[u8], width: u32, height: u32) -> (f64, f64) {
+                let mut sum = (0.0, 0.0, 0.0);
+                for (i, p) in pixels.chunks_exact(4).enumerate() {
+                    if p[0] as i32 > p[1] as i32 * 2 + 16 && p[0] as i32 > p[2] as i32 * 2 + 16 {
+                        let weight = p[0] as f64;
+                        sum.0 += ((i as u32 % width) as f64 + 0.5) * weight;
+                        sum.1 += (height as f64 - (i as u32 / width) as f64 - 0.5) * weight;
+                        sum.2 += weight;
+                    }
+                }
+                assert!(sum.2 > 100.0, "Missing marker in readback");
+                (sum.0 / sum.2, sum.1 / sum.2)
+            }
+            for (name, lottes, halo, curvature, zoom, pixelate) in [
+                ("Lottes", true, false, true, 100.0, false),
+                ("Halo", false, true, true, 100.0, false),
+                ("Halo zoom", false, true, true, 95.0, false),
+                ("Halo zoom flat", false, true, false, 95.0, false),
+                ("Off after capture", false, false, false, 100.0, false),
+                ("Pixelate after capture", false, false, false, 100.0, true),
+            ] {
+                frame.captured_at += 1;
+                let halo_params = HaloShaderParams {
+                    curvature,
+                    halo_zoom: zoom,
+                    shadow_mask: 0.0,
+                    bloom: 0.0,
+                    glow: 0.0,
+                    halation: 0.0,
+                    halo_intensity: 0.0,
+                    ..Default::default()
+                };
+                let output = (1280.0, 801.0);
+                renderer.capture_ocr_next_paint = true;
+                let area = renderer.paint(
+                    &gl,
+                    &painter,
+                    egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(output.0, output.1)),
+                    Some(&frame),
+                    None,
+                    (source_width, source_height),
+                    output,
+                    &params,
+                    &halo_params,
+                    &cathode,
+                    None,
+                    None,
+                    0.0,
+                    pixelate,
+                    lottes,
+                    halo,
+                    None,
+                    0.0,
+                    0.0,
+                    None,
+                    None,
+                    false,
+                );
+                let (clean, w, h) = renderer.last_ocr_capture.take().expect("OCR capture");
+                assert_eq!(
+                    (w, h),
+                    (area.width, area.height),
+                    "Capture/display fit differs for {name}"
+                );
+                let (display, dw, dh) = read_framebuffer_pixels_raw(&gl, area).unwrap();
+                let a = marker(&clean, w, h);
+                let b = marker(&display, dw, dh);
+                println!("{source_width}x{source_height} {name}: clean={a:?} display={b:?}");
+                assert!(
+                    (a.0 - b.0).abs() < 1.0 && (a.1 - b.1).abs() < 1.0,
+                    "{name}: misaligned OCR"
+                );
+                if !lottes && !halo {
+                    let fitted = if pixelate {
+                        super::super::geometry::pixelate_size((source_width, source_height))
+                    } else {
+                        (source_width, source_height)
+                    };
+                    let aspect = fitted.0 as f64 / fitted.1 as f64;
+                    let image_width = (output.0 as f64).min(output.1 as f64 * aspect);
+                    let image_height = (output.1 as f64).min(output.0 as f64 / aspect);
+                    let expected_x = (output.0 as f64 - image_width) * 0.5
+                        + marker_x as f64 / source_width as f64 * image_width
+                        - area.x as f64;
+                    let expected_y = (output.1 as f64 - image_height) * 0.5
+                        + marker_y as f64 / source_height as f64 * image_height
+                        - area.top(output.1 as u32) as f64;
+                    assert!(
+                        (a.0 - expected_x).abs() < 1.0 && (a.1 - expected_y).abs() < 1.0,
+                        "Leaked OCR warp/zoom"
+                    );
+                }
+                assert_eq!(unsafe { gl.get_error() }, glow::NO_ERROR, "{name}");
+            }
+        }
+        renderer.destroy(&gl);
+        painter.destroy();
+    }
 
     #[test]
     fn linear_prepasses_use_high_precision_targets() {

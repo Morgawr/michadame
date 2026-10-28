@@ -9,6 +9,9 @@
     uniform int scaler_filter;
     uniform vec4 border_crop; // left, right, top, bottom
     uniform int input_is_srgb;
+    uniform vec2 ocr_warp;
+    uniform float ocr_zoom;
+    uniform float image_aspect;
 
     // Convert from linear to sRGB color space
     float ToSrgb1(float c) {
@@ -103,7 +106,7 @@
     void main() {
         vec2 corrected_tc = vec2(v_tc.x, 1.0 - v_tc.y);
         vec2 video_res = vec2(textureSize(video_texture, 0)); // Calculate aspect ratios
-        float video_aspect = (video_res.x * horizontal_stretch) / video_res.y;
+        float video_aspect = image_aspect * horizontal_stretch;
         float output_aspect = outputResolution.x / outputResolution.y;
 
         vec2 scale = vec2(1.0, 1.0);
@@ -114,6 +117,24 @@
         }
 
         vec2 centered_tc = (corrected_tc - 0.5) / scale + 0.5;
+
+        // The OCR-only clean pass follows the displayed image's geometry.
+        // Normal presentation always uses zero warp and unit zoom.
+        if (ocr_zoom != 1.0 || any(notEqual(ocr_warp, vec2(0.0)))) {
+            if (any(lessThan(centered_tc, vec2(0.0))) || any(greaterThan(centered_tc, vec2(1.0)))) {
+                out_color = vec4(ToSrgb(background_color), 1.0);
+                return;
+            }
+            centered_tc = (centered_tc - 0.5) / ocr_zoom + 0.5;
+            if (any(lessThan(centered_tc, vec2(0.0))) || any(greaterThan(centered_tc, vec2(1.0)))) {
+                out_color = vec4(ToSrgb(background_color), 1.0);
+                return;
+            }
+            vec2 pos = centered_tc * 2.0 - 1.0;
+            pos *= vec2(1.0 + pos.y * pos.y * ocr_warp.x,
+                        1.0 + pos.x * pos.x * ocr_warp.y);
+            centered_tc = pos * 0.5 + 0.5;
+        }
 
         if (centered_tc.x < border_crop.x || centered_tc.x > (1.0 - border_crop.y) ||
             centered_tc.y < border_crop.z || centered_tc.y > (1.0 - border_crop.w)) {

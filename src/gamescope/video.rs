@@ -100,7 +100,7 @@ pub fn run_pw_dump_with_timeout(
         return None;
     }
 
-    let mut child = Command::new("pw-dump")
+    let mut child = crate::portable::helper_command("pw-dump")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()

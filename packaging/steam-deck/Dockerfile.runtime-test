@@ -1,0 +1,10 @@
+# Deliberately has no FFmpeg, SDL, libei, ALSA/Pulse plugins or PipeWire tools.
+# The portable package must supply those. SteamOS supplies its graphics stack.
+FROM ubuntu@sha256:e0f80c829509ef4df9e76bd8944eb7b8ec25cbb379b112a7f9448b2c77a77c9b
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates python3 binutils xvfb xauth libgl1-mesa-dri libegl1 libgl1 \
+    libva2 libva-drm2 libva-x11-2 libudev1 libx11-6 libx11-xcb1 libxkbcommon0 \
+    libxkbcommon-x11-0 libwayland-client0 libwayland-cursor0 libwayland-egl1 \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /bundle

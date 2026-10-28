@@ -9,7 +9,70 @@ pub struct RenderedArea {
     pub height: u32,
 }
 
+/// Shared with the Anime4K renderer and UI geometry; only integer 2x steps are used.
+pub fn anime4k_size(source: (u32, u32), target: (u32, u32)) -> (u32, u32) {
+    let (mut w, mut h) = source;
+    if w == 0 || h == 0 || target.0 == 0 || target.1 == 0 {
+        return source;
+    }
+    while w as u64 * 6 < target.0 as u64 * 5 && h as u64 * 6 < target.1 as u64 * 5 {
+        w *= 2;
+        h *= 2;
+    }
+    (w, h)
+}
+
+pub fn pixelate_size(source: (u32, u32)) -> (u32, u32) {
+    if source.0 == 0 || source.1 == 0 {
+        return (1, 1);
+    }
+    let height = source.1.clamp(1, 480);
+    let width = (source.0 as u64 * height as u64)
+        .div_ceil(source.1 as u64)
+        .max(1) as u32;
+    (width, height)
+}
+
+/// Geometry for the clean OCR pass: the same source sampling coordinates as
+/// the displayed CRT image, without scanlines, masks, bloom, or color effects.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OcrProjection {
+    pub warp: [f32; 2],
+    pub zoom: f32,
+}
+
+impl Default for OcrProjection {
+    fn default() -> Self {
+        Self {
+            warp: [0.0; 2],
+            zoom: 1.0,
+        }
+    }
+}
+
+impl OcrProjection {
+    pub fn lottes(warp_x: f32, warp_y: f32) -> Self {
+        Self {
+            warp: [warp_x, warp_y],
+            zoom: 1.0,
+        }
+    }
+
+    pub fn halo(curvature: bool, zoom_percent: f32) -> Self {
+        Self {
+            warp: if curvature { [0.031, 0.041] } else { [0.0; 2] },
+            zoom: zoom_percent / 100.0,
+        }
+    }
+}
+
 impl RenderedArea {
+    /// Convert the bottom-origin readback inset to a top-origin UI inset.
+    /// Odd letterbox padding need not have equal upper and lower halves.
+    pub fn top(self, framebuffer_height: u32) -> u32 {
+        framebuffer_height.saturating_sub(self.y.saturating_add(self.height))
+    }
+
     pub fn fit(source: (u32, u32), output: (f32, f32), horizontal_stretch: f32) -> Self {
         if source.0 == 0
             || source.1 == 0
@@ -60,6 +123,30 @@ impl RenderedArea {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pixelated_and_upscaled_image_bounds_use_the_final_integer_texture() {
+        assert_eq!(pixelate_size((1920, 1080)), (854, 480));
+        let fitted = RenderedArea::fit(pixelate_size((1920, 1080)), (1280.0, 801.0), 1.0);
+        assert_eq!((fitted.width, fitted.height), (1280, 719));
+        let upscaled = anime4k_size((301, 241), (1280, 801));
+        assert_eq!(upscaled, (1204, 964));
+        assert_eq!(pixelate_size(upscaled), (600, 480));
+    }
+
+    #[test]
+    fn ui_top_matches_the_flipped_readback_with_odd_padding() {
+        for height in [800, 801, 803, 1081] {
+            let area = RenderedArea::fit((1920, 1080), (1280.0, height as f32), 1.0);
+            assert_eq!(area.top(height) + area.height + area.y, height);
+            for ppp in [1.0, 1.25, 1.5, 13.0 / 6.0] {
+                let ui_top = area.top(height) as f32 / ppp;
+                assert!((ui_top * ppp - (height - area.y - area.height) as f32).abs() < 0.001);
+            }
+        }
+        let odd = RenderedArea::fit((1920, 1080), (1280.0, 801.0), 1.0);
+        assert_eq!((odd.y, odd.top(801)), (40, 41));
+    }
 
     #[test]
     fn four_by_three_uses_rendered_pixels_without_pillarboxes() {
