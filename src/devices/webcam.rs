@@ -277,7 +277,7 @@ fn run_webcam_worker(
             }
         }
 
-        if packet.stream() != video_stream_index {
+        if crate::video::decoder::should_skip_v4l2_packet(&packet, video_stream_index) {
             continue;
         }
 

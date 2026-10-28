@@ -181,16 +181,17 @@ pub(crate) fn setup_v4l2_ffmpeg_options(
     if !pixel_format_str.is_empty() && pixel_format_str != "unkn" {
         ffmpeg_options.set("input_format", &pixel_format_str);
     }
-    // Do NOT set `nobuffer` in `fflags`: if `avformat_find_stream_info` runs, `nobuffer`
-    // discards the initial probed packet (which on hardware H.264 V4L2 devices contains
-    // the only IDR keyframe + SPS/PPS for an entire GOP).
-    ffmpeg_options.set("fflags", "discardcorrupt");
-    ffmpeg_options.set("probesize", "32");
     if include_capture_pixel_and_range_defaults && pixel_format_str != "h264" {
+        ffmpeg_options.set("fflags", "nobuffer+discardcorrupt");
         ffmpeg_options.set("analyzeduration", "100000");
     } else {
+        // Do NOT set `nobuffer` in `fflags` for H.264/webcam streams: if `avformat_find_stream_info`
+        // runs, `nobuffer` discards the initial probed packet (which on hardware H.264 V4L2 devices
+        // contains the only IDR keyframe + SPS/PPS for an entire GOP).
+        ffmpeg_options.set("fflags", "discardcorrupt");
         ffmpeg_options.set("analyzeduration", "0");
     }
+    ffmpeg_options.set("probesize", "32");
     if include_capture_pixel_and_range_defaults {
         ffmpeg_options.set("pixel_format", &pixel_format_str);
         ffmpeg_options.set("color_range", "pc");
@@ -204,6 +205,22 @@ fn setup_ffmpeg_options(
     framerate: u32,
 ) -> (String, ffmpeg_next::Dictionary<'_>) {
     setup_v4l2_ffmpeg_options(format, resolution, framerate, true)
+}
+
+pub(crate) fn should_skip_v4l2_packet(
+    packet: &ffmpeg_next::Packet,
+    video_stream_index: usize,
+) -> bool {
+    // When V4L2 dequeues a partial or corrupted mmap buffer (such as the initial partial scanout
+    // frame right after `VIDIOC_STREAMON`), FFmpeg's `mmap_read_frame` logs
+    // "Dequeued v4l2 buffer contains corrupted data" and zeroes `pkt->size` while leaving
+    // `pkt->data` non-null without setting `AV_PKT_FLAG_CORRUPT`. Passing such a 0-byte packet to
+    // `avcodec_send_packet` either fails with `EINVAL` (when `data != NULL`) or puts the decoder
+    // into EOF draining mode (when `data == NULL`).
+    packet.stream() != video_stream_index
+        || packet.is_corrupt()
+        || packet.size() == 0
+        || packet.data().is_none_or(|d| d.is_empty())
 }
 
 pub(crate) unsafe fn v4l2_context_needs_stream_info(
@@ -230,14 +247,10 @@ pub(crate) unsafe fn v4l2_context_needs_stream_info(
         let codec_id = unsafe { (*codecpar).codec_id };
         let width = unsafe { (*codecpar).width };
         let height = unsafe { (*codecpar).height };
-        let format = unsafe { (*codecpar).format };
-        let has_pixel_format =
-            format != ffmpeg_next::sys::AVPixelFormat::AV_PIX_FMT_NONE as libc::c_int;
         codec_type == ffmpeg_next::sys::AVMediaType::AVMEDIA_TYPE_VIDEO
-            && codec_id != ffmpeg_next::sys::AVCodecID::AV_CODEC_ID_NONE
+            && codec_id == ffmpeg_next::sys::AVCodecID::AV_CODEC_ID_H264
             && width > 0
             && height > 0
-            && (codec_id == ffmpeg_next::sys::AVCodecID::AV_CODEC_ID_H264 || has_pixel_format)
     })
 }
 
@@ -390,6 +403,7 @@ pub fn video_thread_main(
     ffmpeg_next::init().context("Failed to initialize FFmpeg")?;
 
     let mut started = false;
+    let mut opened_device = false;
     let mut frame_progress = VideoFrameProgress::new();
     loop {
         let result = run_video_capture_session(
@@ -405,6 +419,7 @@ pub fn video_thread_main(
             &stop_requested,
             &request_repaint,
             &mut started,
+            &mut opened_device,
             &mut frame_progress,
         );
 
@@ -414,7 +429,7 @@ pub fn video_thread_main(
 
         match result {
             Ok(()) => return Ok(()),
-            Err(error) if !started => return Err(error),
+            Err(error) if !started && !opened_device => return Err(error),
             Err(error) if !frame_progress.stalled_for(VIDEO_RECOVERY_TIMEOUT) => {
                 tracing::warn!(
                     error = %error,
@@ -446,6 +461,7 @@ fn run_video_capture_session(
     stop_requested: &Arc<AtomicBool>,
     request_repaint: &Arc<dyn Fn() + Send + Sync>,
     started: &mut bool,
+    opened_device: &mut bool,
     frame_progress: &mut VideoFrameProgress,
 ) -> Result<()> {
     let initial_range = color_range.load(Ordering::Relaxed);
@@ -481,6 +497,7 @@ fn run_video_capture_session(
             }
         }
     };
+    *opened_device = true;
 
     let input = ictx
         .streams()
@@ -538,13 +555,27 @@ fn run_video_capture_session(
             Err(error) => return Err(error).context("Failed to read a video packet"),
         }
 
-        if packet.stream() != video_stream_index {
+        if should_skip_v4l2_packet(&packet, video_stream_index) {
+            if frame_progress.stalled_for(VIDEO_STALL_TIMEOUT) {
+                return Err(anyhow!(
+                    "Video input produced no decoded frames for {:?}",
+                    VIDEO_STALL_TIMEOUT
+                ));
+            }
             continue;
         }
 
-        decoder
-            .send_packet(&packet)
-            .context("Failed to send packet to decoder")?;
+        if let Err(error) = decoder.send_packet(&packet) {
+            tracing::warn!(
+                error = %error,
+                packet_size = packet.size(),
+                "Skipping video packet rejected by decoder"
+            );
+            if frame_progress.stalled_for(VIDEO_STALL_TIMEOUT) {
+                return Err(error).context("Failed to send packet to decoder");
+            }
+            continue;
+        }
         while decoder.receive_frame(&mut decoded).is_ok() {
             let desired_scaler_val = scaler_filter.load(Ordering::Relaxed);
             let Some((width, height, format, data)) = normalize_decoded_video_frame(
@@ -674,6 +705,7 @@ mod tests {
         assert_eq!(options.get("video_size"), Some("1920x1080"));
         assert_eq!(options.get("framerate"), Some("60"));
         assert_eq!(options.get("input_format"), Some("mjpeg"));
+        assert_eq!(options.get("fflags"), Some("nobuffer+discardcorrupt"));
         assert_eq!(options.get("color_range"), Some("pc"));
     }
 
@@ -690,6 +722,7 @@ mod tests {
         assert_eq!(options.get("video_size"), Some("1280x720"));
         assert_eq!(options.get("framerate"), Some("30"));
         assert_eq!(options.get("input_format"), Some("yuyv422"));
+        assert_eq!(options.get("fflags"), Some("nobuffer+discardcorrupt"));
     }
 
     #[test]
@@ -749,14 +782,21 @@ mod tests {
                 "unknown codec_id must still probe stream info"
             );
 
-            // Raw video (e.g. YUYV) with AV_PIX_FMT_NONE must still run avformat_find_stream_info
-            // so FFmpeg populates codecpar->format before opening rawdec.
+            // Raw video (e.g. YUYV) must still run avformat_find_stream_info even when
+            // v4l2_read_header already populated codecpar->format (e.g. AV_PIX_FMT_YUYV422)
+            // so initial partial/corrupted V4L2 buffers are probed and discarded with nobuffer.
             (*(*stream).codecpar).codec_id = ffmpeg_next::sys::AVCodecID::AV_CODEC_ID_RAWVIDEO;
             (*(*stream).codecpar).format =
                 ffmpeg_next::sys::AVPixelFormat::AV_PIX_FMT_NONE as libc::c_int;
             assert!(
                 v4l2_context_needs_stream_info(ctx),
                 "rawvideo with AV_PIX_FMT_NONE must probe stream info"
+            );
+            (*(*stream).codecpar).format =
+                ffmpeg_next::sys::AVPixelFormat::AV_PIX_FMT_YUYV422 as libc::c_int;
+            assert!(
+                v4l2_context_needs_stream_info(ctx),
+                "rawvideo with AV_PIX_FMT_YUYV422 must still probe stream info"
             );
 
             // Simulate v4l2_read_header on H.264 capture: codec_id and dimensions are known,
@@ -771,6 +811,34 @@ mod tests {
 
             ffmpeg_next::sys::avformat_free_context(ctx);
         }
+    }
+
+    #[test]
+    fn test_should_skip_v4l2_packet_rejects_corrupted_zero_byte_mmap_packets() {
+        use ffmpeg_next::packet::{Mut, Ref};
+        ffmpeg_next::init().unwrap();
+
+        let empty_pkt = ffmpeg_next::Packet::empty();
+        assert!(should_skip_v4l2_packet(&empty_pkt, 0));
+
+        // Simulate FFmpeg's `mmap_read_frame` when `VIDIOC_DQBUF` returns a partial/corrupted
+        // initial HDMI capture buffer (`Dequeued v4l2 buffer contains corrupted data`):
+        // `pkt->data` is non-null (pointing to the mmap buffer) while `pkt->size` is set to 0.
+        let mut zero_sized_mmap_pkt = ffmpeg_next::Packet::new(16);
+        zero_sized_mmap_pkt.set_stream(0);
+        unsafe {
+            (*zero_sized_mmap_pkt.as_mut_ptr()).size = 0;
+            assert!(!(*zero_sized_mmap_pkt.as_ptr()).data.is_null());
+        }
+        assert!(
+            should_skip_v4l2_packet(&zero_sized_mmap_pkt, 0),
+            "0-byte V4L2 mmap packet with non-null data must be skipped before avcodec_send_packet returns EINVAL"
+        );
+
+        let mut valid_pkt = ffmpeg_next::Packet::copy(&[1, 2, 3, 4]);
+        valid_pkt.set_stream(0);
+        assert!(!should_skip_v4l2_packet(&valid_pkt, 0));
+        assert!(should_skip_v4l2_packet(&valid_pkt, 1));
     }
 
     #[test]
