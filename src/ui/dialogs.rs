@@ -9,7 +9,7 @@ pub fn show_first_run_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut
         egui::Color32::from_rgba_unmultiplied(0, 0, 0, 128),
     );
 
-    egui::Window::new("Heads Up!")
+    if let Some(inner) = egui::Window::new("Heads Up!")
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .collapsible(false)
         .resizable(false)
@@ -34,8 +34,12 @@ pub fn show_first_run_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut
                 }
             }).inner
         })
-        .and_then(|inner| inner.inner)
-        .unwrap_or(false)
+    {
+        ctx.move_to_top(inner.response.layer_id);
+        inner.inner.unwrap_or(false)
+    } else {
+        false
+    }
 }
 
 pub fn show_quit_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
@@ -46,7 +50,7 @@ pub fn show_quit_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut egui
         egui::Color32::from_rgba_unmultiplied(0, 0, 0, 128),
     );
 
-    egui::Window::new("Quit?")
+    if let Some(inner) = egui::Window::new("Quit?")
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .collapsible(false)
         .resizable(false)
@@ -61,7 +65,10 @@ pub fn show_quit_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut egui
                     state.ui.show_quit_dialog = false;
                 }
             });
-        });
+        })
+    {
+        ctx.move_to_top(inner.response.layer_id);
+    }
 }
 
 pub fn show_stop_stream_dialog(
@@ -77,7 +84,7 @@ pub fn show_stop_stream_dialog(
         egui::Color32::from_rgba_unmultiplied(0, 0, 0, 128),
     );
 
-    egui::Window::new("Stop Stream?")
+    if let Some(inner) = egui::Window::new("Stop Stream?")
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .collapsible(false)
         .resizable(false)
@@ -96,7 +103,10 @@ pub fn show_stop_stream_dialog(
                     state.ui.show_stop_stream_dialog = false;
                 }
             });
-        });
+        })
+    {
+        ctx.move_to_top(inner.response.layer_id);
+    }
 }
 
 pub fn show_config_error_dialog(
@@ -112,7 +122,7 @@ pub fn show_config_error_dialog(
     );
 
     let mut dismissed = false;
-    egui::Window::new("Configuration Warning")
+    if let Some(inner) = egui::Window::new("Configuration Warning")
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .collapsible(false)
         .resizable(false)
@@ -169,7 +179,10 @@ pub fn show_config_error_dialog(
                     dismissed = true;
                 }
             });
-        });
+        })
+    {
+        ctx.move_to_top(inner.response.layer_id);
+    }
 
     dismissed
 }

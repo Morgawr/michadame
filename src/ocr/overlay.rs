@@ -71,8 +71,16 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         return;
     }
 
-    // Expire copied feedback highlight after 1.5 seconds (paused while whiteboard is open)
-    if state.whiteboard.open {
+    let modal_dialog_open = state.ui.show_quit_dialog
+        || state.ui.show_stop_stream_dialog
+        || state.ui.show_first_run_dialog
+        || (!state.ui.control_window_open
+            && state.config_load_error.is_some()
+            && !state.ui.dismissed_config_error);
+    let overlay_blocked = state.whiteboard.open || modal_dialog_open;
+
+    // Expire copied feedback highlight after 1.5 seconds (paused while whiteboard or modal dialog is open)
+    if overlay_blocked {
         if let Some(ref mut feedback_time) = state.ocr.copy_feedback_time {
             *feedback_time = Instant::now();
         }
@@ -91,13 +99,12 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
     });
     let deck_mode = state.steam_deck.is_some();
     let mut tapped_word = false;
-    let whiteboard_open = state.whiteboard.open;
     let hide_for_mining_capture = state.bank.has_pending() && state.whiteboard.is_visible();
     // The dictionary popup "eats" pointer events: if the cursor is currently over the
     // popup window (using its rect from the last drawn frame), words/boxes underneath it
     // must not react to hover or clicks. This is checked against the *current* pointer
     // position so there is no one-frame lag when entering the popup.
-    let pointer_in_popup = !whiteboard_open
+    let pointer_in_popup = !overlay_blocked
         && match (
             pointer_pos,
             state.dict.popup.as_ref().and_then(|p| p.popup_rect),
@@ -134,7 +141,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         let is_recently_copied = state.ocr.last_copied_index == Some(idx);
         let is_hovered = (response.hovered() || (deck_mode && response.clicked()))
             && !pointer_in_popup
-            && !whiteboard_open;
+            && !overlay_blocked;
         let is_active_popup_box = state.dict.popup.as_ref().map_or(false, |p| {
             box_rect.expand(2.0).contains(p.word_rect.center())
         });
@@ -154,7 +161,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         if !state.ocr.is_constant_scanning_active()
             && response.secondary_clicked()
             && !pointer_in_popup
-            && !whiteboard_open
+            && !overlay_blocked
         {
             dismissed_box_idx = Some(idx);
         }
@@ -229,7 +236,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
             }
         }
 
-        if response.clicked() && !pointer_in_popup && !whiteboard_open {
+        if response.clicked() && !pointer_in_popup && !overlay_blocked {
             if deck_mode {
                 tapped_word = true;
             } else {
@@ -239,7 +246,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         }
 
         // Fallback tooltip only if no dictionary is installed
-        if state.dict.installed_metadata.is_none() && !whiteboard_open {
+        if state.dict.installed_metadata.is_none() && !overlay_blocked {
             let hint_label = if state.ocr.is_constant_scanning_active() {
                 "📋 Click to copy"
             } else {
@@ -315,9 +322,9 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
     }
 
     // Handle Dictionary Word Recognition and Popup with persistence grace period.
-    // While the transparent whiteboard is open, any open OCR dictionary popup stays open
-    // and its hover grace timer is frozen.
-    if whiteboard_open {
+    // While the transparent whiteboard or a modal dialog is open, any open OCR dictionary
+    // popup stays open and its hover grace timer is frozen.
+    if overlay_blocked {
         if let Some(ref mut popup) = state.dict.popup {
             let now = Instant::now();
             popup.last_hover_time = now;
@@ -325,7 +332,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         }
     }
 
-    let is_popup_currently_hovered = !whiteboard_open
+    let is_popup_currently_hovered = !overlay_blocked
         && (pointer_in_popup
             || state
                 .dict
@@ -341,6 +348,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         && ui.input(|i| i.pointer.primary_clicked())
         && !pointer_in_popup
         && !hovered_any_box
+        && !overlay_blocked
     {
         state.dict.popup = None;
         state.steam_deck.as_mut().unwrap().pinned_dictionary = false;
@@ -351,8 +359,8 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         .is_some_and(|deck| deck.pinned_dictionary);
     let grace_period = std::time::Duration::from_millis(450);
 
-    // If mouse is inside the popup or the whiteboard is open, keep it open!
-    if (tapped_word || !is_popup_currently_hovered) && !whiteboard_open && (!pinned || tapped_word)
+    // If mouse is inside the popup or the whiteboard/modal dialog is open, keep it open!
+    if (tapped_word || !is_popup_currently_hovered) && !overlay_blocked && (!pinned || tapped_word)
     {
         if let Some(pos) = pointer_pos {
             if hovered_any_box {
@@ -1005,5 +1013,60 @@ mod tests {
         assert!(!state.ocr.hide_overlay);
         state.ocr.hide_overlay = true;
         assert!(state.ocr.hide_overlay);
+    }
+
+    #[test]
+    fn test_modal_dialog_suppresses_ocr_box_hover_and_preserves_popup() {
+        let ctx = japanese_context(1.0);
+        let screen_rect =
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
+        let mut state = crate::app::AppState::default();
+        state.ocr.boxes.push(OcrBox {
+            text: "テスト".to_string(),
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.2,
+            height: 0.1,
+            lines: Vec::new(),
+            writing_direction: WritingDirection::LeftToRight,
+        });
+        let stale = Instant::now() - std::time::Duration::from_secs(5);
+        state.dict.popup = Some(crate::dict::models::DictPopupState {
+            matched_term: "テスト".to_string(),
+            source_text: "テスト".to_string(),
+            char_range: (0, 3),
+            word_rect: egui::Rect::from_min_size(egui::pos2(900.0, 500.0), egui::vec2(60.0, 30.0)),
+            extra_word_rects: Vec::new(),
+            box_rect: egui::Rect::from_min_size(egui::pos2(800.0, 490.0), egui::vec2(200.0, 50.0)),
+            entries: Vec::new(),
+            is_popup_hovered: false,
+            popup_rect: None,
+            last_hover_time: stale,
+            last_word_hover_time: stale,
+        });
+        state.ui.show_quit_dialog = true;
+
+        // Move pointer directly over the OCR box while the Quit dialog is open
+        let raw = egui::RawInput {
+            screen_rect: Some(screen_rect),
+            events: vec![egui::Event::PointerMoved(egui::pos2(960.0, 540.0))],
+            ..Default::default()
+        };
+        let _ = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                draw_ocr_overlay(ui, &mut state, screen_rect);
+            });
+        });
+
+        assert!(
+            !state.ocr.is_box_hovered,
+            "OCR boxes must not hover while quit dialog is open"
+        );
+        let popup = state
+            .dict
+            .popup
+            .as_ref()
+            .expect("Popup must remain open while quit dialog is open");
+        assert!(popup.last_hover_time > stale);
     }
 }

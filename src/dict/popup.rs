@@ -113,7 +113,7 @@ pub fn draw_dict_popup(
     // 3. Render floating popup
     let layer_id = if popup_under_crt {
         egui::LayerId::new(
-            egui::Order::Middle,
+            egui::Order::Background,
             egui::Id::new("jitendex_dict_popup_crt"),
         )
     } else {
@@ -273,11 +273,12 @@ pub fn draw_dict_popup(
                 .tessellate(clipped_shapes, ui.ctx().pixels_per_point())
         }
     } else {
-        // Keep the dictionary popup above CentralPanel within Order::Background,
-        // while staying beneath Order::PanelResizeLine (the drawing whiteboard).
-        ui.ctx().move_to_top(layer_id);
         Vec::new()
     };
+
+    // Keep the dictionary popup above CentralPanel within Order::Background,
+    // while staying beneath Order::PanelResizeLine (whiteboard) and Order::Middle (dialogs).
+    ui.ctx().move_to_top(layer_id);
 
     // 4. Update whether the user is interacting with the popup window
     popup.popup_rect = Some(transform * area_response.response.rect);
@@ -872,5 +873,234 @@ mod tests {
                 assert_eq!(action_clip, None);
             });
         });
+    }
+
+    #[test]
+    fn test_quit_and_stop_stream_dialogs_clickable_over_centered_dict_popup() {
+        for popup_under_crt in [false, true] {
+            let ctx = egui::Context::default();
+            let mut fonts = egui::FontDefinitions::default();
+            let prop = fonts
+                .families
+                .get(&egui::FontFamily::Proportional)
+                .cloned()
+                .unwrap_or_default();
+            fonts
+                .families
+                .insert(egui::FontFamily::Name("GothicCJK".into()), prop);
+            ctx.set_fonts(fonts);
+
+            let screen_rect =
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
+            let mut state = crate::app::AppState::default();
+            state.ui.video_window_open = true;
+            state.ui.show_quit_dialog = true;
+            state.dict.popup_under_crt = popup_under_crt;
+
+            // Place word at (600, 400) so the popup renders just below it (pos ~ (584, 440))
+            // and covers the screen center (960, 540) where "Quit?" / "Stop Stream?" are anchored.
+            let centered_popup = || DictPopupState {
+                matched_term: "飽きる".into(),
+                source_text: "飽きる".into(),
+                char_range: (0, 3),
+                word_rect: egui::Rect::from_min_size(
+                    egui::pos2(600.0, 400.0),
+                    egui::vec2(40.0, 30.0),
+                ),
+                extra_word_rects: vec![],
+                box_rect: egui::Rect::from_min_size(
+                    egui::pos2(580.0, 400.0),
+                    egui::vec2(120.0, 30.0),
+                ),
+                entries: (0..6)
+                    .map(|i| super::super::models::TermEntry {
+                        term: "飽きる".into(),
+                        reading: "あきる".into(),
+                        definition_tags: None,
+                        rules: String::new(),
+                        score: 0.0,
+                        glossary: vec![super::super::models::GlossaryEntry::Text(
+                            "to get tired of; to lose interest in; to have enough of".into(),
+                        )],
+                        sequence: i + 1,
+                        term_tags: None,
+                        inflection_reasons: vec![],
+                        frequency: None,
+                        pitches: vec![],
+                        custom_name_id: None,
+                        custom_tag: None,
+                    })
+                    .collect(),
+                is_popup_hovered: false,
+                popup_rect: None,
+                last_hover_time: Instant::now(),
+                last_word_hover_time: Instant::now(),
+            };
+
+            // Frame 1: Dialog is shown first (before popup opens), simulating the dialog
+            // already existing before the popup layer is created/re-created.
+            let raw = egui::RawInput {
+                screen_rect: Some(screen_rect),
+                ..Default::default()
+            };
+            let _ = ctx.run(raw.clone(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    crate::ui::dialogs::show_quit_dialog(&mut state, ctx, ui);
+                });
+            });
+
+            // Frames 2..4: Popup is now open covering the screen center alongside the Quit dialog.
+            state.dict.popup = Some(centered_popup());
+            for _ in 0..2 {
+                let _ = ctx.run(raw.clone(), |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let _ = draw_dict_popup(
+                            ui,
+                            &mut state.dict.popup,
+                            screen_rect,
+                            true,
+                            popup_under_crt,
+                            1.0,
+                            |_| crate::bank::MineStatus::Available,
+                            |_| false,
+                            false,
+                        );
+                        crate::ui::dialogs::show_quit_dialog(&mut state, ctx, ui);
+                    });
+                });
+            }
+
+            let popup_rect = state.dict.popup.as_ref().unwrap().popup_rect.unwrap();
+            assert!(
+                popup_rect.contains(screen_rect.center()),
+                "Popup must cover screen center: {popup_rect:?}"
+            );
+
+            // Verify that at the center of the screen, hit-testing resolves to the Quit? window
+            // (Order::Middle), NOT the dictionary popup.
+            let top_layer = ctx.layer_id_at(screen_rect.center()).unwrap();
+            assert_eq!(top_layer.order, egui::Order::Middle);
+
+            let quit_window_rect = ctx
+                .memory(|m| m.area_rect(top_layer.id))
+                .expect("Quit? window rect must exist");
+            assert!(popup_rect.intersects(quit_window_rect));
+
+            // Click "Yes, quit" (left button near bottom-left of the Quit? window)
+            let yes_pos = egui::pos2(
+                quit_window_rect.left() + 45.0,
+                quit_window_rect.bottom() - 18.0,
+            );
+            let mut close_sent = false;
+            for pressed in [true, false] {
+                let out = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(screen_rect),
+                        events: vec![
+                            egui::Event::PointerMoved(yes_pos),
+                            egui::Event::PointerButton {
+                                pos: yes_pos,
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                modifiers: egui::Modifiers::NONE,
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            let _ = draw_dict_popup(
+                                ui,
+                                &mut state.dict.popup,
+                                screen_rect,
+                                true,
+                                popup_under_crt,
+                                1.0,
+                                |_| crate::bank::MineStatus::Available,
+                                |_| false,
+                                false,
+                            );
+                            crate::ui::dialogs::show_quit_dialog(&mut state, ctx, ui);
+                        });
+                    },
+                );
+                close_sent |= out
+                    .viewport_output
+                    .get(&egui::ViewportId::ROOT)
+                    .is_some_and(|v| v.commands.contains(&egui::ViewportCommand::Close));
+            }
+            assert!(
+                close_sent,
+                "Clicking 'Yes, quit' over OCR popup failed (popup_under_crt={popup_under_crt})"
+            );
+
+            // Also verify "Stop Stream?" dialog "Yes, stop stream" button works over the OCR popup
+            state.ui.show_quit_dialog = false;
+            state.ui.show_stop_stream_dialog = true;
+            for _ in 0..2 {
+                let _ = ctx.run(raw.clone(), |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let _ = draw_dict_popup(
+                            ui,
+                            &mut state.dict.popup,
+                            screen_rect,
+                            true,
+                            popup_under_crt,
+                            1.0,
+                            |_| crate::bank::MineStatus::Available,
+                            |_| false,
+                            false,
+                        );
+                        crate::ui::dialogs::show_stop_stream_dialog(&mut state, ctx, ui, ctx);
+                    });
+                });
+            }
+            let stop_layer = ctx.layer_id_at(screen_rect.center()).unwrap();
+            assert_eq!(stop_layer.order, egui::Order::Middle);
+            let stop_window_rect = ctx
+                .memory(|m| m.area_rect(stop_layer.id))
+                .expect("Stop Stream? window rect must exist");
+            let yes_stop_pos = egui::pos2(
+                stop_window_rect.left() + 60.0,
+                stop_window_rect.bottom() - 18.0,
+            );
+            for pressed in [true, false] {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(screen_rect),
+                        events: vec![
+                            egui::Event::PointerMoved(yes_stop_pos),
+                            egui::Event::PointerButton {
+                                pos: yes_stop_pos,
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                modifiers: egui::Modifiers::NONE,
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            let _ = draw_dict_popup(
+                                ui,
+                                &mut state.dict.popup,
+                                screen_rect,
+                                true,
+                                popup_under_crt,
+                                1.0,
+                                |_| crate::bank::MineStatus::Available,
+                                |_| false,
+                                false,
+                            );
+                            crate::ui::dialogs::show_stop_stream_dialog(&mut state, ctx, ui, ctx);
+                        });
+                    },
+                );
+            }
+            assert!(
+                !state.ui.video_window_open,
+                "Clicking 'Yes, stop stream' over OCR popup failed (popup_under_crt={popup_under_crt})"
+            );
+        }
     }
 }
