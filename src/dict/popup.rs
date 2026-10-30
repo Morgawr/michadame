@@ -142,6 +142,10 @@ pub fn draw_dict_popup(
         })
         .order(layer_id.order)
         .show(ui.ctx(), |ui| {
+            // Disable text selection inside the popup so clicking and dragging anywhere on
+            // definitions/headwords always scrolls the ScrollArea (including catching kinetic
+            // momentum) rather than starting a multi-label text selection.
+            ui.style_mut().interaction.selectable_labels = false;
             if scale != 1.0 {
                 // Area's initial bounds are in screen coordinates; this layer
                 // lays out the full-size content in its own local coordinates.
@@ -251,17 +255,23 @@ pub fn draw_dict_popup(
         });
 
     let primitives = if popup_under_crt {
+        // Steal the painted shapes for CRT tessellation and replace them in-place with
+        // `Shape::Noop` (rather than `std::mem::take`ing the `PaintList` to length 0) so
+        // egui does not paint them in the foreground AND any `on_end_frame` plugin (such as
+        // `LabelSelectionState::end_frame`) holding a `ShapeIdx` into `layer_id` cannot panic
+        // with an out-of-bounds index.
         let mut clipped_shapes = ui
             .ctx()
             .graphics_mut(|g| {
-                g.get_mut(layer_id)
-                    .map(|list| list.all_entries().cloned().collect::<Vec<_>>())
+                g.get_mut(layer_id).map(|list| {
+                    let shapes = list.all_entries().cloned().collect::<Vec<_>>();
+                    for idx in 0..shapes.len() {
+                        list.reset_shape(egui::layers::ShapeIdx(idx));
+                    }
+                    shapes
+                })
             })
             .unwrap_or_default();
-        // Clear the stolen layer so egui does not paint it in foreground
-        let _ = ui
-            .ctx()
-            .graphics_mut(|g| g.get_mut(layer_id).map(std::mem::take));
         if clipped_shapes.is_empty() {
             Vec::new()
         } else {
@@ -1100,6 +1110,176 @@ mod tests {
             assert!(
                 !state.ui.video_window_open,
                 "Clicking 'Yes, stop stream' over OCR popup failed (popup_under_crt={popup_under_crt})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dict_popup_drag_scroll_momentum_catch_and_reverse_does_not_crash() {
+        for popup_under_crt in [false, true] {
+            let ctx = egui::Context::default();
+            let mut fonts = egui::FontDefinitions::default();
+            let prop = fonts
+                .families
+                .get(&egui::FontFamily::Proportional)
+                .cloned()
+                .unwrap_or_default();
+            fonts
+                .families
+                .insert(egui::FontFamily::Name("GothicCJK".into()), prop);
+            ctx.set_fonts(fonts);
+
+            let video_rect =
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
+            let mut popup_state = Some(DictPopupState {
+                matched_term: "飽きる".into(),
+                source_text: "飽きる".into(),
+                char_range: (0, 3),
+                word_rect: egui::Rect::from_min_size(
+                    egui::pos2(400.0, 100.0),
+                    egui::vec2(40.0, 30.0),
+                ),
+                extra_word_rects: vec![],
+                box_rect: egui::Rect::from_min_size(
+                    egui::pos2(380.0, 100.0),
+                    egui::vec2(120.0, 30.0),
+                ),
+                entries: (0..20)
+                    .map(|i| super::super::models::TermEntry {
+                        term: format!("飽きる{i}"),
+                        reading: "あきる".into(),
+                        definition_tags: Some("v1 vi".into()),
+                        rules: String::new(),
+                        score: 0.0,
+                        glossary: vec![
+                            super::super::models::GlossaryEntry::Text(
+                                "to get tired of; to lose interest in; to have enough of".into(),
+                            ),
+                            super::super::models::GlossaryEntry::Text(
+                                "to become sated; to grow weary of".into(),
+                            ),
+                        ],
+                        sequence: i + 1,
+                        term_tags: None,
+                        inflection_reasons: vec![],
+                        frequency: None,
+                        pitches: vec![],
+                        custom_name_id: None,
+                        custom_tag: None,
+                    })
+                    .collect(),
+                is_popup_hovered: false,
+                popup_rect: None,
+                last_hover_time: Instant::now(),
+                last_word_hover_time: Instant::now(),
+            });
+
+            let offset_key = egui::Id::new("jitendex_dict_popup_scroll_offset");
+            let mut time = 0.0f64;
+            let mut run_frame = |events: Vec<egui::Event>| -> (f32, egui::Rect) {
+                time += 1.0 / 60.0;
+                let raw = egui::RawInput {
+                    screen_rect: Some(video_rect),
+                    time: Some(time),
+                    predicted_dt: 1.0 / 60.0,
+                    events,
+                    ..Default::default()
+                };
+                let _ = ctx.run(raw, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let _ = draw_dict_popup(
+                            ui,
+                            &mut popup_state,
+                            video_rect,
+                            true,
+                            popup_under_crt,
+                            1.0,
+                            |_| crate::bank::MineStatus::Available,
+                            |_| false,
+                            false,
+                        );
+                    });
+                });
+                (
+                    ctx.data(|d| d.get_temp::<f32>(offset_key)).unwrap_or(0.0),
+                    popup_state.as_ref().unwrap().popup_rect.unwrap(),
+                )
+            };
+
+            // Warm up layout so ScrollArea knows content_is_too_large
+            let mut popup_rect = video_rect;
+            for _ in 0..3 {
+                popup_rect = run_frame(vec![]).1;
+            }
+            let grab_x = popup_rect.left() + 120.0; // Directly over headword/definition labels
+            let start_y = popup_rect.top() + 500.0;
+
+            // 1. Click and drag upwards on the content to scroll down the list with velocity
+            run_frame(vec![
+                egui::Event::PointerMoved(egui::pos2(grab_x, start_y)),
+                egui::Event::PointerButton {
+                    pos: egui::pos2(grab_x, start_y),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+            for step in 1..=6 {
+                let y = start_y - step as f32 * 45.0;
+                run_frame(vec![egui::Event::PointerMoved(egui::pos2(grab_x, y))]);
+            }
+            let end_drag1_y = start_y - 6.0 * 45.0;
+            let (offset_at_release, _) = run_frame(vec![egui::Event::PointerButton {
+                pos: egui::pos2(grab_x, end_drag1_y),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+            assert!(
+                offset_at_release > 100.0,
+                "Expected drag-to-scroll to move down: {offset_at_release}"
+            );
+
+            // 2. Let inertia/momentum carry the list further down for a few frames
+            let mut offset_in_momentum = offset_at_release;
+            for _ in 0..4 {
+                offset_in_momentum = run_frame(vec![]).0;
+            }
+            assert!(
+                offset_in_momentum > offset_at_release,
+                "Expected inertia/momentum to continue scrolling down ({offset_at_release} -> {offset_in_momentum})"
+            );
+
+            // 3. Grab the moving list again directly on a label and reverse flow back up (drag down)
+            let catch_y = popup_rect.top() + 200.0;
+            run_frame(vec![
+                egui::Event::PointerMoved(egui::pos2(grab_x, catch_y)),
+                egui::Event::PointerButton {
+                    pos: egui::pos2(grab_x, catch_y),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+            let mut reversed_offset = offset_in_momentum;
+            for step in 1..=8 {
+                let y = catch_y + step as f32 * 50.0;
+                reversed_offset =
+                    run_frame(vec![egui::Event::PointerMoved(egui::pos2(grab_x, y))]).0;
+            }
+            run_frame(vec![egui::Event::PointerButton {
+                pos: egui::pos2(grab_x, catch_y + 400.0),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+            for _ in 0..4 {
+                reversed_offset = run_frame(vec![]).0;
+            }
+
+            assert!(
+                reversed_offset < offset_in_momentum,
+                "Reversing drag should scroll back up ({offset_in_momentum} -> {reversed_offset})"
             );
         }
     }
