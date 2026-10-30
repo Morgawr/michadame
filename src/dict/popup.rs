@@ -75,11 +75,14 @@ pub fn draw_dict_popup(
     is_mined: impl Fn(&super::models::TermEntry) -> bool,
     can_clip: bool,
 ) -> (Option<PopupAction>, Vec<egui::ClippedPrimitive>) {
+    let session_key = egui::Id::new("jitendex_dict_popup_session");
     let Some(popup) = popup_state else {
+        ui.ctx().data_mut(|d| d.remove::<(u64, u64)>(session_key));
         return (None, Vec::new());
     };
 
     if popup.entries.is_empty() {
+        ui.ctx().data_mut(|d| d.remove::<(u64, u64)>(session_key));
         return (None, Vec::new());
     }
 
@@ -189,9 +192,9 @@ pub fn draw_dict_popup(
                         0.0
                     };
 
-                // Start at the top whenever the popup shows a different lookup, or it was not
-                // drawn on the previous frame (i.e. it was closed and has been re-opened).
-                let session_key = egui::Id::new("jitendex_dict_popup_session");
+                // Start at the top (with zero kinetic momentum) whenever the popup shows a
+                // different lookup, or it was not drawn on the previous frame (i.e. it was
+                // closed and has been re-opened).
                 let identity = popup_identity(popup);
                 let frame_nr = ui.ctx().frame_nr();
                 let last: Option<(u64, u64)> = ui.ctx().data(|d| d.get_temp(session_key));
@@ -204,11 +207,13 @@ pub fn draw_dict_popup(
                 ui.ctx()
                     .data_mut(|d| d.insert_temp(session_key, (identity, frame_nr)));
 
+                let scroll_id = ui.make_persistent_id(egui::Id::new("jitendex_dict_popup_scroll"));
                 let mut scroll_area = egui::ScrollArea::vertical()
                     .id_source("jitendex_dict_popup_scroll")
                     .auto_shrink([false, false])
                     .max_height(scroll_max_h);
                 if is_new_session {
+                    egui::scroll_area::State::default().store(ui.ctx(), scroll_id);
                     scroll_area = scroll_area.vertical_scroll_offset(0.0);
                 } else if external_scroll != 0.0 {
                     let current: f32 = ui.ctx().data(|d| d.get_temp(offset_key)).unwrap_or(0.0);
@@ -239,6 +244,7 @@ pub fn draw_dict_popup(
                         }
                     }
                 });
+                debug_assert_eq!(scroll_output.id, scroll_id);
                 let offset = scroll_output.state.offset.y;
                 ui.ctx().data_mut(|d| d.insert_temp(offset_key, offset));
                 if external_scroll != 0.0 {
@@ -1280,6 +1286,157 @@ mod tests {
             assert!(
                 reversed_offset < offset_in_momentum,
                 "Reversing drag should scroll back up ({offset_in_momentum} -> {reversed_offset})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dict_popup_momentum_does_not_transfer_to_new_popup_after_dismiss_or_switch() {
+        let ctx = egui::Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        let prop = fonts
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .cloned()
+            .unwrap_or_default();
+        fonts
+            .families
+            .insert(egui::FontFamily::Name("GothicCJK".into()), prop);
+        ctx.set_fonts(fonts);
+
+        let video_rect =
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
+        let make_popup = |word: &str| DictPopupState {
+            matched_term: word.into(),
+            source_text: word.into(),
+            char_range: (0, word.chars().count()),
+            word_rect: egui::Rect::from_min_size(egui::pos2(400.0, 100.0), egui::vec2(40.0, 30.0)),
+            extra_word_rects: vec![],
+            box_rect: egui::Rect::from_min_size(egui::pos2(380.0, 100.0), egui::vec2(120.0, 30.0)),
+            entries: (0..20)
+                .map(|i| super::super::models::TermEntry {
+                    term: format!("{word}{i}"),
+                    reading: "あきる".into(),
+                    definition_tags: Some("v1 vi".into()),
+                    rules: String::new(),
+                    score: 0.0,
+                    glossary: vec![super::super::models::GlossaryEntry::Text(
+                        "to get tired of; to lose interest in; to have enough of".into(),
+                    )],
+                    sequence: i + 1,
+                    term_tags: None,
+                    inflection_reasons: vec![],
+                    frequency: None,
+                    pitches: vec![],
+                    custom_name_id: None,
+                    custom_tag: None,
+                })
+                .collect(),
+            is_popup_hovered: false,
+            popup_rect: None,
+            last_hover_time: Instant::now(),
+            last_word_hover_time: Instant::now(),
+        };
+
+        let mut popup_state = Some(make_popup("飽きる"));
+        let offset_key = egui::Id::new("jitendex_dict_popup_scroll_offset");
+        let time = std::cell::Cell::new(0.0f64);
+
+        let run_frame =
+            |popup_state: &mut Option<DictPopupState>, events: Vec<egui::Event>| -> f32 {
+                time.set(time.get() + 1.0 / 60.0);
+                let raw = egui::RawInput {
+                    screen_rect: Some(video_rect),
+                    time: Some(time.get()),
+                    predicted_dt: 1.0 / 60.0,
+                    events,
+                    ..Default::default()
+                };
+                let _ = ctx.run(raw, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let _ = draw_dict_popup(
+                            ui,
+                            popup_state,
+                            video_rect,
+                            true,
+                            true,
+                            1.0,
+                            |_| crate::bank::MineStatus::Available,
+                            |_| false,
+                            false,
+                        );
+                    });
+                });
+                ctx.data(|d| d.get_temp::<f32>(offset_key)).unwrap_or(0.0)
+            };
+
+        for _ in 0..3 {
+            run_frame(&mut popup_state, vec![]);
+        }
+        let popup_rect = popup_state.as_ref().unwrap().popup_rect.unwrap();
+        let grab_x = popup_rect.left() + 120.0;
+        let start_y = popup_rect.top() + 500.0;
+
+        // Flick-drag popup 1 so it has strong downward kinetic scrolling momentum
+        let flick = |popup_state: &mut Option<DictPopupState>| {
+            run_frame(
+                popup_state,
+                vec![
+                    egui::Event::PointerMoved(egui::pos2(grab_x, start_y)),
+                    egui::Event::PointerButton {
+                        pos: egui::pos2(grab_x, start_y),
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+            for step in 1..=5 {
+                let y = start_y - step as f32 * 50.0;
+                run_frame(
+                    popup_state,
+                    vec![egui::Event::PointerMoved(egui::pos2(grab_x, y))],
+                );
+            }
+            let release_y = start_y - 250.0;
+            let off1 = run_frame(
+                popup_state,
+                vec![egui::Event::PointerButton {
+                    pos: egui::pos2(grab_x, release_y),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+            let off2 = run_frame(popup_state, vec![]);
+            assert!(
+                off2 > off1,
+                "Popup should be actively scrolling with momentum ({off1} -> {off2})"
+            );
+        };
+
+        flick(&mut popup_state);
+
+        // Case 1: Dismiss popup while it still has momentum, then open a new popup (even for the same word)
+        popup_state = None;
+        run_frame(&mut popup_state, vec![]);
+        popup_state = Some(make_popup("飽きる"));
+        for frame in 0..5 {
+            let offset = run_frame(&mut popup_state, vec![]);
+            assert_eq!(
+                offset, 0.0,
+                "Reopened popup after dismissal must not inherit momentum (frame {frame})"
+            );
+        }
+
+        // Case 2: Flick again, then switch directly to another word's popup without a dismissal gap
+        flick(&mut popup_state);
+        popup_state = Some(make_popup("食べる"));
+        for frame in 0..5 {
+            let offset = run_frame(&mut popup_state, vec![]);
+            assert_eq!(
+                offset, 0.0,
+                "Switched popup must not inherit momentum from previous word (frame {frame})"
             );
         }
     }
