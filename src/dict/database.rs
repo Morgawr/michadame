@@ -214,6 +214,13 @@ impl DictDatabase {
                     }
                 }
 
+                // Reject false matches where a mixed Katakana+Hiragana candidate (e.g. "カドで"
+                // from "カードで") only matched by folding Katakana into Hiragana across a word
+                // that would never be written half-Katakana and half-Hiragana (e.g. 門出 "かどで").
+                if !is_valid_mixed_kana_match(candidate, &term, &reading, &rules) {
+                    continue;
+                }
+
                 let key = (term.clone(), reading.clone(), sequence);
                 if !seen_keys.insert(key) {
                     continue;
@@ -663,10 +670,143 @@ pub fn hiragana_to_katakana(s: &str) -> String {
         .collect()
 }
 
+/// Returns true if the character is a Hiragana letter (`ぁ`..=`ゖ`).
+pub fn is_hiragana(c: char) -> bool {
+    (0x3041..=0x3096).contains(&(c as u32))
+}
+
+/// Returns true if the character is a Katakana letter (`ァ`..=`ヺ`, excluding `ー`).
+pub fn is_katakana(c: char) -> bool {
+    (0x30A1..=0x30FA).contains(&(c as u32))
+}
+
+/// Returns true if the string contains any Hiragana letter.
+pub fn has_hiragana(s: &str) -> bool {
+    s.chars().any(is_hiragana)
+}
+
+/// Returns true if the string contains any Katakana letter.
+pub fn has_katakana(s: &str) -> bool {
+    s.chars().any(is_katakana)
+}
+
+/// Checks whether a candidate containing mixed Katakana and Hiragana can legitimately
+/// match a dictionary entry `(entry_term, entry_reading, entry_rules)`.
+///
+/// A single word is never written half-Katakana and half-Hiragana across an arbitrary
+/// boundary (e.g. `門出` (`かどで`) would never be written `カドで`). Mixed kana is only
+/// valid when:
+/// - The dictionary headword/reading itself has that exact mixed script (e.g. `サボる`),
+/// - The candidate was deinflected by a verb/adjective rule from a Katakana stem + Hiragana
+///   inflection ending (e.g. `タベた` → `タベる` for `食べる`, `ビビった` → `ビビる` for `びびる`),
+/// - The dictionary `term` contains Kanji/Katakana and preserves the Hiragana prefix/suffix
+///   of the candidate (e.g. `関係ない` for `カンケイない`, `凄い` for `スゴい`, `お金` for `おカネ`),
+/// - Or the trailing Hiragana is an honorific/plural suffix (`さま`, `さん`, `ちゃん`, `くん`,
+///   `たち`, `だち`, `ども`, `どの`) matching the end of `entry_term` (e.g. `オージさま` for `王子様`).
+pub fn is_valid_mixed_kana_match(
+    cand: &DeinflectionCandidate,
+    entry_term: &str,
+    entry_reading: &str,
+    entry_rules: &str,
+) -> bool {
+    if !has_katakana(&cand.term) || !has_hiragana(&cand.term) {
+        return true;
+    }
+    if entry_term == cand.term || entry_reading == cand.term {
+        return true;
+    }
+
+    let chars: Vec<char> = cand.term.chars().collect();
+    let lead_hira_len = chars.iter().take_while(|&&c| is_hiragana(c)).count();
+    let trail_hira_len = chars.iter().rev().take_while(|&&c| is_hiragana(c)).count();
+
+    if lead_hira_len + trail_hira_len >= chars.len() {
+        return false;
+    }
+
+    let lead_hira: String = chars[..lead_hira_len].iter().collect();
+    let trail_hira: String = chars[chars.len() - trail_hira_len..].iter().collect();
+    let middle = &chars[lead_hira_len..chars.len() - trail_hira_len];
+
+    // Any leading Hiragana prefix (e.g. "お" in "おカネ") must appear verbatim at the start
+    // of a Kanji/Katakana headword (e.g. "お金").
+    if !lead_hira.is_empty() {
+        if !(contains_kanji(entry_term) || has_katakana(entry_term))
+            || !entry_term.starts_with(&lead_hira)
+        {
+            return false;
+        }
+    }
+
+    // Any interior Hiragana inside the middle stem (e.g. "の" in "オンナの子") must also
+    // appear in a Kanji headword.
+    if middle.iter().any(|&c| is_hiragana(c)) {
+        if !contains_kanji(entry_term) {
+            return false;
+        }
+        let mut idx = 0;
+        while idx < middle.len() {
+            if is_hiragana(middle[idx]) {
+                let start = idx;
+                while idx < middle.len() && is_hiragana(middle[idx]) {
+                    idx += 1;
+                }
+                let run: String = middle[start..idx].iter().collect();
+                if !entry_term.contains(&run) {
+                    return false;
+                }
+            } else {
+                idx += 1;
+            }
+        }
+    }
+
+    if trail_hira.is_empty() {
+        return contains_kanji(entry_term) || has_katakana(entry_term);
+    }
+
+    // Trailing Hiragana after Katakana:
+    // 1. Deinflected verb / i-adjective (e.g. "タベた" -> "タベる", "ビビった" -> "ビビる").
+    if cand.rules != 0 {
+        return true;
+    }
+
+    // 2. Honorific / plural suffixes commonly written in Hiragana after a Katakana noun
+    //    (e.g. "オージさま" -> "王子様", "カミさま" -> "神様", "オレたち" -> "俺達").
+    let is_honorific_suffix = match trail_hira.as_str() {
+        "さま" => entry_term.ends_with("さま") || entry_term.ends_with('様'),
+        "さん" => entry_term.ends_with("さん"),
+        "ちゃん" => entry_term.ends_with("ちゃん"),
+        "くん" => entry_term.ends_with("くん") || entry_term.ends_with('君'),
+        "たち" | "だち" => entry_term.ends_with(&trail_hira) || entry_term.ends_with('達'),
+        "ども" => entry_term.ends_with("ども") || entry_term.ends_with('共'),
+        "どの" => entry_term.ends_with("どの") || entry_term.ends_with('殿'),
+        _ => false,
+    };
+    if is_honorific_suffix && (contains_kanji(entry_term) || has_katakana(entry_term)) {
+        return true;
+    }
+
+    // 3. Base-form headword with Kanji/Katakana stem + Hiragana okurigana/auxiliary
+    //    (e.g. "関係ない" for "カンケイない", "凄い" for "スゴい", "食べる" for "タベる").
+    //    Require either an inflectable rule tag or a 2+ char Hiragana suffix so that
+    //    non-inflectable "Kanji + 1-char particle" entries (e.g. "事で", "先に", "共に")
+    //    cannot match "Katakana noun + particle".
+    if (contains_kanji(entry_term) || has_katakana(entry_term)) && entry_term.ends_with(&trail_hira)
+    {
+        let entry_is_inflectable = parse_rule_flags(entry_rules) != 0;
+        if entry_is_inflectable || trail_hira.chars().count() >= 2 {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Returns the alternate kana representation if the string contains Hiragana or Katakana.
 pub fn to_alternate_kana(s: &str) -> Option<String> {
-    let has_kata = s.chars().any(|c| (0x30A1..=0x30F6).contains(&(c as u32)));
-    let has_hira = s.chars().any(|c| (0x3041..=0x3096).contains(&(c as u32)));
+    let has_kata = has_katakana(s);
+    let has_hira = has_hiragana(s);
     if has_kata {
         Some(katakana_to_hiragana(s))
     } else if has_hira {

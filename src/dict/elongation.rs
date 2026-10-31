@@ -59,6 +59,7 @@ pub fn elongation_variants(s: &str) -> Vec<(String, String)> {
     }
 
     let chars: Vec<char> = s.chars().collect();
+    let has_hira = super::database::has_hiragana(s);
     let mut segs: Vec<Seg> = Vec::new();
     let mut runs = 0usize;
     let mut i = 0;
@@ -72,7 +73,14 @@ pub fn elongation_variants(s: &str) -> Vec<(String, String)> {
                 j += 1;
             }
             let original: String = chars[i..j].iter().collect();
-            if runs < MAX_EXPANDED_RUNS {
+            // In mixed Katakana + Hiragana text (e.g. "カードで", "オージさまで"), a single ー
+            // immediately following Katakana is standard Katakana long-vowel orthography, not
+            // an emphatic stress insertion that can be stripped to ∅.
+            let is_kata_long_vowel_in_mixed = kind == Kind::LongMark
+                && j - i == 1
+                && has_hira
+                && super::database::is_katakana(chars[i - 1]);
+            if runs < MAX_EXPANDED_RUNS && !is_kata_long_vowel_in_mixed {
                 let removed = (String::new(), Some(format!("{original}→∅")));
                 let options = match kind {
                     Kind::Sokuon if j - i == 1 => vec![(original.clone(), None), removed],
@@ -86,7 +94,10 @@ pub fn elongation_variants(s: &str) -> Vec<(String, String)> {
                 segs.push(Seg::Run(options));
                 runs += 1;
             } else {
-                segs.push(Seg::Lit(original));
+                match segs.last_mut() {
+                    Some(Seg::Lit(lit)) => lit.push_str(&original),
+                    _ => segs.push(Seg::Lit(original)),
+                }
             }
             i = j;
         } else {

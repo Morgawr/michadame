@@ -231,11 +231,10 @@ pub fn lookup_word_at_pointer_with_pitch(
         let matched_entry: ScanResult = if let Some(hit) = cached {
             hit
         } else {
-            // All lookups feed one accumulator. The first span that matches becomes the
-            // primary match (highlighted, popup anchor); scanning then continues over
-            // shorter spans to collect lower-priority alternatives until the cap is reached.
+            // All lookups feed one accumulator. Batches are prioritized by effective matched
+            // character length (longest first), then by match tier (exact before normalized,
+            // long-vowel before character-removing elongation), then by discovery order.
             let mut acc = ScanAccumulator::default();
-            let mut primary_span: Option<(usize, usize)> = None;
 
             for len in (1..=max_len).rev() {
                 let start = char_idx;
@@ -249,6 +248,7 @@ pub fn lookup_word_at_pointer_with_pitch(
                 }
                 let full = find_span_entries(
                     &sub_str,
+                    (start, end),
                     db,
                     deinflector,
                     particle_index.as_deref(),
@@ -256,9 +256,6 @@ pub fn lookup_word_at_pointer_with_pitch(
                     current_tag,
                     &mut acc,
                 );
-                if primary_span.is_none() && acc.has_primary() {
-                    primary_span = Some((start, end));
-                }
                 if full {
                     break;
                 }
@@ -271,7 +268,7 @@ pub fn lookup_word_at_pointer_with_pitch(
             // We search from the closest start (char_idx - 1) backwards to min_start.
             // Once a start matches, shorter spans from that same start still contribute
             // alternatives.
-            if primary_span.is_none() {
+            if !acc.has_any() {
                 let min_start = char_idx.saturating_sub(6);
                 'lookbehind: for start in (min_start..char_idx).rev() {
                     if is_punct_char(chars[start]) {
@@ -288,6 +285,7 @@ pub fn lookup_word_at_pointer_with_pitch(
                         }
                         let full = find_span_entries(
                             &sub_str,
+                            (start, end),
                             db,
                             deinflector,
                             particle_index.as_deref(),
@@ -295,22 +293,17 @@ pub fn lookup_word_at_pointer_with_pitch(
                             current_tag,
                             &mut acc,
                         );
-                        if primary_span.is_none() && acc.has_primary() {
-                            primary_span = Some((start, end));
-                        }
                         if full {
                             break 'lookbehind;
                         }
                     }
-                    if primary_span.is_some() {
+                    if acc.has_any() {
                         break;
                     }
                 }
             }
 
-            let matched_entry = primary_span.map(|(start, end)| {
-                let mut entries = acc.entries;
-                let groups = acc.groups;
+            let matched_entry = acc.finish().map(|((start, end), mut entries, groups)| {
                 // Enrich entries with frequency if available and sort. Priority group always
                 // comes first (primary match, then longer before shorter spans, exact before
                 // normalized); frequency only orders entries within the same group.
@@ -595,6 +588,7 @@ fn custom_name_to_term_entry(name: &CustomNameEntry) -> super::models::TermEntry
 ///    (e.g. `突拍子がない` → `突拍子もない`). Only entries tagged as expressions are kept.
 fn find_span_entries(
     sub_str: &str,
+    span: (usize, usize),
     db: Option<&DictDatabase>,
     deinflector: &Deinflector,
     particle_index: Option<&ParticleIndex>,
@@ -602,8 +596,14 @@ fn find_span_entries(
     current_tag: Option<&str>,
     acc: &mut ScanAccumulator,
 ) -> bool {
+    let span_len = span.1 - span.0;
+    let is_mixed_kana =
+        super::database::has_katakana(sub_str) && super::database::has_hiragana(sub_str);
+
     // 0. Check custom names
-    let alt_kana = crate::dict::database::to_alternate_kana(sub_str);
+    let alt_kana = (!is_mixed_kana)
+        .then(|| crate::dict::database::to_alternate_kana(sub_str))
+        .flatten();
     let matching_names: Vec<&CustomNameEntry> = custom_names
         .iter()
         .filter(|n| {
@@ -633,12 +633,12 @@ fn find_span_entries(
         }
 
         if !tagged_names.is_empty() {
-            if acc.absorb(tagged_names) {
+            if acc.absorb(span, span_len, MatchTier::CustomTagged, tagged_names) {
                 return true;
             }
         }
         if !other_names.is_empty() {
-            if acc.absorb(other_names) {
+            if acc.absorb(span, span_len, MatchTier::CustomOther, other_names) {
                 return true;
             }
         }
@@ -647,19 +647,29 @@ fn find_span_entries(
     // 1. Check Japanese dictionary (if available)
     if let Some(db) = db {
         let mut candidates = deinflector.deinflect(sub_str);
-        let hira_str = super::database::katakana_to_hiragana(sub_str);
-        if hira_str != sub_str {
-            for cand in deinflector.deinflect(&hira_str) {
-                if !candidates
-                    .iter()
-                    .any(|c| c.term == cand.term && c.rules == cand.rules)
-                {
-                    candidates.push(cand);
+        // Only pre-convert Katakana to Hiragana for deinflection when the span has no
+        // Hiragana (i.e. the conjugation ending itself is written in Katakana, e.g. "タベタ").
+        // If the span already contains Hiragana, any Hiragana inflection suffix is already
+        // deinflected directly on `sub_str` while preserving the Katakana/Hiragana boundary.
+        if !super::database::has_hiragana(sub_str) {
+            let hira_str = super::database::katakana_to_hiragana(sub_str);
+            if hira_str != sub_str {
+                for cand in deinflector.deinflect(&hira_str) {
+                    if !candidates
+                        .iter()
+                        .any(|c| c.term == cand.term && c.rules == cand.rules)
+                    {
+                        candidates.push(cand);
+                    }
                 }
             }
         }
+        let mut matched_exact_or_lv = false;
         if let Ok(entries) = db.find_terms(&candidates) {
-            if acc.absorb(entries) {
+            if !entries.is_empty() {
+                matched_exact_or_lv = true;
+            }
+            if acc.absorb(span, span_len, MatchTier::Exact, entries) {
                 return true;
             }
         }
@@ -676,7 +686,10 @@ fn find_span_entries(
                     cand.reasons.insert(0, reason.clone());
                 }
                 if let Ok(entries) = db.find_terms(&cands) {
-                    if acc.absorb(entries) {
+                    if !entries.is_empty() {
+                        matched_exact_or_lv = true;
+                    }
+                    if acc.absorb(span, span_len, MatchTier::LongVowel, entries) {
                         return true;
                     }
                 }
@@ -687,33 +700,42 @@ fn find_span_entries(
 
         // Tier 2b: emphatic elongation (ぜっっったい, ぜーんぜん, い〜っぱい). Only does work if
         // the span contains っ/ッ, ー or 〜.
-        let variants = elongation_variants(sub_str);
-        if !variants.is_empty() {
-            let mut el_candidates = Vec::new();
-            for (variant, reason) in &variants {
-                let mut cands = deinflector.deinflect(variant);
-                for cand in &mut cands {
-                    cand.reasons.insert(0, reason.clone());
-                }
-                if let Ok(entries) = db.find_terms(&cands) {
-                    if acc.absorb(entries) {
-                        return true;
+        // If a pure-Katakana word already matched in Tier 1/2 (e.g. "カード", "ビール"), do not
+        // strip its single standard Katakana long vowel ー to produce false-friend alternatives
+        // (e.g. "カド" / 角, "ビル").
+        let skip_elongation = matched_exact_or_lv
+            && !super::database::has_hiragana(sub_str)
+            && super::database::has_katakana(sub_str);
+        if !skip_elongation {
+            let variants = elongation_variants(sub_str);
+            if !variants.is_empty() {
+                let mut el_candidates = Vec::new();
+                for (variant, reason) in &variants {
+                    let eff_len = variant.chars().count();
+                    let mut cands = deinflector.deinflect(variant);
+                    for cand in &mut cands {
+                        cand.reasons.insert(0, reason.clone());
                     }
+                    if let Ok(entries) = db.find_terms(&cands) {
+                        if acc.absorb(span, eff_len, MatchTier::Elongation, entries) {
+                            return true;
+                        }
+                    }
+                    el_candidates.extend(cands);
                 }
-                el_candidates.extend(cands);
+                candidates.extend(el_candidates);
             }
-            candidates.extend(el_candidates);
         }
 
         // Tier 3: particle swap for expressions. Unlike spelling normalizations, a swap yields a
         // different expression (気がする vs 気もする), so it is only used when nothing else matched
         // and never contributes alternatives.
-        if let (Some(index), false) = (particle_index, acc.has_primary()) {
+        if let (Some(index), false) = (particle_index, acc.has_any()) {
             let swapped = index.swapped_candidates(&candidates);
             if !swapped.is_empty() {
                 if let Ok(mut entries) = db.find_terms(&swapped) {
                     entries.retain(|e| index.is_allowed(&e.term, &e.reading));
-                    return acc.absorb(entries);
+                    return acc.absorb(span, span_len, MatchTier::ParticleSwap, entries);
                 }
             }
         }
@@ -731,56 +753,146 @@ enum EntryDedupeKey {
     Dict(String, String, i64),
 }
 
-/// Collects entries over the whole scan (all tiers of all candidate spans, in priority order).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum MatchTier {
+    CustomTagged = 0,
+    CustomOther = 1,
+    Exact = 2,
+    LongVowel = 3,
+    Elongation = 4,
+    ParticleSwap = 5,
+}
+
+struct ScanBatch {
+    span: (usize, usize),
+    effective_len: usize,
+    tier: MatchTier,
+    batch_idx: usize,
+    entries: Vec<super::models::TermEntry>,
+}
+
+/// Collects entries over the whole scan (all tiers of all candidate spans).
 ///
-/// Every non-empty lookup batch gets its own priority `group`, increasing as the scan goes:
-/// longer spans before shorter ones, and within a span exact before normalized. Group 0 is
-/// the primary match. Display order is by group first, then by frequency within a group.
+/// Batches are ordered by `(Reverse(effective_len), tier, batch_idx)` so that:
+/// - Longer effective matches come before shorter ones,
+/// - At equal effective length, exact/deinflected matches beat long-vowel normalizations,
+///   which in turn beat character-removing elongation normalizations (e.g. a 3-char exact
+///   match `カード` beats a 4-char span `かーどで` reduced to 3 chars `かどで` by `ー→∅`).
 #[derive(Default)]
 struct ScanAccumulator {
-    entries: Vec<super::models::TermEntry>,
-    groups: Vec<usize>,
-    next_group: usize,
-    primary_len: usize,
-    seen: std::collections::HashSet<EntryDedupeKey>,
+    batches: Vec<ScanBatch>,
 }
 
 impl ScanAccumulator {
-    fn has_primary(&self) -> bool {
-        self.primary_len > 0
+    fn has_any(&self) -> bool {
+        !self.batches.is_empty()
     }
 
-    fn is_full(&self) -> bool {
-        self.has_primary() && self.entries.len() - self.primary_len >= MAX_ALTERNATES
+    fn absorb(
+        &mut self,
+        span: (usize, usize),
+        effective_len: usize,
+        tier: MatchTier,
+        found: Vec<super::models::TermEntry>,
+    ) -> bool {
+        let current_span_len = span.1 - span.0;
+        if !found.is_empty() {
+            let batch_idx = self.batches.len();
+            self.batches.push(ScanBatch {
+                span,
+                effective_len,
+                tier,
+                batch_idx,
+                entries: found,
+            });
+        }
+        self.can_stop_at_len(current_span_len)
     }
 
-    /// Adds the results of one lookup. The first non-empty batch becomes the primary set;
-    /// subsequent batches contribute unseen entries as alternatives. Returns `true` once no
-    /// more alternatives are wanted.
-    fn absorb(&mut self, found: Vec<super::models::TermEntry>) -> bool {
-        let is_primary = !self.has_primary();
-        let before = self.entries.len();
-        for e in found {
-            if self.is_full() {
+    /// Returns true if we already have enough high-priority entries with `effective_len >= current_span_len`
+    /// that no shorter span (`< current_span_len`) could change the primary match or fit in `MAX_ALTERNATES`.
+    fn can_stop_at_len(&self, current_span_len: usize) -> bool {
+        let max_eff = self
+            .batches
+            .iter()
+            .map(|b| b.effective_len)
+            .max()
+            .unwrap_or(0);
+        if max_eff < current_span_len {
+            return false;
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut primary_len = 0usize;
+        let mut total = 0usize;
+        let mut qualifying: Vec<&ScanBatch> = self
+            .batches
+            .iter()
+            .filter(|b| b.effective_len >= current_span_len)
+            .collect();
+        qualifying.sort_by_key(|b| (std::cmp::Reverse(b.effective_len), b.tier, b.batch_idx));
+        for (i, batch) in qualifying.iter().enumerate() {
+            for e in &batch.entries {
+                let key = Self::dedupe_key(e);
+                if seen.insert(key) {
+                    total += 1;
+                }
+            }
+            if i == 0 {
+                primary_len = total;
+            }
+            if primary_len > 0 && total - primary_len >= MAX_ALTERNATES {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn dedupe_key(e: &super::models::TermEntry) -> EntryDedupeKey {
+        if let Some(id) = e.custom_name_id {
+            EntryDedupeKey::Custom(id)
+        } else {
+            EntryDedupeKey::Dict(e.term.clone(), e.reading.clone(), e.sequence)
+        }
+    }
+
+    fn finish(mut self) -> Option<((usize, usize), Vec<super::models::TermEntry>, Vec<usize>)> {
+        if self.batches.is_empty() {
+            return None;
+        }
+        self.batches
+            .sort_by_key(|b| (std::cmp::Reverse(b.effective_len), b.tier, b.batch_idx));
+
+        let primary_span = self.batches[0].span;
+        let mut entries = Vec::new();
+        let mut groups = Vec::new();
+        let mut next_group = 0usize;
+        let mut primary_len = 0usize;
+        let mut seen = std::collections::HashSet::new();
+
+        for batch in self.batches {
+            let is_primary = primary_len == 0;
+            let before = entries.len();
+            for e in batch.entries {
+                if !is_primary && entries.len() - primary_len >= MAX_ALTERNATES {
+                    break;
+                }
+                if seen.insert(Self::dedupe_key(&e)) {
+                    entries.push(e);
+                    groups.push(next_group);
+                }
+            }
+            if entries.len() > before {
+                next_group += 1;
+            }
+            if is_primary {
+                primary_len = entries.len();
+            }
+            if primary_len > 0 && entries.len() - primary_len >= MAX_ALTERNATES {
                 break;
             }
-            let key = if let Some(id) = e.custom_name_id {
-                EntryDedupeKey::Custom(id)
-            } else {
-                EntryDedupeKey::Dict(e.term.clone(), e.reading.clone(), e.sequence)
-            };
-            if self.seen.insert(key) {
-                self.entries.push(e);
-                self.groups.push(self.next_group);
-            }
         }
-        if self.entries.len() > before {
-            self.next_group += 1;
-        }
-        if is_primary {
-            self.primary_len = self.entries.len();
-        }
-        self.is_full()
+
+        Some((primary_span, entries, groups))
     }
 }
 
@@ -2319,5 +2431,98 @@ mod tests {
         assert_eq!(popup2.entries[0].frequency.as_ref().unwrap().rank, 10);
         assert_eq!(popup2.entries[1].term, "気");
         assert_eq!(popup2.entries[1].frequency.as_ref().unwrap().rank, 5000);
+    }
+
+    #[test]
+    fn test_mixed_kana_and_elongation_prioritization() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test_mixed_kana_priority.db");
+        let db = DictDatabase::open_or_create(&db_path).unwrap();
+        let plain = r#"["gloss"]"#;
+        let rows: &[(&str, &str, &str, i64)] = &[
+            ("カード", "カード", "", 1),
+            ("門出", "かどで", "", 2),
+            ("角", "かど", "", 3),
+            ("コート", "コート", "", 4),
+            ("事で", "ことで", "", 5),
+            ("勘", "かん", "", 6),
+            ("噛む", "かむ", "v5m", 7),
+            ("貝", "かい", "", 8),
+            ("嗅ぐ", "かぐ", "v5g", 9),
+            ("食べる", "たべる", "v1", 10),
+            ("サボる", "さぼる", "v5r", 11),
+            ("凄い", "すごい", "adj-i", 12),
+            ("お金", "おかね", "", 13),
+        ];
+        for (term, reading, rules, seq) in rows {
+            db.conn
+                .execute(
+                    "INSERT INTO terms VALUES (?1, ?2, '', ?3, 100.0, ?4, ?5, '')",
+                    rusqlite::params![term, reading, rules, plain, seq],
+                )
+                .unwrap();
+        }
+
+        // 1. "カードで": hovering on "カード" must match "カード" (0..3) and never "門出" (かどで)
+        let p = hover_first_char("カードで", &db).unwrap();
+        assert_eq!(p.matched_term, "カード");
+        assert_eq!(p.char_range, (0, 3));
+        assert!(
+            p.entries.iter().all(|e| e.term != "門出"),
+            "門出 should never match half-Katakana/half-Hiragana カードで: {:?}",
+            p.entries
+        );
+        assert!(
+            p.entries.iter().all(|e| e.term != "角"),
+            "角 should not be offered by stripping standard Katakana ー from カード: {:?}",
+            p.entries
+        );
+
+        // 2. "カドで": even without ー, half-Katakana "カド" + Hiragana "で" must match "角", not "門出"
+        let p = hover_first_char("カドで", &db).unwrap();
+        assert_eq!(p.matched_term, "角");
+        assert_eq!(p.char_range, (0, 2));
+        assert!(p.entries.iter().all(|e| e.term != "門出"));
+
+        // 3. "コートで": must match "コート" (0..3), not "事で" (ことで)
+        let p = hover_first_char("コートで", &db).unwrap();
+        assert_eq!(p.matched_term, "コート");
+        assert_eq!(p.char_range, (0, 3));
+        assert!(p.entries.iter().all(|e| e.term != "事で"));
+
+        // 4. "カンで" / "カイで": must not fuse Katakana stem + Hiragana particle into a verb conjugation
+        let p = hover_first_char("カンで", &db).unwrap();
+        assert_eq!(p.matched_term, "勘");
+        assert_eq!(p.char_range, (0, 2));
+        assert!(p.entries.iter().all(|e| e.term != "噛む"));
+
+        let p = hover_first_char("カイで", &db).unwrap();
+        assert_eq!(p.matched_term, "貝");
+        assert_eq!(p.char_range, (0, 2));
+        assert!(p.entries.iter().all(|e| e.term != "嗅ぐ"));
+
+        // 5. All-Hiragana "かーどで": exact 3-char match "カード" (effective_len = 3, Tier 1)
+        //    must still prioritize ahead of 4-char elongation-stripped "門出" (effective_len = 3, Tier 2b)
+        let p = hover_first_char("かーどで", &db).unwrap();
+        assert_eq!(p.matched_term, "カード");
+        assert_eq!(p.char_range, (0, 3));
+        assert_eq!(p.entries[0].term, "カード");
+
+        // 6. Legitimate mixed Katakana + Hiragana forms still match
+        let p = hover_first_char("タベた", &db).unwrap();
+        assert_eq!(p.matched_term, "食べる");
+        assert_eq!(p.char_range, (0, 3));
+
+        let p = hover_first_char("サボった", &db).unwrap();
+        assert_eq!(p.matched_term, "サボる");
+        assert_eq!(p.char_range, (0, 4));
+
+        let p = hover_first_char("スゴい", &db).unwrap();
+        assert_eq!(p.matched_term, "凄い");
+        assert_eq!(p.char_range, (0, 3));
+
+        let p = hover_first_char("おカネ", &db).unwrap();
+        assert_eq!(p.matched_term, "お金");
+        assert_eq!(p.char_range, (0, 3));
     }
 }
