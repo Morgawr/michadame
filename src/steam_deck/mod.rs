@@ -265,6 +265,16 @@ pub fn toggle_cursor(state: &mut AppState, ctx: &egui::Context) {
     } else if state.pc98.is_active {
         state.pc98.toggle_passthrough();
     }
+    if crate::ocr::overlay::is_input_passthrough_active(state) {
+        state.ocr.is_box_hovered = false;
+        state.dict.popup = None;
+        if let Some(deck) = &mut state.steam_deck {
+            deck.pinned_dictionary = false;
+        }
+        if let Some(renderer) = &state.crt_renderer {
+            renderer.lock().unwrap().popup_primitives.clear();
+        }
+    }
     ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
     ctx.memory_mut(|m| {
         m.stop_text_input();
@@ -284,30 +294,6 @@ pub fn forward_inputs(state: &mut AppState, ctx: &egui::Context, video: egui::Re
     let deck = state.steam_deck.as_ref().unwrap();
     let in_game = deck.tab == Tab::Game;
     let pos = ctx.input(|i| i.pointer.latest_pos());
-    let on_ocr = pos.is_some_and(|p| {
-        state.ocr.boxes.iter().any(|b| {
-            egui::Rect::from_center_size(
-                video.min + egui::vec2(b.center_x * video.width(), b.center_y * video.height()),
-                egui::vec2(b.width * video.width(), b.height * video.height()),
-            )
-            .contains(p)
-        })
-    });
-    let in_popup = pos.is_some_and(|p| {
-        state
-            .dict
-            .popup
-            .as_ref()
-            .and_then(|p| p.popup_rect)
-            .is_some_and(|r| r.contains(p))
-    });
-    let pointer_ui =
-        !in_game || state.whiteboard.open || in_popup || on_ocr || state.ui.show_quit_dialog;
-    let deck = state.steam_deck.as_mut().unwrap();
-    if ctx.input(|i| i.pointer.any_pressed()) {
-        deck.ui_touch = pointer_ui || state.dict.popup.is_some();
-    }
-    let mouse_enabled = focused && !pointer_ui && !deck.ui_touch;
     let hooked = state
         .gamescope_hook
         .as_ref()
@@ -317,7 +303,32 @@ pub fn forward_inputs(state: &mut AppState, ctx: &egui::Context, video: egui::Re
         } else {
             state.pc98.passthrough_enabled
         });
-    let mouse_enabled = mouse_enabled && hooked;
+    let on_ocr = !hooked
+        && pos.is_some_and(|p| {
+            state.ocr.boxes.iter().any(|b| {
+                egui::Rect::from_center_size(
+                    video.min + egui::vec2(b.center_x * video.width(), b.center_y * video.height()),
+                    egui::vec2(b.width * video.width(), b.height * video.height()),
+                )
+                .contains(p)
+            })
+        });
+    let in_popup = !hooked
+        && pos.is_some_and(|p| {
+            state
+                .dict
+                .popup
+                .as_ref()
+                .and_then(|p| p.popup_rect)
+                .is_some_and(|r| r.contains(p))
+        });
+    let pointer_ui =
+        !in_game || state.whiteboard.open || in_popup || on_ocr || state.ui.show_quit_dialog;
+    let deck = state.steam_deck.as_mut().unwrap();
+    if ctx.input(|i| i.pointer.any_pressed()) {
+        deck.ui_touch = !hooked || pointer_ui || state.dict.popup.is_some();
+    }
+    let mouse_enabled = focused && !pointer_ui && !deck.ui_touch && hooked;
     let touch = ctx.input(|i| {
         i.any_touches()
             || i.events

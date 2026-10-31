@@ -44,7 +44,6 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
     let is_gamescope = state.gamescope_hook.as_ref().map_or(false, |h| h.is_active);
     let is_pc98 = state.pc98.is_active;
     let is_pc88 = state.pc88.is_active;
-    let mut passthrough_active = false;
     if !deck_mode && is_gamescope {
         let toggle_passthrough =
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
@@ -60,10 +59,6 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 ctx.request_repaint();
             }
         }
-        passthrough_active = state
-            .gamescope_hook
-            .as_ref()
-            .map_or(false, |h| h.passthrough_enabled);
     } else if !deck_mode && is_pc98 {
         let toggle_passthrough =
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
@@ -101,7 +96,6 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 "Selected PC-98 Save Slot {slot} (Shift+F5 Save / Shift+F9 Load)"
             ));
         }
-        passthrough_active = state.pc98.passthrough_enabled;
     } else if !deck_mode && is_pc88 {
         let toggle_passthrough =
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
@@ -139,7 +133,17 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 "Selected PC-88 Save Slot {slot} (Shift+F5 Save / Shift+F9 Load)"
             ));
         }
-        passthrough_active = state.pc88.passthrough_enabled;
+    }
+    let passthrough_active = crate::ocr::overlay::is_input_passthrough_active(state);
+    if passthrough_active {
+        state.ocr.is_box_hovered = false;
+        state.dict.popup = None;
+        if let Some(deck) = &mut state.steam_deck {
+            deck.pinned_dictionary = false;
+        }
+        if let Some(ref r) = state.crt_renderer {
+            r.lock().unwrap().popup_primitives.clear();
+        }
     }
 
     let mut new_dma_frame_received = false;

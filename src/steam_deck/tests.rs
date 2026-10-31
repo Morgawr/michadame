@@ -1052,3 +1052,109 @@ fn tapped_dictionary_survives_finger_lift_and_closes_on_outside_tap() {
     }
     assert!(state.dict.popup.is_none());
 }
+
+#[test]
+fn hooked_cursor_hides_ocr_overlay_and_popup_and_passes_clicks_over_ocr_boxes() {
+    let ctx = deck_context();
+    let mut state = deck_state();
+    state.pc98.is_active = true;
+    state.pc98.passthrough_enabled = false;
+    state.steam_deck.as_mut().unwrap().gamepad_error = Some("No hardware in this test".into());
+    state.bank.custom_names.push(crate::bank::CustomNameEntry {
+        id: 1,
+        created_at: 0,
+        kanji: "テスト".into(),
+        furigana: "てすと".into(),
+        source_tag: None,
+        notes: None,
+    });
+    state.ocr.boxes.push(crate::ocr::OcrBox {
+        text: "テスト".into(),
+        center_x: 0.5,
+        center_y: 0.1,
+        width: 0.2,
+        height: 0.08,
+        lines: vec![],
+        writing_direction: crate::ocr::WritingDirection::LeftToRight,
+    });
+    let word = egui::pos2(540.0, 80.0);
+    let render = |state: &mut AppState, ctx: &egui::Context| {
+        shortcuts(state, ctx);
+        let screen = ctx.screen_rect();
+        forward_inputs(state, ctx, screen);
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none())
+            .show(ctx, |ui| {
+                crate::ocr::overlay::draw_ocr_overlay(ui, state, screen)
+            });
+    };
+
+    // Unhooked: tapping an OCR word opens the dictionary popup and does not click in-game.
+    let _ = frame(&ctx, vec![], |ctx| render(&mut state, ctx));
+    for pressed in [true, false] {
+        let _ = frame(
+            &ctx,
+            vec![
+                Event::PointerMoved(word),
+                Event::PointerButton {
+                    pos: word,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Modifiers::NONE,
+                },
+            ],
+            |ctx| render(&mut state, ctx),
+        );
+        assert!(!state.pc98.input_state.lock().unwrap().mouse_left);
+    }
+    assert!(state.dict.popup.is_some());
+    assert!(state.steam_deck.as_ref().unwrap().pinned_dictionary);
+
+    // Hooking via L5 (Ctrl+Alt+Space) immediately dismisses the popup and hides OCR overlay.
+    let _ = frame(
+        &ctx,
+        vec![key(Key::Space, Modifiers::CTRL | Modifiers::ALT, true)],
+        |ctx| render(&mut state, ctx),
+    );
+    assert!(state.pc98.passthrough_enabled);
+    assert!(state.dict.popup.is_none());
+    assert!(!state.steam_deck.as_ref().unwrap().pinned_dictionary);
+    assert!(!state.ocr.is_box_hovered);
+
+    // While hooked, hovering and clicking directly on the OCR box passes the click to the game
+    // and never raises the OCR dictionary popup.
+    let _ = frame(
+        &ctx,
+        vec![
+            Event::PointerMoved(word),
+            Event::PointerButton {
+                pos: word,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            },
+        ],
+        |ctx| render(&mut state, ctx),
+    );
+    assert!(
+        state.pc98.input_state.lock().unwrap().mouse_left,
+        "Mouse click over OCR box must reach the game when hooked"
+    );
+    assert!(
+        state.dict.popup.is_none(),
+        "OCR popup must not appear while input is hooked"
+    );
+    assert!(!state.ocr.is_box_hovered);
+
+    let _ = frame(
+        &ctx,
+        vec![Event::PointerButton {
+            pos: word,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }],
+        |ctx| render(&mut state, ctx),
+    );
+    assert!(!state.pc98.input_state.lock().unwrap().mouse_left);
+}

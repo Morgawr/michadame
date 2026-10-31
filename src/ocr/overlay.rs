@@ -58,12 +58,31 @@ pub fn execute_popup_mine_action(
     true
 }
 
+/// Returns `true` when mouse/keyboard input passthrough ("hooked" mode) is active
+/// for Gamescope, PC-88, or PC-98.
+pub fn is_input_passthrough_active(state: &AppState) -> bool {
+    state
+        .gamescope_hook
+        .as_ref()
+        .is_some_and(|h| h.is_active && h.passthrough_enabled)
+        || (state.pc88.is_active && state.pc88.passthrough_enabled)
+        || (state.pc98.is_active && state.pc98.passthrough_enabled)
+}
+
 /// Draws the interactive OCR bounding boxes and floating controls on top of the video feed.
 pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egui::Rect) {
-    if video_rect.width() <= 10.0 || video_rect.height() <= 10.0 || state.ocr.boxes.is_empty() {
+    let passthrough_active = is_input_passthrough_active(state);
+    if passthrough_active
+        || video_rect.width() <= 10.0
+        || video_rect.height() <= 10.0
+        || state.ocr.boxes.is_empty()
+    {
         state.ocr.is_box_hovered = false;
-        if state.ocr.boxes.is_empty() {
+        if passthrough_active || state.ocr.boxes.is_empty() {
             state.dict.popup = None;
+            if let Some(deck) = &mut state.steam_deck {
+                deck.pinned_dictionary = false;
+            }
         }
         if let Some(ref r) = state.crt_renderer {
             r.lock().unwrap().popup_primitives.clear();
