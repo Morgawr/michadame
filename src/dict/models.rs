@@ -155,6 +155,61 @@ pub struct DictPopupState {
     /// until `POPUP_SWITCH_DELAY` after this, so the cursor can travel from the word to the
     /// popup across neighboring words without replacing the popup.
     pub last_word_hover_time: std::time::Instant,
+    /// Optional recursive child popup opened by hovering a Japanese word inside this popup.
+    pub child: Option<Box<DictPopupState>>,
+}
+
+impl DictPopupState {
+    /// Returns true if `pos` is inside this popup's window rect or any recursive child popup's rect.
+    pub fn contains_pointer(&self, pos: egui::Pos2) -> bool {
+        self.popup_rect.is_some_and(|r| r.contains(pos))
+            || self.child.as_ref().is_some_and(|c| c.contains_pointer(pos))
+    }
+
+    /// Returns true if this popup or any recursive child popup is currently hovered.
+    pub fn is_any_hovered(&self) -> bool {
+        self.is_popup_hovered || self.child.as_ref().is_some_and(|c| c.is_any_hovered())
+    }
+
+    /// Returns the 0-based depth of the deepest open popup in this chain (`0` if `self.child` is `None`).
+    pub fn deepest_depth(&self) -> usize {
+        match &self.child {
+            Some(c) => 1 + c.deepest_depth(),
+            None => 0,
+        }
+    }
+
+    /// Returns the 0-based depth of the topmost (deepest) popup layer whose `popup_rect` contains `pos`.
+    pub fn topmost_layer_at(&self, pos: egui::Pos2) -> Option<usize> {
+        if let Some(child) = &self.child {
+            if let Some(d) = child.topmost_layer_at(pos) {
+                return Some(d + 1);
+            }
+        }
+        self.popup_rect.filter(|r| r.contains(pos)).map(|_| 0)
+    }
+
+    /// Refreshes `last_hover_time` and `last_word_hover_time` on this popup and all recursive children.
+    pub fn touch_all_hover_times(&mut self, now: std::time::Instant) {
+        self.last_hover_time = now;
+        self.last_word_hover_time = now;
+        if let Some(child) = &mut self.child {
+            child.touch_all_hover_times(now);
+        }
+    }
+
+    /// Removes entries matching `custom_name_id == Some(id)` from this popup and all recursive children.
+    /// If any child popup becomes empty, it (and its descendants) are closed.
+    /// Returns `true` if this popup itself is now empty.
+    pub fn remove_custom_name(&mut self, id: i64) -> bool {
+        self.entries.retain(|e| e.custom_name_id != Some(id));
+        if let Some(child) = &mut self.child {
+            if child.remove_custom_name(id) {
+                self.child = None;
+            }
+        }
+        self.entries.is_empty()
+    }
 }
 
 /// Background events sent between worker threads and the UI.

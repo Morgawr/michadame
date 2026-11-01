@@ -24,6 +24,234 @@ pub fn with_dict_scale<R>(scale: f32, f: impl FnOnce() -> R) -> R {
     result
 }
 
+/// A single laid-out character inside a dictionary popup, with its bounding box in the
+/// popup layer's local coordinate space and its visual line/row index.
+#[derive(Clone, Debug)]
+pub struct PlacedPopupChar {
+    pub ch: char,
+    pub rect: egui::Rect,
+    pub row_idx: usize,
+}
+
+/// Result of probing which character inside a dictionary popup is under the pointer.
+#[derive(Clone, Debug)]
+pub struct PopupTextHit {
+    pub chars: Vec<PlacedPopupChar>,
+    pub hovered_char_idx: usize,
+}
+
+struct PopupHoverProbe {
+    /// Pointer position in the popup layer's local coordinate space.
+    local_pointer: egui::Pos2,
+    /// Clip rect of the popup's scroll viewport in local coordinates.
+    clip_rect: egui::Rect,
+    /// True if an interactive button (`+`, `++`, delete custom name) was hovered.
+    button_hovered: bool,
+    /// The matched Japanese text run and character index under `local_pointer`, if any.
+    hit: Option<PopupTextHit>,
+}
+
+thread_local! {
+    static POPUP_HOVER_PROBE: std::cell::RefCell<Option<PopupHoverProbe>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` while probing for a Japanese character under `local_pointer` (within `clip_rect`).
+/// Returns the `f` result along with the `PopupTextHit` if `local_pointer` is hovering a
+/// Japanese character and not hovering any action button.
+pub fn with_popup_hover_probe<R>(
+    local_pointer: Option<egui::Pos2>,
+    clip_rect: egui::Rect,
+    f: impl FnOnce() -> R,
+) -> (R, Option<PopupTextHit>) {
+    let probe = local_pointer
+        .filter(|p| clip_rect.contains(*p))
+        .map(|local_pointer| PopupHoverProbe {
+            local_pointer,
+            clip_rect,
+            button_hovered: false,
+            hit: None,
+        });
+    let prev = POPUP_HOVER_PROBE.with(|cell| cell.replace(probe));
+    let result = f();
+    let finished = POPUP_HOVER_PROBE.with(|cell| cell.replace(prev));
+    let hit = finished.and_then(|p| (!p.button_hovered).then_some(p.hit).flatten());
+    (result, hit)
+}
+
+fn mark_popup_button_hovered() {
+    POPUP_HOVER_PROBE.with(|cell| {
+        if let Some(probe) = cell.borrow_mut().as_mut() {
+            probe.button_hovered = true;
+        }
+    });
+}
+
+fn is_popup_hover_probe_active() -> bool {
+    POPUP_HOVER_PROBE.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|p| p.hit.is_none() && !p.button_hovered)
+    })
+}
+
+fn record_galley_hit(
+    galley_pos: egui::Pos2,
+    galley: &egui::Galley,
+    char_overrides: Option<&[char]>,
+    ruby_rt_ranges: &[std::ops::Range<usize>],
+) {
+    POPUP_HOVER_PROBE.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(probe) = borrow.as_mut() else {
+            return;
+        };
+        if probe.hit.is_some() || probe.button_hovered {
+            return;
+        };
+        let galley_rect = egui::Rect::from_min_size(galley_pos, galley.size())
+            .intersect(probe.clip_rect)
+            .expand(2.0);
+        if !galley_rect.is_positive() || !galley_rect.contains(probe.local_pointer) {
+            return;
+        }
+
+        let mut raw_chars: Vec<(usize, PlacedPopupChar)> = Vec::new();
+        let mut global_idx = 0usize;
+        for (row_idx, row) in galley.rows.iter().enumerate() {
+            let row_min_y = galley_pos.y + row.rect.min.y;
+            let row_max_y = galley_pos.y + row.rect.max.y;
+            for g in &row.glyphs {
+                let ch = char_overrides
+                    .and_then(|ov| ov.get(global_idx).copied())
+                    .unwrap_or(g.chr);
+                let min_x = galley_pos.x + g.pos.x;
+                let max_x = min_x + g.size.x;
+                let rect = egui::Rect::from_min_max(
+                    egui::pos2(min_x, row_min_y),
+                    egui::pos2(max_x, row_max_y),
+                );
+                raw_chars.push((global_idx, PlacedPopupChar { ch, rect, row_idx }));
+                global_idx += 1;
+            }
+            if row.ends_with_newline {
+                raw_chars.push((
+                    global_idx,
+                    PlacedPopupChar {
+                        ch: '\n',
+                        rect: egui::Rect::NOTHING,
+                        row_idx,
+                    },
+                ));
+                global_idx += 1;
+            }
+        }
+
+        let ptr = probe.local_pointer;
+        let hovered_raw = raw_chars
+            .iter()
+            .position(|(_, pc)| pc.rect.contains(ptr))
+            .or_else(|| {
+                raw_chars
+                    .iter()
+                    .position(|(_, pc)| pc.rect.is_positive() && pc.rect.expand(1.5).contains(ptr))
+            });
+        let Some(hovered_raw_idx) = hovered_raw else {
+            return;
+        };
+        let (hovered_global_idx, ref hovered_pc) = raw_chars[hovered_raw_idx];
+        if !crate::dict::lookup::is_japanese_lookup_char(hovered_pc.ch) {
+            return;
+        }
+
+        let target_global_idx = ruby_rt_ranges
+            .iter()
+            .find(|r| r.contains(&hovered_global_idx))
+            .map_or(hovered_global_idx, |r| r.start.saturating_sub(1));
+
+        let mut chars = Vec::with_capacity(raw_chars.len());
+        let mut hovered_char_idx = None;
+        for (g_idx, pc) in raw_chars {
+            if !ruby_rt_ranges.iter().any(|r| r.contains(&g_idx)) {
+                if g_idx == target_global_idx {
+                    hovered_char_idx = Some(chars.len());
+                }
+                chars.push(pc);
+            }
+        }
+
+        if let Some(hovered_char_idx) = hovered_char_idx {
+            probe.hit = Some(PopupTextHit {
+                chars,
+                hovered_char_idx,
+            });
+        }
+    });
+}
+
+fn record_placed_chars_hit(chars: Vec<PlacedPopupChar>) {
+    if chars.is_empty() {
+        return;
+    }
+    POPUP_HOVER_PROBE.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(probe) = borrow.as_mut() else {
+            return;
+        };
+        if probe.hit.is_some() || probe.button_hovered {
+            return;
+        }
+        let ptr = probe.local_pointer;
+        let hovered_idx = chars
+            .iter()
+            .position(|pc| pc.rect.contains(ptr))
+            .or_else(|| {
+                chars
+                    .iter()
+                    .position(|pc| pc.rect.is_positive() && pc.rect.expand(1.5).contains(ptr))
+            });
+        let Some(hovered_char_idx) = hovered_idx else {
+            return;
+        };
+        if !crate::dict::lookup::is_japanese_lookup_char(chars[hovered_char_idx].ch) {
+            return;
+        }
+        probe.hit = Some(PopupTextHit {
+            chars,
+            hovered_char_idx,
+        });
+    });
+}
+
+fn render_interactive_job(
+    ui: &mut egui::Ui,
+    mut job: LayoutJob,
+    ruby_rt_ranges: &[std::ops::Range<usize>],
+) -> egui::Response {
+    job.wrap.max_width = ui.available_width();
+    let galley = ui.fonts(|f| f.layout_job(job));
+    let response = ui.label(galley.clone());
+    record_galley_hit(response.rect.min, &galley, None, ruby_rt_ranges);
+    response
+}
+
+fn render_interactive_text(
+    ui: &mut egui::Ui,
+    text: impl Into<String>,
+    font_id: FontId,
+    color: Color32,
+) -> egui::Response {
+    let job = LayoutJob::single_section(
+        text.into(),
+        TextFormat {
+            font_id,
+            color,
+            ..Default::default()
+        },
+    );
+    render_interactive_job(ui, job, &[])
+}
+
 const MAX_JSON_WALK_DEPTH: usize = 64;
 
 #[inline]
@@ -215,6 +443,7 @@ fn render_delete_name_button(ui: &mut egui::Ui, size: f32) -> bool {
     );
 
     if hovered {
+        mark_popup_button_hovered();
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     response.on_hover_text("Delete from custom names").clicked()
@@ -312,6 +541,9 @@ fn paint_bevel_mine_button(
         glyph_color,
         2.0,
     );
+    if response.hovered() {
+        mark_popup_button_hovered();
+    }
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -683,11 +915,12 @@ pub fn render_headword_and_reading(
         let galley = ui.fonts(|f| f.layout_job(job));
         let shadow_idx = ui.painter().add(egui::Shape::Noop);
         let response = ui.label(galley.clone());
+        record_galley_hit(response.rect.min, &galley, None, &[]);
         set_text_shadow(ui, shadow_idx, response.rect.min, galley, shadow);
         return response;
     }
 
-    let (job, spans) = build_headword_reading_pitch_job(
+    let (mut job, spans) = build_headword_reading_pitch_job(
         term,
         reading,
         pitches,
@@ -696,9 +929,30 @@ pub fn render_headword_and_reading(
         term_color,
         reading_color,
     );
+    job.wrap.max_width = ui.available_width();
     let galley = ui.fonts(|f| f.layout_job(job));
     let shadow_idx = ui.painter().add(egui::Shape::Noop);
     let response = ui.label(galley.clone());
+    let unstripped: Option<Vec<char>> = spans.iter().any(|s| s.is_nasal).then(|| {
+        let mut chars: Vec<char> = term.chars().collect();
+        chars.push('【');
+        for (p_idx, pitch) in pitches.iter().enumerate() {
+            if p_idx > 0 {
+                chars.push('・');
+            }
+            let r_str = if !pitch.reading.is_empty() {
+                pitch.reading.as_str()
+            } else if !reading.is_empty() {
+                reading
+            } else {
+                term
+            };
+            chars.extend(r_str.chars());
+        }
+        chars.push('】');
+        chars
+    });
+    record_galley_hit(response.rect.min, &galley, unstripped.as_deref(), &[]);
     set_text_shadow(ui, shadow_idx, response.rect.min, galley.clone(), shadow);
     paint_pitch_accents(
         ui.painter(),
@@ -839,11 +1093,7 @@ pub fn render_glossaries(ui: &mut egui::Ui, entry: &TermEntry) {
         if let Some(GlossaryEntry::Text(notes)) = entry.glossary.first() {
             if !notes.trim().is_empty() {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(
-                        RichText::new(notes)
-                            .font(dict_font(32.0))
-                            .color(COLOR_DEFINITION),
-                    );
+                    render_interactive_text(ui, notes, dict_font(32.0), COLOR_DEFINITION);
                 });
             }
         }
@@ -874,7 +1124,7 @@ pub fn render_glossaries(ui: &mut egui::Ui, entry: &TermEntry) {
                     } else {
                         format!("{term}  ({})", reasons.join(", "))
                     };
-                    ui.label(RichText::new(text).font(dict_font(28.0)).color(COLOR_MUTED));
+                    render_interactive_text(ui, text, dict_font(28.0), COLOR_MUTED);
                     ui.add_space(4.0);
                 } else {
                     render_structured_entry(ui, val);
@@ -1076,11 +1326,7 @@ fn render_sense(ui: &mut egui::Ui, sense_val: &serde_json::Value, index: usize) 
                 .strong()
                 .color(COLOR_READING),
         );
-        ui.label(
-            RichText::new(&def_str)
-                .font(dict_font(34.0))
-                .color(COLOR_DEFINITION),
-        );
+        render_interactive_text(ui, &def_str, dict_font(34.0), COLOR_DEFINITION);
     });
 
     // C. Sense notes / info-gloss
@@ -1110,11 +1356,7 @@ fn render_sense(ui: &mut egui::Ui, sense_val: &serde_json::Value, index: usize) 
             ui.horizontal_wrapped(|ui| {
                 ui.add_space(32.0);
                 ui.label(RichText::new("ℹ").font(dict_font(28.0)).color(COLOR_MUTED));
-                ui.label(
-                    RichText::new(note_text)
-                        .font(dict_font(30.0))
-                        .color(COLOR_TAG_TEXT),
-                );
+                render_interactive_text(ui, note_text, dict_font(30.0), COLOR_TAG_TEXT);
             });
         }
     }
@@ -1186,10 +1428,11 @@ fn render_sense(ui: &mut egui::Ui, sense_val: &serde_json::Value, index: usize) 
                 render_inline_content(ui, target);
             }
             if !gloss_text.is_empty() {
-                ui.label(
-                    RichText::new(format!("— {gloss_text}"))
-                        .font(dict_font(30.0))
-                        .color(COLOR_TAG_TEXT),
+                render_interactive_text(
+                    ui,
+                    format!("— {gloss_text}"),
+                    dict_font(30.0),
+                    COLOR_TAG_TEXT,
                 );
             }
         });
@@ -1212,11 +1455,7 @@ fn render_forms(ui: &mut egui::Ui, forms_val: &serde_json::Value) {
                     .strong()
                     .color(COLOR_MUTED),
             );
-            ui.label(
-                RichText::new(form_words.join(", "))
-                    .font(dict_font(32.0))
-                    .color(COLOR_HEADWORD),
-            );
+            render_interactive_text(ui, form_words.join(", "), dict_font(32.0), COLOR_HEADWORD);
         });
     }
 }
@@ -1453,15 +1692,37 @@ pub fn render_ruby_item(ui: &mut egui::Ui, base: &str, rt: &str) {
     let rt_y = (target_bottom - rt_glyph_bottom).max(0.0);
 
     let rt_x = rect.min.x + (w - galley_rt.size().x) / 2.0;
-    ui.painter()
-        .galley(egui::pos2(rt_x, rect.min.y + rt_y), galley_rt, COLOR_RUBY);
+    let rt_pos = egui::pos2(rt_x, rect.min.y + rt_y);
+    ui.painter().galley(rt_pos, galley_rt, COLOR_RUBY);
 
     let base_x = rect.min.x + (w - galley_base.size().x) / 2.0;
-    ui.painter().galley(
-        egui::pos2(base_x, rect.min.y + base_y_offset),
-        galley_base,
-        COLOR_EXAMPLE_JA,
-    );
+    let base_pos = egui::pos2(base_x, rect.min.y + base_y_offset);
+    if is_popup_hover_probe_active() {
+        let mut placed_chars = Vec::new();
+        for row in &galley_base.rows {
+            let n = row.glyphs.len();
+            for (i, g) in row.glyphs.iter().enumerate() {
+                let mut min_x = base_pos.x + g.pos.x;
+                let mut max_x = min_x + g.size.x;
+                if i == 0 {
+                    min_x = min_x.min(rect.min.x);
+                }
+                if i + 1 == n {
+                    max_x = max_x.max(rect.max.x);
+                }
+                placed_chars.push(PlacedPopupChar {
+                    ch: g.chr,
+                    rect: egui::Rect::from_min_max(
+                        egui::pos2(min_x, rect.min.y),
+                        egui::pos2(max_x, rect.max.y),
+                    ),
+                    row_idx: 0,
+                });
+            }
+        }
+        record_placed_chars_hit(placed_chars);
+    }
+    ui.painter().galley(base_pos, galley_base, COLOR_EXAMPLE_JA);
 }
 
 /// Renders a complete Japanese example sentence with furigana stacked neatly on top of the kanji.
@@ -1494,6 +1755,10 @@ fn render_ruby_flow(ui: &mut egui::Ui, segments: Vec<RubySegment>, badge: Option
         .unwrap_or(sample_base.size().y * 0.18);
     let ruby_gap = 2.0;
     let target_bottom = base_y_offset + base_top - ruby_gap;
+    let probe_active = is_popup_hover_probe_active();
+    let mut placed_chars: Vec<PlacedPopupChar> = Vec::new();
+    let mut current_line_y: Option<f32> = None;
+    let mut line_idx: usize = 0;
 
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(0.0, 4.0);
@@ -1547,6 +1812,17 @@ fn render_ruby_flow(ui: &mut egui::Ui, segments: Vec<RubySegment>, badge: Option
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(w, total_h), egui::Sense::hover());
 
+                    if probe_active {
+                        if let Some(prev_y) = current_line_y {
+                            if (rect.min.y - prev_y).abs() > 4.0 {
+                                line_idx += 1;
+                                current_line_y = Some(rect.min.y);
+                            }
+                        } else {
+                            current_line_y = Some(rect.min.y);
+                        }
+                    }
+
                     let rt_glyph_bottom = galley_rt
                         .rows
                         .first()
@@ -1556,15 +1832,35 @@ fn render_ruby_flow(ui: &mut egui::Ui, segments: Vec<RubySegment>, badge: Option
                     let rt_y = (target_bottom - rt_glyph_bottom).max(0.0);
 
                     let rt_x = rect.min.x + (w - galley_rt.size().x) / 2.0;
-                    ui.painter()
-                        .galley(egui::pos2(rt_x, rect.min.y + rt_y), galley_rt, COLOR_RUBY);
+                    let rt_pos = egui::pos2(rt_x, rect.min.y + rt_y);
+                    ui.painter().galley(rt_pos, galley_rt, COLOR_RUBY);
 
                     let base_x = rect.min.x + (w - galley_base.size().x) / 2.0;
-                    ui.painter().galley(
-                        egui::pos2(base_x, rect.min.y + base_y_offset),
-                        galley_base,
-                        COLOR_EXAMPLE_JA,
-                    );
+                    let base_pos = egui::pos2(base_x, rect.min.y + base_y_offset);
+                    if probe_active {
+                        for row in &galley_base.rows {
+                            let n = row.glyphs.len();
+                            for (i, g) in row.glyphs.iter().enumerate() {
+                                let mut min_x = base_pos.x + g.pos.x;
+                                let mut max_x = min_x + g.size.x;
+                                if i == 0 {
+                                    min_x = min_x.min(rect.min.x);
+                                }
+                                if i + 1 == n {
+                                    max_x = max_x.max(rect.max.x);
+                                }
+                                placed_chars.push(PlacedPopupChar {
+                                    ch: g.chr,
+                                    rect: egui::Rect::from_min_max(
+                                        egui::pos2(min_x, rect.min.y),
+                                        egui::pos2(max_x, rect.max.y),
+                                    ),
+                                    row_idx: line_idx,
+                                });
+                            }
+                        }
+                    }
+                    ui.painter().galley(base_pos, galley_base, COLOR_EXAMPLE_JA);
                 }
                 RubySegment::Plain(text) => {
                     let galley =
@@ -1578,15 +1874,42 @@ fn render_ruby_flow(ui: &mut egui::Ui, segments: Vec<RubySegment>, badge: Option
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(w, total_h), egui::Sense::hover());
 
-                    ui.painter().galley(
-                        egui::pos2(rect.min.x, rect.min.y + base_y_offset),
-                        galley,
-                        COLOR_EXAMPLE_JA,
-                    );
+                    if probe_active {
+                        if let Some(prev_y) = current_line_y {
+                            if (rect.min.y - prev_y).abs() > 4.0 {
+                                line_idx += 1;
+                                current_line_y = Some(rect.min.y);
+                            }
+                        } else {
+                            current_line_y = Some(rect.min.y);
+                        }
+                    }
+
+                    let base_pos = egui::pos2(rect.min.x, rect.min.y + base_y_offset);
+                    if probe_active {
+                        for row in &galley.rows {
+                            for g in &row.glyphs {
+                                let min_x = base_pos.x + g.pos.x;
+                                let max_x = min_x + g.size.x;
+                                placed_chars.push(PlacedPopupChar {
+                                    ch: g.chr,
+                                    rect: egui::Rect::from_min_max(
+                                        egui::pos2(min_x, rect.min.y),
+                                        egui::pos2(max_x, rect.max.y),
+                                    ),
+                                    row_idx: line_idx,
+                                });
+                            }
+                        }
+                    }
+                    ui.painter().galley(base_pos, galley, COLOR_EXAMPLE_JA);
                 }
             }
         }
     });
+    if probe_active {
+        record_placed_chars_hit(placed_chars);
+    }
 }
 
 /// Tags whose content flows inline (on the same line as surrounding text).
@@ -1666,9 +1989,10 @@ fn normalize_glyphs(segments: &mut [RubySegment]) {
 /// Renders inline content (handling ruby, bold, plain text) using LayoutJob.
 pub fn render_inline_content(ui: &mut egui::Ui, node: &serde_json::Value) {
     let mut job = LayoutJob::default();
-    build_layout_job_from_node(node, &mut job, false, 0);
+    let mut ruby_rt_ranges = Vec::new();
+    build_layout_job_from_node(node, &mut job, &mut ruby_rt_ranges, false, 0);
     if !job.text.is_empty() {
-        ui.label(job);
+        render_interactive_job(ui, job, &ruby_rt_ranges);
     }
 }
 
@@ -1676,6 +2000,7 @@ pub fn render_inline_content(ui: &mut egui::Ui, node: &serde_json::Value) {
 fn build_layout_job_from_node(
     node: &serde_json::Value,
     job: &mut LayoutJob,
+    ruby_rt_ranges: &mut Vec<std::ops::Range<usize>>,
     is_bold: bool,
     depth: usize,
 ) {
@@ -1701,7 +2026,7 @@ fn build_layout_job_from_node(
         }
         serde_json::Value::Array(arr) => {
             for child in arr {
-                build_layout_job_from_node(child, job, is_bold, depth + 1);
+                build_layout_job_from_node(child, job, ruby_rt_ranges, is_bold, depth + 1);
             }
         }
         serde_json::Value::Object(map) => {
@@ -1709,7 +2034,7 @@ fn build_layout_job_from_node(
             match tag {
                 "b" | "strong" => {
                     if let Some(content) = map.get("content") {
-                        build_layout_job_from_node(content, job, true, depth + 1);
+                        build_layout_job_from_node(content, job, ruby_rt_ranges, true, depth + 1);
                     }
                 }
                 "ruby" => {
@@ -1724,20 +2049,32 @@ fn build_layout_job_from_node(
                         },
                     );
                     if !rt.is_empty() {
+                        let start_char = job.text.chars().count();
+                        let rt_str = format!("({})", rt);
                         append_to_layout_job(
                             job,
-                            &format!("({})", rt),
+                            &rt_str,
                             TextFormat {
                                 font_id: dict_font(24.0),
                                 color: COLOR_RUBY,
                                 ..Default::default()
                             },
                         );
+                        let end_char = job.text.chars().count();
+                        if end_char > start_char {
+                            ruby_rt_ranges.push(start_char..end_char);
+                        }
                     }
                 }
                 _ => {
                     if let Some(content) = map.get("content") {
-                        build_layout_job_from_node(content, job, is_bold, depth + 1);
+                        build_layout_job_from_node(
+                            content,
+                            job,
+                            ruby_rt_ranges,
+                            is_bold,
+                            depth + 1,
+                        );
                     }
                 }
             }
@@ -2117,7 +2454,7 @@ fn render_plain_html_text(ui: &mut egui::Ui, text: &str) {
     }
 
     if !job.text.is_empty() {
-        ui.label(job);
+        render_interactive_job(ui, job, &[]);
     }
 }
 

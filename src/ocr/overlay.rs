@@ -124,13 +124,13 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
     // must not react to hover or clicks. This is checked against the *current* pointer
     // position so there is no one-frame lag when entering the popup.
     let pointer_in_popup = !overlay_blocked
-        && match (
-            pointer_pos,
-            state.dict.popup.as_ref().and_then(|p| p.popup_rect),
-        ) {
-            (Some(pos), Some(rect)) => rect.contains(pos),
-            _ => false,
-        };
+        && pointer_pos.is_some_and(|pos| {
+            state
+                .dict
+                .popup
+                .as_ref()
+                .is_some_and(|p| p.contains_pointer(pos))
+        });
     let mut hovered_any_box = false;
     let mut copied_text: Option<String> = None;
     let mut copied_index: Option<usize> = None;
@@ -345,9 +345,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
     // popup stays open and its hover grace timer is frozen.
     if overlay_blocked {
         if let Some(ref mut popup) = state.dict.popup {
-            let now = Instant::now();
-            popup.last_hover_time = now;
-            popup.last_word_hover_time = now;
+            popup.touch_all_hover_times(Instant::now());
         }
     }
 
@@ -357,7 +355,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
                 .dict
                 .popup
                 .as_ref()
-                .map(|p| p.is_popup_hovered)
+                .map(|p| p.is_any_hovered())
                 .unwrap_or(false));
 
     if tapped_word {
@@ -419,7 +417,20 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
                         });
                         match wait {
                             Some(remaining) => ui.ctx().request_repaint_after(remaining),
-                            None => state.dict.popup = Some(new_popup),
+                            None => match state.dict.popup.as_mut() {
+                                Some(current)
+                                    if current.source_text == new_popup.source_text
+                                        && current.char_range == new_popup.char_range =>
+                                {
+                                    current.word_rect = new_popup.word_rect;
+                                    current.extra_word_rects = new_popup.extra_word_rects;
+                                    current.box_rect = new_popup.box_rect;
+                                    current.entries = new_popup.entries;
+                                    current.last_hover_time = new_popup.last_hover_time;
+                                    current.last_word_hover_time = new_popup.last_word_hover_time;
+                                }
+                                _ => state.dict.popup = Some(new_popup),
+                            },
                         }
                     } else if let Some(ref popup) = state.dict.popup {
                         if popup.last_hover_time.elapsed() < grace_period {
@@ -496,7 +507,13 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
     let (popup_action, popup_primitives) = if hide_for_mining_capture {
         (None, Vec::new())
     } else {
-        crate::dict::popup::draw_dict_popup(
+        let current_tag = bank.mining_tag();
+        let custom_names = &bank.custom_names;
+        let custom_names_gen = bank.custom_names_generation;
+        let dict_db = &state.dict.db;
+        let dict_freq_db = &state.dict.freq_db;
+        let dict_pitch_db = &state.dict.pitch_db;
+        crate::dict::popup::draw_dict_popup_with_lookup(
             ui,
             &mut state.dict.popup,
             target_rect,
@@ -510,6 +527,30 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
             |entry| bank.status(&entry.term, &entry.reading, &popup_sentence),
             |entry| bank.is_entry_mined(&entry.term, &entry.reading, entry.sequence),
             !deck_mode && state.twitch.is_stream_live(),
+            Some(|text: &str, char_idx: usize| {
+                let has_db = dict_db.lock().map(|g| g.is_some()).unwrap_or(false);
+                let has_custom = !custom_names.is_empty();
+                if !has_db && !has_custom {
+                    return None;
+                }
+                let db_guard = dict_db.lock().ok();
+                let db = db_guard.as_ref().and_then(|g| g.as_ref());
+                let freq_guard = dict_freq_db.lock().ok();
+                let freq_db = freq_guard.as_ref().and_then(|g| g.as_ref());
+                let pitch_guard = dict_pitch_db.lock().ok();
+                let pitch_db = pitch_guard.as_ref().and_then(|g| g.as_ref());
+                crate::dict::lookup::scan_text_at_char(
+                    text,
+                    char_idx,
+                    db,
+                    freq_db,
+                    pitch_db,
+                    crate::dict::global_deinflector(),
+                    custom_names,
+                    current_tag.as_deref(),
+                    custom_names_gen,
+                )
+            }),
         )
     };
 
@@ -532,8 +573,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
                 } else {
                     state.info("Deleted custom name.");
                     if let Some(ref mut popup) = state.dict.popup {
-                        popup.entries.retain(|e| e.custom_name_id != Some(id));
-                        if popup.entries.is_empty() {
+                        if popup.remove_custom_name(id) {
                             state.dict.popup = None;
                         }
                     }
@@ -1062,6 +1102,7 @@ mod tests {
             popup_rect: None,
             last_hover_time: stale,
             last_word_hover_time: stale,
+            child: None,
         });
         state.ui.show_quit_dialog = true;
 

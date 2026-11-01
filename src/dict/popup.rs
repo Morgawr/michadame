@@ -10,6 +10,119 @@ const POPUP_FOOTER_HEIGHT: f32 = 30.0;
 /// After the cursor leaves the popup or the highlighted word, hovering a different word
 /// only replaces the popup once this much time has passed.
 pub const POPUP_SWITCH_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+/// Hover dwell delay before a recursive child popup (`depth > 0`) opens when hovering a word
+/// inside an already-open popup. Layer 0 (root OCR popup) opens with no delay.
+pub const RECURSIVE_POPUP_HOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+/// Maximum number of stacked dictionary popups (root layer 0 + recursive child layers).
+pub const MAX_POPUP_DEPTH: usize = 10;
+/// Grace period before an unhovered child popup layer automatically closes.
+const CHILD_POPUP_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_millis(450);
+
+fn popup_hover_dwell_key(depth: usize) -> egui::Id {
+    egui::Id::new(("jitendex_dict_popup_hover_dwell", depth))
+}
+
+fn popup_layer_id(popup_under_crt: bool, depth: usize) -> egui::LayerId {
+    match (popup_under_crt, depth) {
+        (true, 0) => egui::LayerId::new(
+            egui::Order::Background,
+            egui::Id::new("jitendex_dict_popup_crt"),
+        ),
+        (false, 0) => egui::LayerId::new(
+            egui::Order::Background,
+            egui::Id::new("jitendex_dict_popup"),
+        ),
+        (true, d) => egui::LayerId::new(
+            egui::Order::Background,
+            egui::Id::new(("jitendex_dict_popup_crt", d)),
+        ),
+        (false, d) => egui::LayerId::new(
+            egui::Order::Background,
+            egui::Id::new(("jitendex_dict_popup", d)),
+        ),
+    }
+}
+
+fn popup_session_key(depth: usize) -> egui::Id {
+    if depth == 0 {
+        egui::Id::new("jitendex_dict_popup_session")
+    } else {
+        egui::Id::new(("jitendex_dict_popup_session", depth))
+    }
+}
+
+fn popup_offset_key(depth: usize) -> egui::Id {
+    if depth == 0 {
+        egui::Id::new("jitendex_dict_popup_scroll_offset")
+    } else {
+        egui::Id::new(("jitendex_dict_popup_scroll_offset", depth))
+    }
+}
+
+fn popup_scroll_id_source(depth: usize) -> egui::Id {
+    if depth == 0 {
+        egui::Id::new("jitendex_dict_popup_scroll")
+    } else {
+        egui::Id::new(("jitendex_dict_popup_scroll", depth))
+    }
+}
+
+fn paint_word_highlight(
+    painter: &egui::Painter,
+    rects: impl Iterator<Item = egui::Rect>,
+    inv_scale: f32,
+) {
+    // Dashed gold box, like a VN text cursor selection.
+    for rect in rects {
+        let r = rect.expand(3.0 * inv_scale);
+        painter.rect_filled(r, 0.0, theme::WORD_HIGHLIGHT_FILL);
+        let corners = [
+            r.left_top(),
+            r.right_top(),
+            r.right_bottom(),
+            r.left_bottom(),
+            r.left_top(),
+        ];
+        painter.extend(egui::Shape::dashed_line(
+            &corners,
+            Stroke::new(2.0 * inv_scale, theme::WORD_HIGHLIGHT_STROKE),
+            5.0 * inv_scale,
+            3.0 * inv_scale,
+        ));
+    }
+}
+
+fn update_hover_and_expire_children(
+    popup: &mut DictPopupState,
+    hover_pos: Option<egui::Pos2>,
+    now: std::time::Instant,
+    depth: usize,
+) -> bool {
+    let child_active = if let Some(child) = popup.child.as_mut() {
+        let active = update_hover_and_expire_children(child, hover_pos, now, depth + 1);
+        if !active && child.last_hover_time.elapsed() >= CHILD_POPUP_GRACE_PERIOD {
+            popup.child = None;
+            false
+        } else {
+            active
+        }
+    } else {
+        false
+    };
+
+    let on_word = hover_pos.is_some_and(|ptr| pointer_on_word(popup, ptr));
+    let on_word_expanded = hover_pos.is_some_and(|ptr| popup.word_rect.expand(6.0).contains(ptr));
+    let on_box = depth == 0 && hover_pos.is_some_and(|ptr| popup.box_rect.contains(ptr));
+
+    if popup.is_popup_hovered || on_word || on_word_expanded || on_box || child_active {
+        popup.last_hover_time = now;
+    }
+    if popup.is_popup_hovered || on_word || child_active {
+        popup.last_word_hover_time = now;
+    }
+
+    popup.is_popup_hovered || on_word || on_word_expanded || child_active
+}
 
 /// True if `pos` is over the highlighted word (including parts wrapped onto other lines).
 fn pointer_on_word(popup: &DictPopupState, pos: egui::Pos2) -> bool {
@@ -76,272 +189,533 @@ pub fn draw_dict_popup(
     is_mined: impl Fn(&super::models::TermEntry) -> bool,
     can_clip: bool,
 ) -> (Option<PopupAction>, Vec<egui::ClippedPrimitive>) {
-    let session_key = egui::Id::new("jitendex_dict_popup_session");
-    let Some(popup) = popup_state else {
-        ui.ctx().data_mut(|d| d.remove::<(u64, u64)>(session_key));
-        return (None, Vec::new());
+    draw_dict_popup_with_lookup(
+        ui,
+        popup_state,
+        video_rect,
+        show_highlight,
+        popup_under_crt,
+        scale,
+        mine_status,
+        is_mined,
+        can_clip,
+        None::<fn(&str, usize) -> Option<(usize, usize, Vec<super::models::TermEntry>)>>,
+    )
+}
+
+/// Renders the word highlight and interactive popup window stack on top of the video feed,
+/// supporting Yomitan-style recursive dictionary lookups when `lookup_fn` is provided.
+///
+/// Mining buttons (`+` and `++`) are only rendered on the root popup layer (`depth == 0`).
+/// Deeper recursive popup layers (`depth > 0`) never display mining buttons.
+pub fn draw_dict_popup_with_lookup<F>(
+    ui: &mut egui::Ui,
+    popup_state: &mut Option<DictPopupState>,
+    video_rect: egui::Rect,
+    show_highlight: bool,
+    popup_under_crt: bool,
+    scale: f32,
+    mine_status: impl Fn(&super::models::TermEntry) -> crate::bank::MineStatus,
+    is_mined: impl Fn(&super::models::TermEntry) -> bool,
+    can_clip: bool,
+    mut lookup_fn: Option<F>,
+) -> (Option<PopupAction>, Vec<egui::ClippedPrimitive>)
+where
+    F: FnMut(&str, usize) -> Option<(usize, usize, Vec<super::models::TermEntry>)>,
+{
+    let clear_sessions = |ctx: &egui::Context, from_depth: usize| {
+        ctx.data_mut(|d| {
+            for depth in from_depth..MAX_POPUP_DEPTH {
+                d.remove::<(u64, u64)>(popup_session_key(depth));
+                d.remove::<(u64, std::time::Instant, f64)>(popup_hover_dwell_key(depth));
+            }
+        });
     };
 
-    if popup.entries.is_empty() {
-        ui.ctx().data_mut(|d| d.remove::<(u64, u64)>(session_key));
+    if popup_state.as_ref().is_none_or(|p| p.entries.is_empty()) {
+        clear_sessions(ui.ctx(), 0);
         return (None, Vec::new());
     }
+
+    let hover_pos = ui.input(|i| i.pointer.hover_pos());
+    let any_popup_contains_pointer = hover_pos.is_some_and(|ptr| {
+        popup_state
+            .as_ref()
+            .is_some_and(|p| p.contains_pointer(ptr))
+    });
+    let root_recently_hovered = popup_state
+        .as_ref()
+        .is_some_and(|p| p.last_hover_time.elapsed().as_millis() < 50);
 
     let mut popup_action: Option<PopupAction> = None;
+    let mut rendered_layers: Vec<(egui::LayerId, egui::emath::TSTransform)> = Vec::new();
+    let mut depth = 0usize;
+    let mut current_opt = popup_state.as_mut();
 
-    // 1. Draw glowing highlight over the recognized word boundary (if highlight is not hidden)
-    if show_highlight {
-        // Dashed gold box, like a VN text cursor selection.
-        for rect in std::iter::once(&popup.word_rect).chain(popup.extra_word_rects.iter()) {
-            let r = rect.expand(3.0);
-            ui.painter().rect_filled(r, 0.0, theme::WORD_HIGHLIGHT_FILL);
-            let corners = [
-                r.left_top(),
-                r.right_top(),
-                r.right_bottom(),
-                r.left_bottom(),
-                r.left_top(),
-            ];
-            ui.painter().extend(egui::Shape::dashed_line(
-                &corners,
-                Stroke::new(2.0, theme::WORD_HIGHLIGHT_STROKE),
-                5.0,
-                3.0,
-            ));
+    while let Some(popup) = current_opt {
+        if depth >= MAX_POPUP_DEPTH || popup.entries.is_empty() {
+            break;
         }
-    }
 
-    // 2. Compute popup window dimensions & smart placement (scaled ~1.7x)
-    let desired_popup_width = 980.0f32 * scale;
-    let desired_popup_height = 760.0f32 * scale;
+        // 1. Draw glowing highlight over the root recognized word boundary on the video canvas
+        if depth == 0 && show_highlight {
+            let rects =
+                std::iter::once(popup.word_rect).chain(popup.extra_word_rects.iter().copied());
+            paint_word_highlight(ui.painter(), rects, 1.0);
+        }
 
-    let placement = calculate_popup_placement(
-        popup.word_rect,
-        desired_popup_width,
-        desired_popup_height,
-        video_rect,
-    );
+        // 2. Compute popup window dimensions & smart placement (scaled ~1.7x)
+        let desired_popup_width = 980.0f32 * scale;
+        let desired_popup_height = 760.0f32 * scale;
 
-    let mut is_pointer_in_popup = false;
+        let placement = calculate_popup_placement(
+            popup.word_rect,
+            desired_popup_width,
+            desired_popup_height,
+            video_rect,
+        );
 
-    // 3. Render floating popup
-    let layer_id = if popup_under_crt {
-        egui::LayerId::new(
-            egui::Order::Background,
-            egui::Id::new("jitendex_dict_popup_crt"),
-        )
-    } else {
-        egui::LayerId::new(
-            egui::Order::Background,
-            egui::Id::new("jitendex_dict_popup"),
-        )
-    };
+        let mut is_pointer_in_popup = false;
+        let occluded_by_descendant = hover_pos.is_some_and(|ptr| {
+            popup
+                .child
+                .as_ref()
+                .is_some_and(|c| c.contains_pointer(ptr))
+        });
+        let is_leaf_layer = popup.child.is_none();
 
-    // Scale the complete popup, including fonts, action buttons, spacing and
-    // hit testing. The highlighted OCR word remains in video coordinates.
-    let transform = if scale == 1.0 {
-        egui::emath::TSTransform::IDENTITY
-    } else {
-        egui::emath::TSTransform::new(placement.pos.to_vec2(), scale)
-    };
-    ui.ctx().set_transform_layer(layer_id, transform);
-    let local_width = placement.width / scale;
-    let local_height = placement.height / scale;
+        // 3. Render floating popup for this depth
+        let layer_id = popup_layer_id(popup_under_crt, depth);
 
-    let area_response = egui::Area::new(layer_id.id)
-        .fixed_pos(if scale == 1.0 {
-            placement.pos
+        // Scale the complete popup, including fonts, action buttons, spacing and
+        // hit testing. The highlighted OCR word remains in video coordinates.
+        let transform = if scale == 1.0 {
+            egui::emath::TSTransform::IDENTITY
         } else {
-            egui::Pos2::ZERO
-        })
-        .order(layer_id.order)
-        .show(ui.ctx(), |ui| {
-            // Disable text selection inside the popup so clicking and dragging anywhere on
-            // definitions/headwords always scrolls the ScrollArea (including catching kinetic
-            // momentum) rather than starting a multi-label text selection.
-            ui.style_mut().interaction.selectable_labels = false;
-            if scale != 1.0 {
-                // Area's initial bounds are in screen coordinates; this layer
-                // lays out the full-size content in its own local coordinates.
-                ui.set_max_size(egui::vec2(local_width + 48.0, local_height + 36.0));
-                ui.set_clip_rect(transform.inverse() * video_rect);
-            }
-            theme::apply_widget_visuals(ui);
-            // Retro window chrome (dithered fill, frame, gems) is painted behind the content
-            // once its final size is known.
-            let chrome_idx = ui.painter().add(egui::Shape::Noop);
-            let frame = egui::Frame::none().inner_margin(egui::Margin::symmetric(24.0, 18.0));
+            egui::emath::TSTransform::new(placement.pos.to_vec2(), scale)
+        };
+        ui.ctx().set_transform_layer(layer_id, transform);
+        let local_width = placement.width / scale;
+        let local_height = placement.height / scale;
 
-            let response = frame.show(ui, |ui| {
-                ui.set_width(local_width);
-                ui.set_max_height(local_height);
-                ui.spacing_mut().item_spacing = egui::vec2(8.0, 5.0);
+        let session_key = popup_session_key(depth);
+        let offset_key = popup_offset_key(depth);
+        let scroll_id_source = popup_scroll_id_source(depth);
 
-                let scroll_max_h = (local_height - 36.0 - POPUP_FOOTER_HEIGHT).max(40.0);
-
-                // While the popup is open, mouse-wheel scrolling anywhere goes to the popup.
-                // When the pointer is over the popup, egui's ScrollArea handles it natively;
-                // otherwise take the scroll delta (so nothing underneath scrolls) and apply
-                // it to the popup's scroll offset ourselves. egui clamps the offset.
-                let offset_key = egui::Id::new("jitendex_dict_popup_scroll_offset");
-                let pointer_over_popup =
-                    match (ui.input(|i| i.pointer.hover_pos()), popup.popup_rect) {
-                        (Some(ptr), Some(rect)) => rect.contains(ptr),
-                        _ => false,
-                    };
-                let external_scroll =
-                    if !pointer_over_popup && popup.last_hover_time.elapsed().as_millis() < 50 {
-                        ui.ctx()
-                            .input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta.y))
-                    } else {
-                        0.0
-                    };
-
-                // Start at the top (with zero kinetic momentum) whenever the popup shows a
-                // different lookup, or it was not drawn on the previous frame (i.e. it was
-                // closed and has been re-opened).
-                let identity = popup_identity(popup);
-                let frame_nr = ui.ctx().frame_nr();
-                let last: Option<(u64, u64)> = ui.ctx().data(|d| d.get_temp(session_key));
-                let is_new_session = match last {
-                    Some((last_identity, last_frame)) => {
-                        last_identity != identity || last_frame + 1 < frame_nr
-                    }
-                    None => true,
-                };
-                ui.ctx()
-                    .data_mut(|d| d.insert_temp(session_key, (identity, frame_nr)));
-
-                let scroll_id = ui.make_persistent_id(egui::Id::new("jitendex_dict_popup_scroll"));
-                let mut scroll_area = egui::ScrollArea::vertical()
-                    .id_source("jitendex_dict_popup_scroll")
-                    .auto_shrink([false, false])
-                    .max_height(scroll_max_h);
-                if is_new_session {
-                    egui::scroll_area::State::default().store(ui.ctx(), scroll_id);
-                    scroll_area = scroll_area.vertical_scroll_offset(0.0);
-                } else if external_scroll != 0.0 {
-                    let current: f32 = ui.ctx().data(|d| d.get_temp(offset_key)).unwrap_or(0.0);
-                    scroll_area = scroll_area
-                        .vertical_scroll_offset((current - external_scroll / scale).max(0.0));
+        let area_response = egui::Area::new(layer_id.id)
+            .fixed_pos(if scale == 1.0 {
+                placement.pos
+            } else {
+                egui::Pos2::ZERO
+            })
+            .order(layer_id.order)
+            .show(ui.ctx(), |ui| {
+                // Disable text selection inside the popup so clicking and dragging anywhere on
+                // definitions/headwords always scrolls the ScrollArea (including catching kinetic
+                // momentum) rather than starting a multi-label text selection.
+                ui.style_mut().interaction.selectable_labels = false;
+                if scale != 1.0 {
+                    // Area's initial bounds are in screen coordinates; this layer
+                    // lays out the full-size content in its own local coordinates.
+                    ui.set_max_size(egui::vec2(local_width + 48.0, local_height + 36.0));
+                    ui.set_clip_rect(transform.inverse() * video_rect);
                 }
-                let mut entry_tops = Vec::with_capacity(popup.entries.len());
-                let scroll_output = scroll_area.show(ui, |ui| {
+                theme::apply_widget_visuals(ui);
+                // Retro window chrome (dithered fill, frame, gems) is painted behind the content
+                // once its final size is known.
+                let chrome_idx = ui.painter().add(egui::Shape::Noop);
+                let frame = egui::Frame::none().inner_margin(egui::Margin::symmetric(24.0, 18.0));
+
+                let response = frame.show(ui, |ui| {
+                    ui.set_width(local_width);
+                    ui.set_max_height(local_height);
                     ui.spacing_mut().item_spacing = egui::vec2(8.0, 5.0);
-                    for (idx, entry) in popup.entries.iter().enumerate() {
-                        entry_tops.push(ui.cursor().top());
-                        match render_term_entry(
-                            ui,
-                            entry,
-                            idx,
-                            Some(mine_status(entry)),
-                            is_mined(entry),
-                            can_clip,
-                        ) {
-                            crate::dict::render::EntryAction::Mine => {
-                                popup_action = Some(PopupAction::Mine(idx));
+
+                    let scroll_max_h = (local_height - 36.0 - POPUP_FOOTER_HEIGHT).max(40.0);
+
+                    // While the popup is open, mouse-wheel scrolling anywhere goes to the popup.
+                    // When the pointer is over a popup, that layer's ScrollArea handles it natively;
+                    // otherwise take the scroll delta on the deepest layer and apply it to its
+                    // scroll offset ourselves. egui clamps the offset.
+                    let external_scroll =
+                        if is_leaf_layer && !any_popup_contains_pointer && root_recently_hovered {
+                            ui.ctx()
+                                .input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta.y))
+                        } else {
+                            0.0
+                        };
+
+                    // Start at the top (with zero kinetic momentum) whenever the popup shows a
+                    // different lookup, or it was not drawn on the previous frame (i.e. it was
+                    // closed and has been re-opened).
+                    let identity = popup_identity(popup);
+                    let frame_nr = ui.ctx().frame_nr();
+                    let last: Option<(u64, u64)> = ui.ctx().data(|d| d.get_temp(session_key));
+                    let is_new_session = match last {
+                        Some((last_identity, last_frame)) => {
+                            last_identity != identity || last_frame + 1 < frame_nr
+                        }
+                        None => true,
+                    };
+                    ui.ctx()
+                        .data_mut(|d| d.insert_temp(session_key, (identity, frame_nr)));
+
+                    let prev_offset: f32 = ui.ctx().data(|d| d.get_temp(offset_key)).unwrap_or(0.0);
+                    let scroll_id = ui.make_persistent_id(egui::Id::new(scroll_id_source));
+                    let mut scroll_area = egui::ScrollArea::vertical()
+                        .id_source(scroll_id_source)
+                        .auto_shrink([false, false])
+                        .max_height(scroll_max_h);
+                    if is_new_session {
+                        egui::scroll_area::State::default().store(ui.ctx(), scroll_id);
+                        scroll_area = scroll_area.vertical_scroll_offset(0.0);
+                    } else if external_scroll != 0.0 {
+                        scroll_area = scroll_area.vertical_scroll_offset(
+                            (prev_offset - external_scroll / scale).max(0.0),
+                        );
+                    }
+                    let mut entry_tops = Vec::with_capacity(popup.entries.len());
+                    let pointer_down = ui.input(|i| i.pointer.any_down());
+                    let probe_local_pos = if lookup_fn.is_some()
+                        && depth + 1 < MAX_POPUP_DEPTH
+                        && popup.popup_rect.is_some()
+                        && !occluded_by_descendant
+                        && !pointer_down
+                    {
+                        hover_pos
+                            .filter(|&ptr| popup.popup_rect.is_some_and(|r| r.contains(ptr)))
+                            .map(|ptr| transform.inverse() * ptr)
+                    } else {
+                        None
+                    };
+
+                    let mut button_clicked_this_layer = false;
+                    let scroll_output = scroll_area.show(ui, |ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(8.0, 5.0);
+                        let scroll_clip = ui.clip_rect();
+                        let (_, text_hit) = super::render::with_popup_hover_probe(
+                            probe_local_pos,
+                            scroll_clip,
+                            || {
+                                for (idx, entry) in popup.entries.iter().enumerate() {
+                                    entry_tops.push(ui.cursor().top());
+                                    // Mining buttons (+ and ++) ONLY show on the first/bottomest
+                                    // layer (depth == 0). Recursive popups cannot be mined.
+                                    let entry_mine_status = if depth == 0 {
+                                        Some(mine_status(entry))
+                                    } else {
+                                        None
+                                    };
+                                    let entry_can_clip = depth == 0 && can_clip;
+                                    let action = render_term_entry(
+                                        ui,
+                                        entry,
+                                        idx,
+                                        entry_mine_status,
+                                        is_mined(entry),
+                                        entry_can_clip,
+                                    );
+                                    if !occluded_by_descendant {
+                                        match action {
+                                            crate::dict::render::EntryAction::Mine
+                                                if depth == 0 =>
+                                            {
+                                                popup_action = Some(PopupAction::Mine(idx));
+                                                button_clicked_this_layer = true;
+                                            }
+                                            crate::dict::render::EntryAction::MineAndClip
+                                                if depth == 0 =>
+                                            {
+                                                popup_action = Some(PopupAction::MineAndClip(idx));
+                                                button_clicked_this_layer = true;
+                                            }
+                                            crate::dict::render::EntryAction::DeleteCustomName(
+                                                id,
+                                            ) => {
+                                                popup_action =
+                                                    Some(PopupAction::DeleteCustomName(id));
+                                                button_clicked_this_layer = true;
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            },
+                        );
+
+                        let dwell_key = popup_hover_dwell_key(depth);
+                        let mut matched_any_word = false;
+                        if let (Some(hit), Some(lookup), Some(ptr)) =
+                            (text_hit, lookup_fn.as_mut(), hover_pos)
+                        {
+                            let text: String = hit.chars.iter().map(|pc| pc.ch).collect();
+                            if let Some((start_char, end_char, entries)) =
+                                lookup(&text, hit.hovered_char_idx)
+                            {
+                                let end_char = end_char.min(hit.chars.len());
+                                if start_char < end_char && !entries.is_empty() {
+                                    let matched_slice = &hit.chars[start_char..end_char];
+                                    let hovered_row = hit.chars[hit.hovered_char_idx].row_idx;
+                                    let mut primary_rect = egui::Rect::NOTHING;
+                                    let mut row_rects: Vec<(usize, egui::Rect)> = Vec::new();
+                                    for pc in matched_slice {
+                                        if !pc.rect.is_positive() {
+                                            continue;
+                                        }
+                                        if pc.row_idx == hovered_row {
+                                            primary_rect = primary_rect.union(pc.rect);
+                                        } else if let Some((_, r)) =
+                                            row_rects.iter_mut().find(|(row, _)| *row == pc.row_idx)
+                                        {
+                                            *r = r.union(pc.rect);
+                                        } else {
+                                            row_rects.push((pc.row_idx, pc.rect));
+                                        }
+                                    }
+                                    if !primary_rect.is_positive() {
+                                        for (_, r) in &row_rects {
+                                            primary_rect = primary_rect.union(*r);
+                                        }
+                                        row_rects.clear();
+                                    }
+                                    if primary_rect.is_positive() {
+                                        matched_any_word = true;
+                                        let word_rect = transform * primary_rect;
+                                        let extra_word_rects: Vec<egui::Rect> = row_rects
+                                            .into_iter()
+                                            .map(|(_, r)| transform * r)
+                                            .collect();
+                                        let now = std::time::Instant::now();
+                                        let now_egui = ui.input(|i| i.time);
+                                        let candidate = DictPopupState {
+                                            matched_term: entries[0].term.clone(),
+                                            source_text: text,
+                                            char_range: (start_char, end_char),
+                                            word_rect,
+                                            extra_word_rects,
+                                            box_rect: word_rect,
+                                            entries,
+                                            is_popup_hovered: false,
+                                            popup_rect: None,
+                                            last_hover_time: now,
+                                            last_word_hover_time: now,
+                                            child: None,
+                                        };
+                                        let target_hash = {
+                                            use std::hash::{Hash, Hasher};
+                                            let mut h =
+                                                std::collections::hash_map::DefaultHasher::new();
+                                            candidate.source_text.hash(&mut h);
+                                            candidate.char_range.hash(&mut h);
+                                            (primary_rect.min.x.round() as i32).hash(&mut h);
+                                            (primary_rect.min.y.round() as i32).hash(&mut h);
+                                            h.finish()
+                                        };
+                                        let same_as_open_child =
+                                            popup.child.as_ref().is_some_and(|existing| {
+                                                existing.source_text == candidate.source_text
+                                                    && existing.char_range == candidate.char_range
+                                                    && (existing.word_rect.center()
+                                                        - candidate.word_rect.center())
+                                                    .length()
+                                                        < 8.0
+                                            });
+                                        if same_as_open_child {
+                                            if let Some(existing) = popup.child.as_mut() {
+                                                existing.word_rect = candidate.word_rect;
+                                                existing.extra_word_rects =
+                                                    candidate.extra_word_rects;
+                                                existing.box_rect = candidate.box_rect;
+                                                existing.last_hover_time = now;
+                                                existing.last_word_hover_time = now;
+                                            }
+                                            ui.ctx().data_mut(|d| {
+                                                d.insert_temp(
+                                                    dwell_key,
+                                                    (target_hash, now, now_egui),
+                                                );
+                                            });
+                                        } else {
+                                            let prev_dwell: Option<(u64, std::time::Instant, f64)> =
+                                                ui.ctx().data(|d| d.get_temp(dwell_key));
+                                            match prev_dwell {
+                                                Some((prev_hash, start_instant, start_egui))
+                                                    if prev_hash == target_hash =>
+                                                {
+                                                    let wall_elapsed = now
+                                                        .saturating_duration_since(start_instant);
+                                                    let egui_elapsed =
+                                                        std::time::Duration::from_secs_f64(
+                                                            (now_egui - start_egui).max(0.0),
+                                                        );
+                                                    let elapsed = wall_elapsed.max(egui_elapsed);
+                                                    if elapsed >= RECURSIVE_POPUP_HOVER_DELAY {
+                                                        if let Some(existing) = popup.child.as_ref()
+                                                        {
+                                                            if let Some(wait) = popup_switch_wait(
+                                                                existing,
+                                                                &candidate,
+                                                                ptr,
+                                                                POPUP_SWITCH_DELAY,
+                                                            ) {
+                                                                ui.ctx()
+                                                                    .request_repaint_after(wait);
+                                                            } else {
+                                                                popup.child =
+                                                                    Some(Box::new(candidate));
+                                                            }
+                                                        } else {
+                                                            popup.child = Some(Box::new(candidate));
+                                                        }
+                                                    } else {
+                                                        ui.ctx().request_repaint_after(
+                                                            RECURSIVE_POPUP_HOVER_DELAY - elapsed,
+                                                        );
+                                                    }
+                                                }
+                                                _ => {
+                                                    ui.ctx().data_mut(|d| {
+                                                        d.insert_temp(
+                                                            dwell_key,
+                                                            (target_hash, now, now_egui),
+                                                        );
+                                                    });
+                                                    ui.ctx().request_repaint_after(
+                                                        RECURSIVE_POPUP_HOVER_DELAY,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
-                            crate::dict::render::EntryAction::MineAndClip => {
-                                popup_action = Some(PopupAction::MineAndClip(idx));
+                        }
+                        if !matched_any_word && !occluded_by_descendant {
+                            ui.ctx().data_mut(|d| {
+                                d.remove::<(u64, std::time::Instant, f64)>(dwell_key);
+                            });
+                        }
+
+                        // Paint highlight over the word in this popup that opened `popup.child`.
+                        if show_highlight {
+                            if let Some(child) = popup.child.as_ref() {
+                                let inv_t = transform.inverse();
+                                let rects = std::iter::once(inv_t * child.word_rect)
+                                    .chain(child.extra_word_rects.iter().map(|&r| inv_t * r));
+                                paint_word_highlight(ui.painter(), rects, 1.0 / scale.max(0.01));
                             }
-                            crate::dict::render::EntryAction::DeleteCustomName(id) => {
-                                popup_action = Some(PopupAction::DeleteCustomName(id));
-                            }
-                            crate::dict::render::EntryAction::None => {}
+                        }
+                    });
+                    debug_assert_eq!(scroll_output.id, scroll_id);
+                    let offset = scroll_output.state.offset.y;
+                    ui.ctx().data_mut(|d| d.insert_temp(offset_key, offset));
+
+                    // Dismiss child popups if this parent popup is scrolled or clicked directly.
+                    if !is_new_session && (offset - prev_offset).abs() > 0.5 {
+                        popup.child = None;
+                    }
+
+                    // Footer: which entry is at the top of the view, plus the blinking page cursor.
+                    let viewport_top = scroll_output.inner_rect.top();
+                    let current = entry_tops
+                        .iter()
+                        .rposition(|&top| top <= viewport_top + 24.0)
+                        .unwrap_or(0)
+                        + 1;
+                    let more_below = offset + scroll_output.inner_rect.height()
+                        < scroll_output.content_size.y - 1.0;
+                    draw_popup_footer(ui, current, popup.entries.len(), more_below);
+                    if external_scroll != 0.0 {
+                        // Keep animating smooth scrolling even if the pointer is idle.
+                        ui.ctx().request_repaint();
+                    }
+                    button_clicked_this_layer
+                });
+
+                let time = ui.input(|i| i.time);
+                ui.painter().set(
+                    chrome_idx,
+                    egui::Shape::Vec(theme::window_shapes(
+                        ui.ctx(),
+                        response.response.rect,
+                        POPUP_CHROME_UNIT,
+                        1.0 / scale.max(0.01),
+                        Some(time),
+                    )),
+                );
+                theme::request_animation_repaint(ui.ctx(), time);
+
+                let screen_popup_rect = transform * response.response.rect;
+                if let Some(ptr) = hover_pos {
+                    if screen_popup_rect.contains(ptr) {
+                        is_pointer_in_popup = true;
+                        if !occluded_by_descendant
+                            && !response.inner
+                            && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary))
+                        {
+                            popup.child = None;
                         }
                     }
-                });
-                debug_assert_eq!(scroll_output.id, scroll_id);
-                let offset = scroll_output.state.offset.y;
-                ui.ctx().data_mut(|d| d.insert_temp(offset_key, offset));
-
-                // Footer: which entry is at the top of the view, plus the blinking page cursor.
-                let viewport_top = scroll_output.inner_rect.top();
-                let current = entry_tops
-                    .iter()
-                    .rposition(|&top| top <= viewport_top + 24.0)
-                    .unwrap_or(0)
-                    + 1;
-                let more_below =
-                    offset + scroll_output.inner_rect.height() < scroll_output.content_size.y - 1.0;
-                draw_popup_footer(ui, current, popup.entries.len(), more_below);
-                if external_scroll != 0.0 {
-                    // Keep animating smooth scrolling even if the pointer is idle.
-                    ui.ctx().request_repaint();
                 }
             });
 
-            let time = ui.input(|i| i.time);
-            ui.painter().set(
-                chrome_idx,
-                egui::Shape::Vec(theme::window_shapes(
-                    ui.ctx(),
-                    response.response.rect,
-                    POPUP_CHROME_UNIT,
-                    1.0 / scale.max(0.01),
-                    Some(time),
-                )),
-            );
-            theme::request_animation_repaint(ui.ctx(), time);
+        popup.popup_rect = Some(transform * area_response.response.rect);
+        popup.is_popup_hovered = is_pointer_in_popup && !occluded_by_descendant;
+        rendered_layers.push((layer_id, transform));
 
-            if let Some(ptr) = ui.input(|i| i.pointer.hover_pos()) {
-                if (transform * response.response.rect).contains(ptr) {
-                    is_pointer_in_popup = true;
-                }
-            }
-        });
+        current_opt = popup.child.as_deref_mut();
+        depth += 1;
+    }
+
+    clear_sessions(ui.ctx(), depth);
 
     let primitives = if popup_under_crt {
-        // Steal the painted shapes for CRT tessellation and replace them in-place with
-        // `Shape::Noop` (rather than `std::mem::take`ing the `PaintList` to length 0) so
-        // egui does not paint them in the foreground AND any `on_end_frame` plugin (such as
-        // `LabelSelectionState::end_frame`) holding a `ShapeIdx` into `layer_id` cannot panic
-        // with an out-of-bounds index.
-        let mut clipped_shapes = ui
-            .ctx()
-            .graphics_mut(|g| {
-                g.get_mut(layer_id).map(|list| {
-                    let shapes = list.all_entries().cloned().collect::<Vec<_>>();
-                    for idx in 0..shapes.len() {
-                        list.reset_shape(egui::layers::ShapeIdx(idx));
-                    }
-                    shapes
+        // Steal the painted shapes from all popup layers in depth order (0, 1, 2, ...) for CRT
+        // tessellation and replace them in-place with `Shape::Noop` (rather than `std::mem::take`ing
+        // the `PaintList` to length 0) so egui does not paint them in the foreground AND any
+        // `on_end_frame` plugin (such as `LabelSelectionState::end_frame`) holding a `ShapeIdx`
+        // into `layer_id` cannot panic with an out-of-bounds index.
+        let mut all_clipped_shapes = Vec::new();
+        for &(layer_id, transform) in &rendered_layers {
+            let mut clipped_shapes = ui
+                .ctx()
+                .graphics_mut(|g| {
+                    g.get_mut(layer_id).map(|list| {
+                        let shapes = list.all_entries().cloned().collect::<Vec<_>>();
+                        for idx in 0..shapes.len() {
+                            list.reset_shape(egui::layers::ShapeIdx(idx));
+                        }
+                        shapes
+                    })
                 })
-            })
-            .unwrap_or_default();
-        if clipped_shapes.is_empty() {
-            Vec::new()
-        } else {
+                .unwrap_or_default();
             for clipped in &mut clipped_shapes {
                 clipped.clip_rect = transform * clipped.clip_rect;
                 clipped.shape.transform(transform);
             }
+            all_clipped_shapes.extend(clipped_shapes);
+        }
+        if all_clipped_shapes.is_empty() {
+            Vec::new()
+        } else {
             ui.ctx()
-                .tessellate(clipped_shapes, ui.ctx().pixels_per_point())
+                .tessellate(all_clipped_shapes, ui.ctx().pixels_per_point())
         }
     } else {
         Vec::new()
     };
 
-    // Keep the dictionary popup above CentralPanel within Order::Background,
-    // while staying beneath Order::PanelResizeLine (whiteboard) and Order::Middle (dialogs).
-    ui.ctx().move_to_top(layer_id);
-
-    // 4. Update whether the user is interacting with the popup window
-    popup.popup_rect = Some(transform * area_response.response.rect);
-    popup.is_popup_hovered = is_pointer_in_popup;
-    if let Some(ptr) = ui.input(|i| i.pointer.hover_pos()) {
-        let now = std::time::Instant::now();
-        if is_pointer_in_popup
-            || popup.word_rect.expand(6.0).contains(ptr)
-            || popup.box_rect.contains(ptr)
-        {
-            popup.last_hover_time = now;
-        }
-        if is_pointer_in_popup || pointer_on_word(popup, ptr) {
-            popup.last_word_hover_time = now;
-        }
+    // Keep the dictionary popups above CentralPanel within Order::Background in depth order
+    // (0, 1, 2, ... so deeper layers sit above shallower layers), while staying beneath
+    // Order::PanelResizeLine (whiteboard) and Order::Middle (dialogs).
+    for &(layer_id, _) in &rendered_layers {
+        ui.ctx().move_to_top(layer_id);
     }
+
+    if let Some(root) = popup_state.as_mut() {
+        update_hover_and_expire_children(root, hover_pos, std::time::Instant::now(), 0);
+    }
+
     (popup_action, primitives)
 }
 
@@ -412,13 +786,12 @@ pub fn calculate_popup_placement(
     // Rule:
     // 1. Prioritize rendering at the top if full desired_h fits above.
     // 2. Otherwise, if full desired_h fits below, render at the bottom.
-    // 3. Otherwise (neither fits full desired_h), render where there is more space
-    //    (preferring above if space_above >= space_below and space_above >= 160.0).
+    // 3. Otherwise (neither fits full desired_h), render where there is more space.
     let (place_above, max_avail_h) = if space_above >= desired_h {
         (true, space_above)
     } else if space_below >= desired_h {
         (false, space_below)
-    } else if space_above >= space_below && space_above >= 160.0 {
+    } else if space_above >= space_below {
         (true, space_above)
     } else {
         (false, space_below)
@@ -428,10 +801,11 @@ pub fn calculate_popup_placement(
 
     let y = if place_above {
         // Place strictly above word_rect (the hovered line)
-        word_rect.min.y - margin - actual_h
+        (word_rect.min.y - margin - actual_h).max(video_rect.min.y + margin)
     } else {
         // Place strictly below word_rect (the hovered line)
-        word_rect.max.y + margin
+        (word_rect.max.y + margin)
+            .min((video_rect.max.y - margin - actual_h).max(video_rect.min.y + margin))
     };
 
     // Horizontal placement: anchor on the matched word string with an inset
@@ -622,6 +996,7 @@ mod tests {
                 popup_rect: None,
                 last_hover_time: Instant::now(),
                 last_word_hover_time: Instant::now(),
+                child: None,
             });
             let mut draw = |events: Vec<egui::Event>| {
                 let mut result = (None, Vec::new());
@@ -806,6 +1181,7 @@ mod tests {
             popup_rect: None,
             last_hover_time: last_word_hover_time,
             last_word_hover_time,
+            child: None,
         }
     }
 
@@ -928,6 +1304,7 @@ mod tests {
             popup_rect: None,
             last_hover_time: Instant::now(),
             last_word_hover_time: Instant::now(),
+            child: None,
         });
 
         let _ = ctx.run(Default::default(), |ctx| {
@@ -1021,6 +1398,7 @@ mod tests {
                 popup_rect: None,
                 last_hover_time: Instant::now(),
                 last_word_hover_time: Instant::now(),
+                child: None,
             };
 
             // Frame 1: Dialog is shown first (before popup opens), simulating the dialog
@@ -1248,6 +1626,7 @@ mod tests {
                 popup_rect: None,
                 last_hover_time: Instant::now(),
                 last_word_hover_time: Instant::now(),
+                child: None,
             });
 
             let offset_key = egui::Id::new("jitendex_dict_popup_scroll_offset");
@@ -1406,6 +1785,7 @@ mod tests {
             popup_rect: None,
             last_hover_time: Instant::now(),
             last_word_hover_time: Instant::now(),
+            child: None,
         };
 
         let mut popup_state = Some(make_popup("飽きる"));
@@ -1507,6 +1887,741 @@ mod tests {
             assert_eq!(
                 offset, 0.0,
                 "Switched popup must not inherit momentum from previous word (frame {frame})"
+            );
+        }
+    }
+
+    fn setup_japanese_test_ctx() -> egui::Context {
+        let ctx = egui::Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "test_jp".into(),
+            egui::FontData::from_static(include_bytes!("../../assets/NotoSansJP-Regular.ttf")),
+        );
+        fonts.families.insert(
+            egui::FontFamily::Name("GothicCJK".into()),
+            vec!["test_jp".into()],
+        );
+        ctx.set_fonts(fonts);
+        ctx
+    }
+
+    fn simple_entry(
+        term: &str,
+        reading: &str,
+        gloss: &str,
+        seq: i64,
+    ) -> super::super::models::TermEntry {
+        super::super::models::TermEntry {
+            term: term.into(),
+            reading: reading.into(),
+            definition_tags: Some("n".into()),
+            rules: String::new(),
+            score: 100.0,
+            glossary: vec![super::super::models::GlossaryEntry::Text(gloss.into())],
+            sequence: seq,
+            term_tags: None,
+            inflection_reasons: vec![],
+            frequency: None,
+            pitches: vec![],
+            custom_name_id: None,
+            custom_tag: None,
+        }
+    }
+
+    #[test]
+    fn test_recursive_popup_chain_crt_modes_and_layout_bounds() {
+        for popup_under_crt in [false, true] {
+            let ctx = setup_japanese_test_ctx();
+            let safe_rect =
+                egui::Rect::from_min_size(egui::pos2(60.0, 50.0), egui::vec2(1800.0, 960.0));
+            let root_word =
+                egui::Rect::from_min_size(egui::pos2(400.0, 120.0), egui::vec2(80.0, 32.0));
+
+            let mut popup_state = Some(DictPopupState {
+                matched_term: "図書館".into(),
+                source_text: "図書館".into(),
+                char_range: (0, 3),
+                word_rect: root_word,
+                extra_word_rects: vec![],
+                box_rect: root_word,
+                entries: vec![simple_entry(
+                    "図書館",
+                    "としょかん",
+                    "書物を集めて公開する施設",
+                    1,
+                )],
+                is_popup_hovered: false,
+                popup_rect: None,
+                last_hover_time: Instant::now(),
+                last_word_hover_time: Instant::now(),
+                child: None,
+            });
+
+            let lookup =
+                |text: &str,
+                 char_idx: usize|
+                 -> Option<(usize, usize, Vec<super::super::models::TermEntry>)> {
+                    let chars: Vec<char> = text.chars().collect();
+                    let tail: String = chars.get(char_idx..)?.iter().collect();
+                    if tail.starts_with("書物") {
+                        Some((
+                            char_idx,
+                            char_idx + 2,
+                            vec![simple_entry("書物", "しょもつ", "本や書籍のこと", 2)],
+                        ))
+                    } else if tail.starts_with("書籍") {
+                        Some((
+                            char_idx,
+                            char_idx + 2,
+                            vec![simple_entry("書籍", "しょせき", "印刷された冊子", 3)],
+                        ))
+                    } else {
+                        None
+                    }
+                };
+
+            let sim_time = std::cell::Cell::new(1.0f64);
+            let run_frame_at =
+                |popup_state: &mut Option<DictPopupState>, t: f64, events: Vec<egui::Event>| {
+                    sim_time.set(t);
+                    let mut out = (None, Vec::new());
+                    let _ = ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(safe_rect),
+                            time: Some(t),
+                            events,
+                            ..Default::default()
+                        },
+                        |ctx| {
+                            egui::CentralPanel::default().show(ctx, |ui| {
+                                out = draw_dict_popup_with_lookup(
+                                    ui,
+                                    popup_state,
+                                    safe_rect,
+                                    true,
+                                    popup_under_crt,
+                                    1.0,
+                                    |_| crate::bank::MineStatus::Available,
+                                    |_| false,
+                                    true,
+                                    Some(lookup),
+                                );
+                            });
+                        },
+                    );
+                    out
+                };
+
+            // Warm up layer 0 (layer 0 has no delay)
+            let mut layer0_prims = 0;
+            for i in 0..3 {
+                let (_, prims) = run_frame_at(&mut popup_state, 1.0 + i as f64 * 0.016, vec![]);
+                layer0_prims = prims.len();
+            }
+            assert_eq!(popup_state.as_ref().unwrap().deepest_depth(), 0);
+            let rect0 = popup_state.as_ref().unwrap().popup_rect.unwrap();
+            assert!(
+                safe_rect.contains_rect(rect0),
+                "{rect0:?} not in {safe_rect:?}"
+            );
+            if popup_under_crt {
+                assert!(layer0_prims > 0);
+            } else {
+                assert_eq!(layer0_prims, 0);
+            }
+
+            // Scan inside layer 0 to find where "書物" is rendered, verify it does NOT open
+            // before RECURSIVE_POPUP_HOVER_DELAY (0.5s), and opens once 0.5s has elapsed.
+            let mut opened_layer1 = false;
+            let mut y = rect0.top() + 80.0;
+            let mut t = 2.0f64;
+            while y < rect0.bottom() - 30.0 && !opened_layer1 {
+                let mut x = rect0.left() + 24.0;
+                while x < rect0.left() + 300.0 {
+                    t += 1.0;
+                    // Initial hover at time `t`: must not open immediately
+                    run_frame_at(
+                        &mut popup_state,
+                        t,
+                        vec![egui::Event::PointerMoved(egui::pos2(x, y))],
+                    );
+                    assert!(
+                        popup_state.as_ref().unwrap().child.is_none(),
+                        "Recursive popup must wait for 0.5s hover delay before opening"
+                    );
+                    // At t + 0.3s (< 0.5s): still must not open
+                    run_frame_at(
+                        &mut popup_state,
+                        t + 0.3,
+                        vec![egui::Event::PointerMoved(egui::pos2(x, y))],
+                    );
+                    assert!(popup_state.as_ref().unwrap().child.is_none());
+                    // At t + 0.55s (>= 0.5s): opens if pointer is over "書物"
+                    run_frame_at(
+                        &mut popup_state,
+                        t + 0.55,
+                        vec![egui::Event::PointerMoved(egui::pos2(x, y))],
+                    );
+                    if popup_state.as_ref().unwrap().child.is_some() {
+                        opened_layer1 = true;
+                        break;
+                    }
+                    x += 18.0;
+                }
+                y += 18.0;
+            }
+            assert!(
+                opened_layer1,
+                "Hovering '書物' in layer 0 definition for 0.5s must open recursive popup layer 1 (under_crt={popup_under_crt})"
+            );
+
+            // Settle layer 1 layout
+            let mut layer1_prims = 0;
+            let layer1_word_center = popup_state
+                .as_ref()
+                .unwrap()
+                .child
+                .as_ref()
+                .unwrap()
+                .word_rect
+                .center();
+            for i in 0..3 {
+                let (_, prims) = run_frame_at(
+                    &mut popup_state,
+                    t + 0.6 + i as f64 * 0.016,
+                    vec![egui::Event::PointerMoved(layer1_word_center)],
+                );
+                layer1_prims = prims.len();
+            }
+            assert_eq!(popup_state.as_ref().unwrap().deepest_depth(), 1);
+            let child1 = popup_state.as_ref().unwrap().child.as_ref().unwrap();
+            assert_eq!(child1.matched_term, "書物");
+            let rect1 = child1.popup_rect.unwrap();
+            assert!(
+                safe_rect.contains_rect(rect1),
+                "Layer 1 rect {rect1:?} must stay inside safe_rect {safe_rect:?}"
+            );
+            assert!(
+                !rect1.intersects(child1.word_rect),
+                "Layer 1 rect {rect1:?} must not cover its anchor word_rect {:?}",
+                child1.word_rect
+            );
+            if popup_under_crt {
+                assert!(
+                    layer1_prims > layer0_prims,
+                    "CRT primitives must include both layer 0 and layer 1 ({layer1_prims} <= {layer0_prims})"
+                );
+            }
+
+            // Now scan inside layer 1 to find "書籍" and open layer 2 (grandchild popup) after 0.5s dwell
+            let mut opened_layer2 = false;
+            let mut y = rect1.top() + 80.0;
+            while y < rect1.bottom() - 30.0 && !opened_layer2 {
+                let mut x = rect1.left() + 24.0;
+                while x < rect1.left() + 300.0 {
+                    t += 1.0;
+                    run_frame_at(
+                        &mut popup_state,
+                        t,
+                        vec![egui::Event::PointerMoved(egui::pos2(x, y))],
+                    );
+                    run_frame_at(
+                        &mut popup_state,
+                        t + 0.55,
+                        vec![egui::Event::PointerMoved(egui::pos2(x, y))],
+                    );
+                    if let Some(c2) = popup_state
+                        .as_ref()
+                        .unwrap()
+                        .child
+                        .as_ref()
+                        .and_then(|c| c.child.as_ref())
+                    {
+                        if c2.matched_term == "書籍" {
+                            opened_layer2 = true;
+                            break;
+                        }
+                        popup_state.as_mut().unwrap().child.as_mut().unwrap().child = None;
+                    }
+                    x += 18.0;
+                }
+                y += 18.0;
+            }
+            assert!(
+                opened_layer2,
+                "Hovering '書籍' in layer 1 definition for 0.5s must open recursive popup layer 2 (under_crt={popup_under_crt})"
+            );
+
+            let layer2_word_center = popup_state
+                .as_ref()
+                .unwrap()
+                .child
+                .as_ref()
+                .unwrap()
+                .child
+                .as_ref()
+                .unwrap()
+                .word_rect
+                .center();
+            for i in 0..3 {
+                run_frame_at(
+                    &mut popup_state,
+                    t + 0.6 + i as f64 * 0.016,
+                    vec![egui::Event::PointerMoved(layer2_word_center)],
+                );
+            }
+            assert_eq!(popup_state.as_ref().unwrap().deepest_depth(), 2);
+            let child2 = popup_state
+                .as_ref()
+                .unwrap()
+                .child
+                .as_ref()
+                .unwrap()
+                .child
+                .as_ref()
+                .unwrap();
+            assert_eq!(child2.matched_term, "書籍");
+            let rect2 = child2.popup_rect.unwrap();
+            assert!(
+                safe_rect.contains_rect(rect2),
+                "Layer 2 rect {rect2:?} must stay inside safe_rect {safe_rect:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_recursive_same_word_with_furigana_and_hover_delay() {
+        let ctx = setup_japanese_test_ctx();
+        let safe_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
+        let root_word = egui::Rect::from_min_size(egui::pos2(400.0, 120.0), egui::vec2(80.0, 32.0));
+
+        // Root popup is for "確か", and its structured content contains an example sentence
+        // with furigana `<ruby>確<rt>たし</rt></ruby>かだ`.
+        let structured_sense = serde_json::json!({
+            "type": "structured-content",
+            "content": {
+                "tag": "div",
+                "data": { "content": "sense-group" },
+                "content": [
+                    {
+                        "tag": "div",
+                        "data": { "content": "sense" },
+                        "content": [
+                            {
+                                "tag": "ul",
+                                "data": { "content": "glossary" },
+                                "content": [
+                                    { "tag": "li", "content": "certain; sure; definite" }
+                                ]
+                            },
+                            {
+                                "tag": "div",
+                                "data": { "content": "example-sentence" },
+                                "content": [
+                                    {
+                                        "tag": "div",
+                                        "data": { "content": "example-sentence-a" },
+                                        "content": [
+                                            {
+                                                "tag": "ruby",
+                                                "content": [
+                                                    "確",
+                                                    { "tag": "rt", "content": "たし" }
+                                                ]
+                                            },
+                                            "かだ"
+                                        ]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+
+        let tashika_entry = super::super::models::TermEntry {
+            term: "確か".into(),
+            reading: "たしか".into(),
+            definition_tags: Some("adj-na adv".into()),
+            rules: String::new(),
+            score: 100.0,
+            glossary: vec![super::super::models::GlossaryEntry::Structured(
+                structured_sense,
+            )],
+            sequence: 1,
+            term_tags: None,
+            inflection_reasons: vec![],
+            frequency: None,
+            pitches: vec![],
+            custom_name_id: None,
+            custom_tag: None,
+        };
+
+        let mut popup_state = Some(DictPopupState {
+            matched_term: "確か".into(),
+            source_text: "確か".into(),
+            char_range: (0, 2),
+            word_rect: root_word,
+            extra_word_rects: vec![],
+            box_rect: root_word,
+            entries: vec![tashika_entry.clone()],
+            is_popup_hovered: false,
+            popup_rect: None,
+            last_hover_time: Instant::now(),
+            last_word_hover_time: Instant::now(),
+            child: None,
+        });
+
+        let lookup = |text: &str,
+                      char_idx: usize|
+         -> Option<(usize, usize, Vec<super::super::models::TermEntry>)> {
+            let chars: Vec<char> = text.chars().collect();
+            let tail: String = chars.get(char_idx..)?.iter().collect();
+            if tail.starts_with("確か") {
+                Some((char_idx, char_idx + 2, vec![tashika_entry.clone()]))
+            } else {
+                None
+            }
+        };
+
+        let run_frame_at =
+            |popup_state: &mut Option<DictPopupState>, t: f64, events: Vec<egui::Event>| {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(safe_rect),
+                        time: Some(t),
+                        events,
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            let _ = draw_dict_popup_with_lookup(
+                                ui,
+                                popup_state,
+                                safe_rect,
+                                true,
+                                false,
+                                1.0,
+                                |_| crate::bank::MineStatus::Available,
+                                |_| false,
+                                false,
+                                Some(lookup),
+                            );
+                        });
+                    },
+                );
+            };
+
+        for i in 0..3 {
+            run_frame_at(&mut popup_state, 1.0 + i as f64 * 0.016, vec![]);
+        }
+        let rect0 = popup_state.as_ref().unwrap().popup_rect.unwrap();
+
+        // Scan the example sentence area (below the English definition line) for `<ruby>確<rt>たし</rt></ruby>かだ`
+        let mut ruby_word_rect = None;
+        let mut t = 10.0f64;
+        let mut y = rect0.top() + 140.0;
+        while y < rect0.bottom() - 20.0 && ruby_word_rect.is_none() {
+            let mut x = rect0.left() + 40.0;
+            while x < rect0.left() + 260.0 {
+                t += 1.0;
+                run_frame_at(
+                    &mut popup_state,
+                    t,
+                    vec![egui::Event::PointerMoved(egui::pos2(x, y))],
+                );
+                run_frame_at(
+                    &mut popup_state,
+                    t + 0.55,
+                    vec![egui::Event::PointerMoved(egui::pos2(x, y))],
+                );
+                if let Some(child) = popup_state.as_ref().unwrap().child.as_ref() {
+                    if child.source_text == "確かだ" {
+                        assert_eq!(child.matched_term, "確か");
+                        assert_eq!(child.char_range, (0, 2));
+                        ruby_word_rect = Some(child.word_rect);
+                        break;
+                    }
+                    popup_state.as_mut().unwrap().child = None;
+                }
+                x += 12.0;
+            }
+            y += 12.0;
+        }
+        let ruby_rect = ruby_word_rect
+            .expect("Hovering `<ruby>確<rt>たし</rt></ruby>か` inside `確か` must open recursive popup for `確か`");
+
+        // Also verify hovering specifically near the TOP of `ruby_rect` (where the furigana `たし` sits)
+        // opens the recursive popup for `確か` after 0.5s.
+        popup_state.as_mut().unwrap().child = None;
+        t += 1.0;
+        run_frame_at(
+            &mut popup_state,
+            t,
+            vec![egui::Event::PointerMoved(egui::pos2(0.0, 0.0))],
+        );
+        let furigana_pos = egui::pos2(ruby_rect.left() + 8.0, ruby_rect.top() + 4.0);
+        t += 1.0;
+        run_frame_at(
+            &mut popup_state,
+            t,
+            vec![egui::Event::PointerMoved(furigana_pos)],
+        );
+        assert!(
+            popup_state.as_ref().unwrap().child.is_none(),
+            "Must not open before 0.5s dwell on furigana"
+        );
+        run_frame_at(
+            &mut popup_state,
+            t + 0.55,
+            vec![egui::Event::PointerMoved(furigana_pos)],
+        );
+        let child = popup_state.as_ref().unwrap().child.as_ref().expect(
+            "Hovering on the furigana `たし` of `<ruby>確<rt>たし</rt></ruby>か` must open `確か`",
+        );
+        assert_eq!(child.matched_term, "確か");
+        assert_eq!(child.source_text, "確かだ");
+        assert_eq!(child.char_range, (0, 2));
+    }
+
+    #[test]
+    fn test_mining_buttons_only_on_first_layer_and_mouse_click_depth_awareness() {
+        for popup_under_crt in [false, true] {
+            let ctx = setup_japanese_test_ctx();
+            let screen_rect =
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
+            let root_word =
+                egui::Rect::from_min_size(egui::pos2(400.0, 120.0), egui::vec2(80.0, 32.0));
+
+            // Place child popup so it overlaps the top-right corner of parent popup (layer 0),
+            // right where layer 0's `+` and `++` mining buttons live!
+            let make_stack = || {
+                let mut root = DictPopupState {
+                    matched_term: "図書館".into(),
+                    source_text: "図書館".into(),
+                    char_range: (0, 3),
+                    word_rect: root_word,
+                    extra_word_rects: vec![],
+                    box_rect: root_word,
+                    entries: vec![simple_entry("図書館", "としょかん", "本を読む場所", 1)],
+                    is_popup_hovered: false,
+                    popup_rect: None,
+                    last_hover_time: Instant::now(),
+                    last_word_hover_time: Instant::now(),
+                    child: None,
+                };
+                // Anchor child word near (650, 120) so child popup's placement overlaps root popup's
+                // top-right mining buttons around x ~ 1250..1360, y ~ 160..240.
+                let child_word =
+                    egui::Rect::from_min_size(egui::pos2(650.0, 120.0), egui::vec2(60.0, 32.0));
+                root.child = Some(Box::new(DictPopupState {
+                    matched_term: "書物".into(),
+                    source_text: "本を読む場所".into(),
+                    char_range: (0, 1),
+                    word_rect: child_word,
+                    extra_word_rects: vec![],
+                    box_rect: child_word,
+                    entries: vec![simple_entry("書物", "しょもつ", "書籍のこと", 2)],
+                    is_popup_hovered: false,
+                    popup_rect: None,
+                    last_hover_time: Instant::now(),
+                    last_word_hover_time: Instant::now(),
+                    child: None,
+                }));
+                root
+            };
+
+            let mut popup_state = Some(make_stack());
+            let run_frame = |popup_state: &mut Option<DictPopupState>, events: Vec<egui::Event>| {
+                let mut action = None;
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(screen_rect),
+                        events,
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            action = draw_dict_popup(
+                                ui,
+                                popup_state,
+                                screen_rect,
+                                true,
+                                popup_under_crt,
+                                1.0,
+                                |_| crate::bank::MineStatus::Available,
+                                |_| false,
+                                true, // can_clip = true so both + and ++ exist on layer 0
+                            )
+                            .0;
+                        });
+                    },
+                );
+                action
+            };
+
+            for _ in 0..3 {
+                run_frame(&mut popup_state, vec![]);
+            }
+
+            let rect0 = popup_state.as_ref().unwrap().popup_rect.unwrap();
+            let rect1 = popup_state
+                .as_ref()
+                .unwrap()
+                .child
+                .as_ref()
+                .unwrap()
+                .popup_rect
+                .unwrap();
+            assert!(
+                rect0.intersects(rect1),
+                "Expected rect0 {rect0:?} and rect1 {rect1:?} to overlap"
+            );
+
+            // 1. Verify Z-order: at the overlap region, egui's top layer is layer 1 (not layer 0).
+            let overlap = rect0.intersect(rect1);
+            assert!(overlap.is_positive());
+            let top_layer = ctx.layer_id_at(overlap.center()).unwrap();
+            assert_eq!(top_layer, popup_layer_id(popup_under_crt, 1));
+            assert_eq!(
+                popup_state
+                    .as_ref()
+                    .unwrap()
+                    .topmost_layer_at(overlap.center()),
+                Some(1)
+            );
+
+            // 2. Verify mining buttons (+ and ++) are NOT present on layer 1 (depth == 1):
+            // Click where `+` and `++` would be in layer 1's top-right corner.
+            let layer1_plus_pos =
+                egui::pos2(rect1.right() - 24.0 - 28.0, rect1.top() + 18.0 + 28.0);
+            let layer1_clip_pos = egui::pos2(
+                rect1.right() - 24.0 - 56.0 - 8.0 - 28.0,
+                rect1.top() + 18.0 + 28.0,
+            );
+            for pos in [layer1_plus_pos, layer1_clip_pos] {
+                for pressed in [true, false] {
+                    let action = run_frame(
+                        &mut popup_state,
+                        vec![
+                            egui::Event::PointerMoved(pos),
+                            egui::Event::PointerButton {
+                                pos,
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                modifiers: egui::Modifiers::NONE,
+                            },
+                        ],
+                    );
+                    assert_eq!(
+                        action, None,
+                        "Recursive popup (depth > 0) must NEVER show or trigger + or ++ mining buttons"
+                    );
+                }
+            }
+
+            // 3. Verify mouse click depth occlusion: clicking layer 0's `+` button position
+            // WHILE it is covered by layer 1 must NOT trigger mining on layer 0 and must NOT
+            // dismiss layer 1!
+            let layer0_plus_pos =
+                egui::pos2(rect0.right() - 24.0 - 28.0, rect0.top() + 18.0 + 28.0);
+            assert!(
+                rect1.contains(layer0_plus_pos),
+                "Layer 1 {rect1:?} must cover layer 0's + button at {layer0_plus_pos:?}"
+            );
+            for pressed in [true, false] {
+                let action = run_frame(
+                    &mut popup_state,
+                    vec![
+                        egui::Event::PointerMoved(layer0_plus_pos),
+                        egui::Event::PointerButton {
+                            pos: layer0_plus_pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+                assert_eq!(
+                    action, None,
+                    "Clicking inside child popup over parent's + button must not click through to parent"
+                );
+            }
+            assert!(
+                popup_state.as_ref().unwrap().child.is_some(),
+                "Clicking inside child popup must not dismiss child popup"
+            );
+
+            // 4. Clicking on an exposed (un-occluded) area of layer 0 dismisses child popup (layer 1).
+            let exposed_layer0_pos = egui::pos2(rect0.left() + 40.0, rect0.top() + 120.0);
+            assert!(rect0.contains(exposed_layer0_pos) && !rect1.contains(exposed_layer0_pos));
+            for pressed in [true, false] {
+                run_frame(
+                    &mut popup_state,
+                    vec![
+                        egui::Event::PointerMoved(exposed_layer0_pos),
+                        egui::Event::PointerButton {
+                            pos: exposed_layer0_pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+            assert!(
+                popup_state.as_ref().unwrap().child.is_none(),
+                "Clicking exposed parent popup area must dismiss deeper child popup"
+            );
+
+            // 5. Now that layer 0 is un-occluded, clicking layer 0's `+` and `++` buttons works!
+            let mut mined = false;
+            for pressed in [true, false] {
+                let action = run_frame(
+                    &mut popup_state,
+                    vec![
+                        egui::Event::PointerMoved(layer0_plus_pos),
+                        egui::Event::PointerButton {
+                            pos: layer0_plus_pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+                if !pressed {
+                    mined = action == Some(PopupAction::Mine(0));
+                }
+            }
+            assert!(mined, "Layer 0 + button must trigger PopupAction::Mine(0)");
+
+            let layer0_clip_pos = egui::pos2(
+                rect0.right() - 24.0 - 56.0 - 8.0 - 28.0,
+                rect0.top() + 18.0 + 28.0,
+            );
+            let mut mined_and_clipped = false;
+            for pressed in [true, false] {
+                let action = run_frame(
+                    &mut popup_state,
+                    vec![
+                        egui::Event::PointerMoved(layer0_clip_pos),
+                        egui::Event::PointerButton {
+                            pos: layer0_clip_pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+                if !pressed {
+                    mined_and_clipped = action == Some(PopupAction::MineAndClip(0));
+                }
+            }
+            assert!(
+                mined_and_clipped,
+                "Layer 0 ++ button must trigger PopupAction::MineAndClip(0)"
             );
         }
     }

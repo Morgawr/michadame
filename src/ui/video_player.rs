@@ -2024,6 +2024,7 @@ mod tests {
             is_popup_hovered: false,
             last_hover_time: std::time::Instant::now(),
             last_word_hover_time: std::time::Instant::now(),
+            child: None,
         });
 
         // Popup active ON TOP of CRT -> software mouse disabled (hardware cursor shown)

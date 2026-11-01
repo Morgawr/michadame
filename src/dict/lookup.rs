@@ -199,161 +199,18 @@ pub fn lookup_word_at_pointer_with_pitch(
         let char_idx = target.char_start + local_idx;
         let full_text: String = chars.iter().collect();
 
-        // Scan for word matches Yomitan-style:
-        //
-        // Phase 1 (Direct hover match):
-        // Candidate spans starting EXACTLY at char_idx under the pointer.
-        // We test from longest span (up to 16 characters) down to 1 character.
-        // Spans may continue onto the following line(s) of the same box.
-        // E.g. hovering over 'よ' in "のような気がする" matches "のような気がする".
-        // E.g. hovering over '気' in "のような気がする" matches "気がする" (never "のような気がする"!).
-        // E.g. hovering over 'な' in "なにか" matches "何か" (reading: "なにか").
-        let max_len = 16.min(chars.len() - char_idx);
-        let particle_index = db.and_then(|d| d.particle_index());
-        let cache_key = ScanCacheKey {
-            db_generation: db.map_or(0, |d| d.generation),
-            particle_index_ready: particle_index.is_some(),
-            freq_db_generation: freq_db.map_or(0, |f| f.generation),
-            pitch_db_generation: pitch_db.map_or(0, |p| p.generation),
-            custom_names_gen,
-            current_tag: current_tag.map(str::to_string),
-            line_text: full_text.clone(),
+        let matched_entry = scan_chars_at_index(
+            &full_text,
+            &chars,
             char_idx,
-        };
-
-        let cached = SCAN_CACHE.with(|c| {
-            c.borrow()
-                .as_ref()
-                .filter(|(k, _)| *k == cache_key)
-                .map(|(_, v)| v.clone())
-        });
-
-        let matched_entry: ScanResult = if let Some(hit) = cached {
-            hit
-        } else {
-            // All lookups feed one accumulator. Batches are prioritized by effective matched
-            // character length (longest first), then by match tier (exact before normalized,
-            // long-vowel before character-removing elongation), then by discovery order.
-            let mut acc = ScanAccumulator::default();
-
-            for len in (1..=max_len).rev() {
-                let start = char_idx;
-                let end = char_idx + len;
-                if is_punct_char(chars[start]) || is_punct_char(chars[end - 1]) {
-                    continue;
-                }
-                let sub_str: String = chars[start..end].iter().collect();
-                if is_ignorable_token(&sub_str) {
-                    continue;
-                }
-                let full = find_span_entries(
-                    &sub_str,
-                    (start, end),
-                    db,
-                    deinflector,
-                    particle_index.as_deref(),
-                    custom_names,
-                    current_tag,
-                    &mut acc,
-                );
-                if full {
-                    break;
-                }
-            }
-
-            // Phase 2 (Fallback lookbehind):
-            // Only if ZERO dictionary entries start at char_idx, check if the cursor is
-            // in the middle of a word whose starting character is up to 6 characters earlier
-            // (possibly on the previous line).
-            // We search from the closest start (char_idx - 1) backwards to min_start.
-            // Once a start matches, shorter spans from that same start still contribute
-            // alternatives.
-            if !acc.has_any() {
-                let min_start = char_idx.saturating_sub(6);
-                'lookbehind: for start in (min_start..char_idx).rev() {
-                    if is_punct_char(chars[start]) {
-                        break;
-                    }
-                    let max_end = (start + 16).min(chars.len());
-                    for end in ((char_idx + 1)..=max_end).rev() {
-                        if is_punct_char(chars[end - 1]) {
-                            continue;
-                        }
-                        let sub_str: String = chars[start..end].iter().collect();
-                        if is_ignorable_token(&sub_str) {
-                            continue;
-                        }
-                        let full = find_span_entries(
-                            &sub_str,
-                            (start, end),
-                            db,
-                            deinflector,
-                            particle_index.as_deref(),
-                            custom_names,
-                            current_tag,
-                            &mut acc,
-                        );
-                        if full {
-                            break 'lookbehind;
-                        }
-                    }
-                    if acc.has_any() {
-                        break;
-                    }
-                }
-            }
-
-            let matched_entry = acc.finish().map(|((start, end), mut entries, groups)| {
-                // Enrich entries with frequency if available and sort. Priority group always
-                // comes first (primary match, then longer before shorter spans, exact before
-                // normalized); frequency only orders entries within the same group.
-                if let Some(fdb) = freq_db {
-                    for entry in &mut entries {
-                        entry.frequency = fdb.get_frequency(&entry.term, &entry.reading);
-                    }
-                    // Sort in order of frequency: lowest rank first, unranked last.
-                    // A kana-only reading frequency (marked with ㋕) on a kanji term represents the reading in kana,
-                    // not the kanji word itself. Penalize it compared to a genuine kanji frequency.
-                    let by_freq = |a: &super::models::TermEntry, b: &super::models::TermEntry| {
-                        let a_kanji = crate::dict::database::contains_kanji(&a.term);
-                        let b_kanji = crate::dict::database::contains_kanji(&b.term);
-
-                        let a_is_kana_on_kanji =
-                            a_kanji && a.frequency.as_ref().map_or(false, |f| f.is_kana_freq());
-                        let b_is_kana_on_kanji =
-                            b_kanji && b.frequency.as_ref().map_or(false, |f| f.is_kana_freq());
-
-                        match (a_is_kana_on_kanji, b_is_kana_on_kanji) {
-                            (false, true) if a.frequency.is_some() => std::cmp::Ordering::Less,
-                            (true, false) if b.frequency.is_some() => std::cmp::Ordering::Greater,
-                            _ => match (&a.frequency, &b.frequency) {
-                                (Some(fa), Some(fb)) => fa.rank.cmp(&fb.rank),
-                                (Some(_), None) => std::cmp::Ordering::Less,
-                                (None, Some(_)) => std::cmp::Ordering::Greater,
-                                (None, None) => std::cmp::Ordering::Equal,
-                            },
-                        }
-                    };
-                    let mut tagged: Vec<_> = groups.into_iter().zip(entries).collect();
-                    tagged.sort_by(|(ga, a), (gb, b)| {
-                        ga.cmp(gb).then_with(|| by_freq(a, b)).then_with(|| {
-                            b.score
-                                .partial_cmp(&a.score)
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        })
-                    });
-                    entries = tagged.into_iter().map(|(_, e)| e).collect();
-                }
-                if let Some(pdb) = pitch_db {
-                    for entry in &mut entries {
-                        entry.pitches = pdb.get_pitches(&entry.term, &entry.reading);
-                    }
-                }
-                (start, end, entries)
-            });
-            SCAN_CACHE.with(|c| *c.borrow_mut() = Some((cache_key, matched_entry.clone())));
-            matched_entry
-        };
+            db,
+            freq_db,
+            pitch_db,
+            deinflector,
+            custom_names,
+            current_tag,
+            custom_names_gen,
+        );
 
         if let Some((start_offset, end_offset, entries)) = matched_entry {
             // Calculate precise per-line sub-bounding boxes for the recognized word.
@@ -386,11 +243,220 @@ pub fn lookup_word_at_pointer_with_pitch(
                 popup_rect: None,
                 last_hover_time: std::time::Instant::now(),
                 last_word_hover_time: std::time::Instant::now(),
+                child: None,
             });
         }
     }
 
     None
+}
+
+/// Scans `text` at character index `char_idx` (Yomitan-style longest-prefix match with
+/// fallback lookbehind, deinflection, long-vowel/elongation normalization, particle swap,
+/// custom names, frequency sorting, and pitch accent enrichment).
+///
+/// Returns `Some((start_char_idx, end_char_idx, entries))` if a match is found.
+#[allow(clippy::too_many_arguments)]
+pub fn scan_text_at_char(
+    text: &str,
+    char_idx: usize,
+    db: Option<&DictDatabase>,
+    freq_db: Option<&super::frequency::FreqDatabase>,
+    pitch_db: Option<&super::pitch::PitchDatabase>,
+    deinflector: &Deinflector,
+    custom_names: &[CustomNameEntry],
+    current_tag: Option<&str>,
+    custom_names_gen: u64,
+) -> Option<(usize, usize, Vec<super::models::TermEntry>)> {
+    let chars: Vec<char> = text.chars().collect();
+    if char_idx >= chars.len() {
+        return None;
+    }
+    scan_chars_at_index(
+        text,
+        &chars,
+        char_idx,
+        db,
+        freq_db,
+        pitch_db,
+        deinflector,
+        custom_names,
+        current_tag,
+        custom_names_gen,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_chars_at_index(
+    full_text: &str,
+    chars: &[char],
+    char_idx: usize,
+    db: Option<&DictDatabase>,
+    freq_db: Option<&super::frequency::FreqDatabase>,
+    pitch_db: Option<&super::pitch::PitchDatabase>,
+    deinflector: &Deinflector,
+    custom_names: &[CustomNameEntry],
+    current_tag: Option<&str>,
+    custom_names_gen: u64,
+) -> ScanResult {
+    // Scan for word matches Yomitan-style:
+    //
+    // Phase 1 (Direct hover match):
+    // Candidate spans starting EXACTLY at char_idx under the pointer.
+    // We test from longest span (up to 16 characters) down to 1 character.
+    // Spans may continue onto the following line(s) of the same box.
+    // E.g. hovering over 'よ' in "のような気がする" matches "のような気がする".
+    // E.g. hovering over '気' in "のような気がする" matches "気がする" (never "のような気がする"!).
+    // E.g. hovering over 'な' in "なにか" matches "何か" (reading: "なにか").
+    let max_len = 16.min(chars.len().saturating_sub(char_idx));
+    if max_len == 0 {
+        return None;
+    }
+    let particle_index = db.and_then(|d| d.particle_index());
+    let cache_key = ScanCacheKey {
+        db_generation: db.map_or(0, |d| d.generation),
+        particle_index_ready: particle_index.is_some(),
+        freq_db_generation: freq_db.map_or(0, |f| f.generation),
+        pitch_db_generation: pitch_db.map_or(0, |p| p.generation),
+        custom_names_gen,
+        current_tag: current_tag.map(str::to_string),
+        line_text: full_text.to_string(),
+        char_idx,
+    };
+
+    let cached = SCAN_CACHE.with(|c| {
+        c.borrow()
+            .as_ref()
+            .filter(|(k, _)| *k == cache_key)
+            .map(|(_, v)| v.clone())
+    });
+
+    if let Some(hit) = cached {
+        return hit;
+    }
+
+    // All lookups feed one accumulator. Batches are prioritized by effective matched
+    // character length (longest first), then by match tier (exact before normalized,
+    // long-vowel before character-removing elongation), then by discovery order.
+    let mut acc = ScanAccumulator::default();
+
+    for len in (1..=max_len).rev() {
+        let start = char_idx;
+        let end = char_idx + len;
+        if is_punct_char(chars[start]) || is_punct_char(chars[end - 1]) {
+            continue;
+        }
+        let sub_str: String = chars[start..end].iter().collect();
+        if is_ignorable_token(&sub_str) {
+            continue;
+        }
+        let full = find_span_entries(
+            &sub_str,
+            (start, end),
+            db,
+            deinflector,
+            particle_index.as_deref(),
+            custom_names,
+            current_tag,
+            &mut acc,
+        );
+        if full {
+            break;
+        }
+    }
+
+    // Phase 2 (Fallback lookbehind):
+    // Only if ZERO dictionary entries start at char_idx, check if the cursor is
+    // in the middle of a word whose starting character is up to 6 characters earlier
+    // (possibly on the previous line).
+    // We search from the closest start (char_idx - 1) backwards to min_start.
+    // Once a start matches, shorter spans from that same start still contribute
+    // alternatives.
+    if !acc.has_any() {
+        let min_start = char_idx.saturating_sub(6);
+        'lookbehind: for start in (min_start..char_idx).rev() {
+            if is_punct_char(chars[start]) {
+                break;
+            }
+            let max_end = (start + 16).min(chars.len());
+            for end in ((char_idx + 1)..=max_end).rev() {
+                if is_punct_char(chars[end - 1]) {
+                    continue;
+                }
+                let sub_str: String = chars[start..end].iter().collect();
+                if is_ignorable_token(&sub_str) {
+                    continue;
+                }
+                let full = find_span_entries(
+                    &sub_str,
+                    (start, end),
+                    db,
+                    deinflector,
+                    particle_index.as_deref(),
+                    custom_names,
+                    current_tag,
+                    &mut acc,
+                );
+                if full {
+                    break 'lookbehind;
+                }
+            }
+            if acc.has_any() {
+                break;
+            }
+        }
+    }
+
+    let matched_entry = acc.finish().map(|((start, end), mut entries, groups)| {
+        // Enrich entries with frequency if available and sort. Priority group always
+        // comes first (primary match, then longer before shorter spans, exact before
+        // normalized); frequency only orders entries within the same group.
+        if let Some(fdb) = freq_db {
+            for entry in &mut entries {
+                entry.frequency = fdb.get_frequency(&entry.term, &entry.reading);
+            }
+            // Sort in order of frequency: lowest rank first, unranked last.
+            // A kana-only reading frequency (marked with ㋕) on a kanji term represents the reading in kana,
+            // not the kanji word itself. Penalize it compared to a genuine kanji frequency.
+            let by_freq = |a: &super::models::TermEntry, b: &super::models::TermEntry| {
+                let a_kanji = crate::dict::database::contains_kanji(&a.term);
+                let b_kanji = crate::dict::database::contains_kanji(&b.term);
+
+                let a_is_kana_on_kanji =
+                    a_kanji && a.frequency.as_ref().map_or(false, |f| f.is_kana_freq());
+                let b_is_kana_on_kanji =
+                    b_kanji && b.frequency.as_ref().map_or(false, |f| f.is_kana_freq());
+
+                match (a_is_kana_on_kanji, b_is_kana_on_kanji) {
+                    (false, true) if a.frequency.is_some() => std::cmp::Ordering::Less,
+                    (true, false) if b.frequency.is_some() => std::cmp::Ordering::Greater,
+                    _ => match (&a.frequency, &b.frequency) {
+                        (Some(fa), Some(fb)) => fa.rank.cmp(&fb.rank),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    },
+                }
+            };
+            let mut tagged: Vec<_> = groups.into_iter().zip(entries).collect();
+            tagged.sort_by(|(ga, a), (gb, b)| {
+                ga.cmp(gb).then_with(|| by_freq(a, b)).then_with(|| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+            });
+            entries = tagged.into_iter().map(|(_, e)| e).collect();
+        }
+        if let Some(pdb) = pitch_db {
+            for entry in &mut entries {
+                entry.pitches = pdb.get_pitches(&entry.term, &entry.reading);
+            }
+        }
+        (start, end, entries)
+    });
+    SCAN_CACHE.with(|c| *c.borrow_mut() = Some((cache_key, matched_entry.clone())));
+    matched_entry
 }
 
 /// A single OCR line within a box, with its screen geometry and its character range
@@ -896,6 +962,31 @@ impl ScanAccumulator {
     }
 }
 
+/// Returns `true` if `c` is a Japanese character (Hiragana, Katakana, Kanji/CJK ideograph,
+/// iteration/prolonged sound mark, or fullwidth alphanumeric) that can trigger a recursive
+/// dictionary lookup inside a popup. Halfwidth ASCII (English text) and punctuation return `false`.
+pub fn is_japanese_lookup_char(c: char) -> bool {
+    if is_punct_char(c) {
+        return false;
+    }
+    matches!(
+        c as u32,
+        0x3040..=0x309F // Hiragana
+        | 0x30A0..=0x30FF // Katakana
+        | 0x31F0..=0x31FF // Katakana Phonetic Extensions
+        | 0xFF65..=0xFF9F // Halfwidth Katakana
+        | 0x4E00..=0x9FFF // CJK Unified Ideographs
+        | 0x3400..=0x4DBF // CJK Unified Ideographs Extension A
+        | 0xF900..=0xFAFF // CJK Compatibility Ideographs
+        | 0x20000..=0x2A6DF // CJK Unified Ideographs Extension B
+        | 0x3005..=0x3007 // 々, 〆, 〇
+        | 0x303B          // 〻
+        | 0xFF10..=0xFF19 // Fullwidth digits
+        | 0xFF21..=0xFF3A // Fullwidth uppercase Latin
+        | 0xFF41..=0xFF5A // Fullwidth lowercase Latin
+    )
+}
+
 /// Checks if a character is punctuation or whitespace that cannot start or end a word.
 fn is_punct_char(c: char) -> bool {
     matches!(
@@ -913,6 +1004,8 @@ fn is_punct_char(c: char) -> bool {
             | '」'
             | '『'
             | '』'
+            | '【'
+            | '】'
             | '（'
             | '）'
             | '('
@@ -927,6 +1020,9 @@ fn is_punct_char(c: char) -> bool {
             | ':'
             | ';'
             | '—'
+            | '→'
+            | '⟶'
+            | '←'
             | '-'
             | '…'
             | '~'
@@ -956,6 +1052,8 @@ fn is_ignorable_token(s: &str) -> bool {
                 | '」'
                 | '『'
                 | '』'
+                | '【'
+                | '】'
                 | '（'
                 | '）'
                 | '('
@@ -970,6 +1068,9 @@ fn is_ignorable_token(s: &str) -> bool {
                 | ':'
                 | ';'
                 | '—'
+                | '→'
+                | '⟶'
+                | '←'
                 | 'ー'
                 | '-'
                 | '…'

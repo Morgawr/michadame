@@ -1194,6 +1194,7 @@ mod tests {
             last_word_hover_time: now,
             popup_rect: None,
             is_popup_hovered: false,
+            child: None,
         });
 
         let info = crate::ocr::overlay::top_popup_entry_mine_info(&state);

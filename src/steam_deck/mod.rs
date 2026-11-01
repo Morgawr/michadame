@@ -319,8 +319,7 @@ pub fn forward_inputs(state: &mut AppState, ctx: &egui::Context, video: egui::Re
                 .dict
                 .popup
                 .as_ref()
-                .and_then(|p| p.popup_rect)
-                .is_some_and(|r| r.contains(p))
+                .is_some_and(|popup| popup.contains_pointer(p))
         });
     let pointer_ui =
         !in_game || state.whiteboard.open || in_popup || on_ocr || state.ui.show_quit_dialog;

@@ -353,8 +353,7 @@ impl AppState {
                     *scan_time += delta;
                 }
                 if let Some(ref mut popup) = self.dict.popup {
-                    popup.last_hover_time = now;
-                    popup.last_word_hover_time = now;
+                    popup.touch_all_hover_times(now);
                 }
             }
             self.ocr.last_pause_tick = Some(now);
@@ -1466,6 +1465,7 @@ mod tests {
             popup_rect: None,
             last_hover_time: Instant::now(),
             last_word_hover_time: Instant::now(),
+            child: None,
         });
 
         // While a popup is open, handle_ocr_timeout must NOT clear OCR scans regardless of pointer position
@@ -1542,6 +1542,7 @@ mod tests {
             popup_rect: None,
             last_hover_time: Instant::now(),
             last_word_hover_time: Instant::now(),
+            child: None,
         });
         let repainted = state.handle_ocr_timeout(&ctx);
         assert!(!repainted);
