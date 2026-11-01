@@ -1,21 +1,23 @@
 use crate::app::{models::WebcamResizeCorner, AppState};
+use crate::dict::theme;
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
 
-const PC98_BEZEL_BG: Color32 = Color32::from_rgb(32, 29, 26); // #201d1a deep charcoal umber
-const PC98_OUTER_HIGHLIGHT: Color32 = Color32::from_rgb(92, 85, 76); // #5c554c warm antique pewter
-const PC98_OUTER_SHADOW: Color32 = Color32::from_rgb(17, 16, 14); // #11100e deep shadow
-const PC98_MID_HIGHLIGHT: Color32 = Color32::from_rgb(61, 55, 48); // #3d3730
-const PC98_MID_SHADOW: Color32 = Color32::from_rgb(25, 23, 21); // #191715
-const PC98_INNER_SHADOW: Color32 = Color32::from_rgb(14, 13, 12); // #0e0d0c inset groove
-const PC98_INNER_HIGHLIGHT: Color32 = Color32::from_rgb(66, 60, 53); // #423c35
-const PC98_BRACKET_COLOR: Color32 = Color32::from_rgb(74, 67, 58); // #4a433a vintage bronze slate
-const PC98_BRACKET_ACTIVE: Color32 = Color32::from_rgb(130, 118, 102); // #827666 illuminated bracket
-const PC98_STANDBY_BG: Color32 = Color32::from_rgb(20, 18, 17); // #141211
-const PC98_STANDBY_TEXT: Color32 = Color32::from_rgb(90, 82, 71); // #5a5247
+// "Faded Indigo" retro chrome, shared with the dictionary popup and mining bank
+// (see `dict::theme`). Everything is drawn inside the `FRAME_PADDING` band:
+//   [0.0, 1.5) dark outline · [1.5, 3.5) parchment frame · [3.5, 5.5) window fill ·
+//   [5.5, 7.0) violet rule · [7.0, 8.0) recessed edge around the picture.
+const EDGE_W: f32 = 1.5;
+const FRAME_W: f32 = 2.0;
+const RULE_W: f32 = 1.5;
+const RULE_INSET: f32 = 5.5;
+const GEM_RADIUS: f32 = 5.0;
+const GEM_RADIUS_ACTIVE: f32 = 6.5;
 
 pub const FRAME_PADDING: f32 = 8.0;
 pub const MIN_CONTENT_WIDTH: f32 = 64.0;
 pub const CORNER_HIT_SIZE: f32 = 18.0;
+/// Label shown in the frame while no webcam picture has arrived yet.
+const STANDBY_LABEL: &str = "WEBCAM STANDBY";
 
 /// Computes effective image dimensions, aspect ratio, and texture UV mapping
 /// after applying cutout margin coordinates. Clamps cutout values to maintain
@@ -363,7 +365,7 @@ pub fn draw_webcam_overlay(
         ctx.request_repaint();
     }
 
-    // 6. Draw PC-98 somber visual novel border on Order::Middle (above the whiteboard, below Debug/Chat)
+    // 6. Draw the retro VN window frame on Order::Middle (above the whiteboard, below Debug/Chat)
     let layer_painter = ctx
         .layer_painter(egui::LayerId::new(
             egui::Order::Middle,
@@ -371,129 +373,66 @@ pub fn draw_webcam_overlay(
         ))
         .with_clip_rect(viewport_rect);
     let painter = &layer_painter;
+    let time = ui.input(|i| i.time);
 
-    // Base chassis matte background
-    painter.rect_filled(outer_rect, egui::Rounding::ZERO, PC98_BEZEL_BG);
-
-    // Outer chiseled contour layer 1 (outermost rim)
-    painter.line_segment(
-        [outer_rect.left_top(), outer_rect.right_top()],
-        Stroke::new(1.0, PC98_OUTER_HIGHLIGHT),
+    // Window fill, dark outline and parchment frame
+    painter.rect_filled(outer_rect, egui::Rounding::ZERO, theme::WINDOW);
+    painter.rect_stroke(
+        outer_rect.shrink(EDGE_W * 0.5),
+        egui::Rounding::ZERO,
+        Stroke::new(EDGE_W, theme::EDGE),
     );
-    painter.line_segment(
-        [outer_rect.left_top(), outer_rect.left_bottom()],
-        Stroke::new(1.0, PC98_OUTER_HIGHLIGHT),
-    );
-    painter.line_segment(
-        [outer_rect.left_bottom(), outer_rect.right_bottom()],
-        Stroke::new(1.0, PC98_OUTER_SHADOW),
-    );
-    painter.line_segment(
-        [outer_rect.right_top(), outer_rect.right_bottom()],
-        Stroke::new(1.0, PC98_OUTER_SHADOW),
+    let frame_rect = outer_rect.shrink(EDGE_W + FRAME_W * 0.5);
+    painter.rect_stroke(
+        frame_rect,
+        egui::Rounding::ZERO,
+        Stroke::new(FRAME_W, theme::FRAME),
     );
 
-    // Outer chiseled contour layer 2 (inset line)
-    let mid_rect = outer_rect.shrink(1.0);
-    painter.line_segment(
-        [mid_rect.left_top(), mid_rect.right_top()],
-        Stroke::new(1.0, PC98_MID_HIGHLIGHT),
+    // Inner violet rule, then a recessed dark edge framing the picture
+    painter.rect_stroke(
+        outer_rect.shrink(RULE_INSET + RULE_W * 0.5),
+        egui::Rounding::ZERO,
+        Stroke::new(RULE_W, theme::RULE),
     );
-    painter.line_segment(
-        [mid_rect.left_top(), mid_rect.left_bottom()],
-        Stroke::new(1.0, PC98_MID_HIGHLIGHT),
-    );
-    painter.line_segment(
-        [mid_rect.left_bottom(), mid_rect.right_bottom()],
-        Stroke::new(1.0, PC98_MID_SHADOW),
-    );
-    painter.line_segment(
-        [mid_rect.right_top(), mid_rect.right_bottom()],
-        Stroke::new(1.0, PC98_MID_SHADOW),
+    painter.rect_stroke(
+        inner_rect.expand(0.5),
+        egui::Rounding::ZERO,
+        Stroke::new(1.0, theme::EDGE),
     );
 
-    // Corner vintage brackets (L-shaped decorative accents at each corner)
-    let bracket_len = 9.0;
-    let bracket_thick = 2.0;
-
-    let draw_corner_bracket =
-        |painter: &egui::Painter, corner: Pos2, dir_x: f32, dir_y: f32, active: bool| {
-            let color = if active {
-                PC98_BRACKET_ACTIVE
-            } else {
-                PC98_BRACKET_COLOR
-            };
-            let stroke = Stroke::new(bracket_thick, color);
-            let h_end = Pos2::new(corner.x + dir_x * bracket_len, corner.y);
-            let v_end = Pos2::new(corner.x, corner.y + dir_y * bracket_len);
-            painter.line_segment([corner, h_end], stroke);
-            painter.line_segment([corner, v_end], stroke);
+    // Corner gems: palette-cycling, and lit up (gold, larger) while hovered or resizing.
+    let corners = [
+        (WebcamResizeCorner::TopLeft, frame_rect.left_top()),
+        (WebcamResizeCorner::TopRight, frame_rect.right_top()),
+        (WebcamResizeCorner::BottomRight, frame_rect.right_bottom()),
+        (WebcamResizeCorner::BottomLeft, frame_rect.left_bottom()),
+    ];
+    for (i, (corner, center)) in corners.into_iter().enumerate() {
+        let active = hovered_corner == Some(corner) || state.webcam.resizing_corner == Some(corner);
+        let (radius, fill, outline) = if active {
+            (GEM_RADIUS_ACTIVE, theme::GOLD, theme::HEAD)
+        } else {
+            (GEM_RADIUS, theme::gem_color(time, i), theme::EDGE)
         };
-
-    let b_offset = 2.0;
-    draw_corner_bracket(
-        painter,
-        Pos2::new(outer_rect.left() + b_offset, outer_rect.top() + b_offset),
-        1.0,
-        1.0,
-        hovered_corner == Some(WebcamResizeCorner::TopLeft)
-            || state.webcam.resizing_corner == Some(WebcamResizeCorner::TopLeft),
-    );
-    draw_corner_bracket(
-        painter,
-        Pos2::new(outer_rect.right() - b_offset, outer_rect.top() + b_offset),
-        -1.0,
-        1.0,
-        hovered_corner == Some(WebcamResizeCorner::TopRight)
-            || state.webcam.resizing_corner == Some(WebcamResizeCorner::TopRight),
-    );
-    draw_corner_bracket(
-        painter,
-        Pos2::new(outer_rect.left() + b_offset, outer_rect.bottom() - b_offset),
-        1.0,
-        -1.0,
-        hovered_corner == Some(WebcamResizeCorner::BottomLeft)
-            || state.webcam.resizing_corner == Some(WebcamResizeCorner::BottomLeft),
-    );
-    draw_corner_bracket(
-        painter,
-        Pos2::new(
-            outer_rect.right() - b_offset,
-            outer_rect.bottom() - b_offset,
-        ),
-        -1.0,
-        -1.0,
-        hovered_corner == Some(WebcamResizeCorner::BottomRight)
-            || state.webcam.resizing_corner == Some(WebcamResizeCorner::BottomRight),
-    );
-
-    // Inner recessed bezel groove framing the video viewport
-    let inner_recess = inner_rect.expand(1.0);
-    painter.line_segment(
-        [inner_recess.left_top(), inner_recess.right_top()],
-        Stroke::new(1.0, PC98_INNER_SHADOW),
-    );
-    painter.line_segment(
-        [inner_recess.left_top(), inner_recess.left_bottom()],
-        Stroke::new(1.0, PC98_INNER_SHADOW),
-    );
-    painter.line_segment(
-        [inner_recess.left_bottom(), inner_recess.right_bottom()],
-        Stroke::new(1.0, PC98_INNER_HIGHLIGHT),
-    );
-    painter.line_segment(
-        [inner_recess.right_top(), inner_recess.right_bottom()],
-        Stroke::new(1.0, PC98_INNER_HIGHLIGHT),
-    );
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                center + Vec2::new(0.0, -radius),
+                center + Vec2::new(radius, 0.0),
+                center + Vec2::new(0.0, radius),
+                center + Vec2::new(-radius, 0.0),
+            ],
+            fill,
+            Stroke::new(1.0, outline),
+        ));
+    }
 
     // 7. Video image / Standby screen
     if let Some(texture) = &state.webcam.texture {
         painter.image(texture.id(), inner_rect, uv, Color32::WHITE);
     } else {
-        // Standby screen
-        painter.rect_filled(inner_rect, egui::Rounding::ZERO, PC98_STANDBY_BG);
-
-        // Fine vintage raster stripes
+        // Standby screen: deep backdrop with faint raster stripes
+        painter.rect_filled(inner_rect, egui::Rounding::ZERO, theme::BACKDROP);
         let step = 4.0;
         let mut y = inner_rect.top() + step;
         while y < inner_rect.bottom() {
@@ -502,20 +441,36 @@ pub fn draw_webcam_overlay(
                     Pos2::new(inner_rect.left(), y),
                     Pos2::new(inner_rect.right(), y),
                 ],
-                Stroke::new(1.0, Color32::from_rgb(26, 24, 22)),
+                Stroke::new(1.0, theme::WINDOW),
             );
             y += step;
         }
 
-        // Standby text label
-        painter.text(
+        // Standby label with a hard shadow and a blinking VN page cursor below it
+        let font = egui::FontId::monospace(12.0);
+        theme::paint_shadow_text(
+            painter,
             inner_rect.center(),
             egui::Align2::CENTER_CENTER,
-            "WEBCAM STANDBY",
-            egui::FontId::monospace(10.0),
-            PC98_STANDBY_TEXT,
+            STANDBY_LABEL,
+            font.clone(),
+            theme::MUTED,
+            1.0,
         );
+        if theme::blink_on(time) {
+            theme::paint_shadow_text(
+                painter,
+                inner_rect.center() + Vec2::new(0.0, 16.0),
+                egui::Align2::CENTER_CENTER,
+                "▼",
+                crate::dict::render::dict_font(12.0),
+                theme::GOLD,
+                1.0,
+            );
+        }
     }
+
+    theme::request_animation_repaint(ctx, time);
 }
 
 #[cfg(test)]
@@ -682,7 +637,6 @@ mod tests {
 
     #[test]
     fn test_no_emojis_in_webcam_labels_and_strings() {
-        let text = "WEBCAM STANDBY";
-        assert!(text.chars().all(|c| c.is_ascii()));
+        assert!(STANDBY_LABEL.chars().all(|c| c.is_ascii()));
     }
 }
