@@ -502,6 +502,7 @@ pub struct LegacyConfig {
     pub default_cathode_interference: Option<crate::app::models::CathodeInterferenceSettings>,
     pub bank_current_tag: Option<String>,
     pub bank_compact_mode: Option<bool>,
+    pub ui_scale: Option<f32>,
     pub popup_under_crt: Option<bool>,
     #[serde(default)]
     pub retro_pc_system: crate::pc88::RetroPcSystem,
@@ -633,6 +634,7 @@ impl Default for LegacyConfig {
             default_cathode_interference: None,
             bank_current_tag: None,
             bank_compact_mode: None,
+            ui_scale: None,
             popup_under_crt: None,
             retro_pc_system: crate::pc88::RetroPcSystem::default(),
             gamescope_launcher_script: None,
@@ -682,6 +684,8 @@ pub struct MichadameConfig {
     pub bank_current_tag: Option<String>,
     /// Whether the mining bank window starts in compact mode.
     pub bank_compact_mode: Option<bool>,
+    /// Manual desktop UI scale override; `None` scales automatically by monitor resolution.
+    pub ui_scale: Option<f32>,
     pub popup_under_crt: Option<bool>,
     #[serde(default)]
     pub retro_pc_system: crate::pc88::RetroPcSystem,
@@ -746,6 +750,7 @@ impl Default for MichadameConfig {
             pc88: crate::pc88::Pc88Config::default(),
             bank_current_tag: None,
             bank_compact_mode: None,
+            ui_scale: None,
             popup_under_crt: Some(false),
             retro_pc_system: crate::pc88::RetroPcSystem::default(),
             gamescope_launcher_script: None,

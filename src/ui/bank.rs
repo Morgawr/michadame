@@ -7,21 +7,23 @@ use crate::dict::render::build_headword_reading_job;
 use crate::dict::render::{
     dict_font, render_entry_header, render_glossaries, render_headword_and_reading, with_dict_scale,
 };
+use crate::dict::theme;
 use crate::ui::tag_input::tag_input;
 use eframe::egui::{self, text::LayoutJob, Color32, RichText, TextFormat};
 
-const ROW_BG: Color32 = Color32::from_rgb(24, 27, 34);
-const ROW_STROKE: Color32 = Color32::from_rgb(51, 65, 85);
-const COLOR_TERM: Color32 = Color32::from_rgb(248, 250, 252);
-const COLOR_READING: Color32 = Color32::from_rgb(56, 189, 248);
-const COLOR_SENTENCE: Color32 = Color32::from_rgb(226, 232, 240);
-const COLOR_HIGHLIGHT: Color32 = Color32::from_rgb(253, 224, 71);
-const COLOR_HIGHLIGHT_BG: Color32 = Color32::from_rgba_premultiplied(66, 56, 10, 160);
-const COLOR_MUTED: Color32 = Color32::from_rgb(100, 116, 139);
-const COLOR_DEFINITION: Color32 = Color32::from_rgb(203, 213, 225);
-const COLOR_TAG: Color32 = Color32::from_rgb(165, 175, 195);
-const COLOR_TAG_BG: Color32 = Color32::from_rgba_premultiplied(45, 52, 68, 160);
-const COLOR_TAG_STROKE: Color32 = Color32::from_rgba_premultiplied(75, 85, 105, 120);
+// "Faded Indigo" retro palette, shared with the dictionary popup (see `dict::theme`).
+const COLOR_TERM: Color32 = theme::HEAD;
+const COLOR_READING: Color32 = theme::GOLD;
+const COLOR_SENTENCE: Color32 = theme::TEXT;
+const COLOR_HIGHLIGHT: Color32 = theme::GOLD;
+const COLOR_HIGHLIGHT_BG: Color32 = theme::MINED_BG;
+const COLOR_MUTED: Color32 = theme::MUTED;
+const COLOR_DEFINITION: Color32 = theme::TEXT;
+const COLOR_TAG: Color32 = theme::TAG_TEXT;
+const COLOR_TAG_BG: Color32 = theme::TAG_BG;
+const COLOR_TAG_STROKE: Color32 = theme::TAG_BORDER;
+const COLOR_TAG_HOVER_BG: Color32 = theme::DEINFLECT_BG;
+const COLOR_TAG_HOVER_STROKE: Color32 = theme::DEINFLECT_BORDER;
 
 /// Scale of the dictionary entry relative to the (large, over-video) popup rendering.
 const DICT_SCALE: f32 = 0.55;
@@ -29,16 +31,23 @@ const DICT_SCALE: f32 = 0.55;
 const THUMB_SIZE: egui::Vec2 = egui::vec2(240.0, 135.0);
 /// Maximum number of thumbnails decoded per frame, to keep scrolling smooth.
 const THUMB_LOADS_PER_FRAME: usize = 6;
+/// Designed size (points) of the mining bank window.
+const BANK_WINDOW_SIZE: egui::Vec2 = egui::vec2(900.0, 900.0);
 
 pub fn draw_bank_window(state: &mut AppState, ctx: &egui::Context) {
     if !state.bank.window_open {
         return;
     }
+    // Designed size, shrunk to fit smaller screens (the window stays freely resizable).
+    let size =
+        crate::ui::scaling::fit_window(BANK_WINDOW_SIZE, crate::ui::scaling::monitor_size(ctx))
+            .size;
     ctx.show_viewport_immediate(
         egui::ViewportId::from_hash_of("bank_window"),
         egui::ViewportBuilder::default()
             .with_title("Michadame Mining Bank")
-            .with_inner_size([900.0, 900.0]),
+            .with_inner_size(size)
+            .with_min_inner_size(crate::ui::scaling::MIN_FALLBACK_WINDOW_SIZE.min(size)),
         |ctx, _class| {
             state.ui.any_pointer_down |= ctx.input(|i| i.pointer.any_down());
             draw_contents(state, ctx);
@@ -66,87 +75,93 @@ pub(crate) fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
         state.ui.studio_window_open = !state.ui.studio_window_open;
     }
 
-    egui::TopBottomPanel::top("bank_header").show(ctx, |ui| {
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.heading("Mining Bank");
-            let total = state.bank.entries.len();
-            let plural = |n: usize| if n == 1 { "" } else { "s" };
-            let text = if state.bank.filter_tag.trim().is_empty() {
-                format!("{total} word{}", plural(total))
-            } else {
-                let shown = state.bank.visible_indices().len();
-                format!("{shown} of {total} word{}", plural(total))
-            };
-            ui.label(RichText::new(text).color(COLOR_MUTED));
+    let panel_frame = egui::Frame::central_panel(&ctx.style()).fill(theme::BACKDROP);
+    egui::TopBottomPanel::top("bank_header")
+        .frame(
+            egui::Frame::side_top_panel(&ctx.style())
+                .fill(theme::BACKDROP)
+                .stroke(egui::Stroke::new(2.0, theme::RULE)),
+        )
+        .show(ctx, |ui| {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("◆ Mining Bank").heading().color(COLOR_TERM));
+                let total = state.bank.entries.len();
+                let plural = |n: usize| if n == 1 { "" } else { "s" };
+                let text = if state.bank.filter_tag.trim().is_empty() {
+                    format!("{total} word{}", plural(total))
+                } else {
+                    let shown = state.bank.visible_indices().len();
+                    format!("{shown} of {total} word{}", plural(total))
+                };
+                ui.label(RichText::new(text).color(COLOR_MUTED));
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let add_btn = egui::Button::new(
-                    RichText::new("➕ Add Name")
-                        .font(egui::FontId::proportional(13.0))
-                        .color(Color32::from_rgb(240, 245, 255)),
-                )
-                .fill(Color32::from_rgba_premultiplied(45, 55, 75, 200))
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    Color32::from_rgba_premultiplied(90, 105, 135, 180),
-                ))
-                .rounding(5.0);
-                if ui
-                    .add(add_btn)
-                    .on_hover_text("Add a custom name to the dictionary")
-                    .clicked()
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let add_btn = egui::Button::new(
+                        RichText::new("➕ Add Name")
+                            .font(egui::FontId::proportional(13.0))
+                            .color(COLOR_TERM),
+                    )
+                    .fill(theme::BUTTON_CLIP)
+                    .stroke(egui::Stroke::new(2.0, theme::RULE))
+                    .rounding(0.0);
+                    if ui
+                        .add(add_btn)
+                        .on_hover_text("Add a custom name to the dictionary")
+                        .clicked()
+                    {
+                        state.bank.open_add_name_dialog();
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("🏷 Filter by tag:").color(COLOR_TAG));
+                let mut compact_changed = false;
                 {
-                    state.bank.open_add_name_dialog();
+                    let bank = &mut state.bank;
+                    let out = tag_input(
+                        ui,
+                        "bank_tag_filter",
+                        &mut bank.filter_tag,
+                        &bank.known_tags,
+                        "Type a tag (partial matches included)…",
+                        320.0,
+                        false,
+                    );
+                    if out.cancelled {
+                        bank.filter_tag.clear();
+                    }
+                    if !bank.filter_tag.is_empty()
+                        && render_close_button(ui, "Clear filter").clicked()
+                    {
+                        bank.filter_tag.clear();
+                    }
+                    ui.add_space(16.0);
+                    let prev_compact = bank.compact_mode;
+                    ui.checkbox(&mut bank.compact_mode, "Compact mode");
+                    if bank.compact_mode != prev_compact {
+                        bank.expanded_entries.clear();
+                        compact_changed = true;
+                    }
+                }
+                if compact_changed {
+                    crate::config::save_config(state);
                 }
             });
+            ui.add_space(6.0);
         });
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("🏷 Filter by tag:").color(COLOR_TAG));
-            let mut compact_changed = false;
-            {
-                let bank = &mut state.bank;
-                let out = tag_input(
-                    ui,
-                    "bank_tag_filter",
-                    &mut bank.filter_tag,
-                    &bank.known_tags,
-                    "Type a tag (partial matches included)…",
-                    320.0,
-                    false,
-                );
-                if out.cancelled {
-                    bank.filter_tag.clear();
-                }
-                if !bank.filter_tag.is_empty() && render_close_button(ui, "Clear filter").clicked()
-                {
-                    bank.filter_tag.clear();
-                }
-                ui.add_space(16.0);
-                let prev_compact = bank.compact_mode;
-                ui.checkbox(&mut bank.compact_mode, "Compact mode");
-                if bank.compact_mode != prev_compact {
-                    bank.expanded_entries.clear();
-                    compact_changed = true;
-                }
-            }
-            if compact_changed {
-                crate::config::save_config(state);
-            }
-        });
-        ui.add_space(6.0);
-    });
 
     let mut enlarge: Option<i64> = None;
     let mut delete: Option<i64> = None;
     let mut copy_screenshot: Option<i64> = None;
     let mut toggle_expand: Option<i64> = None;
 
-    egui::CentralPanel::default().show(ctx, |ui| {
+    egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
+        theme::apply_widget_visuals(ui);
         if let Some(err) = &state.bank.load_error {
             ui.colored_label(
-                Color32::from_rgb(255, 100, 100),
+                theme::BRICK,
                 format!("⚠ Could not open the mining bank database: {err}"),
             );
             return;
@@ -263,30 +278,18 @@ fn draw_compact_row(
     }
     let row_clicked = response.on_hover_text("Click to expand entry").clicked();
 
-    let bg_color = if is_hovered {
-        Color32::from_rgb(33, 38, 48)
-    } else {
-        ROW_BG
-    };
-    let stroke_color = if is_hovered {
-        Color32::from_rgb(99, 102, 241)
-    } else {
-        ROW_STROKE
-    };
-
-    ui.painter()
-        .rect(rect, 6.0, bg_color, egui::Stroke::new(1.0, stroke_color));
+    ui.painter().extend(theme::panel_shapes(
+        rect,
+        1.0,
+        is_hovered.then_some(theme::GOLD),
+    ));
 
     let inner_rect = rect.shrink2(egui::vec2(12.0, 5.0));
     let mut tag_clicked = false;
 
     ui.allocate_ui_at_rect(inner_rect, |ui| {
         ui.horizontal(|ui| {
-            let arrow_color = if is_hovered {
-                Color32::from_rgb(148, 163, 184)
-            } else {
-                COLOR_MUTED
-            };
+            let arrow_color = if is_hovered { theme::GOLD } else { COLOR_MUTED };
             ui.label(RichText::new("▶").size(11.0).color(arrow_color));
             ui.add_space(4.0);
             render_headword_and_reading(
@@ -337,10 +340,9 @@ fn draw_row(
 ) -> RowAction {
     let mut action = RowAction::None;
 
-    egui::Frame::none()
-        .fill(ROW_BG)
-        .stroke(egui::Stroke::new(1.0, ROW_STROKE))
-        .rounding(8.0)
+    // Retro panel chrome is painted behind the row once its size is known.
+    let chrome_idx = ui.painter().add(egui::Shape::Noop);
+    let row = egui::Frame::none()
         .inner_margin(egui::Margin::same(12.0))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -354,13 +356,13 @@ fn draw_row(
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
                     let arrow_bg = if arrow_hovered {
-                        Color32::from_rgba_premultiplied(55, 65, 85, 180)
+                        COLOR_TAG_HOVER_BG
                     } else {
                         Color32::TRANSPARENT
                     };
-                    ui.painter().rect_filled(arrow_rect, 4.0, arrow_bg);
+                    ui.painter().rect_filled(arrow_rect, 0.0, arrow_bg);
                     let arrow_color = if arrow_hovered {
-                        Color32::from_rgb(226, 232, 240)
+                        theme::GOLD
                     } else {
                         COLOR_MUTED
                     };
@@ -482,10 +484,7 @@ fn draw_row(
                                         state.bank.pending_delete = None;
                                     }
                                     if ui
-                                        .button(
-                                            RichText::new("Delete")
-                                                .color(Color32::from_rgb(248, 113, 113)),
-                                        )
+                                        .button(RichText::new("Delete").color(theme::DANGER_TEXT))
                                         .clicked()
                                     {
                                         action = RowAction::Delete;
@@ -510,7 +509,7 @@ fn draw_row(
                                     {
                                         let clip_btn = ui.link(
                                             RichText::new("🎬 Clip")
-                                                .color(Color32::from_rgb(168, 85, 247))
+                                                .color(theme::DEINFLECT_TEXT)
                                                 .font(egui::FontId::proportional(12.5)),
                                         );
                                         if clip_btn
@@ -560,6 +559,10 @@ fn draw_row(
                 });
             });
         });
+    ui.painter().set(
+        chrome_idx,
+        egui::Shape::Vec(theme::panel_shapes(row.response.rect, 1.0, None)),
+    );
 
     action
 }
@@ -648,17 +651,14 @@ fn draw_tag_row(ui: &mut egui::Ui, state: &mut AppState, entry: &BankEntryMeta) 
                 }
 
                 let (bg, border) = if tag_hovered {
-                    (
-                        Color32::from_rgba_premultiplied(65, 75, 98, 200),
-                        Color32::from_rgb(148, 163, 184),
-                    )
+                    (COLOR_TAG_HOVER_BG, COLOR_TAG_HOVER_STROKE)
                 } else {
                     (COLOR_TAG_BG, COLOR_TAG_STROKE)
                 };
 
-                // Draw base pill
+                // Draw base chip
                 ui.painter()
-                    .rect(chip_rect, 5.0, bg, egui::Stroke::new(1.0, border));
+                    .rect(chip_rect, 0.0, bg, egui::Stroke::new(2.0, border));
 
                 // Draw tag text
                 let text_pos = egui::pos2(
@@ -678,16 +678,17 @@ fn draw_tag_row(ui: &mut egui::Ui, state: &mut AppState, entry: &BankEntryMeta) 
                 );
 
                 let (x_stroke_color, x_bg) = if remove_hovered {
-                    (Color32::WHITE, Color32::from_rgb(220, 38, 38))
+                    (theme::DANGER_TEXT, theme::BUTTON_DANGER_HOVER)
                 } else {
-                    (
-                        Color32::from_rgba_premultiplied(165, 175, 195, 200),
-                        Color32::TRANSPARENT,
-                    )
+                    (COLOR_TAG, Color32::TRANSPARENT)
                 };
 
                 if x_bg != Color32::TRANSPARENT {
-                    ui.painter().circle_filled(remove_center, 8.5, x_bg);
+                    ui.painter().rect_filled(
+                        egui::Rect::from_center_size(remove_center, egui::vec2(16.0, 16.0)),
+                        0.0,
+                        x_bg,
+                    );
                 }
 
                 let arm = 3.5;
@@ -733,12 +734,9 @@ fn draw_tag_row(ui: &mut egui::Ui, state: &mut AppState, entry: &BankEntryMeta) 
                         .font(egui::FontId::proportional(12.0))
                         .color(COLOR_MUTED),
                 )
-                .fill(Color32::from_rgba_premultiplied(35, 42, 55, 120))
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    Color32::from_rgba_premultiplied(70, 80, 100, 100),
-                ))
-                .rounding(5.0);
+                .fill(COLOR_TAG_BG)
+                .stroke(egui::Stroke::new(2.0, COLOR_TAG_STROKE))
+                .rounding(0.0);
 
                 if ui
                     .add(add_btn)
@@ -810,7 +808,12 @@ fn paint_thumbnail(
     loaded: bool,
 ) {
     let painter = ui.painter();
-    painter.rect_filled(rect, 6.0, Color32::from_rgb(12, 14, 18));
+    painter.rect_filled(rect, 0.0, theme::EDGE);
+    painter.rect_stroke(
+        rect.expand(1.0),
+        0.0,
+        egui::Stroke::new(2.0, theme::TAG_BORDER),
+    );
     match texture {
         Some(tex) => {
             let image_rect = fit_rect(tex.size_vec2(), rect);
@@ -840,27 +843,15 @@ fn paint_thumbnail(
 
 fn paint_copy_overlay(painter: &egui::Painter, rect: egui::Rect, hovered: bool, copying: bool) {
     let (bg, stroke_color, icon_color) = if copying {
-        (
-            Color32::from_rgba_premultiplied(30, 41, 59, 230),
-            Color32::from_rgb(148, 163, 184),
-            Color32::from_rgb(148, 163, 184),
-        )
+        (theme::TAG_BG, theme::TAG_BORDER, theme::TAG_TEXT)
     } else if hovered {
-        (
-            Color32::from_rgba_premultiplied(51, 65, 85, 240),
-            Color32::from_rgb(226, 232, 240),
-            Color32::WHITE,
-        )
+        (theme::BUTTON_CLIP_HOVER, theme::FRAME, COLOR_TERM)
     } else {
-        (
-            Color32::from_rgba_premultiplied(15, 23, 42, 200),
-            Color32::from_rgba_premultiplied(100, 116, 139, 180),
-            Color32::from_rgb(203, 213, 225),
-        )
+        (theme::WINDOW, theme::RULE, theme::TEXT)
     };
 
-    painter.rect_filled(rect, 5.0, bg);
-    painter.rect_stroke(rect, 5.0, egui::Stroke::new(1.0, stroke_color));
+    painter.rect_filled(rect, 0.0, bg);
+    painter.rect_stroke(rect, 0.0, egui::Stroke::new(2.0, stroke_color));
 
     let center = rect.center();
     if copying {
@@ -1006,6 +997,8 @@ fn draw_add_name_dialog(state: &mut AppState, ctx: &egui::Context) {
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .collapsible(false)
         .resizable(false)
+        .max_height(crate::ui::scaling::max_dialog_size(ctx).y)
+        .vscroll(true)
         .default_width(380.0)
         .show(ctx, |ui| {
             ui.set_width(380.0);
@@ -1122,15 +1115,12 @@ fn render_subtle_tag_chip(ui: &mut egui::Ui, tag: &str) -> egui::Response {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     let (bg, border) = if hovered {
-        (
-            Color32::from_rgba_premultiplied(70, 80, 105, 200),
-            Color32::from_rgb(148, 163, 184),
-        )
+        (COLOR_TAG_HOVER_BG, COLOR_TAG_HOVER_STROKE)
     } else {
         (COLOR_TAG_BG, COLOR_TAG_STROKE)
     };
     ui.painter()
-        .rect(chip_rect, 4.0, bg, egui::Stroke::new(1.0, border));
+        .rect(chip_rect, 0.0, bg, egui::Stroke::new(1.5, border));
     ui.painter().galley(
         chip_rect.min + padding,
         galley,
@@ -1147,21 +1137,13 @@ fn render_close_button(ui: &mut egui::Ui, hover_text: &str) -> egui::Response {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     let (bg, stroke_color, border_color) = if hovered {
-        (
-            Color32::from_rgb(220, 38, 38),
-            Color32::WHITE,
-            Color32::from_rgb(239, 68, 68),
-        )
+        (theme::BUTTON_DANGER_HOVER, theme::DANGER_TEXT, theme::BRICK)
     } else {
-        (
-            Color32::from_rgba_premultiplied(45, 52, 68, 140),
-            Color32::from_rgb(148, 163, 184),
-            Color32::from_rgba_premultiplied(75, 85, 105, 120),
-        )
+        (COLOR_TAG_BG, COLOR_TAG, COLOR_TAG_STROKE)
     };
-    ui.painter().rect_filled(rect, 4.0, bg);
+    ui.painter().rect_filled(rect, 0.0, bg);
     ui.painter()
-        .rect_stroke(rect, 4.0, egui::Stroke::new(1.0, border_color));
+        .rect_stroke(rect, 0.0, egui::Stroke::new(1.5, border_color));
     let center = rect.center();
     let arm = 3.5;
     let stroke = egui::Stroke::new(1.4, stroke_color);
@@ -1212,22 +1194,13 @@ fn format_friendly_timestamp(ms: i64) -> String {
 }
 
 fn paint_delete_button(painter: &egui::Painter, rect: egui::Rect, hovered: bool) {
-    let (bg, stroke_color, icon_color) = if hovered {
-        (
-            Color32::from_rgba_premultiplied(65, 25, 25, 220),
-            Color32::from_rgb(239, 68, 68),
-            Color32::from_rgb(248, 113, 113),
-        )
+    let (bg, icon_color) = if hovered {
+        (theme::BUTTON_DANGER_HOVER, theme::DANGER_TEXT)
     } else {
-        (
-            Color32::from_rgba_premultiplied(30, 35, 45, 180),
-            Color32::from_rgba_premultiplied(80, 90, 110, 160),
-            Color32::from_rgb(148, 163, 184),
-        )
+        (COLOR_TAG_BG, COLOR_TAG)
     };
 
-    painter.rect_filled(rect, 5.0, bg);
-    painter.rect_stroke(rect, 5.0, egui::Stroke::new(1.0, stroke_color));
+    theme::paint_bevel(painter, rect, bg, false, 1.0);
 
     let center = rect.center();
     let stroke = egui::Stroke::new(1.4, icon_color);

@@ -11,6 +11,11 @@ pub fn init_app_state(cc: &eframe::CreationContext, steam_deck: bool) -> AppStat
 
     let ctx_clone = cc.egui_ctx.clone();
     crate::ui::setup_style(&ctx_clone);
+    if !steam_deck {
+        // The desktop UI scale is managed by `ui::scaling` (auto by resolution or the manual
+        // "UI Scale" setting); egui's built-in Ctrl +/- zoom would fight with it.
+        ctx_clone.options_mut(|o| o.zoom_with_keyboard = false);
+    }
 
     let logo_image = image::load_from_memory(include_bytes!("../../assets/logo.png"))
         .expect("Failed to load logo");

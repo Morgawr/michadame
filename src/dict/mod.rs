@@ -10,6 +10,7 @@ pub mod pitch;
 pub mod popup;
 pub mod render;
 pub mod sync;
+pub mod theme;
 
 pub use database::DictDatabase;
 pub use deinflect::{global_deinflector, Deinflector};

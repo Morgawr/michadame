@@ -651,6 +651,8 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     changed |= super::twitch::draw_twitch_tab(ui, state);
                 }
                 SettingsTab::Hotkeys => {
+                    changed |= draw_interface_scale_group(ui, state);
+                    ui.add_space(4.0);
                     draw_hotkeys_tab(ui);
                 }
             }
@@ -1269,6 +1271,63 @@ pub(crate) fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed
             }
         });
     });
+}
+
+/// Desktop UI scale selector (Auto = based on the monitor resolution, 4K = 100%).
+fn draw_interface_scale_group(ui: &mut egui::Ui, state: &mut AppState) -> bool {
+    use crate::ui::scaling;
+
+    let mut changed = false;
+    technical_group(ui, "Interface Scale:", |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.add_sized(
+                [130.0, 18.0],
+                egui::Label::new(
+                    egui::RichText::new("UI Scale:")
+                        .monospace()
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(153, 153, 153)),
+                ),
+            )
+            .on_hover_text(
+                "Scales all Michadame windows. Auto picks a scale from the monitor resolution \
+                 (4K = 100%, 1440p ≈ 83%, 1080p = 75%) on top of the OS display scaling.",
+            );
+
+            let auto_pct = (state.ui.scale.auto.unwrap_or(1.0) * 100.0).round();
+            let label_for = |scale: Option<f32>| match scale {
+                None => format!("Auto ({auto_pct:.0}%)"),
+                Some(s) => format!("{:.0}%", s * 100.0),
+            };
+            let mut selected = state.ui.scale.manual;
+            egui::ComboBox::from_id_source("ui_scale_selector")
+                .width(220.0)
+                .selected_text(
+                    egui::RichText::new(label_for(selected))
+                        .monospace()
+                        .size(11.0),
+                )
+                .show_ui(ui, |ui| {
+                    let options = std::iter::once(None)
+                        .chain(scaling::MANUAL_SCALE_PRESETS.iter().copied().map(Some));
+                    for option in options {
+                        ui.selectable_value(
+                            &mut selected,
+                            option,
+                            egui::RichText::new(label_for(option))
+                                .monospace()
+                                .size(11.0),
+                        );
+                    }
+                });
+            if selected != state.ui.scale.manual {
+                state.ui.scale.manual = selected;
+                crate::config::save_config(state);
+                changed = true;
+            }
+        });
+    });
+    changed
 }
 
 fn draw_hotkeys_tab(ui: &mut egui::Ui) {

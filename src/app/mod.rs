@@ -59,6 +59,7 @@ impl Default for AppState {
                 config_save_pending: false,
                 in_egui_frame: false,
                 any_pointer_down: false,
+                scale: Default::default(),
             },
             crt: CrtSettings {
                 hard_scan: -8.0,
@@ -726,6 +727,9 @@ impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ui.in_egui_frame = true;
         self.ui.any_pointer_down = ctx.input(|i| i.pointer.any_down());
+        if self.steam_deck.is_none() {
+            ui::scaling::apply_ui_scale(ctx, &mut self.ui.scale);
+        }
         self.pace_gui_frame();
 
         let raw_audio_peak = self
@@ -797,35 +801,24 @@ impl eframe::App for AppState {
         }
         let mut repaint_requested = false;
 
-        if self.steam_deck.is_none() && self.ui.control_window_open {
-            let monitor = ctx
-                .input(|i| i.viewport().monitor_size)
-                .unwrap_or(egui::vec2(1920.0, 1080.0));
-            let compact = monitor.y < 850.0 || monitor.x < 1024.0;
-            let size = if compact {
-                egui::vec2(
-                    960.0_f32.min(monitor.x - 48.0).max(320.0),
-                    770.0_f32.min(monitor.y - 96.0).max(240.0),
-                )
-            } else {
-                egui::vec2(960.0, 770.0)
-            };
-            let mut controls_viewport = egui::ViewportBuilder::default()
-                .with_title("Michadame Controls")
-                .with_inner_size(size)
-                .with_min_inner_size(if compact {
-                    egui::vec2(320.0, 240.0)
-                } else {
-                    size
-                })
-                .with_resizable(compact);
-            if !compact {
-                controls_viewport = controls_viewport.with_max_inner_size(size);
-            }
+        // Wait for the startup UI scale to settle so the controls window is not created at
+        // the wrong pixel size and immediately resized.
+        if self.steam_deck.is_none() && self.ui.control_window_open && self.ui.scale.settled_once {
+            let (controls_viewport, fitted) = ui::scaling::fixed_size_viewport(
+                egui::ViewportBuilder::default().with_title("Michadame Controls"),
+                ui::CONTROLS_WINDOW_SIZE,
+                ui::scaling::monitor_size(ctx),
+            );
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("control_window"),
                 controls_viewport,
                 |ctx, _class| {
+                    ui::scaling::reapply_window_size_on_zoom_change(
+                        ctx,
+                        &self.ui.scale,
+                        fitted,
+                        ui::CONTROLS_WINDOW_SIZE,
+                    );
                     self.ui.any_pointer_down |= ctx.input(|i| i.pointer.any_down());
 
                     repaint_requested |= ui::draw_main_ui(self, ctx);

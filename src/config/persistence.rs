@@ -409,6 +409,11 @@ pub fn save_global_hardware_config_at(
     cfg.ocr_jitter_tolerance = Some(state.ocr.jitter_tolerance);
     cfg.bank_current_tag = crate::bank::tags::normalize_tag(&state.bank.current_tag);
     cfg.bank_compact_mode = Some(state.bank.compact_mode);
+    cfg.ui_scale = state
+        .ui
+        .scale
+        .manual
+        .map(crate::ui::scaling::sanitize_manual_scale);
     cfg.default_halo = Some(state.halo_defaults.clone());
     cfg.default_cathode_interference = Some(state.cathode_interference_defaults.clone());
     cfg.popup_under_crt = Some(state.dict.popup_under_crt);
@@ -906,6 +911,7 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     state.bank.current_tag = cfg.bank_current_tag.clone().unwrap_or_default();
     state.bank.saved_current_tag = state.bank.current_tag.clone();
     state.bank.compact_mode = cfg.bank_compact_mode.unwrap_or(false);
+    state.ui.scale.manual = cfg.ui_scale.map(crate::ui::scaling::sanitize_manual_scale);
     if state.steam_deck.is_none() {
         state.twitch.apply_config(cfg.twitch.clone());
     }

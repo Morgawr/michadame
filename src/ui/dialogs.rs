@@ -13,6 +13,8 @@ pub fn show_first_run_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .collapsible(false)
         .resizable(false)
+        .max_height(crate::ui::scaling::max_dialog_size(ctx).y)
+        .vscroll(true)
         .show(ctx, |ui| {
             ui.vertical_centered(|ui| {
                 if let Some(logo) = &state.logo_texture {
@@ -54,6 +56,8 @@ pub fn show_quit_dialog(state: &mut AppState, ctx: &egui::Context, ui: &mut egui
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .collapsible(false)
         .resizable(false)
+        .max_height(crate::ui::scaling::max_dialog_size(ctx).y)
+        .vscroll(true)
         .show(ctx, |ui| {
             ui.label("A video stream is active. Are you sure you want to quit the application?");
             ui.add_space(15.0);
@@ -88,6 +92,8 @@ pub fn show_stop_stream_dialog(
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .collapsible(false)
         .resizable(false)
+        .max_height(crate::ui::scaling::max_dialog_size(ctx).y)
+        .vscroll(true)
         .show(ctx, |ui| {
             ui.label("Are you sure you want to stop the video stream?");
             ui.add_space(15.0);
@@ -126,6 +132,8 @@ pub fn show_config_error_dialog(
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .collapsible(false)
         .resizable(false)
+        .max_height(crate::ui::scaling::max_dialog_size(ctx).y)
+        .vscroll(true)
         .show(ctx, |ui| {
             ui.set_max_width(520.0);
             ui.vertical_centered(|ui| {

@@ -1,4 +1,5 @@
 use super::models::{GlossaryEntry, PitchAccent, TermEntry};
+use super::theme;
 use eframe::egui::{self, text::LayoutJob, Color32, FontId, RichText, TextFormat};
 
 pub const FONT_DICT_FAMILY: &str = "GothicCJK";
@@ -34,27 +35,27 @@ pub fn dict_font(size: f32) -> FontId {
     FontId::new(size * dict_scale(), family)
 }
 
-/// Dark-theme palette constants
-const COLOR_HEADWORD: Color32 = Color32::from_rgb(248, 250, 252);
-const COLOR_READING: Color32 = Color32::from_rgb(56, 189, 248); // sky-400
-const COLOR_PITCH_ACCENT: Color32 = Color32::from_rgb(239, 68, 68); // red-500
-const COLOR_DEINFLECT_BG: Color32 = Color32::from_rgb(59, 45, 84);
-const COLOR_DEINFLECT_TEXT: Color32 = Color32::from_rgb(216, 180, 254);
-const COLOR_TAG_BG: Color32 = Color32::from_rgb(30, 41, 59);
-const COLOR_TAG_BORDER: Color32 = Color32::from_rgb(51, 65, 85);
-const COLOR_TAG_TEXT: Color32 = Color32::from_rgb(148, 163, 184);
-const COLOR_DEFINITION: Color32 = Color32::from_rgb(226, 232, 240);
-const COLOR_EXAMPLE_JA: Color32 = Color32::from_rgb(241, 245, 249);
-const COLOR_EXAMPLE_EN: Color32 = Color32::from_rgb(203, 213, 225);
-const COLOR_EXAMPLE_BG: Color32 = Color32::from_rgba_premultiplied(30, 41, 59, 70);
-const COLOR_RUBY: Color32 = Color32::from_rgb(125, 211, 252);
-const COLOR_MUTED: Color32 = Color32::from_rgb(100, 116, 139);
-const COLOR_FREQ_BG: Color32 = Color32::from_rgb(19, 78, 74);
-const COLOR_FREQ_BORDER: Color32 = Color32::from_rgb(20, 184, 166);
-const COLOR_FREQ_TEXT: Color32 = Color32::from_rgb(94, 234, 212);
-const COLOR_MINED_BG: Color32 = Color32::from_rgb(67, 26, 7);
-const COLOR_MINED_BORDER: Color32 = Color32::from_rgb(249, 115, 22);
-const COLOR_MINED_TEXT: Color32 = Color32::from_rgb(254, 215, 170);
+/// "Faded Indigo" retro palette (see [`super::theme`])
+const COLOR_HEADWORD: Color32 = theme::HEAD;
+const COLOR_READING: Color32 = theme::GOLD;
+const COLOR_PITCH_ACCENT: Color32 = theme::BRICK;
+const COLOR_DEINFLECT_BG: Color32 = theme::DEINFLECT_BG;
+const COLOR_DEINFLECT_TEXT: Color32 = theme::DEINFLECT_TEXT;
+const COLOR_TAG_BG: Color32 = theme::TAG_BG;
+const COLOR_TAG_BORDER: Color32 = theme::TAG_BORDER;
+const COLOR_TAG_TEXT: Color32 = theme::TAG_TEXT;
+const COLOR_DEFINITION: Color32 = theme::TEXT;
+const COLOR_EXAMPLE_JA: Color32 = theme::EXAMPLE_JA;
+const COLOR_EXAMPLE_EN: Color32 = theme::EXAMPLE_EN;
+const COLOR_EXAMPLE_BG: Color32 = theme::EXAMPLE_BG;
+const COLOR_RUBY: Color32 = theme::GOLD;
+const COLOR_MUTED: Color32 = theme::MUTED;
+const COLOR_FREQ_BG: Color32 = theme::FREQ_BG;
+const COLOR_FREQ_BORDER: Color32 = theme::FREQ_BORDER;
+const COLOR_FREQ_TEXT: Color32 = theme::FREQ_TEXT;
+const COLOR_MINED_BG: Color32 = theme::MINED_BG;
+const COLOR_MINED_BORDER: Color32 = theme::MINED_BORDER;
+const COLOR_MINED_TEXT: Color32 = theme::MINED_TEXT;
 
 /// Circled numbers for sense indices ①..⑳
 const CIRCLED_NUMBERS: &[&str] = &[
@@ -84,9 +85,9 @@ pub fn render_term_entry(
     can_clip: bool,
 ) -> EntryAction {
     if index > 0 {
-        ui.add_space(14.0);
-        ui.separator();
-        ui.add_space(8.0);
+        ui.add_space(10.0);
+        theme::divider(ui, 2.0 * dict_scale());
+        ui.add_space(6.0);
     }
 
     let mut action = EntryAction::None;
@@ -155,17 +156,18 @@ fn render_delete_name_button(ui: &mut egui::Ui, size: f32) -> bool {
     };
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), non_focus_click);
     let hovered = response.hovered();
-    let (fill, stroke_color, icon_color) = if hovered {
-        (
-            Color32::from_rgba_premultiplied(65, 25, 25, 220),
-            Color32::from_rgb(239, 68, 68),
-            Color32::from_rgb(248, 113, 113),
-        )
+    let (fill, icon_color) = if hovered {
+        (theme::BUTTON_DANGER_HOVER, theme::DANGER_TEXT)
     } else {
-        (COLOR_TAG_BG, COLOR_TAG_BORDER, COLOR_TAG_TEXT)
+        (COLOR_TAG_BG, COLOR_TAG_TEXT)
     };
-    ui.painter()
-        .rect(rect, 8.0, fill, egui::Stroke::new(1.5, stroke_color));
+    theme::paint_bevel(
+        ui.painter(),
+        rect,
+        fill,
+        response.is_pointer_button_down_on(),
+        1.5,
+    );
 
     let center = rect.center();
     let arm = size * 0.22;
@@ -218,49 +220,46 @@ fn render_delete_name_button(ui: &mut egui::Ui, size: f32) -> bool {
     response.on_hover_text("Delete from custom names").clicked()
 }
 
-/// Round `+` / `…` / `✔` button used to add an entry to the mining bank.
+/// Square bevel `＋` / `…` / `✔` button used to add an entry to the mining bank.
 fn render_mine_button(ui: &mut egui::Ui, status: crate::bank::MineStatus, size: f32) -> bool {
     use crate::bank::MineStatus;
-    let non_focus_click = egui::Sense {
-        click: true,
-        drag: false,
-        focusable: false,
-    };
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), non_focus_click);
-    let hovered = response.hovered() && status == MineStatus::Available;
-    let (fill, stroke, glyph, glyph_color) = match status {
-        MineStatus::Available => (
-            if hovered {
-                Color32::from_rgb(14, 116, 144)
-            } else {
-                COLOR_TAG_BG
-            },
-            COLOR_READING,
-            "+",
-            COLOR_HEADWORD,
-        ),
-        MineStatus::Pending => (COLOR_TAG_BG, COLOR_TAG_BORDER, "…", COLOR_TAG_TEXT),
-        MineStatus::Mined => (COLOR_FREQ_BG, COLOR_FREQ_BORDER, "✔", COLOR_FREQ_TEXT),
-    };
-    ui.painter().circle(
-        rect.center(),
-        size / 2.0 - 1.0,
-        fill,
-        egui::Stroke::new(1.5, stroke),
+    let response = paint_bevel_mine_button(
+        ui,
+        status,
+        size,
+        "+",
+        size * 0.6,
+        theme::BUTTON_MINE,
+        theme::BUTTON_MINE_HOVER,
     );
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        glyph,
-        FontId::proportional(size * 0.6),
-        glyph_color,
+    let response = match status {
+        MineStatus::Available => response.on_hover_text("Add to mining bank (B)"),
+        MineStatus::Pending => response.on_hover_text("Saving…"),
+        MineStatus::Mined => response.on_hover_text("Already in the mining bank"),
+    };
+    status == MineStatus::Available && response.clicked()
+}
+
+/// Square bevel `＋＋` / `…` / `✔` button used to add an entry to the mining bank and create a
+/// Twitch clip.
+fn render_mine_and_clip_button(
+    ui: &mut egui::Ui,
+    status: crate::bank::MineStatus,
+    size: f32,
+) -> bool {
+    use crate::bank::MineStatus;
+    let response = paint_bevel_mine_button(
+        ui,
+        status,
+        size,
+        "++",
+        size * 0.45,
+        theme::BUTTON_CLIP,
+        theme::BUTTON_CLIP_HOVER,
     );
     let response = match status {
         MineStatus::Available => {
-            if hovered {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
-            response.on_hover_text("Add to mining bank (B)")
+            response.on_hover_text("Add to mining bank and create 20s Twitch clip")
         }
         MineStatus::Pending => response.on_hover_text("Saving…"),
         MineStatus::Mined => response.on_hover_text("Already in the mining bank"),
@@ -268,12 +267,17 @@ fn render_mine_button(ui: &mut egui::Ui, status: crate::bank::MineStatus, size: 
     status == MineStatus::Available && response.clicked()
 }
 
-/// Round `++` / `…` / `✔` button used to add an entry to the mining bank and create a Twitch clip.
-fn render_mine_and_clip_button(
+/// Allocates and paints a PC-98 style bevel button for the mining actions. Mined entries are
+/// drawn pressed-in with a `✔`.
+fn paint_bevel_mine_button(
     ui: &mut egui::Ui,
     status: crate::bank::MineStatus,
     size: f32,
-) -> bool {
+    glyph: &str,
+    glyph_size: f32,
+    face: Color32,
+    face_hover: Color32,
+) -> egui::Response {
     use crate::bank::MineStatus;
     let non_focus_click = egui::Sense {
         click: true,
@@ -282,48 +286,36 @@ fn render_mine_and_clip_button(
     };
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), non_focus_click);
     let hovered = response.hovered() && status == MineStatus::Available;
-    let (fill, stroke, glyph, glyph_color) = match status {
+    let (fill, glyph, glyph_color, pressed) = match status {
         MineStatus::Available => (
-            if hovered {
-                Color32::from_rgb(126, 34, 206)
-            } else {
-                COLOR_TAG_BG
-            },
-            Color32::from_rgb(168, 85, 247),
-            "++",
+            if hovered { face_hover } else { face },
+            glyph,
             COLOR_HEADWORD,
+            response.is_pointer_button_down_on(),
         ),
-        MineStatus::Pending => (COLOR_TAG_BG, COLOR_TAG_BORDER, "…", COLOR_TAG_TEXT),
-        MineStatus::Mined => (COLOR_FREQ_BG, COLOR_FREQ_BORDER, "✔", COLOR_FREQ_TEXT),
+        MineStatus::Pending => (COLOR_TAG_BG, "…", COLOR_TAG_TEXT, false),
+        MineStatus::Mined => (COLOR_FREQ_BG, "✔", COLOR_FREQ_TEXT, true),
     };
-    ui.painter().circle(
-        rect.center(),
-        size / 2.0 - 1.0,
-        fill,
-        egui::Stroke::new(1.5, stroke),
-    );
-    ui.painter().text(
-        rect.center(),
+    theme::paint_bevel(ui.painter(), rect, fill, pressed, 1.5);
+    let glyph_size = if glyph == "++" {
+        glyph_size
+    } else {
+        size * 0.6
+    };
+    let nudge = if pressed { 1.5 } else { 0.0 };
+    theme::paint_shadow_text(
+        ui.painter(),
+        rect.center() + egui::vec2(nudge, nudge),
         egui::Align2::CENTER_CENTER,
         glyph,
-        FontId::proportional(if glyph == "++" {
-            size * 0.45
-        } else {
-            size * 0.6
-        }),
+        FontId::proportional(glyph_size),
         glyph_color,
+        2.0,
     );
-    let response = match status {
-        MineStatus::Available => {
-            if hovered {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
-            response.on_hover_text("Add to mining bank and create 20s Twitch clip")
-        }
-        MineStatus::Pending => response.on_hover_text("Saving…"),
-        MineStatus::Mined => response.on_hover_text("Already in the mining bank"),
-    };
-    status == MineStatus::Available && response.clicked()
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response
 }
 
 /// Combines a headword and its bracketed kana reading into a single `LayoutJob`,
@@ -676,8 +668,10 @@ pub fn render_headword_and_reading(
     term_color: Color32,
     reading_color: Color32,
 ) -> egui::Response {
+    // Hard drop shadow behind the headword + reading (PC-98 bitmap text look).
+    let shadow = (term_size * dict_scale() * 0.06).max(1.0);
     if pitches.is_empty() {
-        let job = build_headword_reading_job(
+        let mut job = build_headword_reading_job(
             term,
             reading,
             term_size,
@@ -685,7 +679,12 @@ pub fn render_headword_and_reading(
             term_color,
             reading_color,
         );
-        return ui.label(job);
+        job.wrap.max_width = ui.available_width();
+        let galley = ui.fonts(|f| f.layout_job(job));
+        let shadow_idx = ui.painter().add(egui::Shape::Noop);
+        let response = ui.label(galley.clone());
+        set_text_shadow(ui, shadow_idx, response.rect.min, galley, shadow);
+        return response;
     }
 
     let (job, spans) = build_headword_reading_pitch_job(
@@ -698,7 +697,9 @@ pub fn render_headword_and_reading(
         reading_color,
     );
     let galley = ui.fonts(|f| f.layout_job(job));
+    let shadow_idx = ui.painter().add(egui::Shape::Noop);
     let response = ui.label(galley.clone());
+    set_text_shadow(ui, shadow_idx, response.rect.min, galley.clone(), shadow);
     paint_pitch_accents(
         ui.painter(),
         response.rect.min,
@@ -708,6 +709,24 @@ pub fn render_headword_and_reading(
         reading_color,
     );
     response
+}
+
+/// Fills the placeholder shape `idx` with a hard, offset shadow copy of `galley`.
+fn set_text_shadow(
+    ui: &egui::Ui,
+    idx: egui::layers::ShapeIdx,
+    pos: egui::Pos2,
+    galley: std::sync::Arc<egui::Galley>,
+    offset: f32,
+) {
+    ui.painter().set(
+        idx,
+        egui::Shape::galley_with_override_text_color(
+            pos + egui::vec2(offset, offset),
+            galley,
+            theme::EDGE,
+        ),
+    );
 }
 
 /// Renders the headword, reading, frequency, deinflection and tag badges of an entry.
@@ -735,9 +754,9 @@ pub fn render_entry_header(ui: &mut egui::Ui, entry: &TermEntry, is_mined: bool)
             render_pill_badge(
                 ui,
                 "Custom Name",
-                Color32::from_rgb(30, 58, 138),
-                Color32::from_rgb(147, 197, 253),
-                Color32::from_rgb(59, 130, 246),
+                theme::CUSTOM_BG,
+                theme::CUSTOM_TEXT,
+                theme::CUSTOM_BORDER,
             );
         }
 
@@ -802,7 +821,7 @@ pub fn render_entry_header(ui: &mut egui::Ui, entry: &TermEntry, is_mined: bool)
                     &format!("← {trail}"),
                     COLOR_DEINFLECT_BG,
                     COLOR_DEINFLECT_TEXT,
-                    Color32::from_rgba_premultiplied(147, 51, 234, 80),
+                    theme::DEINFLECT_BORDER,
                 );
             }
 
@@ -880,7 +899,7 @@ fn as_deinflection_glossary(val: &serde_json::Value) -> Option<(&str, Vec<&str>)
     Some((term, reasons))
 }
 
-/// Renders a small stylish pill badge (e.g. for tags or deinflections).
+/// Renders a small square-edged chip badge (e.g. for tags or deinflections).
 pub fn render_pill_badge(
     ui: &mut egui::Ui,
     text: &str,
@@ -896,8 +915,12 @@ pub fn render_pill_badge(
     let desired_size = galley.size() + padding * 2.0;
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
 
-    ui.painter()
-        .rect(rect, 5.0 * scale, bg, egui::Stroke::new(1.0, border));
+    ui.painter().rect(
+        rect,
+        0.0,
+        bg,
+        egui::Stroke::new((2.0 * scale).max(1.0), border),
+    );
 
     let text_pos = rect.min + padding;
     ui.painter().galley(text_pos, galley, fg);
@@ -1107,15 +1130,10 @@ fn render_sense(ui: &mut egui::Ui, sense_val: &serde_json::Value, index: usize) 
             .unwrap_or_default();
 
         ui.add_space(4.0);
-        let accent_color = Color32::from_rgb(56, 189, 248); // sky-400 accent
+        let accent_color = theme::EXAMPLE_ACCENT;
         let frame_resp = egui::Frame::none()
             .fill(COLOR_EXAMPLE_BG)
-            .rounding(egui::Rounding {
-                nw: 4.0,
-                sw: 4.0,
-                ne: 4.0,
-                se: 4.0,
-            })
+            .rounding(egui::Rounding::ZERO)
             .stroke(egui::Stroke::NONE)
             .inner_margin(egui::Margin {
                 left: 14.0,
@@ -1146,7 +1164,7 @@ fn render_sense(ui: &mut egui::Ui, sense_val: &serde_json::Value, index: usize) 
         ui.painter().vline(
             r.min.x + 2.0,
             r.y_range(),
-            egui::Stroke::new(2.5, accent_color),
+            egui::Stroke::new(4.0, accent_color),
         );
     }
 

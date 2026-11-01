@@ -15,6 +15,7 @@ pub mod networking;
 pub mod niconico;
 pub mod pc98;
 pub mod profiles;
+pub mod scaling;
 pub mod steam_deck;
 pub mod studio;
 pub mod tag_input;
@@ -26,6 +27,13 @@ pub mod whiteboard;
 
 pub use networking::send_ws_command;
 pub use video_player::draw_video_player;
+
+/// Designed size (points) of the desktop controls/settings window.
+pub const CONTROLS_WINDOW_SIZE: egui::Vec2 = egui::vec2(960.0, 770.0);
+/// Narrowest width (points) the settings content is laid out at. When the controls window
+/// has to be shrunk to fit a small screen, the content keeps this designed width and a
+/// horizontal scrollbar appears instead of the layout getting squeezed and cut off.
+const CONTROLS_MIN_CONTENT_WIDTH: f32 = 930.0;
 
 pub fn setup_style(ctx: &eframe::egui::Context) {
     let mut style = (*ctx.style()).clone();
@@ -197,7 +205,7 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
                 ui.add_space(6.0);
             }
 
-            let max_panel_w = ui.available_width();
+            let max_panel_w = ui.available_width().max(CONTROLS_MIN_CONTENT_WIDTH);
             egui::ScrollArea::both()
                 .id_source("desktop_settings_scroll")
                 .auto_shrink([false, false])

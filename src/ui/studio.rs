@@ -698,15 +698,22 @@ pub fn draw_studio_window(state: &mut AppState, ctx: &egui::Context) -> bool {
 
     let mut repaint_requested = false;
 
+    let desired = egui::Vec2::from(STUDIO_WINDOW_SIZE);
+    let (viewport, fitted) = crate::ui::scaling::fixed_size_viewport(
+        egui::ViewportBuilder::default().with_title("Michadame Studio"),
+        desired,
+        crate::ui::scaling::monitor_size(ctx),
+    );
     ctx.show_viewport_immediate(
         egui::ViewportId::from_hash_of("studio_window"),
-        egui::ViewportBuilder::default()
-            .with_title("Michadame Studio")
-            .with_inner_size(STUDIO_WINDOW_SIZE)
-            .with_min_inner_size(STUDIO_WINDOW_SIZE)
-            .with_max_inner_size(STUDIO_WINDOW_SIZE)
-            .with_resizable(false),
+        viewport,
         |ctx, _class| {
+            crate::ui::scaling::reapply_window_size_on_zoom_change(
+                ctx,
+                &state.ui.scale,
+                fitted,
+                desired,
+            );
             state.ui.any_pointer_down |= ctx.input(|i| i.pointer.any_down());
 
             // Hotkeys inside Studio window:
@@ -719,7 +726,21 @@ pub fn draw_studio_window(state: &mut AppState, ctx: &egui::Context) -> bool {
             }
 
             egui::CentralPanel::default().show(ctx, |ui| {
-                repaint_requested |= draw_studio_contents(state, ui);
+                if fitted.fits {
+                    repaint_requested |= draw_studio_contents(state, ui);
+                } else {
+                    // The window had to be shrunk to fit the screen: keep the designed
+                    // layout and make it scrollable instead of cutting it off.
+                    let design_size = desired - egui::vec2(16.0, 16.0);
+                    egui::ScrollArea::both()
+                        .id_source("studio_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.set_min_size(design_size);
+                            ui.set_max_width(design_size.x);
+                            repaint_requested |= draw_studio_contents(state, ui);
+                        });
+                }
             });
 
             if ctx.input(|i| i.viewport().close_requested()) {

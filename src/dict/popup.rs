@@ -1,11 +1,12 @@
 use super::models::DictPopupState;
 use super::render::render_term_entry;
-use eframe::egui::{self, Color32, Rounding, Stroke};
+use super::theme;
+use eframe::egui::{self, Stroke};
 
-const POPUP_BG: Color32 = Color32::from_rgb(22, 24, 30);
-const POPUP_STROKE: Color32 = Color32::from_rgb(51, 65, 85);
-const WORD_HIGHLIGHT_FILL: Color32 = Color32::from_rgba_premultiplied(56, 189, 248, 45);
-const WORD_HIGHLIGHT_STROKE: Color32 = Color32::from_rgb(56, 189, 248);
+/// Line-width unit of the retro window chrome at popup scale 1.0.
+const POPUP_CHROME_UNIT: f32 = 2.0;
+/// Height of the footer row (`━━ 1 / 3 ━━ ▼`) below the entry list.
+const POPUP_FOOTER_HEIGHT: f32 = 30.0;
 /// After the cursor leaves the popup or the highlighted word, hovering a different word
 /// only replaces the popup once this much time has passed.
 pub const POPUP_SWITCH_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
@@ -90,13 +91,23 @@ pub fn draw_dict_popup(
 
     // 1. Draw glowing highlight over the recognized word boundary (if highlight is not hidden)
     if show_highlight {
+        // Dashed gold box, like a VN text cursor selection.
         for rect in std::iter::once(&popup.word_rect).chain(popup.extra_word_rects.iter()) {
-            ui.painter().rect(
-                rect.expand(2.0),
+            let r = rect.expand(3.0);
+            ui.painter().rect_filled(r, 0.0, theme::WORD_HIGHLIGHT_FILL);
+            let corners = [
+                r.left_top(),
+                r.right_top(),
+                r.right_bottom(),
+                r.left_bottom(),
+                r.left_top(),
+            ];
+            ui.painter().extend(egui::Shape::dashed_line(
+                &corners,
+                Stroke::new(2.0, theme::WORD_HIGHLIGHT_STROKE),
+                5.0,
                 3.0,
-                WORD_HIGHLIGHT_FILL,
-                Stroke::new(1.5, WORD_HIGHLIGHT_STROKE),
-            );
+            ));
         }
     }
 
@@ -155,24 +166,18 @@ pub fn draw_dict_popup(
                 ui.set_max_size(egui::vec2(local_width + 48.0, local_height + 36.0));
                 ui.set_clip_rect(transform.inverse() * video_rect);
             }
-            let frame = egui::Frame::none()
-                .fill(POPUP_BG)
-                .stroke(Stroke::new(1.5, POPUP_STROKE))
-                .rounding(Rounding::same(12.0))
-                .shadow(egui::epaint::Shadow {
-                    offset: egui::vec2(0.0, 6.0),
-                    blur: 16.0,
-                    spread: 3.0,
-                    color: Color32::from_black_alpha(180),
-                })
-                .inner_margin(egui::Margin::symmetric(24.0, 18.0));
+            theme::apply_widget_visuals(ui);
+            // Retro window chrome (dithered fill, frame, gems) is painted behind the content
+            // once its final size is known.
+            let chrome_idx = ui.painter().add(egui::Shape::Noop);
+            let frame = egui::Frame::none().inner_margin(egui::Margin::symmetric(24.0, 18.0));
 
             let response = frame.show(ui, |ui| {
                 ui.set_width(local_width);
                 ui.set_max_height(local_height);
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 5.0);
 
-                let scroll_max_h = (local_height - 36.0).max(40.0);
+                let scroll_max_h = (local_height - 36.0 - POPUP_FOOTER_HEIGHT).max(40.0);
 
                 // While the popup is open, mouse-wheel scrolling anywhere goes to the popup.
                 // When the pointer is over the popup, egui's ScrollArea handles it natively;
@@ -220,9 +225,11 @@ pub fn draw_dict_popup(
                     scroll_area = scroll_area
                         .vertical_scroll_offset((current - external_scroll / scale).max(0.0));
                 }
+                let mut entry_tops = Vec::with_capacity(popup.entries.len());
                 let scroll_output = scroll_area.show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(8.0, 5.0);
                     for (idx, entry) in popup.entries.iter().enumerate() {
+                        entry_tops.push(ui.cursor().top());
                         match render_term_entry(
                             ui,
                             entry,
@@ -247,11 +254,35 @@ pub fn draw_dict_popup(
                 debug_assert_eq!(scroll_output.id, scroll_id);
                 let offset = scroll_output.state.offset.y;
                 ui.ctx().data_mut(|d| d.insert_temp(offset_key, offset));
+
+                // Footer: which entry is at the top of the view, plus the blinking page cursor.
+                let viewport_top = scroll_output.inner_rect.top();
+                let current = entry_tops
+                    .iter()
+                    .rposition(|&top| top <= viewport_top + 24.0)
+                    .unwrap_or(0)
+                    + 1;
+                let more_below =
+                    offset + scroll_output.inner_rect.height() < scroll_output.content_size.y - 1.0;
+                draw_popup_footer(ui, current, popup.entries.len(), more_below);
                 if external_scroll != 0.0 {
                     // Keep animating smooth scrolling even if the pointer is idle.
                     ui.ctx().request_repaint();
                 }
             });
+
+            let time = ui.input(|i| i.time);
+            ui.painter().set(
+                chrome_idx,
+                egui::Shape::Vec(theme::window_shapes(
+                    ui.ctx(),
+                    response.response.rect,
+                    POPUP_CHROME_UNIT,
+                    1.0 / scale.max(0.01),
+                    Some(time),
+                )),
+            );
+            theme::request_animation_repaint(ui.ctx(), time);
 
             if let Some(ptr) = ui.input(|i| i.pointer.hover_pos()) {
                 if (transform * response.response.rect).contains(ptr) {
@@ -312,6 +343,45 @@ pub fn draw_dict_popup(
         }
     }
     (popup_action, primitives)
+}
+
+/// Footer row of the popup: `━━━ 1 / 3 ━━━ ▼`. The page cursor blinks (gold while more
+/// content is below, dim violet once the end is reached).
+fn draw_popup_footer(ui: &mut egui::Ui, current: usize, total: usize, more_below: bool) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), POPUP_FOOTER_HEIGHT),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+    let center = rect.center();
+    let label = format!("{current} / {total}");
+    let galley = painter.layout_no_wrap(label, super::render::dict_font(22.0), theme::MUTED);
+    let half = galley.size().x * 0.5 + 14.0;
+    let rule_len = 150.0f32.min(rect.width() * 0.3);
+    let stroke = Stroke::new(3.0, theme::RULE);
+    painter.hline(
+        center.x - half - rule_len..=center.x - half,
+        center.y,
+        stroke,
+    );
+    painter.hline(
+        center.x + half..=center.x + half + rule_len,
+        center.y,
+        stroke,
+    );
+    painter.galley(center - galley.size() * 0.5, galley, theme::MUTED);
+
+    if theme::blink_on(ui.input(|i| i.time)) {
+        theme::paint_shadow_text(
+            painter,
+            egui::pos2(center.x + half + rule_len + 22.0, center.y),
+            egui::Align2::CENTER_CENTER,
+            "▼",
+            super::render::dict_font(24.0),
+            if more_below { theme::GOLD } else { theme::RULE },
+            2.0,
+        );
+    }
 }
 
 /// Placement result containing the top-left position and dimensions for the popup.
