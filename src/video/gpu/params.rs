@@ -25,6 +25,8 @@ pub struct ShaderParams {
     pub deinterlace_line_spacing: f32,
     pub deinterlace_spatial_mix: f32,
     pub vibrance: f32,
+    pub brightness: f32,
+    pub gamma: f32,
     pub scaler_filter: u8,
     pub overscan_x: f32,
     pub overscan_y: f32,
@@ -379,6 +381,8 @@ impl ShaderParams {
             deinterlace_line_spacing: state.video.deinterlace_line_spacing,
             deinterlace_spatial_mix: state.video.deinterlace_spatial_mix,
             vibrance: state.video.vibrance,
+            brightness: state.video.brightness,
+            gamma: state.video.gamma,
             scaler_filter: state.scaler_filter.load(Ordering::Relaxed),
             overscan_x: state.video.overscan_x,
             overscan_y: state.video.overscan_y,
@@ -418,6 +422,8 @@ impl Default for ShaderParams {
             deinterlace_line_spacing: 1.0,
             deinterlace_spatial_mix: 0.75,
             vibrance: 1.0,
+            brightness: 1.0,
+            gamma: 1.0,
             scaler_filter: crate::video::types::ScalerFilter::FastBilinear as u8,
             overscan_x: 0.0,
             overscan_y: 0.0,
@@ -785,5 +791,22 @@ mod tests {
         assert_eq!(p.warp, [0.031, 0.041]);
         assert_eq!(p.corner_size, 0.02);
         assert_eq!(p.filter_type, 2);
+    }
+
+    #[test]
+    fn test_shader_params_brightness_and_gamma() {
+        let default_params = ShaderParams::default();
+        assert_eq!(default_params.brightness, 1.0);
+        assert_eq!(default_params.gamma, 1.0);
+
+        let mut state = AppState::default();
+        assert_eq!(state.video.brightness, 1.0);
+        assert_eq!(state.video.gamma, 1.0);
+
+        state.video.brightness = 1.35;
+        state.video.gamma = 1.45;
+        let params = ShaderParams::from_state(&state);
+        assert_eq!(params.brightness, 1.35);
+        assert_eq!(params.gamma, 1.45);
     }
 }

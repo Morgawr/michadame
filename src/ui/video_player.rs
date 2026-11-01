@@ -874,6 +874,16 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             } else {
                 state.video.vibrance
             };
+            let brightness = if is_showing_roll {
+                1.0
+            } else {
+                state.video.brightness
+            };
+            let gamma = if is_showing_roll {
+                1.0
+            } else {
+                state.video.gamma
+            };
             let overscan_x = if is_showing_roll {
                 0.0
             } else {
@@ -1043,6 +1053,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                             deinterlace_line_spacing,
                             deinterlace_spatial_mix,
                             vibrance,
+                            brightness,
+                            gamma,
                             scaler_filter,
                             overscan_x,
                             overscan_y,

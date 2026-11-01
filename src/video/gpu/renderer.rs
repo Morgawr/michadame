@@ -96,6 +96,10 @@ pub struct CrtFilterRenderer {
     yuyv_overscan_loc: glow::UniformLocation,
     yuv_underscan_loc: glow::UniformLocation,
     yuyv_underscan_loc: glow::UniformLocation,
+    yuv_brightness_loc: glow::UniformLocation,
+    yuyv_brightness_loc: glow::UniformLocation,
+    yuv_gamma_loc: glow::UniformLocation,
+    yuyv_gamma_loc: glow::UniformLocation,
     median_mix_loc: glow::UniformLocation,
     deinterlace_prog: glow::Program,
     deinterlace_current_frame_loc: Option<glow::UniformLocation>,
@@ -262,6 +266,8 @@ pub struct CrtFilterRenderer {
     linearize_sampler_loc: Option<glow::UniformLocation>,
     linearize_overscan_loc: Option<glow::UniformLocation>,
     linearize_underscan_loc: Option<glow::UniformLocation>,
+    linearize_brightness_loc: Option<glow::UniformLocation>,
+    linearize_gamma_loc: Option<glow::UniformLocation>,
 
     post_fbos: [glow::Framebuffer; 2],
     post_textures: [glow::Texture; 2],
@@ -275,6 +281,7 @@ pub struct CrtFilterRenderer {
     last_frame_captured_at: i64,
     last_input_color_range: Option<crate::video::types::ColorRange>,
     last_input_scan: (f32, f32, f32, f32),
+    last_input_color_adj: (f32, f32),
     last_fft_enabled: bool,
     last_fft_thresholds: (f32, f32),
     last_fft_mask_gen: u64,
@@ -498,6 +505,8 @@ impl CrtFilterRenderer {
             let linearize_overscan_loc = gl.get_uniform_location(linearize_prog, "overscan_offset");
             let linearize_underscan_loc =
                 gl.get_uniform_location(linearize_prog, "underscan_stretch");
+            let linearize_brightness_loc = gl.get_uniform_location(linearize_prog, "brightness");
+            let linearize_gamma_loc = gl.get_uniform_location(linearize_prog, "gamma");
             gl.use_program(Some(linearize_prog));
             if let Some(ref loc) = linearize_sampler_loc {
                 gl.uniform_1_i32(Some(loc), 0);
@@ -507,6 +516,12 @@ impl CrtFilterRenderer {
             }
             if let Some(ref loc) = linearize_underscan_loc {
                 gl.uniform_2_f32(Some(loc), 1.0, 1.0);
+            }
+            if let Some(ref loc) = linearize_brightness_loc {
+                gl.uniform_1_f32(Some(loc), 1.0);
+            }
+            if let Some(ref loc) = linearize_gamma_loc {
+                gl.uniform_1_f32(Some(loc), 1.0);
             }
             gl.use_program(None);
 
@@ -794,6 +809,10 @@ impl CrtFilterRenderer {
             let yuyv_underscan_loc = gl
                 .get_uniform_location(yuyv_packed_prog, "underscan_stretch")
                 .unwrap();
+            let yuyv_brightness_loc = gl
+                .get_uniform_location(yuyv_packed_prog, "brightness")
+                .unwrap();
+            let yuyv_gamma_loc = gl.get_uniform_location(yuyv_packed_prog, "gamma").unwrap();
 
             gl.use_program(Some(yuv_planar_prog));
             let yuv_range_loc = gl
@@ -805,6 +824,10 @@ impl CrtFilterRenderer {
             let yuv_underscan_loc = gl
                 .get_uniform_location(yuv_planar_prog, "underscan_stretch")
                 .unwrap();
+            let yuv_brightness_loc = gl
+                .get_uniform_location(yuv_planar_prog, "brightness")
+                .unwrap();
+            let yuv_gamma_loc = gl.get_uniform_location(yuv_planar_prog, "gamma").unwrap();
 
             gl.use_program(None);
 
@@ -987,6 +1010,10 @@ impl CrtFilterRenderer {
                 yuyv_overscan_loc,
                 yuv_underscan_loc,
                 yuyv_underscan_loc,
+                yuv_brightness_loc,
+                yuyv_brightness_loc,
+                yuv_gamma_loc,
+                yuyv_gamma_loc,
                 fbos,
                 pass_textures,
                 yuv_planes,
@@ -1123,6 +1150,8 @@ impl CrtFilterRenderer {
                 linearize_sampler_loc,
                 linearize_overscan_loc,
                 linearize_underscan_loc,
+                linearize_brightness_loc,
+                linearize_gamma_loc,
                 post_fbos,
                 post_textures,
                 last_post_size: (0, 0),
@@ -1138,6 +1167,7 @@ impl CrtFilterRenderer {
                 last_frame_captured_at: -1,
                 last_input_color_range: None,
                 last_input_scan: (0.0, 0.0, 0.0, 0.0),
+                last_input_color_adj: (1.0, 1.0),
                 last_fft_enabled: false,
                 last_fft_thresholds: (0.0, 0.0),
                 last_fft_mask_gen: 0,
@@ -1163,11 +1193,14 @@ impl CrtFilterRenderer {
         overscan_y: f32,
         underscan_x: f32,
         underscan_y: f32,
+        brightness: f32,
+        gamma: f32,
         fft_filter: Option<&Arc<Mutex<FftFilter>>>,
         fft_mask_threshold: f32,
         fft_black_threshold: f32,
     ) -> glow::Texture {
         let scan_tuple = (overscan_x, overscan_y, underscan_x, underscan_y);
+        let color_adj_tuple = (brightness, gamma);
         let need_yuv_upload = is_new_frame
             || self.history_count == 0
             || self.last_input_tex.is_none()
@@ -1175,7 +1208,8 @@ impl CrtFilterRenderer {
             || frame.height != self.last_frame_size.1
             || Some(frame.format) != self.last_frame_format
             || Some(frame.color_range) != self.last_input_color_range
-            || scan_tuple != self.last_input_scan;
+            || scan_tuple != self.last_input_scan
+            || color_adj_tuple != self.last_input_color_adj;
 
         if need_yuv_upload {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[6]));
@@ -1335,6 +1369,8 @@ impl CrtFilterRenderer {
                     (1.0 + underscan_x).max(0.01),
                     (1.0 + underscan_y).max(0.01),
                 );
+                gl.uniform_1_f32(Some(&self.yuv_brightness_loc), brightness);
+                gl.uniform_1_f32(Some(&self.yuv_gamma_loc), gamma);
                 if needs_realloc {
                     self.last_frame_size = (frame.width, frame.height);
                     self.last_frame_format = Some(frame.format);
@@ -1402,6 +1438,8 @@ impl CrtFilterRenderer {
                     (1.0 + underscan_x).max(0.01),
                     (1.0 + underscan_y).max(0.01),
                 );
+                gl.uniform_1_f32(Some(&self.yuyv_brightness_loc), brightness);
+                gl.uniform_1_f32(Some(&self.yuyv_gamma_loc), gamma);
                 rendered_input = true;
             } else if frame.format == Pixel::RGBA {
                 let expected_len = (frame.width * frame.height * 4) as usize;
@@ -1471,6 +1509,12 @@ impl CrtFilterRenderer {
                         (1.0 + underscan_y).max(0.01),
                     );
                 }
+                if let Some(ref loc) = self.linearize_brightness_loc {
+                    gl.uniform_1_f32(Some(loc), brightness);
+                }
+                if let Some(ref loc) = self.linearize_gamma_loc {
+                    gl.uniform_1_f32(Some(loc), gamma);
+                }
                 rendered_input = true;
             } else {
                 tracing::warn!("Skipping unsupported pixel format: {:?}", frame.format);
@@ -1480,6 +1524,7 @@ impl CrtFilterRenderer {
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 self.last_input_color_range = Some(frame.color_range);
                 self.last_input_scan = scan_tuple;
+                self.last_input_color_adj = color_adj_tuple;
             }
         }
 
@@ -1543,6 +1588,8 @@ impl CrtFilterRenderer {
         fallback_texture: glow::Texture,
         target_width: u32,
         target_height: u32,
+        brightness: f32,
+        gamma: f32,
     ) -> glow::Texture {
         self.last_frame_captured_at = -1;
         self.last_input_tex = None;
@@ -1558,6 +1605,12 @@ impl CrtFilterRenderer {
         }
         if let Some(loc) = &self.linearize_underscan_loc {
             gl.uniform_2_f32(Some(loc), 1.0, 1.0);
+        }
+        if let Some(loc) = &self.linearize_brightness_loc {
+            gl.uniform_1_f32(Some(loc), brightness);
+        }
+        if let Some(loc) = &self.linearize_gamma_loc {
+            gl.uniform_1_f32(Some(loc), gamma);
         }
         gl.active_texture(glow::TEXTURE0);
         gl.bind_texture(glow::TEXTURE_2D, Some(fallback_texture));
@@ -1578,6 +1631,8 @@ impl CrtFilterRenderer {
         overscan_y: f32,
         underscan_x: f32,
         underscan_y: f32,
+        brightness: f32,
+        gamma: f32,
         fft_filter: Option<&Arc<Mutex<FftFilter>>>,
         fft_mask_threshold: f32,
         fft_black_threshold: f32,
@@ -1633,6 +1688,8 @@ impl CrtFilterRenderer {
             overscan_y,
             underscan_x,
             underscan_y,
+            brightness,
+            gamma,
             fft_filter,
             fft_mask_threshold,
             fft_black_threshold,
@@ -1735,6 +1792,8 @@ impl CrtFilterRenderer {
         overscan_y: f32,
         underscan_x: f32,
         underscan_y: f32,
+        brightness: f32,
+        gamma: f32,
         deinterlace_filter_enabled: bool,
         deinterlace_mode: u8,
         deinterlace_blend: f32,
@@ -1812,6 +1871,8 @@ impl CrtFilterRenderer {
             overscan_y,
             underscan_x,
             underscan_y,
+            brightness,
+            gamma,
             fft_filter,
             fft_mask_threshold,
             fft_black_threshold,
@@ -1822,12 +1883,20 @@ impl CrtFilterRenderer {
                 && !deinterlace_filter_enabled
                 && !median_filter_enabled
                 && !is_anime4k
+                && (brightness - 1.0).abs() <= 0.0001
+                && (gamma - 1.0).abs() <= 0.0001
             {
                 video_texture = Some(tex);
                 input_is_srgb = true;
             } else {
-                video_texture =
-                    Some(self.linearize_fallback_texture(gl, tex, resolution.0, resolution.1));
+                video_texture = Some(self.linearize_fallback_texture(
+                    gl,
+                    tex,
+                    resolution.0,
+                    resolution.1,
+                    brightness,
+                    gamma,
+                ));
             }
         }
 
@@ -2220,6 +2289,8 @@ impl CrtFilterRenderer {
                 params.overscan_y,
                 params.underscan_x,
                 params.underscan_y,
+                params.brightness,
+                params.gamma,
                 params.deinterlace_filter_enabled,
                 params.deinterlace_mode,
                 params.deinterlace_blend,
@@ -2480,6 +2551,8 @@ impl CrtFilterRenderer {
         deinterlace_line_spacing: f32,
         deinterlace_spatial_mix: f32,
         vibrance: f32,
+        brightness: f32,
+        gamma: f32,
         scaler_filter: u8,
         overscan_x: f32,
         overscan_y: f32,
@@ -2515,6 +2588,8 @@ impl CrtFilterRenderer {
                 overscan_y,
                 underscan_x,
                 underscan_y,
+                brightness,
+                gamma,
                 deinterlace_filter_enabled,
                 deinterlace_mode,
                 deinterlace_blend,
@@ -3955,5 +4030,55 @@ mod tests {
                 "FS_AUDIO_REACTIVE is missing uniform declaration or usage for `{name}`"
             );
         }
+    }
+
+    #[test]
+    fn input_shaders_contain_brightness_and_gamma_uniforms() {
+        for (shader_name, src) in [
+            ("FS_YUV_PLANAR", FS_YUV_PLANAR),
+            ("FS_YUYV_PACKED", FS_YUYV_PACKED),
+            ("FS_LINEARIZE", FS_LINEARIZE),
+        ] {
+            assert!(
+                src.contains("uniform float brightness;"),
+                "{shader_name} is missing `uniform float brightness;`"
+            );
+            assert!(
+                src.contains("uniform float gamma;"),
+                "{shader_name} is missing `uniform float gamma;`"
+            );
+            assert!(
+                src.contains("ApplyBrightnessGamma"),
+                "{shader_name} is missing `ApplyBrightnessGamma`"
+            );
+        }
+    }
+
+    #[test]
+    fn test_brightness_and_gamma_adjustment_math() {
+        fn apply_brightness_gamma(mut c: f32, brightness: f32, gamma: f32) -> f32 {
+            if (gamma - 1.0).abs() > 0.0001 {
+                c = c.max(0.0).powf(1.0 / gamma.max(0.01));
+            }
+            c *= brightness.max(0.0);
+            c.clamp(0.0, 1.0)
+        }
+
+        // Neutral settings preserve signal identically
+        assert_eq!(apply_brightness_gamma(0.5, 1.0, 1.0), 0.5);
+
+        // Higher gamma (> 1.0) lifts midtones while keeping 0 and 1 anchored
+        let lifted = apply_brightness_gamma(0.5, 1.0, 2.0);
+        assert!(lifted > 0.70 && lifted < 0.71, "got {lifted}");
+        assert_eq!(apply_brightness_gamma(0.0, 1.0, 2.0), 0.0);
+        assert_eq!(apply_brightness_gamma(1.0, 1.0, 2.0), 1.0);
+
+        // Lower gamma (< 1.0) darkens midtones
+        let darkened = apply_brightness_gamma(0.5, 1.0, 0.5);
+        assert!((darkened - 0.25).abs() < 1e-5, "got {darkened}");
+
+        // Brightness scales signal and clamps to [0, 1]
+        assert!((apply_brightness_gamma(0.4, 1.5, 1.0) - 0.6).abs() < 1e-5);
+        assert_eq!(apply_brightness_gamma(0.8, 2.0, 1.0), 1.0);
     }
 }

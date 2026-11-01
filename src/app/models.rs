@@ -559,6 +559,8 @@ pub struct VideoSettings {
     pub deinterlace_line_spacing: f32,
     pub deinterlace_spatial_mix: f32,
     pub vibrance: f32,
+    pub brightness: f32,
+    pub gamma: f32,
     pub overscan_x: f32,
     pub overscan_y: f32,
     pub underscan_x: f32,

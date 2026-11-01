@@ -110,6 +110,8 @@ impl Default for AppState {
                 deinterlace_line_spacing: 1.0,
                 deinterlace_spatial_mix: 0.75,
                 vibrance: 1.0,
+                brightness: 1.0,
+                gamma: 1.0,
                 overscan_x: 0.0,
                 overscan_y: 0.0,
                 underscan_x: 0.0,

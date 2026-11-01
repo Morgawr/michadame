@@ -4,6 +4,8 @@ out vec4 out_color;
 uniform sampler2D srgb_tex;
 uniform vec2 overscan_offset;
 uniform vec2 underscan_stretch;
+uniform float brightness;
+uniform float gamma;
 
 float ToLinear1(float c) {
     return (c <= 0.04045) ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
@@ -11,6 +13,14 @@ float ToLinear1(float c) {
 
 vec3 ToLinear(vec3 c) {
     return vec3(ToLinear1(c.r), ToLinear1(c.g), ToLinear1(c.b));
+}
+
+vec3 ApplyBrightnessGamma(vec3 c) {
+    if (abs(gamma - 1.0) > 0.0001) {
+        c = pow(max(c, vec3(0.0)), vec3(1.0 / max(gamma, 0.01)));
+    }
+    c *= max(brightness, 0.0);
+    return clamp(c, 0.0, 1.0);
 }
 
 void main() {
@@ -27,5 +37,6 @@ void main() {
     }
 
     vec4 srgb = texture(srgb_tex, shifted_tc);
-    out_color = vec4(ToLinear(srgb.rgb), srgb.a);
+    vec3 rgb = ApplyBrightnessGamma(clamp(srgb.rgb, 0.0, 1.0));
+    out_color = vec4(ToLinear(rgb), srgb.a);
 }

@@ -219,6 +219,8 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         deinterlace_line_spacing: Some(state.video.deinterlace_line_spacing),
         deinterlace_spatial_mix: Some(state.video.deinterlace_spatial_mix),
         vibrance: Some(state.video.vibrance),
+        brightness: Some(state.video.brightness),
+        gamma: Some(state.video.gamma),
         overscan_x: Some(state.video.overscan_x),
         overscan_y: Some(state.video.overscan_y),
         underscan_x: Some(state.video.underscan_x),
@@ -562,6 +564,8 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) -> bool {
     state.video.deinterlace_spatial_mix =
         sanitize_finite_f32(profile.deinterlace_spatial_mix, 0.75, 0.0, 1.0);
     state.video.vibrance = sanitize_finite_f32(profile.vibrance, 1.0, 0.0, 3.0);
+    state.video.brightness = sanitize_finite_f32(profile.brightness, 1.0, 0.0, 3.0);
+    state.video.gamma = sanitize_finite_f32(profile.gamma, 1.0, 0.2, 3.0);
     state.video.overscan_x = sanitize_finite_f32(profile.overscan_x, 0.0, -0.2, 0.2);
     state.video.overscan_y = sanitize_finite_f32(profile.overscan_y, 0.0, -0.2, 0.2);
     state.video.underscan_x = sanitize_finite_f32(profile.underscan_x, 0.0, -0.2, 0.3);
@@ -2343,6 +2347,8 @@ crt_brightboost = 1.6
             crt_hard_scan: Some(f32::NAN),
             crt_brightboost: Some(f32::INFINITY),
             vibrance: Some(f32::NEG_INFINITY),
+            brightness: Some(f32::NAN),
+            gamma: Some(f32::NEG_INFINITY),
             horizontal_stretch: Some(f32::NAN),
             halo_brightboost: Some(f32::NAN),
             cathode_intensity: Some(f32::INFINITY),
@@ -2357,6 +2363,8 @@ crt_brightboost = 1.6
         assert_eq!(state.crt.hard_scan, -8.0);
         assert_eq!(state.crt.brightboost, 1.0);
         assert_eq!(state.video.vibrance, 1.0);
+        assert_eq!(state.video.brightness, 1.0);
+        assert_eq!(state.video.gamma, 1.0);
         assert_eq!(state.video.horizontal_stretch, 1.0);
         assert_eq!(state.halo.brightboost, state.halo_defaults.brightboost);
         assert_eq!(

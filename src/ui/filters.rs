@@ -973,6 +973,22 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
         });
 
         two_columns(ui, |c1, c2| {
+            let slider = percent_slider_range(&mut state.video.brightness, 0.0..=3.0, 3.0);
+            if slider_item(c1, "Brightness:", slider, None).changed() {
+                crate::config::save_config(state);
+                changed = true;
+            }
+
+            let slider = egui::Slider::new(&mut state.video.gamma, 0.2..=3.0)
+                .step_by(0.01)
+                .custom_formatter(|n, _| format!("{:.2}", n));
+            if slider_item(c2, "Gamma:", slider, None).changed() {
+                crate::config::save_config(state);
+                changed = true;
+            }
+        });
+
+        two_columns(ui, |c1, c2| {
             let slider = egui::Slider::new(&mut state.video.overscan_x, -0.2..=0.2)
                 .step_by(0.0005)
                 .custom_formatter(|n, _| format!("{:.1}%", n * 100.0))
