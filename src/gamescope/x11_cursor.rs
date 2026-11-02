@@ -46,6 +46,7 @@ extern "C" {
 
 struct CursorMonitorShared {
     is_cursor_hidden: AtomicBool,
+    is_disconnected: AtomicBool,
     cursor_image: Mutex<Option<Arc<GameCursorImage>>>,
 }
 
@@ -67,6 +68,15 @@ unsafe extern "C" fn on_cursor_changed(
         return;
     }
     let shared = &*(user_data as *const Arc<CursorMonitorShared>);
+    if is_hidden < 0 {
+        shared.is_cursor_hidden.store(false, Ordering::Release);
+        shared.is_disconnected.store(true, Ordering::Release);
+        let mut guard = shared.cursor_image.lock().unwrap();
+        *guard = None;
+        tracing::info!("Gamescope X11 display disconnected; cursor monitor stopped");
+        return;
+    }
+
     let hidden = is_hidden != 0;
     shared.is_cursor_hidden.store(hidden, Ordering::Release);
 
@@ -116,6 +126,7 @@ impl GamescopeX11CursorMonitor {
     pub fn start(display_name: &str) -> Option<Self> {
         let shared = Arc::new(CursorMonitorShared {
             is_cursor_hidden: AtomicBool::new(false),
+            is_disconnected: AtomicBool::new(false),
             cursor_image: Mutex::new(None),
         });
         let callback_data = Box::new(shared.clone());
@@ -144,6 +155,10 @@ impl GamescopeX11CursorMonitor {
         self.shared.is_cursor_hidden.load(Ordering::Acquire)
     }
 
+    pub fn is_disconnected(&self) -> bool {
+        self.shared.is_disconnected.load(Ordering::Acquire)
+    }
+
     pub fn cursor_image(&self) -> Option<Arc<GameCursorImage>> {
         self.shared.cursor_image.lock().unwrap().clone()
     }
@@ -152,6 +167,7 @@ impl GamescopeX11CursorMonitor {
     pub fn dummy_for_test(hidden: bool, image: Option<GameCursorImage>) -> Self {
         let shared = Arc::new(CursorMonitorShared {
             is_cursor_hidden: AtomicBool::new(hidden),
+            is_disconnected: AtomicBool::new(false),
             cursor_image: Mutex::new(image.map(Arc::new)),
         });
         Self {
@@ -325,6 +341,7 @@ mod tests {
     fn test_on_cursor_changed_callback() {
         let shared = Arc::new(CursorMonitorShared {
             is_cursor_hidden: AtomicBool::new(true),
+            is_disconnected: AtomicBool::new(false),
             cursor_image: Mutex::new(None),
         });
         let user_data = &shared as *const Arc<CursorMonitorShared> as *mut c_void;
@@ -345,6 +362,7 @@ mod tests {
         }
 
         assert!(!shared.is_cursor_hidden.load(Ordering::Acquire));
+        assert!(!shared.is_disconnected.load(Ordering::Acquire));
         let img = shared
             .cursor_image
             .lock()
@@ -364,5 +382,128 @@ mod tests {
         }
         assert!(shared.is_cursor_hidden.load(Ordering::Acquire));
         assert!(shared.cursor_image.lock().unwrap().is_none());
+
+        // Notify disconnected (-1) -> must reset cursor hidden state so cursor isn't left locked
+        unsafe {
+            on_cursor_changed(-1, std::ptr::null(), user_data);
+        }
+        assert!(!shared.is_cursor_hidden.load(Ordering::Acquire));
+        assert!(shared.is_disconnected.load(Ordering::Acquire));
+        assert!(shared.cursor_image.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_cursor_monitor_survives_x_server_shutdown() {
+        use std::io::Read;
+        use std::os::unix::io::{FromRawFd, IntoRawFd};
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let mut pipe_fds = [0i32; 2];
+        if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } != 0 {
+            return;
+        }
+        let read_fd = pipe_fds[0];
+        let write_fd = pipe_fds[1];
+
+        // Clear FD_CLOEXEC on write_fd so Xvfb -displayfd can write to it
+        unsafe {
+            let flags = libc::fcntl(write_fd, libc::F_GETFD);
+            if flags >= 0 {
+                libc::fcntl(write_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+            }
+        }
+
+        let child = Command::new("Xvfb")
+            .args([
+                "-displayfd",
+                &write_fd.to_string(),
+                "-screen",
+                "0",
+                "640x480x24",
+                "-nolisten",
+                "tcp",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        unsafe {
+            libc::close(write_fd);
+        }
+
+        let Ok(mut xvfb) = child else {
+            unsafe {
+                libc::close(read_fd);
+            }
+            return;
+        };
+
+        let mut file = unsafe { std::fs::File::from_raw_fd(read_fd) };
+        let mut disp_num = String::new();
+        let mut buf = [0u8; 32];
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            match file.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    disp_num.push_str(&String::from_utf8_lossy(&buf[..n]));
+                    if disp_num.contains('\n') {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = file.into_raw_fd();
+        unsafe {
+            libc::close(read_fd);
+        }
+
+        let disp_num = disp_num.trim();
+        if disp_num.is_empty() {
+            let _ = xvfb.kill();
+            let _ = xvfb.wait();
+            return;
+        }
+        let display = format!(":{disp_num}");
+
+        let monitor = GamescopeX11CursorMonitor::start(&display).expect("start cursor monitor");
+
+        // Wait until the monitor connects and performs its initial cursor query
+        let connect_deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < connect_deadline {
+            if monitor.is_cursor_hidden() || monitor.cursor_image().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!monitor.is_disconnected());
+
+        // Simulate cursor hidden right before the game/Xwayland server exits
+        monitor.set_hidden_for_test(true);
+        assert!(monitor.is_cursor_hidden());
+
+        // Abruptly terminate the X server (simulating Gamescope shutting down :3)
+        let _ = xvfb.kill();
+        let _ = xvfb.wait();
+
+        // Wait for the monitor thread to detect the broken X connection without calling exit(1)
+        let disconnect_deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < disconnect_deadline && !monitor.is_disconnected() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert!(
+            monitor.is_disconnected(),
+            "Cursor monitor should detect X server shutdown cleanly"
+        );
+        assert!(
+            !monitor.is_cursor_hidden(),
+            "Cursor hidden state must be reset to false when X server shuts down"
+        );
+        assert!(monitor.cursor_image().is_none());
+
+        drop(monitor);
     }
 }

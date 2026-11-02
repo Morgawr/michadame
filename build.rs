@@ -15,6 +15,10 @@ fn main() {
         .probe("x11")
         .expect("Failed to find libX11 via pkg-config");
 
+    let xcb = pkg_config::Config::new()
+        .probe("xcb")
+        .expect("Failed to find libxcb via pkg-config");
+
     let xfixes = pkg_config::Config::new()
         .probe("xfixes")
         .expect("Failed to find libXfixes via pkg-config");
@@ -35,6 +39,9 @@ fn main() {
     for include in &x11.include_paths {
         build.include(include);
     }
+    for include in &xcb.include_paths {
+        build.include(include);
+    }
     for include in &xfixes.include_paths {
         build.include(include);
     }
@@ -42,5 +49,6 @@ fn main() {
 
     println!("cargo:rustc-link-lib=pipewire-0.3");
     println!("cargo:rustc-link-lib=X11");
+    println!("cargo:rustc-link-lib=xcb");
     println!("cargo:rustc-link-lib=Xfixes");
 }

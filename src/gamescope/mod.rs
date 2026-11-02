@@ -48,7 +48,26 @@ impl Default for GamescopeHookState {
 
 impl GamescopeHookState {
     pub fn poll_late_connections(&mut self) {
-        if !self.is_active || (self.x11_cursor_monitor.is_some() && self.input_client.is_some()) {
+        if !self.is_active {
+            return;
+        }
+        if self
+            .x11_cursor_monitor
+            .as_ref()
+            .is_some_and(|m| m.is_disconnected())
+        {
+            self.x11_cursor_monitor = None;
+            self.cursor_texture = None;
+        }
+        if self
+            .input_client
+            .as_ref()
+            .is_some_and(|c| c.is_disconnected())
+        {
+            self.release_all_inputs();
+            self.input_client = None;
+        }
+        if self.x11_cursor_monitor.is_some() && self.input_client.is_some() {
             return;
         }
         let now = std::time::Instant::now();

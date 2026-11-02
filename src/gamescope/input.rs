@@ -74,6 +74,7 @@ pub struct GamescopeInputClient {
     ei: *mut Ei,
     devices: Vec<*mut EiDevice>,
     is_emulating: bool,
+    disconnected: bool,
 }
 
 unsafe impl Send for GamescopeInputClient {}
@@ -162,6 +163,7 @@ impl GamescopeInputClient {
                 ei,
                 devices: Vec::new(),
                 is_emulating: false,
+                disconnected: false,
             };
 
             // Run initial handshake dispatch loop to negotiate seat capabilities and resume device
@@ -212,6 +214,16 @@ impl GamescopeInputClient {
                 match ev_type {
                     EI_EVENT_CONNECT => {
                         tracing::debug!("EI client connected event received");
+                    }
+                    EI_EVENT_DISCONNECT => {
+                        for d in self.devices.drain(..) {
+                            if !d.is_null() {
+                                ei_device_unref(d);
+                            }
+                        }
+                        self.is_emulating = false;
+                        self.disconnected = true;
+                        tracing::info!("Gamescope EIS input client disconnected");
                     }
                     EI_EVENT_SEAT_ADDED => {
                         let seat = ei_event_get_seat(event);
@@ -280,6 +292,10 @@ impl GamescopeInputClient {
                 ei_event_unref(event);
             }
         }
+    }
+
+    pub fn is_disconnected(&self) -> bool {
+        self.disconnected
     }
 
     pub fn send_pointer_motion_absolute(&mut self, x: f64, y: f64) {
