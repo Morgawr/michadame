@@ -35,15 +35,17 @@ const THUMB_LOADS_PER_FRAME: usize = 6;
 const BANK_WINDOW_SIZE: egui::Vec2 = egui::vec2(900.0, 900.0);
 
 pub fn draw_bank_window(state: &mut AppState, ctx: &egui::Context) {
-    if !state.bank.window_open {
+    if !state.bank.window_open || !state.ui.scale.settled_once {
         return;
     }
     // Designed size, shrunk to fit smaller screens (the window stays freely resizable).
-    let size =
-        crate::ui::scaling::fit_window(BANK_WINDOW_SIZE, crate::ui::scaling::monitor_size(ctx))
-            .size;
+    let size = crate::ui::scaling::fit_window(
+        BANK_WINDOW_SIZE,
+        crate::ui::scaling::monitor_size(ctx, &state.ui.scale),
+    )
+    .size;
     ctx.show_viewport_immediate(
-        egui::ViewportId::from_hash_of("bank_window"),
+        crate::ui::scaling::viewport_id("bank_window", ctx, size),
         egui::ViewportBuilder::default()
             .with_title("Michadame Mining Bank")
             .with_inner_size(size)

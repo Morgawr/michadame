@@ -1323,6 +1323,7 @@ fn draw_interface_scale_group(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             if selected != state.ui.scale.manual {
                 state.ui.scale.manual = selected;
                 crate::config::save_config(state);
+                ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
                 changed = true;
             }
         });

@@ -692,7 +692,7 @@ pub fn studio_mixer_slider(
 
 /// Draws the Studio viewport window when opened.
 pub fn draw_studio_window(state: &mut AppState, ctx: &egui::Context) -> bool {
-    if !state.ui.studio_window_open {
+    if !state.ui.studio_window_open || !state.ui.scale.settled_once {
         return false;
     }
 
@@ -702,18 +702,12 @@ pub fn draw_studio_window(state: &mut AppState, ctx: &egui::Context) -> bool {
     let (viewport, fitted) = crate::ui::scaling::fixed_size_viewport(
         egui::ViewportBuilder::default().with_title("Michadame Studio"),
         desired,
-        crate::ui::scaling::monitor_size(ctx),
+        crate::ui::scaling::monitor_size(ctx, &state.ui.scale),
     );
     ctx.show_viewport_immediate(
-        egui::ViewportId::from_hash_of("studio_window"),
+        crate::ui::scaling::viewport_id("studio_window", ctx, fitted.size),
         viewport,
         |ctx, _class| {
-            crate::ui::scaling::reapply_window_size_on_zoom_change(
-                ctx,
-                &state.ui.scale,
-                fitted,
-                desired,
-            );
             state.ui.any_pointer_down |= ctx.input(|i| i.pointer.any_down());
 
             // Hotkeys inside Studio window:

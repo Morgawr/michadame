@@ -808,18 +808,12 @@ impl eframe::App for AppState {
             let (controls_viewport, fitted) = ui::scaling::fixed_size_viewport(
                 egui::ViewportBuilder::default().with_title("Michadame Controls"),
                 ui::CONTROLS_WINDOW_SIZE,
-                ui::scaling::monitor_size(ctx),
+                ui::scaling::monitor_size(ctx, &self.ui.scale),
             );
             ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of("control_window"),
+                ui::scaling::viewport_id("control_window", ctx, fitted.size),
                 controls_viewport,
                 |ctx, _class| {
-                    ui::scaling::reapply_window_size_on_zoom_change(
-                        ctx,
-                        &self.ui.scale,
-                        fitted,
-                        ui::CONTROLS_WINDOW_SIZE,
-                    );
                     self.ui.any_pointer_down |= ctx.input(|i| i.pointer.any_down());
 
                     repaint_requested |= ui::draw_main_ui(self, ctx);

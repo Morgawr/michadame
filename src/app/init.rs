@@ -58,6 +58,9 @@ pub fn init_app_state(cc: &eframe::CreationContext, steam_deck: bool) -> AppStat
 
     if steam_deck {
         crate::steam_deck::configure(&mut state, &cc.egui_ctx);
+    } else if let Some(manual) = state.ui.scale.manual {
+        cc.egui_ctx
+            .set_zoom_factor(crate::ui::scaling::sanitize_manual_scale(manual));
     }
 
     let default_cfg_applied = state.config_load_error.is_some();
