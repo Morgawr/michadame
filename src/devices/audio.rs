@@ -29,7 +29,7 @@ pub struct AudioStreamHandle {
     alsa_capture_thread: Option<thread::JoinHandle<()>>,
     capture_failure_receiver: crossbeam_channel::Receiver<String>,
     stop_capture: Arc<AtomicBool>,
-    _output_stream_guard: OutputStream,
+    _output_stream_guard: SharedPlaybackGuard,
     _output_stream_handle: rodio::OutputStreamHandle,
     sink: Sink,
 }
@@ -865,12 +865,180 @@ fn push_to_ring(
     let _ = samples_captured.fetch_add(sample_count as u64, Ordering::Relaxed);
 }
 
-pub(crate) fn initialize_rodio_playback() -> Result<(OutputStream, rodio::OutputStreamHandle)> {
-    if cfg!(test) {
-        return Err(anyhow!(
-            "Hardware audio playback is disabled during unit tests"
-        ));
+const SHARED_PLAYBACK_IDLE_TIMEOUT: Duration = Duration::from_millis(250);
+
+struct PlaybackCoordinatorState<H> {
+    active_count: usize,
+    handle: Option<H>,
+    opening: bool,
+    generation: u64,
+    last_open_error: Option<String>,
+}
+
+struct PlaybackCoordinator<H> {
+    mutex: std::sync::Mutex<PlaybackCoordinatorState<H>>,
+    cv: std::sync::Condvar,
+    idle_timeout: Duration,
+}
+
+/// RAII guard keeping the shared process-wide Rodio output stream alive.
+///
+/// While at least one `SharedPlaybackGuard` exists, all audio subsystems share
+/// the same underlying `rodio::OutputStreamHandle` (and its internal software mixer)
+/// so only a single application output stream appears in the desktop audio mixer.
+/// When all guards are dropped, the output stream closes after a brief grace period.
+pub struct SharedPlaybackGuard<H: Clone + Send + 'static = rodio::OutputStreamHandle> {
+    coord: Arc<PlaybackCoordinator<H>>,
+}
+
+impl<H: Clone + Send + 'static> Drop for SharedPlaybackGuard<H> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.coord.mutex.lock() {
+            state.active_count = state.active_count.saturating_sub(1);
+            if state.active_count == 0 {
+                self.coord.cv.notify_all();
+            }
+        }
     }
+}
+
+impl<H: Clone + Send + 'static> PlaybackCoordinator<H> {
+    fn acquire(self: &Arc<Self>) -> Result<(SharedPlaybackGuard<H>, H)> {
+        let mut state = self.mutex.lock().unwrap();
+
+        if let Some(handle) = state.handle.clone() {
+            state.active_count += 1;
+            return Ok((
+                SharedPlaybackGuard {
+                    coord: Arc::clone(self),
+                },
+                handle,
+            ));
+        }
+
+        state.active_count += 1;
+        let wait_gen = state.generation;
+        state.opening = true;
+        self.cv.notify_all();
+
+        while state.handle.is_none() && state.generation == wait_gen {
+            state = self.cv.wait(state).unwrap();
+        }
+
+        if let Some(ref handle) = state.handle {
+            Ok((
+                SharedPlaybackGuard {
+                    coord: Arc::clone(self),
+                },
+                handle.clone(),
+            ))
+        } else {
+            state.active_count = state.active_count.saturating_sub(1);
+            if state.active_count == 0 {
+                self.cv.notify_all();
+            }
+            let err_msg = state
+                .last_open_error
+                .clone()
+                .unwrap_or_else(|| "Failed to open audio output stream".to_string());
+            Err(anyhow!(err_msg))
+        }
+    }
+}
+
+fn spawn_playback_coordinator<S, H, F>(
+    idle_timeout: Duration,
+    mut open_fn: F,
+) -> Arc<PlaybackCoordinator<H>>
+where
+    H: Clone + Send + 'static,
+    F: FnMut() -> Result<(S, H)> + Send + 'static,
+{
+    let coord = Arc::new(PlaybackCoordinator {
+        mutex: std::sync::Mutex::new(PlaybackCoordinatorState {
+            active_count: 0,
+            handle: None,
+            opening: false,
+            generation: 0,
+            last_open_error: None,
+        }),
+        cv: std::sync::Condvar::new(),
+        idle_timeout,
+    });
+
+    let owner_coord = Arc::clone(&coord);
+    let _ = thread::Builder::new()
+        .name("michadame-audio-output".to_string())
+        .spawn(move || {
+            let mut current_stream: Option<S> = None;
+            let mut state = owner_coord.mutex.lock().unwrap();
+
+            loop {
+                if state.opening && current_stream.is_none() {
+                    state.opening = false;
+                    drop(state);
+
+                    let result = open_fn();
+
+                    state = owner_coord.mutex.lock().unwrap();
+                    state.generation = state.generation.wrapping_add(1);
+
+                    match result {
+                        Ok((stream, handle)) => {
+                            if state.active_count > 0 {
+                                current_stream = Some(stream);
+                                state.handle = Some(handle);
+                                state.last_open_error = None;
+                            } else {
+                                state.handle = None;
+                                state.last_open_error = None;
+                                drop(state);
+                                drop(stream);
+                                state = owner_coord.mutex.lock().unwrap();
+                            }
+                        }
+                        Err(e) => {
+                            state.handle = None;
+                            state.last_open_error = Some(format!("{e:#}"));
+                        }
+                    }
+                    owner_coord.cv.notify_all();
+                    continue;
+                }
+
+                if state.active_count == 0 && current_stream.is_some() {
+                    let (new_state, timeout_res) = owner_coord
+                        .cv
+                        .wait_timeout(state, owner_coord.idle_timeout)
+                        .unwrap();
+                    state = new_state;
+                    if state.active_count == 0 && timeout_res.timed_out() {
+                        state.handle = None;
+                        let stream_to_drop = current_stream.take();
+                        drop(state);
+                        drop(stream_to_drop);
+                        tracing::debug!("Closed idle shared Rodio output stream");
+                        state = owner_coord.mutex.lock().unwrap();
+                    }
+                    continue;
+                }
+
+                if state.active_count == 0
+                    && !state.opening
+                    && current_stream.is_none()
+                    && Arc::strong_count(&owner_coord) == 1
+                {
+                    break;
+                }
+
+                state = owner_coord.cv.wait(state).unwrap();
+            }
+        });
+
+    coord
+}
+
+fn open_hardware_output_stream() -> Result<(OutputStream, rodio::OutputStreamHandle)> {
     // On Linux, the "default" host is ALSA, but for output we want to hit the sound server (Pulse/PipeWire).
     // If we can find a Host for PulseAudio or if the default host has a "pulse"/"pipewire" device, we prefer it.
     let host = cpal::default_host();
@@ -895,6 +1063,25 @@ pub(crate) fn initialize_rodio_playback() -> Result<(OutputStream, rodio::Output
         tracing::info!("Using system default output stream");
         OutputStream::try_default().context("Failed to open default output stream")
     }
+}
+
+pub(crate) fn initialize_rodio_playback() -> Result<(SharedPlaybackGuard, rodio::OutputStreamHandle)>
+{
+    if cfg!(test) {
+        return Err(anyhow!(
+            "Hardware audio playback is disabled during unit tests"
+        ));
+    }
+
+    static SHARED_PLAYBACK: std::sync::OnceLock<
+        Arc<PlaybackCoordinator<rodio::OutputStreamHandle>>,
+    > = std::sync::OnceLock::new();
+
+    let coord = SHARED_PLAYBACK.get_or_init(|| {
+        spawn_playback_coordinator(SHARED_PLAYBACK_IDLE_TIMEOUT, open_hardware_output_stream)
+    });
+
+    coord.acquire()
 }
 
 #[cfg(test)]
@@ -1259,5 +1446,100 @@ mod tests {
                 desc
             );
         }
+    }
+
+    #[test]
+    fn shared_playback_coordinator_shares_single_stream_and_closes_when_idle() {
+        let open_count = Arc::new(AtomicU64::new(0));
+        let drop_count = Arc::new(AtomicU64::new(0));
+
+        struct MockStream {
+            drop_count: Arc<AtomicU64>,
+        }
+        impl Drop for MockStream {
+            fn drop(&mut self) {
+                self.drop_count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let open_count_clone = Arc::clone(&open_count);
+        let drop_count_clone = Arc::clone(&drop_count);
+        let coord = spawn_playback_coordinator(Duration::from_millis(30), move || {
+            let id = open_count_clone.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok((
+                MockStream {
+                    drop_count: Arc::clone(&drop_count_clone),
+                },
+                id,
+            ))
+        });
+
+        // No stream is opened until the first caller acquires a guard
+        assert_eq!(open_count.load(Ordering::SeqCst), 0);
+        assert_eq!(drop_count.load(Ordering::SeqCst), 0);
+
+        // First caller opens stream #1
+        let (guard1, handle1) = coord.acquire().unwrap();
+        assert_eq!(handle1, 1);
+        assert_eq!(open_count.load(Ordering::SeqCst), 1);
+
+        // Concurrent callers share stream #1 without opening a second stream
+        let (guard2, handle2) = coord.acquire().unwrap();
+        let (guard3, handle3) = coord.acquire().unwrap();
+        assert_eq!(handle2, 1);
+        assert_eq!(handle3, 1);
+        assert_eq!(open_count.load(Ordering::SeqCst), 1);
+        assert_eq!(drop_count.load(Ordering::SeqCst), 0);
+
+        // Dropping two of the three guards leaves stream #1 open
+        drop(guard2);
+        drop(guard3);
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(drop_count.load(Ordering::SeqCst), 0);
+
+        // Dropping the last guard and re-acquiring within the idle grace window reuses stream #1
+        drop(guard1);
+        let (guard_reused, handle_reused) = coord.acquire().unwrap();
+        assert_eq!(handle_reused, 1);
+        assert_eq!(open_count.load(Ordering::SeqCst), 1);
+        assert_eq!(drop_count.load(Ordering::SeqCst), 0);
+
+        // Dropping the last guard and waiting past the idle timeout closes stream #1
+        drop(guard_reused);
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while drop_count.load(Ordering::SeqCst) < 1 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(drop_count.load(Ordering::SeqCst), 1);
+
+        // Acquiring again after idle close opens stream #2
+        let (guard_new, handle_new) = coord.acquire().unwrap();
+        assert_eq!(handle_new, 2);
+        assert_eq!(open_count.load(Ordering::SeqCst), 2);
+        drop(guard_new);
+    }
+
+    #[test]
+    fn shared_playback_coordinator_propagates_open_failure_and_recovers() {
+        let attempts = Arc::new(AtomicU64::new(0));
+        let attempts_clone = Arc::clone(&attempts);
+
+        let coord = spawn_playback_coordinator(Duration::from_millis(20), move || {
+            let n = attempts_clone.fetch_add(1, Ordering::SeqCst) + 1;
+            if n == 1 {
+                Err(anyhow!("Simulated ALSA device busy"))
+            } else {
+                Ok(((), n))
+            }
+        });
+
+        let err = coord.acquire().err().expect("First attempt should fail");
+        assert!(err.to_string().contains("Simulated ALSA device busy"));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+        // Subsequent acquisition succeeds cleanly
+        let (_guard, handle) = coord.acquire().unwrap();
+        assert_eq!(handle, 2);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 }

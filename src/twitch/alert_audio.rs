@@ -6,7 +6,7 @@
 //! (such as Ryu Umemoto's soundtrack for *YU-NO: A girl who chants love at the bound of this world*).
 
 use rodio::buffer::SamplesBuffer;
-use rodio::{OutputStream, Sink};
+use rodio::{Sink, Source};
 use std::f32::consts::PI;
 use std::sync::Arc;
 
@@ -203,11 +203,54 @@ pub fn generate_light_switch_on_samples() -> Vec<f32> {
     decode_embedded_wav_samples(EMBEDDED_LIGHT_SWITCH_ON_WAV)
 }
 
+struct GuardedSamplesSource {
+    inner: SamplesBuffer<f32>,
+    _guard: crate::devices::audio::SharedPlaybackGuard,
+}
+
+impl Iterator for GuardedSamplesSource {
+    type Item = f32;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl Source for GuardedSamplesSource {
+    #[inline]
+    fn current_frame_len(&self) -> Option<usize> {
+        self.inner.current_frame_len()
+    }
+
+    #[inline]
+    fn channels(&self) -> u16 {
+        self.inner.channels()
+    }
+
+    #[inline]
+    fn sample_rate(&self) -> u32 {
+        self.inner.sample_rate()
+    }
+
+    #[inline]
+    fn total_duration(&self) -> Option<std::time::Duration> {
+        self.inner.total_duration()
+    }
+}
+
 /// Manages local audio playback for Twitch alerts and UI sound effects through Rodio.
+///
+/// Acquires the shared Rodio output stream lazily on demand when an alert chime or
+/// light-switch sound is played, avoiding holding an idle OS audio stream open at startup.
 pub struct AlertSoundPlayer {
-    _stream: Option<OutputStream>,
-    stream_handle: Option<rodio::OutputStreamHandle>,
-    sink: Option<Sink>,
+    enable_hardware: bool,
+    active_chime_sink: std::sync::Mutex<Option<Sink>>,
     active_switch_sink: std::sync::Mutex<Option<Sink>>,
     chime_samples: Arc<Vec<f32>>,
     light_switch_samples: Arc<Vec<f32>>,
@@ -240,34 +283,9 @@ impl AlertSoundPlayer {
         let light_switch_samples = Arc::new(generate_light_switch_clack_samples());
         let light_switch_on_samples = Arc::new(generate_light_switch_on_samples());
 
-        // Attempt to initialize Rodio playback when hardware output is enabled.
-        // If unavailable (e.g. headless environment or unit tests), we safely retain None
-        // so execution never probes ALSA/PipeWire in tests or crashes without audio hardware.
-        let (stream, stream_handle, sink) = if !enable_hardware {
-            (None, None, None)
-        } else {
-            match crate::devices::audio::initialize_rodio_playback() {
-                Ok((guard, handle)) => match Sink::try_new(&handle) {
-                    Ok(sink) => {
-                        sink.set_volume(1.0);
-                        (Some(guard), Some(handle), Some(sink))
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to create Rodio sink for alert audio: {e}");
-                        (Some(guard), Some(handle), None)
-                    }
-                },
-                Err(e) => {
-                    tracing::debug!("Rodio output stream not available for alert audio: {e}");
-                    (None, None, None)
-                }
-            }
-        };
-
         Self {
-            _stream: stream,
-            stream_handle,
-            sink,
+            enable_hardware,
+            active_chime_sink: std::sync::Mutex::new(None),
             active_switch_sink: std::sync::Mutex::new(None),
             chime_samples,
             light_switch_samples,
@@ -276,10 +294,22 @@ impl AlertSoundPlayer {
         }
     }
 
-    /// Returns true if a hardware audio output stream is attached to this player.
+    /// Returns true if a hardware audio output sink is currently active on this player.
     #[allow(dead_code)]
     pub fn has_hardware_output(&self) -> bool {
-        self._stream.is_some() || self.stream_handle.is_some() || self.sink.is_some()
+        let chime_active = self
+            .active_chime_sink
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|s| !s.empty()))
+            .unwrap_or(false);
+        let switch_active = self
+            .active_switch_sink
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|s| !s.empty()))
+            .unwrap_or(false);
+        chime_active || switch_active
     }
 
     /// Sets the playback volume for local alert audio, matching the stream master volume.
@@ -287,12 +317,22 @@ impl AlertSoundPlayer {
         let clamped = volume.clamp(0.0, 1.0);
         self.volume
             .store(clamped.to_bits(), std::sync::atomic::Ordering::Relaxed);
-        if let Some(sink) = &self.sink {
-            sink.set_volume(clamped);
-        }
-        if let Ok(guard) = self.active_switch_sink.lock() {
+        if let Ok(mut guard) = self.active_chime_sink.lock() {
             if let Some(sink) = guard.as_ref() {
-                sink.set_volume(clamped);
+                if sink.empty() {
+                    *guard = None;
+                } else {
+                    sink.set_volume(clamped);
+                }
+            }
+        }
+        if let Ok(mut guard) = self.active_switch_sink.lock() {
+            if let Some(sink) = guard.as_ref() {
+                if sink.empty() {
+                    *guard = None;
+                } else {
+                    sink.set_volume(clamped);
+                }
             }
         }
     }
@@ -304,15 +344,36 @@ impl AlertSoundPlayer {
 
     /// Plays the retro alert chime locally on the PC through Rodio at current master volume.
     pub fn play_local(&self) {
-        if let Some(sink) = &self.sink {
-            let vol = self.volume();
-            sink.set_volume(vol);
-            let buffer = SamplesBuffer::new(
+        if !self.enable_hardware {
+            return;
+        }
+        let Ok((playback_guard, handle)) = crate::devices::audio::initialize_rodio_playback()
+        else {
+            return;
+        };
+        let vol = self.volume();
+        let source = GuardedSamplesSource {
+            inner: SamplesBuffer::new(
                 ALERT_CHANNELS,
                 ALERT_SAMPLE_RATE,
                 self.chime_samples.as_ref().clone(),
-            );
-            sink.append(buffer);
+            ),
+            _guard: playback_guard,
+        };
+
+        if let Ok(mut chime_guard) = self.active_chime_sink.lock() {
+            if let Some(existing) = chime_guard.as_ref() {
+                if !existing.empty() {
+                    existing.set_volume(vol);
+                    existing.append(source);
+                    return;
+                }
+            }
+            if let Ok(sink) = Sink::try_new(&handle) {
+                sink.set_volume(vol);
+                sink.append(source);
+                *chime_guard = Some(sink);
+            }
         }
     }
 
@@ -321,31 +382,39 @@ impl AlertSoundPlayer {
     /// When `turning_on` is `true`, plays the switch clack + ceiling tube ballast charging hum.
     /// When `turning_on` is `false`, stops any in-progress tube charging hum and plays the switch clack.
     pub fn play_light_switch_local(&self, turning_on: bool) {
+        if !self.enable_hardware {
+            return;
+        }
+        if let Ok(mut guard) = self.active_switch_sink.lock() {
+            if let Some(prev) = guard.take() {
+                prev.stop();
+            }
+        }
+        let Ok((playback_guard, handle)) = crate::devices::audio::initialize_rodio_playback()
+        else {
+            return;
+        };
         let vol = self.volume();
         let samples = if turning_on {
             self.light_switch_on_samples.as_ref().clone()
         } else {
             self.light_switch_samples.as_ref().clone()
         };
-        let buffer = SamplesBuffer::new(ALERT_CHANNELS, ALERT_SAMPLE_RATE, samples);
-        if let Some(handle) = &self.stream_handle {
-            if let Ok(sink) = Sink::try_new(handle) {
-                sink.set_volume(vol);
-                sink.append(buffer);
-                if let Ok(mut guard) = self.active_switch_sink.lock() {
-                    if let Some(prev) = guard.take() {
-                        prev.stop();
-                    }
-                    *guard = Some(sink);
-                } else {
-                    sink.detach();
-                }
-                return;
-            }
-        }
-        if let Some(sink) = &self.sink {
+        let source = GuardedSamplesSource {
+            inner: SamplesBuffer::new(ALERT_CHANNELS, ALERT_SAMPLE_RATE, samples),
+            _guard: playback_guard,
+        };
+        if let Ok(sink) = Sink::try_new(&handle) {
             sink.set_volume(vol);
-            sink.append(buffer);
+            sink.append(source);
+            if let Ok(mut guard) = self.active_switch_sink.lock() {
+                if let Some(prev) = guard.take() {
+                    prev.stop();
+                }
+                *guard = Some(sink);
+            } else {
+                sink.detach();
+            }
         }
     }
 

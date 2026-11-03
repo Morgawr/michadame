@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rodio::{OutputStream, Sink, Source};
+use rodio::{Sink, Source};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
@@ -421,7 +421,7 @@ impl Iterator for MicMonitorSource {
                 return Some(left);
             }
         }
-        if self.stop.load(Ordering::Relaxed) {
+        if self.stop.load(Ordering::Relaxed) || self.consumer.is_abandoned() {
             None
         } else {
             self.pending_right = Some(0.0);
@@ -503,12 +503,24 @@ fn push_monitor_stereo(
     }
 }
 
+struct MonitorPlayback {
+    _guard: crate::devices::audio::SharedPlaybackGuard,
+    _handle: rodio::OutputStreamHandle,
+    sink: Sink,
+}
+
+impl Drop for MonitorPlayback {
+    fn drop(&mut self) {
+        self.sink.stop();
+    }
+}
+
 pub struct MicStreamHandle {
     pub device_name: String,
     pub stop: Arc<AtomicBool>,
     pub thread: Option<thread::JoinHandle<()>>,
     pub config: Arc<RwLock<MicConfig>>,
-    _monitor_guard: Option<(OutputStream, rodio::OutputStreamHandle, Sink)>,
+    monitor_guard: Arc<std::sync::Mutex<Option<MonitorPlayback>>>,
 }
 
 fn reap_mic_capture_thread(handle: thread::JoinHandle<()>) {
@@ -536,8 +548,8 @@ fn reap_mic_capture_thread(handle: thread::JoinHandle<()>) {
 impl Drop for MicStreamHandle {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some((_, _, sink)) = &self._monitor_guard {
-            sink.stop();
+        if let Ok(mut guard) = self.monitor_guard.lock() {
+            *guard = None;
         }
         if let Some(handle) = self.thread.take() {
             reap_mic_capture_thread(handle);
@@ -554,22 +566,29 @@ pub fn start_mic_stream(
     replay: Arc<crate::replay::AudioTap>,
 ) -> Result<MicStreamHandle> {
     let stop = Arc::new(AtomicBool::new(false));
+    let monitor_initially_enabled = initial_config.monitor;
     let config = Arc::new(RwLock::new(initial_config));
 
-    // Monitor playback output stream (Rodio)
-    let (monitor_output, mut monitor_producer) = match initialize_monitor_playback(&stop) {
-        Ok((guard, handle, sink, prod)) => (Some((guard, handle, sink)), Some(prod)),
-        Err(e) => {
-            tracing::warn!("Failed to initialize mic monitor audio output: {}", e);
-            (None, None)
+    // Only open a monitor playback sink when local monitoring is enabled.
+    let (monitor_output, mut monitor_producer) = if monitor_initially_enabled {
+        match initialize_monitor_playback(&stop) {
+            Ok((playback, prod)) => (Some(playback), Some(prod)),
+            Err(e) => {
+                tracing::warn!("Failed to initialize mic monitor audio output: {}", e);
+                (None, None)
+            }
         }
+    } else {
+        (None, None)
     };
+    let monitor_guard = Arc::new(std::sync::Mutex::new(monitor_output));
 
     let stop_clone = stop.clone();
     let config_clone = config.clone();
     let level_clone = current_level_db.clone();
     let peak_clone = peak_level_db.clone();
     let clipping_clone = is_clipping.clone();
+    let monitor_guard_clone = Arc::clone(&monitor_guard);
     let dev_name = device_name.to_string();
 
     let thread = thread::Builder::new()
@@ -582,6 +601,7 @@ pub fn start_mic_stream(
                 level_clone,
                 peak_clone,
                 clipping_clone,
+                &monitor_guard_clone,
                 &mut monitor_producer,
                 replay,
             );
@@ -593,13 +613,11 @@ pub fn start_mic_stream(
         stop,
         thread: Some(thread),
         config,
-        _monitor_guard: monitor_output,
+        monitor_guard,
     })
 }
 
-fn initialize_monitor_playback(
-    stop: &Arc<AtomicBool>,
-) -> Result<(OutputStream, rodio::OutputStreamHandle, Sink, Producer<f32>)> {
+fn initialize_monitor_playback(stop: &Arc<AtomicBool>) -> Result<(MonitorPlayback, Producer<f32>)> {
     let (guard, handle) = crate::devices::audio::initialize_rodio_playback()?;
     let sink = Sink::try_new(&handle).context("Failed to create monitor rodio sink")?;
     sink.set_volume(1.0);
@@ -617,7 +635,14 @@ fn initialize_monitor_playback(
     };
     sink.append(source);
 
-    Ok((guard, handle, sink, producer))
+    Ok((
+        MonitorPlayback {
+            _guard: guard,
+            _handle: handle,
+            sink,
+        },
+        producer,
+    ))
 }
 
 fn sleep_until_reconnect(stop: &Arc<AtomicBool>) {
@@ -638,6 +663,7 @@ fn run_mic_capture_worker(
     current_level_db: Arc<AtomicU32>,
     peak_level_db: Arc<AtomicU32>,
     is_clipping: Arc<AtomicBool>,
+    monitor_guard: &Arc<std::sync::Mutex<Option<MonitorPlayback>>>,
     monitor_producer: &mut Option<Producer<f32>>,
     replay: Arc<crate::replay::AudioTap>,
 ) {
@@ -755,6 +781,7 @@ fn run_mic_capture_worker(
         let mut cfg = config.read().map(|c| c.clone()).unwrap_or_default();
         let mut monitor_resample_phase = 0.0f64;
         let mut monitor_prev_frame = [0.0f32; 2];
+        let mut last_monitor_init_attempt: Option<Instant> = None;
 
         // Capture loop
         while !stop.load(Ordering::Relaxed) {
@@ -839,8 +866,31 @@ fn run_mic_capture_worker(
 
                     is_clipping.store(max_abs >= 0.999, Ordering::Relaxed);
 
-                    // Submit to monitor if enabled
+                    // Submit to monitor if enabled; lazily attach/detach shared Rodio sink
                     if cfg.monitor {
+                        if monitor_producer.is_none() {
+                            let should_attempt = last_monitor_init_attempt
+                                .is_none_or(|t| t.elapsed() >= Duration::from_secs(1));
+                            if should_attempt {
+                                last_monitor_init_attempt = Some(Instant::now());
+                                match initialize_monitor_playback(&stop) {
+                                    Ok((playback, prod)) => {
+                                        if let Ok(mut guard) = monitor_guard.lock() {
+                                            *guard = Some(playback);
+                                        }
+                                        *monitor_producer = Some(prod);
+                                        monitor_resample_phase = 0.0;
+                                        monitor_prev_frame = [0.0; 2];
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "Failed to initialize mic monitor audio output: {}",
+                                            e
+                                        );
+                                    }
+                                }
+                            }
+                        }
                         if let Some(prod) = monitor_producer {
                             push_monitor_stereo(
                                 prod,
@@ -851,6 +901,12 @@ fn run_mic_capture_worker(
                                 &mut monitor_prev_frame,
                             );
                         }
+                    } else if monitor_producer.is_some() {
+                        *monitor_producer = None;
+                        if let Ok(mut guard) = monitor_guard.lock() {
+                            *guard = None;
+                        }
+                        last_monitor_init_attempt = None;
                     }
 
                     // Submit to replay buffer
