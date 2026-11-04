@@ -320,6 +320,7 @@ impl AppState {
                 self.video.border_crop_top,
                 self.video.border_crop_bottom,
             ],
+            halo: self.halo.clone(),
         };
         if self.screenshot.request(mode, scene) {
             ctx.request_repaint();

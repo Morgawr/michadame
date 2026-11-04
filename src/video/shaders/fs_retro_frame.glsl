@@ -93,7 +93,7 @@ void main() {
         screen_tc = pos * 0.5 + 0.5;
     } else if (filter_type == 2) { // Halo curvature
         vec2 pos = centered_tc * 2.0 - 1.0;
-        vec2 eff_warp = (warp.x > 0.001 || warp.y > 0.001) ? vec2(0.044, 0.054) : vec2(0.024, 0.030);
+        vec2 eff_warp = (warp.x > 0.001 || warp.y > 0.001) ? vec2(0.044, 0.054) : vec2(0.0, 0.0);
         pos *= vec2(1.0 + (pos.y * pos.y) * eff_warp.x, 1.0 + (pos.x * pos.x) * eff_warp.y);
         screen_tc = pos * 0.5 + 0.5;
     } else {
@@ -115,9 +115,9 @@ void main() {
     vec2 p_vid = (screen_tc - ap_center) * video_pixels;
     vec2 b_vid = ap_half * video_pixels;
 
-    // Molded corner radius in physical screen pixels (minimum 22px for authentic rounded CRT aperture)
+    // Molded corner radius in physical screen pixels
     float r_corner = (filter_type == 2 && corner_size > 0.001)
-        ? max(corner_size * min_vid_dim, 22.0)
+        ? max(corner_size * min_vid_dim, 4.0)
         : clamp(min_vid_dim * 0.038, 20.0, 32.0);
 
     // Exact Euclidean rounded box SDF:

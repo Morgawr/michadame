@@ -43,6 +43,7 @@ pub struct PhotoSceneContext {
     pub warp: [f32; 2],
     pub corner_size: f32,
     pub border_crop: [f32; 4],
+    pub halo: crate::app::models::HaloSettings,
 }
 
 impl Default for PhotoSceneContext {
@@ -57,6 +58,7 @@ impl Default for PhotoSceneContext {
             warp: [0.031, 0.041],
             corner_size: 0.0,
             border_crop: [0.0; 4],
+            halo: crate::app::models::HaloSettings::default(),
         }
     }
 }
@@ -421,10 +423,16 @@ impl PhotoCameraParams {
         let pan_x = (pan_angle.cos() * pan_mag).clamp(-0.028, 0.028);
         let pan_y = (pan_angle.sin() * pan_mag).clamp(-0.026, 0.026);
 
-        // Flat LCD screens must keep straight edges in 3D perspective (zero barrel curvature).
-        // Even in CRT mode, the CRT tube curvature comes from `scene.warp`, so camera lens
-        // distortion is kept near zero like a 2015 smartphone ISP.
-        let barrel_k1 = if is_crt {
+        // Flat LCD screens and flat-glass CRT TVs (WEGA, Tau, Toshiba AF, Diamondtron) keep straight
+        // edges in 3D perspective (zero barrel curvature). Curved CRT tube curvature comes from `scene.warp`.
+        let has_warp = match scene.crt_filter {
+            CrtFilter::Halo => {
+                scene.halo.curvature && (scene.warp[0] > 0.001 || scene.warp[1] > 0.001)
+            }
+            CrtFilter::Lottes => scene.warp[0] > 0.001 || scene.warp[1] > 0.001,
+            CrtFilter::Off => false,
+        };
+        let barrel_k1 = if is_crt && has_warp {
             rng.gen_range(0.002f32..0.007f32)
         } else {
             0.0
@@ -1205,27 +1213,35 @@ fn eval_monitor_plane_point(
     );
 
     if is_crt {
-        // Apply CRT glass curvature & rounded aperture SDF matching `fs_retro_frame.glsl` exactly
+        // Apply CRT glass curvature & rounded aperture SDF matching `fs_retro_frame.glsl` and active preset:
         let pos_x = u * 2.0 - 1.0;
         let pos_y = v * 2.0 - 1.0;
-        let has_warp = scene.warp[0] > 0.001 || scene.warp[1] > 0.001;
-        let warp_x = if scene.crt_filter == CrtFilter::Lottes || has_warp {
-            scene.warp[0].max(0.044)
-        } else {
-            0.024
+        let has_warp = match scene.crt_filter {
+            CrtFilter::Halo => {
+                scene.halo.curvature && (scene.warp[0] > 0.001 || scene.warp[1] > 0.001)
+            }
+            CrtFilter::Lottes => scene.warp[0] > 0.001 || scene.warp[1] > 0.001,
+            CrtFilter::Off => false,
         };
-        let warp_y = if scene.crt_filter == CrtFilter::Lottes || has_warp {
-            scene.warp[1].max(0.054)
+        let (warp_x, warp_y) = if has_warp {
+            (scene.warp[0].max(0.036), scene.warp[1].max(0.046))
         } else {
-            0.030
+            (0.0, 0.0)
         };
         let su = (pos_x * (1.0 + pos_y * pos_y * warp_x)) * 0.5 + 0.5;
         let sv = (pos_y * (1.0 + pos_x * pos_x * warp_y)) * 0.5 + 0.5;
 
-        let r_corner = if scene.corner_size > 0.001 {
-            scene.corner_size.max(0.035)
+        let r_corner = if scene.crt_filter == CrtFilter::Halo {
+            let eff_corner = if scene.corner_size > 0.0005 {
+                scene.corner_size
+            } else {
+                scene.halo.corner_size
+            };
+            eff_corner.clamp(0.003, 0.08)
+        } else if scene.corner_size > 0.001 {
+            scene.corner_size.clamp(0.004, 0.08)
         } else {
-            0.038
+            0.035
         };
         let qx = (su - 0.5).abs() - (0.5 - r_corner);
         let qy = (sv - 0.5).abs() - (0.5 - r_corner);
@@ -1294,39 +1310,67 @@ fn eval_monitor_plane_point(
         let col_max = col[0].max(col[1]).max(col[2]).clamp(0.0, 1.0);
 
         // Bright highlights widen the Gaussian electron beam into adjacent scanline gaps (`beam_size` bloom),
-        // while midtones have a delicate, natural ~8-12% scanline ripple matching the in-game shader.
-        let beam = cos_wave.powf(1.02 - 0.32 * col_max);
-        let trough = 0.90 + 0.05 * col_max;
+        // while midtones have a delicate, natural ~8-12% scanline ripple modulated by the preset's beam tightness.
+        let beam_tightness = if scene.crt_filter == CrtFilter::Halo {
+            ((scene.halo.beam_min - 1.30) / 0.85).clamp(0.0, 1.2)
+        } else {
+            0.6
+        };
+        let beam = cos_wave.powf((0.96 + 0.12 * beam_tightness) - 0.32 * col_max);
+        let trough = (0.91 - 0.02 * beam_tightness) + 0.05 * col_max;
         let peak = 1.025 - 0.01 * col_max;
         let scan_mult = trough + (peak - trough) * beam;
 
-        // Fine vertical RGB phosphor triad pitch (`640` triads) with subtle modulation (`mask_str = 0.038`)
-        let triad_count = if width.max(height) >= 320 {
-            640.0f32
+        // Fine vertical RGB phosphor triad pitch (`640` triads, scaled by `masksize`)
+        let mask_scale = if scene.crt_filter == CrtFilter::Halo {
+            scene.halo.masksize.clamp(1.0, 4.0)
         } else {
-            (width as f32 * 0.45).clamp(36.0, 80.0)
+            1.0
+        };
+        let triad_count = if width.max(height) >= 320 {
+            640.0f32 / mask_scale
+        } else {
+            (width as f32 * 0.45 / mask_scale).clamp(24.0, 80.0)
         };
         let triad_x = su * triad_count;
         let theta = triad_x * std::f32::consts::TAU;
-        let mask_str = 0.038 * (1.0 - 0.45 * col_max * col_max);
+        let preset_mask_weight = if scene.crt_filter == CrtFilter::Halo {
+            (scene.halo.maskstr / 0.42).clamp(0.4, 1.5)
+        } else {
+            1.0
+        };
+        let mask_str = 0.038 * preset_mask_weight * (1.0 - 0.45 * col_max * col_max);
         let mut mask_r = 1.0 + mask_str * theta.cos();
         let mut mask_g = 1.0 + mask_str * (theta - 2.0943951).cos();
         let mut mask_b = 1.0 + mask_str * (theta - 4.1887902).cos();
 
-        if scene.crt_filter == CrtFilter::Lottes {
-            // Subtle staggered slot-mask shadow bridges
+        let uses_slot_mask = scene.crt_filter == CrtFilter::Lottes
+            || (scene.halo.slotmask + scene.halo.slotmask1) > 0.01;
+        if uses_slot_mask {
+            // Staggered Invar Slot Mask bridges (Toshiba, JVC, Panasonic, Philips, Lottes)
+            let slot_strength = if scene.crt_filter == CrtFilter::Halo {
+                ((scene.halo.slotmask + scene.halo.slotmask1) * 0.5).clamp(0.10, 0.60)
+            } else {
+                0.30
+            };
+            let slot_pitch = if scene.crt_filter == CrtFilter::Halo {
+                (scene.halo.double_slot / 2.0).clamp(0.5, 2.0)
+            } else {
+                1.0
+            };
             let slot_col = (triad_x * 2.0).floor() as i32;
             let slot_row =
-                ((scan_coord + if (slot_col & 1) != 0 { 1.0 } else { 0.0 }) * 0.5).fract();
+                ((scan_coord / slot_pitch + if (slot_col & 1) != 0 { 1.0 } else { 0.0 }) * 0.5)
+                    .fract();
             let slot_bridge = 1.0
                 - (1.0 - (slot_row * std::f32::consts::TAU).cos().abs())
-                    * 0.025
+                    * (0.075 * slot_strength)
                     * (1.0 - 0.45 * col_max);
             mask_r *= slot_bridge;
             mask_g *= slot_bridge;
             mask_b *= slot_bridge;
-        } else {
-            // Very faint Trinitron aperture-grille tension damper wires at sv = 0.30 and sv = 0.70
+        } else if scene.halo.shadow_mask >= 5.0 {
+            // Very faint Trinitron / Diamondtron aperture-grille tension damper wires at sv = 0.30 and sv = 0.70
             let damper = 1.0
                 - ((-0.5 * ((sv - 0.30) / 0.0010).powi(2)).exp()
                     + (-0.5 * ((sv - 0.70) / 0.0010).powi(2)).exp())
@@ -1340,8 +1384,15 @@ fn eval_monitor_plane_point(
         col[1] *= scan_mult * mask_g;
         col[2] *= scan_mult * mask_b;
 
-        // 3. CRT Phosphor Halation / Bloom
-        let bloom_weight = (if dark_room { 0.32 } else { 0.15 }) * (0.75 + 0.25 * beam);
+        // 3. CRT Phosphor Halation / Bloom (scaled by active Halo preset's glow/bloom/halation)
+        let halo_bloom_scale = if scene.crt_filter == CrtFilter::Halo {
+            ((scene.halo.glow + scene.halo.bloom + scene.halo.halation * 2.0) / 1.20)
+                .clamp(0.45, 1.65)
+        } else {
+            1.0
+        };
+        let bloom_weight =
+            (if dark_room { 0.32 } else { 0.15 }) * halo_bloom_scale * (0.75 + 0.25 * beam);
         let amb_lum =
             0.2126 * ambient_edge[0] + 0.7152 * ambient_edge[1] + 0.0722 * ambient_edge[2];
         for c in 0..3 {
@@ -1378,15 +1429,17 @@ fn eval_monitor_plane_point(
         col[1] *= luma_ripple * (1.0 - shadow_beat * moire_mod * 0.50);
         col[2] *= luma_ripple * (1.0 + (shadow_beat * 1.7 + 1.1).sin() * moire_mod * 0.65);
 
-        // 6. CRT Glass Reflections (Light Room vs Dark Room)
+        // 6. CRT Glass Reflections (Light Room vs Dark Room, scaled by flat vs curved faceplate)
         let glass_scale = if scene.crt_glass_already_drawn {
             0.35
         } else {
             1.0
         };
-        let nx_glass = pos_x * 0.24;
-        let ny_glass = pos_y * 0.28;
-        let fresnel = (pos_x.hypot(pos_y) * 0.65).clamp(0.0, 1.0).powi(3) * 0.14;
+        let glass_curve = if has_warp { 1.0 } else { 0.22 };
+        let nx_glass = pos_x * 0.24 * glass_curve;
+        let ny_glass = pos_y * 0.28 * glass_curve;
+        let fresnel = (pos_x.hypot(pos_y) * 0.65).clamp(0.0, 1.0).powi(3)
+            * if has_warp { 0.14 } else { 0.06 };
 
         if !dark_room {
             // Light Room: Overhead fluorescent ceiling fixture reflection + photographer silhouette
@@ -2141,6 +2194,73 @@ mod tests {
         assert!(
             finished_phone,
             "Expected PhonePhoto screenshot worker event"
+        );
+    }
+
+    #[test]
+    fn test_halo_curvature_and_preset_settings_carry_over_to_phone_photo() {
+        let width = 160;
+        let height = 120;
+        let pixels = vec![200u8; (width * height * 4) as usize];
+        let mut rng = rand::rngs::StdRng::seed_from_u64(999);
+
+        let wega = crate::app::models::HaloSettings::preset_sony_trinitron_wega();
+        let wega_scene = PhotoSceneContext {
+            crt_filter: CrtFilter::Halo,
+            dark_room: false,
+            warp: [0.0, 0.0],
+            corner_size: wega.corner_size,
+            halo: wega,
+            ..Default::default()
+        };
+
+        let trinitron_90s = crate::app::models::HaloSettings::preset_sony_trinitron_90s();
+        let curved_90s_scene = PhotoSceneContext {
+            crt_filter: CrtFilter::Halo,
+            dark_room: false,
+            warp: [0.031, 0.041],
+            corner_size: trinitron_90s.corner_size,
+            halo: trinitron_90s,
+            ..Default::default()
+        };
+
+        let blackstripe = crate::app::models::HaloSettings::preset_toshiba_blackstripe_80s();
+        let blackstripe_scene = PhotoSceneContext {
+            crt_filter: CrtFilter::Halo,
+            dark_room: false,
+            warp: [0.031, 0.041],
+            corner_size: blackstripe.corner_size,
+            halo: blackstripe,
+            ..Default::default()
+        };
+
+        let wega_params = PhotoCameraParams::random(&mut rng, &wega_scene);
+        assert_eq!(
+            wega_params.barrel_k1, 0.0,
+            "Flat-glass CRT (WEGA, curvature=false) must have zero barrel_k1"
+        );
+        let curved_params = PhotoCameraParams::random(&mut rng, &curved_90s_scene);
+        assert!(
+            curved_params.barrel_k1 > 0.0,
+            "Curved CRT (90s Trinitron, curvature=true) must have positive barrel_k1"
+        );
+
+        // Render with identical camera pose to verify that curvature, corner_size, and slotmask
+        // produce distinct output photos
+        let (wega_rgba, _, _) =
+            render_phone_photo_rgba(&pixels, width, height, &wega_scene, &wega_params);
+        let (curved_rgba, _, _) =
+            render_phone_photo_rgba(&pixels, width, height, &curved_90s_scene, &wega_params);
+        let (blackstripe_rgba, _, _) =
+            render_phone_photo_rgba(&pixels, width, height, &blackstripe_scene, &wega_params);
+
+        assert_ne!(
+            wega_rgba, curved_rgba,
+            "Flat WEGA vs Curved 90s Trinitron must render differently in Ctrl+S photo"
+        );
+        assert_ne!(
+            curved_rgba, blackstripe_rgba,
+            "90s Trinitron (Aperture Grille) vs 80s Toshiba Blackstripe (Slot Mask + deeper corners) must render differently"
         );
     }
 }
