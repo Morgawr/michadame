@@ -1952,7 +1952,7 @@ mod tests {
         let mut state = AppState::default();
         let dreamcast_profile = crate::config::Profile {
             crt_hard_scan: Some(-12.0),
-            vibrance: Some(1.2),
+            brightness: Some(1.2),
             video_resolution: Some((640, 480)),
             ..Default::default()
         };
@@ -1965,7 +1965,7 @@ mod tests {
         let dreamcast = state.profiles.get("Dreamcast").unwrap().clone();
         crate::config::apply_profile_to_state(&mut state, &dreamcast);
         assert_eq!(state.crt.hard_scan, -12.0);
-        assert_eq!(state.video.vibrance, 1.2);
+        assert_eq!(state.video.brightness, 1.2);
 
         // Simulate entering video mode
         let current_normal = crate::config::build_profile_from_state(&mut state);
@@ -1980,7 +1980,7 @@ mod tests {
         let vid_prof = state.video_profile.clone();
         crate::config::apply_profile_to_state(&mut state, &vid_prof);
         assert_eq!(state.crt.hard_scan, -8.0); // Default CRT scanline
-        assert_eq!(state.video.vibrance, 1.0); // Default vibrance
+        assert_eq!(state.video.brightness, 1.0); // Default brightness
 
         // Native video resolution (e.g., 1920x1080)
         state.hardware.selected_resolution = (1920, 1080);
@@ -2005,14 +2005,14 @@ mod tests {
             player_thread: None,
         });
 
-        // User tweaks a setting while watching video
-        state.video.vibrance = 1.6;
+        // User tweaks a source setting while watching video
+        state.video.brightness = 1.6;
 
         // Stop video file
         state.stop_video_file();
 
         // 1. Video profile should have captured the video tweak
-        assert_eq!(state.video_profile.vibrance, Some(1.6));
+        assert_eq!(state.video_profile.brightness, Some(1.6));
 
         // 2. Active profile should be restored to Dreamcast
         assert_eq!(state.active_profile, "Dreamcast");
@@ -2023,7 +2023,7 @@ mod tests {
 
         // 4. Dreamcast profile settings should be intact and restored
         assert_eq!(state.crt.hard_scan, -12.0);
-        assert_eq!(state.video.vibrance, 1.2);
+        assert_eq!(state.video.brightness, 1.2);
     }
 
     #[test]
@@ -2076,7 +2076,7 @@ mod tests {
 
         let saturn_profile = crate::config::Profile {
             crt_hard_scan: Some(-10.0),
-            vibrance: Some(1.3),
+            brightness: Some(1.3),
             video_resolution: Some((720, 480)),
             ..Default::default()
         };
@@ -2104,17 +2104,17 @@ mod tests {
         state.hardware.selected_resolution = (640, 400);
         state.hardware.selected_framerate = 56;
 
-        // User tweaks vibrance while in PC-98 mode
-        state.video.vibrance = 1.45;
+        // User tweaks brightness while in PC-98 mode
+        state.video.brightness = 1.45;
 
         state.stop_pc98_mode();
 
         assert!(!state.pc98.is_active);
-        assert_eq!(state.pc98_profile.vibrance, Some(1.45));
+        assert_eq!(state.pc98_profile.brightness, Some(1.45));
         assert_eq!(state.active_profile, "Saturn");
         assert_eq!(state.hardware.selected_resolution, (720, 480));
         assert_eq!(state.hardware.selected_framerate, 60);
         assert_eq!(state.crt.hard_scan, -10.0);
-        assert_eq!(state.video.vibrance, 1.3);
+        assert_eq!(state.video.brightness, 1.3);
     }
 }

@@ -75,6 +75,9 @@ impl Default for AppState {
             },
             halo: crate::app::models::HaloSettings::default(),
             halo_defaults: crate::app::models::HaloSettings::default(),
+            halo_presets: crate::app::models::HaloSettings::builtin_presets(),
+            active_halo_preset: crate::app::models::HALO_DEFAULT_PRESET.to_string(),
+            new_halo_preset_name: String::new(),
             cathode_interference: crate::app::models::CathodeInterferenceSettings::default(),
             cathode_interference_defaults: crate::app::models::CathodeInterferenceSettings::default(
             ),
@@ -244,6 +247,34 @@ impl AppState {
     pub fn clear_ocr(&mut self) {
         self.ocr.clear();
         self.dict.popup = None;
+    }
+
+    pub fn ensure_halo_presets(&mut self) {
+        for (name, preset) in crate::app::models::HaloSettings::builtin_presets() {
+            self.halo_presets.entry(name).or_insert(preset);
+        }
+        for preset in self.halo_presets.values_mut() {
+            *preset = preset.sanitized();
+        }
+        if self.active_halo_preset.trim().is_empty()
+            || !self.halo_presets.contains_key(&self.active_halo_preset)
+        {
+            self.active_halo_preset = crate::app::models::HALO_DEFAULT_PRESET.to_string();
+        }
+    }
+
+    pub fn apply_halo_preset(&mut self, name: &str) -> bool {
+        self.ensure_halo_presets();
+        if let Some(preset) = self.halo_presets.get(name).cloned() {
+            let clean = preset.sanitized();
+            self.active_halo_preset = name.to_string();
+            self.halo = clean.clone();
+            self.halo_defaults = clean.clone();
+            self.video.vibrance = clean.vibrance;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn request_screenshot(

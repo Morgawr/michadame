@@ -94,7 +94,7 @@ impl HaloShaderParams {
                 [0.0, 0.0, 0.0]
             },
             horizontal_stretch: state.video.horizontal_stretch,
-            vibrance: state.video.vibrance,
+            vibrance: state.halo.vibrance,
             border_crop: [
                 state.video.border_crop_left,
                 state.video.border_crop_right,
@@ -535,6 +535,7 @@ mod tests {
         let mut state = AppState::default();
         state.halo.brightboost = 2.2;
         state.halo.halo_zoom = 90.0;
+        state.halo.vibrance = 1.5;
         state.video.use_magenta_background = true;
         state.video.vibrance = 1.5;
 

@@ -218,7 +218,7 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         deinterlace_motion_threshold: Some(state.video.deinterlace_motion_threshold),
         deinterlace_line_spacing: Some(state.video.deinterlace_line_spacing),
         deinterlace_spatial_mix: Some(state.video.deinterlace_spatial_mix),
-        vibrance: Some(state.video.vibrance),
+        vibrance: None,
         brightness: Some(state.video.brightness),
         gamma: Some(state.video.gamma),
         overscan_x: Some(state.video.overscan_x),
@@ -231,27 +231,27 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         border_crop_bottom: Some(state.video.border_crop_bottom),
 
         selected_crt_filter: Some(state.selected_crt_filter as u8),
-        halo_brightboost: Some(state.halo.brightboost),
-        halo_brightboost1: Some(state.halo.brightboost1),
-        halo_beam_min: Some(state.halo.beam_min),
-        halo_beam_max: Some(state.halo.beam_max),
-        halo_beam_size: Some(state.halo.beam_size),
-        halo_h_sharp: Some(state.halo.h_sharp),
-        halo_glow: Some(state.halo.glow),
-        halo_bloom: Some(state.halo.bloom),
-        halo_halation: Some(state.halo.halation),
-        halo_shadow_mask: Some(state.halo.shadow_mask),
-        halo_masksize: Some(state.halo.masksize),
-        halo_maskstr: Some(state.halo.maskstr),
-        halo_mcut: Some(state.halo.mcut),
-        halo_slotmask: Some(state.halo.slotmask),
-        halo_slotmask1: Some(state.halo.slotmask1),
-        halo_double_slot: Some(state.halo.double_slot),
-        halo_smoothmask: Some(state.halo.smoothmask),
-        halo_zoom: Some(state.halo.halo_zoom),
-        halo_intensity: Some(state.halo.halo_intensity),
-        halo_corner_size: Some(state.halo.corner_size),
-        halo_curvature: Some(state.halo.curvature),
+        halo_brightboost: None,
+        halo_brightboost1: None,
+        halo_beam_min: None,
+        halo_beam_max: None,
+        halo_beam_size: None,
+        halo_h_sharp: None,
+        halo_glow: None,
+        halo_bloom: None,
+        halo_halation: None,
+        halo_shadow_mask: None,
+        halo_masksize: None,
+        halo_maskstr: None,
+        halo_mcut: None,
+        halo_slotmask: None,
+        halo_slotmask1: None,
+        halo_double_slot: None,
+        halo_smoothmask: None,
+        halo_zoom: None,
+        halo_intensity: None,
+        halo_corner_size: None,
+        halo_curvature: None,
 
         cathode_interference_enabled: Some(state.cathode_interference.enabled),
         cathode_intensity: Some(state.cathode_interference.intensity),
@@ -416,7 +416,9 @@ pub fn save_global_hardware_config_at(
         .scale
         .manual
         .map(crate::ui::scaling::sanitize_manual_scale);
-    cfg.default_halo = Some(state.halo_defaults.clone());
+    cfg.active_halo_preset = state.active_halo_preset.clone();
+    cfg.halo_presets = state.halo_presets.clone();
+    cfg.default_halo = Some(state.halo.clone());
     cfg.default_cathode_interference = Some(state.cathode_interference_defaults.clone());
     cfg.popup_under_crt = Some(state.dict.popup_under_crt);
     cfg.retro_pc_system = state.retro_pc_system;
@@ -563,7 +565,6 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) -> bool {
         sanitize_finite_f32(profile.deinterlace_line_spacing, 1.0, 0.5, 3.0);
     state.video.deinterlace_spatial_mix =
         sanitize_finite_f32(profile.deinterlace_spatial_mix, 0.75, 0.0, 1.0);
-    state.video.vibrance = sanitize_finite_f32(profile.vibrance, 1.0, 0.0, 3.0);
     state.video.brightness = sanitize_finite_f32(profile.brightness, 1.0, 0.0, 3.0);
     state.video.gamma = sanitize_finite_f32(profile.gamma, 1.0, 0.2, 3.0);
     state.video.overscan_x = sanitize_finite_f32(profile.overscan_x, 0.0, -0.2, 0.2);
@@ -574,38 +575,7 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) -> bool {
     state.video.border_crop_right = sanitize_finite_f32(profile.border_crop_right, 0.0, 0.0, 0.2);
     state.video.border_crop_top = sanitize_finite_f32(profile.border_crop_top, 0.0, 0.0, 0.2);
     state.video.border_crop_bottom = sanitize_finite_f32(profile.border_crop_bottom, 0.0, 0.0, 0.2);
-
-    let def_halo = state.halo_defaults.clone();
-    state.halo.brightboost =
-        sanitize_finite_f32(profile.halo_brightboost, def_halo.brightboost, 0.5, 3.0);
-    state.halo.brightboost1 =
-        sanitize_finite_f32(profile.halo_brightboost1, def_halo.brightboost1, 0.5, 3.0);
-    state.halo.beam_min = sanitize_finite_f32(profile.halo_beam_min, def_halo.beam_min, 0.5, 3.0);
-    state.halo.beam_max = sanitize_finite_f32(profile.halo_beam_max, def_halo.beam_max, 0.2, 2.0);
-    state.halo.beam_size =
-        sanitize_finite_f32(profile.halo_beam_size, def_halo.beam_size, 0.0, 2.0);
-    state.halo.h_sharp = sanitize_finite_f32(profile.halo_h_sharp, def_halo.h_sharp, 1.0, 10.0);
-    state.halo.glow = sanitize_finite_f32(profile.halo_glow, def_halo.glow, 0.0, 1.0);
-    state.halo.bloom = sanitize_finite_f32(profile.halo_bloom, def_halo.bloom, 0.0, 1.0);
-    state.halo.halation = sanitize_finite_f32(profile.halo_halation, def_halo.halation, 0.0, 0.5);
-    state.halo.shadow_mask =
-        sanitize_finite_f32(profile.halo_shadow_mask, def_halo.shadow_mask, 0.0, 6.0);
-    state.halo.masksize = sanitize_finite_f32(profile.halo_masksize, def_halo.masksize, 1.0, 4.0);
-    state.halo.maskstr = sanitize_finite_f32(profile.halo_maskstr, def_halo.maskstr, 0.0, 1.0);
-    state.halo.mcut = sanitize_finite_f32(profile.halo_mcut, def_halo.mcut, 0.0, 1.0);
-    state.halo.slotmask = sanitize_finite_f32(profile.halo_slotmask, def_halo.slotmask, 0.0, 1.0);
-    state.halo.slotmask1 =
-        sanitize_finite_f32(profile.halo_slotmask1, def_halo.slotmask1, 0.0, 1.0);
-    state.halo.double_slot =
-        sanitize_finite_f32(profile.halo_double_slot, def_halo.double_slot, 1.0, 4.0);
-    state.halo.smoothmask =
-        sanitize_finite_f32(profile.halo_smoothmask, def_halo.smoothmask, 0.0, 2.0);
-    state.halo.halo_zoom = sanitize_finite_f32(profile.halo_zoom, def_halo.halo_zoom, 50.0, 100.0);
-    state.halo.halo_intensity =
-        sanitize_finite_f32(profile.halo_intensity, def_halo.halo_intensity, 0.0, 2.0);
-    state.halo.corner_size =
-        sanitize_finite_f32(profile.halo_corner_size, def_halo.corner_size, 0.0, 0.1);
-    state.halo.curvature = profile.halo_curvature.unwrap_or(def_halo.curvature);
+    state.video.vibrance = state.halo.vibrance;
 
     let def_cathode = state.cathode_interference_defaults.clone();
     state.cathode_interference.enabled = profile
@@ -920,10 +890,19 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
         state.twitch.apply_config(cfg.twitch.clone());
     }
     state.mic.config = cfg.mic.clone();
-    if let Some(defaults) = &cfg.default_halo {
-        state.halo_defaults = defaults.clone();
-        state.halo = defaults.clone();
+    state.halo_presets = cfg.halo_presets.clone();
+    state.active_halo_preset = cfg.active_halo_preset.clone();
+    state.ensure_halo_presets();
+    if let Some(preset) = state.halo_presets.get(&state.active_halo_preset).cloned() {
+        state.halo_defaults = preset.clone();
+        state.halo = preset;
     }
+    if let Some(defaults) = &cfg.default_halo {
+        let clean = defaults.sanitized();
+        state.halo_defaults = clean.clone();
+        state.halo = clean;
+    }
+    state.video.vibrance = state.halo.vibrance;
     if let Some(defaults) = &cfg.default_cathode_interference {
         state.cathode_interference_defaults = defaults.clone();
         state.cathode_interference = defaults.clone();
@@ -1027,7 +1006,9 @@ mod tests {
         let profile = build_profile_from_state(&state);
         assert_eq!(profile.master_volume, Some(0.75));
         assert_eq!(profile.crt_hard_scan, Some(-12.0));
-        assert_eq!(profile.halo_brightboost, Some(2.1));
+        // Halo settings and vibrance are stored in Halo CRT presets, not source profiles
+        assert_eq!(profile.halo_brightboost, None);
+        assert_eq!(profile.vibrance, None);
         assert_eq!(profile.cathode_interference_enabled, Some(true));
         assert_eq!(profile.cathode_intensity, Some(0.75));
         assert_eq!(profile.cathode_lightbulb_effect, Some(0.35));
@@ -1045,6 +1026,8 @@ mod tests {
     #[test]
     fn test_apply_profile_to_state() {
         let mut state = AppState::default();
+        state.halo.brightboost = 2.1;
+        state.halo.vibrance = 1.25;
         let profile = Profile {
             crt_hard_scan: Some(-15.0),
             halo_brightboost: Some(2.5),
@@ -1062,7 +1045,10 @@ mod tests {
         apply_profile_to_state(&mut state, &profile);
         assert_eq!(state.hardware.master_volume, 0.6);
         assert_eq!(state.crt.hard_scan, -15.0);
-        assert_eq!(state.halo.brightboost, 2.5);
+        // Applying a source profile must NOT overwrite active Halo CRT preset settings
+        assert_eq!(state.halo.brightboost, 2.1);
+        assert_eq!(state.halo.vibrance, 1.25);
+        assert_eq!(state.video.vibrance, 1.25);
         assert!(state.cathode_interference.enabled);
         assert_eq!(state.cathode_interference.intensity, 0.9);
         assert_eq!(state.cathode_interference.frequency, 2.0);
@@ -1316,20 +1302,40 @@ mod tests {
     #[test]
     fn test_apply_profile_halo_settings() {
         let mut state = AppState::default();
+        assert_eq!(
+            state.active_halo_preset,
+            crate::app::models::HALO_PRESET_SONY_WEGA
+        );
+        assert!(state.apply_halo_preset(crate::app::models::HALO_PRESET_SONY_WEGA));
+        assert_eq!(
+            state.halo,
+            crate::app::models::HaloSettings::preset_sony_trinitron_wega()
+        );
+
+        // Switch Halo preset to Sony Trinitron (90s)
+        assert!(state.apply_halo_preset(crate::app::models::HALO_PRESET_SONY_90S));
+        assert_eq!(
+            state.active_halo_preset,
+            crate::app::models::HALO_PRESET_SONY_90S
+        );
+        assert!(state.halo.curvature);
+        assert_eq!(state.halo.corner_size, 0.025);
+
+        // Switching source profile must preserve the active Halo preset and its parameters
         let mut profile = Profile::default();
         profile.selected_crt_filter = Some(crate::devices::filter_type::CrtFilter::Halo as u8);
-        profile.halo_brightboost = Some(2.2);
-        profile.halo_zoom = Some(75.0);
-        profile.halo_curvature = Some(false);
+        profile.brightness = Some(1.4);
 
         apply_profile_to_state(&mut state, &profile);
         assert_eq!(
             state.selected_crt_filter,
             crate::devices::filter_type::CrtFilter::Halo
         );
-        assert_eq!(state.halo.brightboost, 2.2);
-        assert_eq!(state.halo.halo_zoom, 75.0);
-        assert_eq!(state.halo.curvature, false);
+        assert_eq!(state.video.brightness, 1.4);
+        assert_eq!(
+            state.halo,
+            crate::app::models::HaloSettings::preset_sony_trinitron_90s()
+        );
     }
 
     #[test]
@@ -2035,14 +2041,14 @@ crt_brightboost = 1.6
         let mut state = AppState::default();
         let retro_profile = Profile {
             crt_hard_scan: Some(-15.0),
-            vibrance: Some(1.3),
+            brightness: Some(1.3),
             video_resolution: Some((640, 480)),
             ..Default::default()
         };
         state.profiles.insert("Retro".to_string(), retro_profile);
         state.active_profile = "Retro".to_string();
         state.crt.hard_scan = -15.0;
-        state.video.vibrance = 1.3;
+        state.video.brightness = 1.3;
         state.hardware.selected_resolution = (640, 480);
 
         // 1. Normal save: writes to Retro profile
@@ -2076,7 +2082,7 @@ crt_brightboost = 1.6
 
         // Tweak settings in video mode
         state.crt.hard_scan = -3.0;
-        state.video.vibrance = 2.0;
+        state.video.brightness = 2.0;
 
         // Save config in video mode
         save_config_at(&path, &mut state).unwrap();
@@ -2088,11 +2094,14 @@ crt_brightboost = 1.6
             reloaded.profiles.get("Retro").unwrap().crt_hard_scan,
             Some(-15.0)
         );
-        assert_eq!(reloaded.profiles.get("Retro").unwrap().vibrance, Some(1.3));
+        assert_eq!(
+            reloaded.profiles.get("Retro").unwrap().brightness,
+            Some(1.3)
+        );
 
         let vid_prof = reloaded.video_profile.expect("video_profile must be saved");
         assert_eq!(vid_prof.crt_hard_scan, Some(-3.0));
-        assert_eq!(vid_prof.vibrance, Some(2.0));
+        assert_eq!(vid_prof.brightness, Some(2.0));
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("toml.bak"));
@@ -2109,7 +2118,7 @@ crt_brightboost = 1.6
         let mut config = MichadameConfig::default();
         let mut retro_profile = Profile::default();
         retro_profile.crt_hard_scan = Some(-15.0);
-        retro_profile.vibrance = Some(1.3);
+        retro_profile.brightness = Some(1.3);
         config
             .profiles
             .insert("Retro".to_string(), retro_profile.clone());
@@ -2120,7 +2129,7 @@ crt_brightboost = 1.6
         apply_config(&mut state, &config);
         assert_eq!(state.active_profile, "Retro");
         assert_eq!(state.crt.hard_scan, -15.0);
-        assert_eq!(state.video.vibrance, 1.3);
+        assert_eq!(state.video.brightness, 1.3);
 
         // Enter Gamescope mode
         state.gamescope_hook = Some(crate::gamescope::GamescopeHookState {
@@ -2131,7 +2140,7 @@ crt_brightboost = 1.6
 
         // Tweak settings in Gamescope mode
         state.crt.hard_scan = -5.0;
-        state.video.vibrance = 1.8;
+        state.video.brightness = 1.8;
 
         // Save config in Gamescope mode
         save_config_at(&path, &mut state).unwrap();
@@ -2143,13 +2152,16 @@ crt_brightboost = 1.6
             reloaded.profiles.get("Retro").unwrap().crt_hard_scan,
             Some(-15.0)
         );
-        assert_eq!(reloaded.profiles.get("Retro").unwrap().vibrance, Some(1.3));
+        assert_eq!(
+            reloaded.profiles.get("Retro").unwrap().brightness,
+            Some(1.3)
+        );
 
         let gs_prof = reloaded
             .gamescope_profile
             .expect("gamescope_profile must be saved");
         assert_eq!(gs_prof.crt_hard_scan, Some(-5.0));
-        assert_eq!(gs_prof.vibrance, Some(1.8));
+        assert_eq!(gs_prof.brightness, Some(1.8));
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("toml.bak"));
@@ -2362,7 +2374,7 @@ crt_brightboost = 1.6
 
         assert_eq!(state.crt.hard_scan, -8.0);
         assert_eq!(state.crt.brightboost, 1.0);
-        assert_eq!(state.video.vibrance, 1.0);
+        assert_eq!(state.video.vibrance, state.halo.vibrance);
         assert_eq!(state.video.brightness, 1.0);
         assert_eq!(state.video.gamma, 1.0);
         assert_eq!(state.video.horizontal_stretch, 1.0);
@@ -2376,5 +2388,63 @@ crt_brightboost = 1.6
 
         let built = build_profile_from_state(&state);
         assert_eq!(built.fft_mask_save_name.as_deref(), Some("my_custom_mask"));
+    }
+
+    #[test]
+    fn test_halo_presets_roundtrip_and_override() {
+        let path = std::env::temp_dir().join(format!(
+            "michadame-halo-presets-test-{}-{}.toml",
+            std::process::id(),
+            crate::replay::now_us()
+        ));
+
+        let mut state = AppState::default();
+        assert!(state
+            .halo_presets
+            .contains_key(crate::app::models::HALO_PRESET_SONY_WEGA));
+        assert!(state
+            .halo_presets
+            .contains_key(crate::app::models::HALO_PRESET_SONY_90S));
+
+        // 1. Modify Sony Trinitron (90s) and override it
+        state.apply_halo_preset(crate::app::models::HALO_PRESET_SONY_90S);
+        state.halo.vibrance = 1.45;
+        state.halo.beam_min = 1.95;
+        state.video.vibrance = state.halo.vibrance;
+        state.halo_presets.insert(
+            crate::app::models::HALO_PRESET_SONY_90S.to_string(),
+            state.halo.clone(),
+        );
+
+        // 2. Create a custom preset "PVM-20M2MDU"
+        let mut pvm = state.halo.clone();
+        pvm.h_sharp = 6.5;
+        pvm.vibrance = 1.25;
+        state
+            .halo_presets
+            .insert("PVM-20M2MDU".to_string(), pvm.clone());
+        state.apply_halo_preset("PVM-20M2MDU");
+
+        save_config_at(&path, &mut state).unwrap();
+
+        let loaded: MichadameConfig = confy::load_path(&path).unwrap();
+        let mut fresh_state = AppState::default();
+        apply_config(&mut fresh_state, &loaded);
+
+        assert_eq!(fresh_state.active_halo_preset, "PVM-20M2MDU");
+        assert_eq!(fresh_state.halo.h_sharp, 6.5);
+        assert_eq!(fresh_state.halo.vibrance, 1.25);
+        assert_eq!(fresh_state.video.vibrance, 1.25);
+
+        // Verify overridden built-in preset kept its overridden values
+        let sony_90s = fresh_state
+            .halo_presets
+            .get(crate::app::models::HALO_PRESET_SONY_90S)
+            .unwrap();
+        assert_eq!(sony_90s.vibrance, 1.45);
+        assert_eq!(sony_90s.beam_min, 1.95);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("toml.bak"));
     }
 }

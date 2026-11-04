@@ -277,31 +277,152 @@ pub fn draw_shaders_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         CrtFilter::from_u8(state.crt_filter.load(std::sync::atomic::Ordering::Relaxed));
 
     if current_filter == CrtFilter::Halo {
+        state.ensure_halo_presets();
         technical_group(ui, "", |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(
-                    egui::RichText::new("Halo CRT Parameters:")
+                    egui::RichText::new("Halo CRT Preset:")
                         .monospace()
                         .size(11.0)
                         .strong()
                         .color(egui::Color32::from_rgb(224, 224, 224)),
                 );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Save as Defaults").clicked() {
-                        state.halo_defaults = state.halo.clone();
-                        let current_profile_data = crate::config::build_profile_from_state(state);
+
+                let is_modified = state
+                    .halo_presets
+                    .get(&state.active_halo_preset)
+                    .map_or(true, |saved| *saved != state.halo);
+                let combo_label = if is_modified {
+                    format!("{} *", state.active_halo_preset)
+                } else {
+                    state.active_halo_preset.clone()
+                };
+
+                let mut preset_names: Vec<String> =
+                    crate::app::models::HaloSettings::builtin_preset_list()
+                        .into_iter()
+                        .filter_map(|(name, _)| {
+                            state
+                                .halo_presets
+                                .contains_key(name)
+                                .then(|| name.to_string())
+                        })
+                        .collect();
+                for key in state.halo_presets.keys() {
+                    if !crate::app::models::HaloSettings::is_builtin_preset(key) {
+                        preset_names.push(key.clone());
+                    }
+                }
+                let mut selected_preset = state.active_halo_preset.clone();
+                egui::ComboBox::from_id_source("halo_preset_selector")
+                    .width(235.0)
+                    .selected_text(combo_label)
+                    .show_ui(ui, |ui| {
+                        for name in &preset_names {
+                            if ui
+                                .selectable_value(&mut selected_preset, name.clone(), name)
+                                .clicked()
+                            {
+                                if state.apply_halo_preset(name) {
+                                    state.info(format!("Loaded Halo CRT preset '{}'", name));
+                                    changed = true;
+                                }
+                            }
+                        }
+                    });
+
+                let name_resp = ui.add(
+                    egui::TextEdit::singleline(&mut state.new_halo_preset_name)
+                        .hint_text("New preset name (optional)")
+                        .desired_width(155.0),
+                );
+                let trimmed_new = state.new_halo_preset_name.trim().to_string();
+                let enter_pressed = !trimmed_new.is_empty()
+                    && name_resp.lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+                let save_hover = if trimmed_new.is_empty() {
+                    "Override the currently selected preset with current Halo CRT settings"
+                } else {
+                    "Save current Halo CRT settings as a new preset"
+                };
+                if ui
+                    .button("Save Preset")
+                    .on_hover_text(save_hover)
+                    .clicked()
+                    || enter_pressed
+                {
+                    let target_name = if trimmed_new.is_empty() {
+                        state.active_halo_preset.clone()
+                    } else {
+                        trimmed_new.clone()
+                    };
+                    let clean = state.halo.sanitized();
+                    state.halo = clean.clone();
+                    state.halo_defaults = clean.clone();
+                    state.video.vibrance = clean.vibrance;
+                    state.halo_presets.insert(target_name.clone(), clean);
+                    state.active_halo_preset = target_name.clone();
+                    if !trimmed_new.is_empty() {
+                        state.new_halo_preset_name.clear();
+                        state.info(format!("Created Halo CRT preset '{}'", target_name));
+                    } else {
+                        state.info(format!("Updated Halo CRT preset '{}'", target_name));
+                    }
+                    changed = true;
+                }
+
+                let is_builtin =
+                    crate::app::models::HaloSettings::is_builtin_preset(&state.active_halo_preset);
+                if ui
+                    .button("Reset")
+                    .on_hover_text(if is_builtin {
+                        "Reset this built-in preset to its factory defaults"
+                    } else {
+                        "Revert unsaved changes back to the stored preset"
+                    })
+                    .clicked()
+                {
+                    let active_name = state.active_halo_preset.clone();
+                    if let Some(factory) =
+                        crate::app::models::HaloSettings::builtin_preset(&active_name)
+                    {
                         state
-                            .profiles
-                            .insert(state.active_profile.clone(), current_profile_data);
-                        crate::config::save_config(state);
-                        state.info("Saved current settings as default");
+                            .halo_presets
+                            .insert(active_name.clone(), factory.clone());
+                        state.halo = factory.clone();
+                        state.halo_defaults = factory.clone();
+                        state.video.vibrance = factory.vibrance;
+                        state.info(format!(
+                            "Reset Halo CRT preset '{}' to factory defaults",
+                            active_name
+                        ));
+                        changed = true;
+                    } else if let Some(saved) = state.halo_presets.get(&active_name).cloned() {
+                        state.halo = saved.clone();
+                        state.halo_defaults = saved.clone();
+                        state.video.vibrance = saved.vibrance;
                         changed = true;
                     }
-                    if ui.button("Reset Defaults").clicked() {
-                        state.halo = state.halo_defaults.clone();
-                        changed = true;
-                    }
-                });
+                }
+
+                if ui
+                    .add_enabled(!is_builtin, egui::Button::new("Delete"))
+                    .on_hover_text(if is_builtin {
+                        "Built-in presets cannot be deleted (use Save Preset to override or Reset to restore)"
+                    } else {
+                        "Delete this custom preset"
+                    })
+                    .clicked()
+                {
+                    let removed = state.active_halo_preset.clone();
+                    state.halo_presets.remove(&removed);
+                    state.ensure_halo_presets();
+                    let fallback = crate::app::models::HALO_DEFAULT_PRESET.to_string();
+                    state.apply_halo_preset(&fallback);
+                    state.info(format!("Deleted Halo CRT preset '{}'", removed));
+                    changed = true;
+                }
             });
             ui.add_space(4.0);
 
@@ -373,6 +494,14 @@ pub fn draw_shaders_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     {
                         changed = true;
                     }
+            });
+
+            two_columns(ui, |c1, _c2| {
+                let slider = percent_slider_range(&mut state.halo.vibrance, 0.0..=3.0, 3.0);
+                if slider_item(c1, "Vibrance (Saturation):", slider, None).changed() {
+                    state.video.vibrance = state.halo.vibrance;
+                    changed = true;
+                }
             });
 
             technical_separator(ui);
@@ -951,28 +1080,6 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
         sub_heading(ui, "Aspect & Scaling:");
 
         two_columns(ui, |c1, c2| {
-            let slider = percent_slider_range(&mut state.video.vibrance, 0.0..=3.0, 3.0);
-            if slider_item(c1, "Vibrance (Saturation):", slider, None).changed() {
-                crate::config::save_config(state);
-                changed = true;
-            }
-
-            let slider = egui::Slider::new(&mut state.video.horizontal_stretch, 0.5..=1.5)
-                .step_by(0.001)
-                .custom_formatter(|n, _| format!("{:.1}%", n * 100.0))
-                .custom_parser(|s| {
-                    let s = s.trim().trim_end_matches('%').trim();
-                    s.parse::<f64>()
-                        .ok()
-                        .map(|v| if v > 1.5 { (v / 100.0) as f64 } else { v })
-                });
-            if slider_item(c2, "Horizontal Stretch:", slider, None).changed() {
-                crate::config::save_config(state);
-                changed = true;
-            }
-        });
-
-        two_columns(ui, |c1, c2| {
             let slider = percent_slider_range(&mut state.video.brightness, 0.0..=3.0, 3.0);
             if slider_item(c1, "Brightness:", slider, None).changed() {
                 crate::config::save_config(state);
@@ -983,6 +1090,22 @@ pub fn draw_geometry_bezel_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                 .step_by(0.01)
                 .custom_formatter(|n, _| format!("{:.2}", n));
             if slider_item(c2, "Gamma:", slider, None).changed() {
+                crate::config::save_config(state);
+                changed = true;
+            }
+        });
+
+        two_columns(ui, |c1, _c2| {
+            let slider = egui::Slider::new(&mut state.video.horizontal_stretch, 0.5..=1.5)
+                .step_by(0.001)
+                .custom_formatter(|n, _| format!("{:.1}%", n * 100.0))
+                .custom_parser(|s| {
+                    let s = s.trim().trim_end_matches('%').trim();
+                    s.parse::<f64>()
+                        .ok()
+                        .map(|v| if v > 1.5 { (v / 100.0) as f64 } else { v })
+                });
+            if slider_item(c1, "Horizontal Stretch:", slider, None).changed() {
                 crate::config::save_config(state);
                 changed = true;
             }

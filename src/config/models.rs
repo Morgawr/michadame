@@ -407,8 +407,12 @@ pub struct LegacyConfig {
 
     #[serde(default = "default_active_profile")]
     pub active_profile: String,
+    #[serde(default = "default_active_halo_preset")]
+    pub active_halo_preset: String,
     #[serde(default)]
     pub profiles: BTreeMap<String, Profile>,
+    #[serde(default)]
+    pub halo_presets: BTreeMap<String, crate::app::models::HaloSettings>,
 
     pub audio_source: Option<String>,
     pub video_format_fourcc: Option<String>,
@@ -545,7 +549,9 @@ impl Default for LegacyConfig {
             reset_usb_on_startup: None,
             has_shown_first_run_warning: None,
             active_profile: default_active_profile(),
+            active_halo_preset: default_active_halo_preset(),
             profiles: BTreeMap::new(),
+            halo_presets: BTreeMap::new(),
             audio_source: None,
             video_format_fourcc: None,
             crt_filter: None,
@@ -663,6 +669,14 @@ pub fn default_active_profile() -> String {
     "Default".to_string()
 }
 
+pub fn default_active_halo_preset() -> String {
+    crate::app::models::HALO_DEFAULT_PRESET.to_string()
+}
+
+pub fn default_halo_presets() -> BTreeMap<String, crate::app::models::HaloSettings> {
+    crate::app::models::HaloSettings::builtin_presets()
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(from = "LegacyConfig")]
 pub struct MichadameConfig {
@@ -678,6 +692,8 @@ pub struct MichadameConfig {
     pub audio_sample_format: Option<String>,
     pub master_volume: Option<f32>,
     pub active_profile: String,
+    #[serde(default = "default_active_halo_preset")]
+    pub active_halo_preset: String,
     pub ocr_backend: Option<crate::ocr::OcrBackend>,
     pub ocr_sticky_distance: Option<f32>,
     pub ocr_hide_overlay: Option<bool>,
@@ -718,6 +734,8 @@ pub struct MichadameConfig {
     pub pc88_profile: Option<Profile>,
     #[serde(default)]
     pub audio_reactive: crate::app::models::AudioReactiveConfig,
+    #[serde(default = "default_halo_presets")]
+    pub halo_presets: BTreeMap<String, crate::app::models::HaloSettings>,
     pub profiles: BTreeMap<String, Profile>,
 }
 
@@ -739,6 +757,7 @@ impl Default for MichadameConfig {
             audio_sample_format: None,
             master_volume: None,
             active_profile: "Default".to_string(),
+            active_halo_preset: default_active_halo_preset(),
             ocr_backend: Some(crate::ocr::OcrBackend::default()),
             ocr_sticky_distance: Some(0.6),
             ocr_hide_overlay: Some(false),
@@ -766,6 +785,7 @@ impl Default for MichadameConfig {
             pc98_profile: None,
             pc88_profile: None,
             audio_reactive: crate::app::models::AudioReactiveConfig::default(),
+            halo_presets: default_halo_presets(),
             profiles,
         }
     }

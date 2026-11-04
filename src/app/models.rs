@@ -80,6 +80,24 @@ pub struct CrtSettings {
     pub hard_pix: f32,
 }
 
+pub const HALO_PRESET_SONY_WEGA: &str = "Sony Trinitron WEGA";
+pub const HALO_PRESET_SONY_90S: &str = "Sony Trinitron (90s)";
+pub const HALO_PRESET_SONY_PVM_20M2: &str = "Sony PVM-20M2 (90s Broadcast)";
+pub const HALO_PRESET_JVC_D_SERIES: &str = "JVC D-Series (Late 90s)";
+pub const HALO_PRESET_TOSHIBA_AF: &str = "Toshiba AF Series (Early 00s)";
+pub const HALO_PRESET_TOSHIBA_BLACKSTRIPE: &str = "Toshiba Blackstripe (Late 80s)";
+pub const HALO_PRESET_PANASONIC_GAOO: &str = "Panasonic Gaoo (Early 90s)";
+pub const HALO_PRESET_PANASONIC_TAU: &str = "Panasonic Tau (Early 00s)";
+pub const HALO_PRESET_PHILIPS_MATCHLINE: &str = "Philips Matchline (90s Euro RGB)";
+pub const HALO_PRESET_COMMODORE_1084S: &str = "Commodore 1084S / NEC (Late 80s)";
+pub const HALO_PRESET_MITSUBISHI_DIAMONDTRON: &str = "Mitsubishi Diamondtron VGA (00s)";
+pub const HALO_PRESET_BUDGET_13_RF: &str = "Budget 13\" Dorm TV (Early 90s RF)";
+pub const HALO_DEFAULT_PRESET: &str = HALO_PRESET_SONY_WEGA;
+
+fn default_halo_vibrance() -> f32 {
+    1.0
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HaloSettings {
@@ -89,6 +107,8 @@ pub struct HaloSettings {
     pub beam_max: f32,
     pub beam_size: f32,
     pub h_sharp: f32,
+    #[serde(default = "default_halo_vibrance")]
+    pub vibrance: f32,
     pub glow: f32,
     pub bloom: f32,
     pub halation: f32,
@@ -115,6 +135,7 @@ impl Default for HaloSettings {
             beam_max: 1.65,
             beam_size: 1.25,
             h_sharp: 4.20,
+            vibrance: 1.0,
             glow: 0.53,
             bloom: 0.57,
             halation: 0.23,
@@ -130,6 +151,459 @@ impl Default for HaloSettings {
             halo_intensity: 0.95,
             corner_size: 0.0,
             curvature: true,
+        }
+    }
+}
+
+impl HaloSettings {
+    /// Early-2000s flat-glass Sony FD Trinitron WEGA consumer TV (`KV-FS` / `KV-FV` series):
+    /// uninterrupted vertical Aperture Grille (`slotmask = 0`), dynamic scanline blooming on
+    /// bright highlights (`beam_max = 1.10`, `beam_size = 1.40`), flat glass (`curvature = false`,
+    /// `corner_size = 0.005`), and Sony's warm phosphor saturation (`vibrance = 1.10`).
+    pub fn preset_sony_trinitron_wega() -> Self {
+        Self {
+            brightboost: 1.20,
+            brightboost1: 1.40,
+            beam_min: 1.70,
+            beam_max: 1.10,
+            beam_size: 1.40,
+            h_sharp: 3.50,
+            vibrance: 1.10,
+            glow: 0.35,
+            bloom: 0.50,
+            halation: 0.16,
+            shadow_mask: 6.0,
+            masksize: 1.0,
+            maskstr: 0.40,
+            mcut: 0.70,
+            slotmask: 0.0,
+            slotmask1: 0.0,
+            double_slot: 3.0,
+            smoothmask: 1.00,
+            halo_zoom: 100.0,
+            halo_intensity: 0.75,
+            corner_size: 0.005,
+            curvature: false,
+        }
+    }
+
+    /// 1990s curved dark-charcoal Sony Trinitron consumer TV (`KV-S` / `KV-V` series):
+    /// uninterrupted vertical Aperture Grille (`slotmask = 0`), curved cylindrical tube
+    /// (`curvature = true`, `corner_size = 0.025`), dynamic scanline bloom, and vivid phosphor saturation.
+    pub fn preset_sony_trinitron_90s() -> Self {
+        Self {
+            brightboost: 1.20,
+            brightboost1: 1.40,
+            beam_min: 1.70,
+            beam_max: 1.15,
+            beam_size: 1.35,
+            h_sharp: 3.50,
+            vibrance: 1.10,
+            glow: 0.38,
+            bloom: 0.52,
+            halation: 0.18,
+            shadow_mask: 6.0,
+            masksize: 1.0,
+            maskstr: 0.42,
+            mcut: 0.72,
+            slotmask: 0.0,
+            slotmask1: 0.0,
+            double_slot: 3.0,
+            smoothmask: 0.95,
+            halo_zoom: 100.0,
+            halo_intensity: 0.85,
+            corner_size: 0.025,
+            curvature: true,
+        }
+    }
+
+    /// Mid-1990s Sony PVM-20M2MDU / PVM-20L2 600-TVL professional broadcast/medical monitor:
+    /// high-density HR Trinitron Aperture Grille, wide RGB video bandwidth (`h_sharp = 6.50`),
+    /// regulated high-voltage supply (tight beam with crisp dark scanlines), low halation,
+    /// and calibrated SMPTE-C phosphors.
+    pub fn preset_sony_pvm_20m2() -> Self {
+        Self {
+            brightboost: 1.18,
+            brightboost1: 1.32,
+            beam_min: 2.05,
+            beam_max: 1.25,
+            beam_size: 1.15,
+            h_sharp: 6.50,
+            vibrance: 1.05,
+            glow: 0.22,
+            bloom: 0.35,
+            halation: 0.08,
+            shadow_mask: 6.0,
+            masksize: 1.0,
+            maskstr: 0.35,
+            mcut: 0.65,
+            slotmask: 0.0,
+            slotmask1: 0.0,
+            double_slot: 3.0,
+            smoothmask: 0.75,
+            halo_zoom: 100.0,
+            halo_intensity: 0.55,
+            corner_size: 0.018,
+            curvature: true,
+        }
+    }
+
+    /// Late-1990s / Early-2000s JVC D-Series (`AV-27D201` / `AV-32D500`):
+    /// dark-tinted curved Invar Slot Mask tube, dynamic focus, strong horizontal bandwidth,
+    /// punchy contrast, and lush organic scanlines that rivaled Sony Trinitron in the consumer space.
+    pub fn preset_jvc_d_series() -> Self {
+        Self {
+            brightboost: 1.32,
+            brightboost1: 1.50,
+            beam_min: 1.75,
+            beam_max: 1.15,
+            beam_size: 1.35,
+            h_sharp: 3.80,
+            vibrance: 1.12,
+            glow: 0.36,
+            bloom: 0.48,
+            halation: 0.16,
+            shadow_mask: 6.0,
+            masksize: 1.0,
+            maskstr: 0.38,
+            mcut: 0.68,
+            slotmask: 0.22,
+            slotmask1: 0.32,
+            double_slot: 2.0,
+            smoothmask: 0.90,
+            halo_zoom: 100.0,
+            halo_intensity: 0.80,
+            corner_size: 0.025,
+            curvature: true,
+        }
+    }
+
+    /// Early-2000s Toshiba AF Series (`14AF43` / `20AF41` / `27AF42` FST Pure):
+    /// flat-glass Invar Slot Mask tube with component input and Toshiba's aggressive horizontal
+    /// edge peaking (`h_sharp = 4.20`), crisp staggered slot mask, and tight scanlines.
+    pub fn preset_toshiba_af() -> Self {
+        Self {
+            brightboost: 1.32,
+            brightboost1: 1.48,
+            beam_min: 1.75,
+            beam_max: 1.15,
+            beam_size: 1.30,
+            h_sharp: 4.20,
+            vibrance: 1.08,
+            glow: 0.32,
+            bloom: 0.45,
+            halation: 0.14,
+            shadow_mask: 6.0,
+            masksize: 1.0,
+            maskstr: 0.40,
+            mcut: 0.70,
+            slotmask: 0.24,
+            slotmask1: 0.35,
+            double_slot: 2.0,
+            smoothmask: 0.95,
+            halo_zoom: 100.0,
+            halo_intensity: 0.70,
+            corner_size: 0.006,
+            curvature: false,
+        }
+    }
+
+    /// Late-1980s Toshiba Blackstripe II (`CF2005` / `CX2088`):
+    /// spherical bubble-curved vertical-stripe slot mask with black matrix guard bands,
+    /// warm 1980s RF/composite video bandwidth (`h_sharp = 2.10`), pronounced corner rounding,
+    /// and generous phosphor bloom/halation.
+    pub fn preset_toshiba_blackstripe_80s() -> Self {
+        Self {
+            brightboost: 1.35,
+            brightboost1: 1.55,
+            beam_min: 1.50,
+            beam_max: 1.00,
+            beam_size: 1.50,
+            h_sharp: 2.10,
+            vibrance: 1.05,
+            glow: 0.46,
+            bloom: 0.58,
+            halation: 0.24,
+            shadow_mask: 6.0,
+            masksize: 1.0,
+            maskstr: 0.45,
+            mcut: 0.75,
+            slotmask: 0.28,
+            slotmask1: 0.40,
+            double_slot: 3.0,
+            smoothmask: 0.85,
+            halo_zoom: 100.0,
+            halo_intensity: 0.95,
+            corner_size: 0.038,
+            curvature: true,
+        }
+    }
+
+    /// Early-to-Mid 1990s Panasonic "Gaoo" / SuperFlat (`CT-27SF` / Matsushita `TH-29GF`):
+    /// ultra-dark tinted PanaBlack curved Invar Slot Mask tube prized for deep black levels,
+    /// rich saturated color (`vibrance = 1.15`), and creamy, natural scanlines.
+    pub fn preset_panasonic_gaoo_90s() -> Self {
+        Self {
+            brightboost: 1.30,
+            brightboost1: 1.52,
+            beam_min: 1.70,
+            beam_max: 1.10,
+            beam_size: 1.40,
+            h_sharp: 3.20,
+            vibrance: 1.15,
+            glow: 0.38,
+            bloom: 0.52,
+            halation: 0.17,
+            shadow_mask: 6.0,
+            masksize: 1.0,
+            maskstr: 0.40,
+            mcut: 0.72,
+            slotmask: 0.20,
+            slotmask1: 0.30,
+            double_slot: 2.0,
+            smoothmask: 0.95,
+            halo_zoom: 100.0,
+            halo_intensity: 0.80,
+            corner_size: 0.022,
+            curvature: true,
+        }
+    }
+
+    /// Early-2000s Panasonic Tau PureFlat (`CT-27SX10` / `CT-20SL14`):
+    /// flat dark-tinted fine-pitch Invar Slot Mask tube with anti-reflective coating,
+    /// low halation, clean 3-line digital comb filtering, and balanced modern color.
+    pub fn preset_panasonic_tau_00s() -> Self {
+        Self {
+            brightboost: 1.28,
+            brightboost1: 1.45,
+            beam_min: 1.68,
+            beam_max: 1.12,
+            beam_size: 1.35,
+            h_sharp: 3.70,
+            vibrance: 1.08,
+            glow: 0.30,
+            bloom: 0.44,
+            halation: 0.12,
+            shadow_mask: 6.0,
+            masksize: 1.0,
+            maskstr: 0.36,
+            mcut: 0.68,
+            slotmask: 0.18,
+            slotmask1: 0.28,
+            double_slot: 2.0,
+            smoothmask: 1.00,
+            halo_zoom: 100.0,
+            halo_intensity: 0.68,
+            corner_size: 0.005,
+            curvature: false,
+        }
+    }
+
+    /// Mid-to-Late 1990s Philips Matchline (`25PT` / `29PT` Black Line S, European RGB SCART):
+    /// European Black Line S Invar Slot Mask tube with warm D65 color balance, smooth organic
+    /// horizontal transitions without artificial ringing, and classic curved pillow geometry.
+    pub fn preset_philips_matchline_90s() -> Self {
+        Self {
+            brightboost: 1.30,
+            brightboost1: 1.48,
+            beam_min: 1.62,
+            beam_max: 1.12,
+            beam_size: 1.38,
+            h_sharp: 2.90,
+            vibrance: 1.06,
+            glow: 0.40,
+            bloom: 0.50,
+            halation: 0.18,
+            shadow_mask: 6.0,
+            masksize: 1.0,
+            maskstr: 0.38,
+            mcut: 0.70,
+            slotmask: 0.22,
+            slotmask1: 0.34,
+            double_slot: 2.0,
+            smoothmask: 0.95,
+            halo_zoom: 100.0,
+            halo_intensity: 0.82,
+            corner_size: 0.028,
+            curvature: true,
+        }
+    }
+
+    /// Late-1980s Commodore 1084S / Philips CM8833 / NEC PC-KD854 14-inch 15kHz RGB monitor:
+    /// medium-pitch staggered dot-triad shadow mask (`shadow_mask = 1.0`), direct analog RGB
+    /// horizontal clarity (`h_sharp = 4.50`), tight beam for 80-column text and pixel art,
+    /// and curved 14" monitor corners.
+    pub fn preset_commodore_1084s_80s() -> Self {
+        Self {
+            brightboost: 1.25,
+            brightboost1: 1.40,
+            beam_min: 1.85,
+            beam_max: 1.25,
+            beam_size: 1.20,
+            h_sharp: 4.50,
+            vibrance: 1.05,
+            glow: 0.28,
+            bloom: 0.38,
+            halation: 0.10,
+            shadow_mask: 1.0,
+            masksize: 1.0,
+            maskstr: 0.36,
+            mcut: 0.65,
+            slotmask: 0.0,
+            slotmask1: 0.0,
+            double_slot: 3.0,
+            smoothmask: 0.85,
+            halo_zoom: 100.0,
+            halo_intensity: 0.65,
+            corner_size: 0.032,
+            curvature: true,
+        }
+    }
+
+    /// Early-2000s Mitsubishi Diamondtron NF / NEC MultiSync FE flat PC VGA CRT monitor:
+    /// ultra-fine 0.24mm Aperture Grille (`shadow_mask = 5.0`), very high horizontal video
+    /// bandwidth (`h_sharp = 7.50`), razor-sharp scanlines, minimal halation, and flat glass.
+    pub fn preset_mitsubishi_diamondtron_00s() -> Self {
+        Self {
+            brightboost: 1.15,
+            brightboost1: 1.25,
+            beam_min: 2.15,
+            beam_max: 1.35,
+            beam_size: 1.05,
+            h_sharp: 7.50,
+            vibrance: 1.02,
+            glow: 0.18,
+            bloom: 0.28,
+            halation: 0.06,
+            shadow_mask: 5.0,
+            masksize: 1.0,
+            maskstr: 0.32,
+            mcut: 0.60,
+            slotmask: 0.0,
+            slotmask1: 0.0,
+            double_slot: 3.0,
+            smoothmask: 0.70,
+            halo_zoom: 100.0,
+            halo_intensity: 0.45,
+            corner_size: 0.004,
+            curvature: false,
+        }
+    }
+
+    /// Early-1990s Budget 13" Bedroom/Dorm TV (Orion / Funai / Emerson / GoldStar RF & Composite):
+    /// small-neck 90-degree deflection tube with unregulated HV (heavy bright-area beam bloom),
+    /// coarse slot mask, narrow composite/RF luma bandwidth (`h_sharp = 1.45`), strong bubble
+    /// curvature (`corner_size = 0.045`), and heavy glass halation.
+    pub fn preset_budget_13_dorm_tv() -> Self {
+        Self {
+            brightboost: 1.38,
+            brightboost1: 1.60,
+            beam_min: 1.35,
+            beam_max: 0.85,
+            beam_size: 1.65,
+            h_sharp: 1.45,
+            vibrance: 0.96,
+            glow: 0.52,
+            bloom: 0.65,
+            halation: 0.28,
+            shadow_mask: 6.0,
+            masksize: 1.0,
+            maskstr: 0.48,
+            mcut: 0.78,
+            slotmask: 0.32,
+            slotmask1: 0.45,
+            double_slot: 3.0,
+            smoothmask: 1.15,
+            halo_zoom: 100.0,
+            halo_intensity: 1.05,
+            corner_size: 0.045,
+            curvature: true,
+        }
+    }
+
+    pub fn builtin_preset_list() -> Vec<(&'static str, Self)> {
+        vec![
+            (HALO_PRESET_SONY_WEGA, Self::preset_sony_trinitron_wega()),
+            (HALO_PRESET_SONY_90S, Self::preset_sony_trinitron_90s()),
+            (HALO_PRESET_SONY_PVM_20M2, Self::preset_sony_pvm_20m2()),
+            (HALO_PRESET_JVC_D_SERIES, Self::preset_jvc_d_series()),
+            (HALO_PRESET_TOSHIBA_AF, Self::preset_toshiba_af()),
+            (
+                HALO_PRESET_TOSHIBA_BLACKSTRIPE,
+                Self::preset_toshiba_blackstripe_80s(),
+            ),
+            (
+                HALO_PRESET_PANASONIC_GAOO,
+                Self::preset_panasonic_gaoo_90s(),
+            ),
+            (HALO_PRESET_PANASONIC_TAU, Self::preset_panasonic_tau_00s()),
+            (
+                HALO_PRESET_PHILIPS_MATCHLINE,
+                Self::preset_philips_matchline_90s(),
+            ),
+            (
+                HALO_PRESET_COMMODORE_1084S,
+                Self::preset_commodore_1084s_80s(),
+            ),
+            (
+                HALO_PRESET_MITSUBISHI_DIAMONDTRON,
+                Self::preset_mitsubishi_diamondtron_00s(),
+            ),
+            (HALO_PRESET_BUDGET_13_RF, Self::preset_budget_13_dorm_tv()),
+        ]
+    }
+
+    pub fn builtin_presets() -> BTreeMap<String, Self> {
+        let mut map = BTreeMap::new();
+        for (name, preset) in Self::builtin_preset_list() {
+            map.insert(name.to_string(), preset);
+        }
+        map
+    }
+
+    pub fn builtin_preset(name: &str) -> Option<Self> {
+        Self::builtin_preset_list()
+            .into_iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, p)| p)
+    }
+
+    pub fn is_builtin_preset(name: &str) -> bool {
+        Self::builtin_preset_list().iter().any(|(n, _)| *n == name)
+    }
+
+    pub fn sanitized(&self) -> Self {
+        let def = Self::default();
+        let clean = |v: f32, fallback: f32, min: f32, max: f32| -> f32 {
+            if v.is_finite() {
+                v.clamp(min, max)
+            } else {
+                fallback.clamp(min, max)
+            }
+        };
+        Self {
+            brightboost: clean(self.brightboost, def.brightboost, 0.5, 3.0),
+            brightboost1: clean(self.brightboost1, def.brightboost1, 0.5, 3.0),
+            beam_min: clean(self.beam_min, def.beam_min, 0.5, 3.0),
+            beam_max: clean(self.beam_max, def.beam_max, 0.2, 2.0),
+            beam_size: clean(self.beam_size, def.beam_size, 0.0, 2.0),
+            h_sharp: clean(self.h_sharp, def.h_sharp, 1.0, 10.0),
+            vibrance: clean(self.vibrance, def.vibrance, 0.0, 3.0),
+            glow: clean(self.glow, def.glow, 0.0, 1.0),
+            bloom: clean(self.bloom, def.bloom, 0.0, 1.0),
+            halation: clean(self.halation, def.halation, 0.0, 0.5),
+            shadow_mask: clean(self.shadow_mask, def.shadow_mask, 0.0, 6.0),
+            masksize: clean(self.masksize, def.masksize, 1.0, 4.0),
+            maskstr: clean(self.maskstr, def.maskstr, 0.0, 1.0),
+            mcut: clean(self.mcut, def.mcut, 0.0, 1.0),
+            slotmask: clean(self.slotmask, def.slotmask, 0.0, 1.0),
+            slotmask1: clean(self.slotmask1, def.slotmask1, 0.0, 1.0),
+            double_slot: clean(self.double_slot, def.double_slot, 1.0, 4.0),
+            smoothmask: clean(self.smoothmask, def.smoothmask, 0.0, 2.0),
+            halo_zoom: clean(self.halo_zoom, def.halo_zoom, 50.0, 100.0),
+            halo_intensity: clean(self.halo_intensity, def.halo_intensity, 0.0, 2.0),
+            corner_size: clean(self.corner_size, def.corner_size, 0.0, 0.1),
+            curvature: self.curvature,
         }
     }
 }
@@ -758,6 +1232,9 @@ pub struct AppState {
     pub crt: CrtSettings,
     pub halo: HaloSettings,
     pub halo_defaults: HaloSettings,
+    pub halo_presets: BTreeMap<String, HaloSettings>,
+    pub active_halo_preset: String,
+    pub new_halo_preset_name: String,
     pub cathode_interference: CathodeInterferenceSettings,
     pub cathode_interference_defaults: CathodeInterferenceSettings,
     pub audio_reactive: AudioReactiveConfig,
@@ -943,5 +1420,33 @@ mod tests {
             state.audio_reactive_runtime.spring_pos_x.abs() > 0.0
                 || state.audio_reactive_runtime.spring_pos_y.abs() > 0.0
         );
+    }
+
+    #[test]
+    fn test_halo_builtin_presets_validity_and_distinctness() {
+        let list = HaloSettings::builtin_preset_list();
+        assert_eq!(list.len(), 12);
+        let map = HaloSettings::builtin_presets();
+        assert_eq!(map.len(), 12);
+
+        for (name, preset) in &list {
+            assert!(
+                HaloSettings::is_builtin_preset(name),
+                "Preset '{}' must be recognized as builtin",
+                name
+            );
+            assert_eq!(
+                HaloSettings::builtin_preset(name).as_ref(),
+                Some(preset),
+                "builtin_preset('{}') must return matching preset",
+                name
+            );
+            assert_eq!(
+                *preset,
+                preset.sanitized(),
+                "Builtin preset '{}' must be within valid sanitized bounds",
+                name
+            );
+        }
     }
 }
