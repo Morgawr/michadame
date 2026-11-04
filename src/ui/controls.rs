@@ -1357,6 +1357,8 @@ fn draw_hotkeys_tab(ui: &mut egui::Ui) {
             ("Shift + F9", "Quick Load State (PC-98 / PC-88)"),
             ("Shift + F6 / F7", "Prev / Next Save Slot (PC-98 / PC-88)"),
             ("F12", "Open / Close NP2 / Quasi88 Menu"),
+            ("S", "Copy Screenshot to Clipboard"),
+            ("Ctrl + S", "Copy Smartphone Photo of Monitor"),
             ("Ctrl + C", "Export 15s Replay Clip to Clipboard"),
             ("Ctrl + Shift + C", "Export 7s Audio Clip to Clipboard"),
             ("F1 – F12", "Save Replay Buffer (Capture & Replay tab)"),

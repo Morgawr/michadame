@@ -9,6 +9,7 @@ pub mod pc88;
 pub mod pc98;
 mod portable;
 mod replay;
+pub mod screenshot;
 mod steam_deck;
 mod twitch;
 mod ui;

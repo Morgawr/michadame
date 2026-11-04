@@ -225,10 +225,12 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             .backend_shared
             .store(state.ocr.backend.as_u8(), Ordering::Release);
         let mining_capture_this_frame = state.bank.has_pending();
-        if mining_capture_this_frame {
+        let screenshot_capture_this_frame = state.screenshot.has_pending();
+        if mining_capture_this_frame || screenshot_capture_this_frame {
             ctx.request_repaint();
         }
         let bank_capture = state.bank.capture_handle();
+        let screenshot_capture = state.screenshot.capture_handle();
 
         let is_preroll_active = state.twitch.preroll.is_some();
         let is_outro_active = state.twitch.outro.is_some();
@@ -614,6 +616,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
                 let ocr_dispatch_cb = ocr_dispatch.clone();
                 let bank_capture_cb = bank_capture.clone();
+                let screenshot_capture_cb = screenshot_capture.clone();
 
                 let latest_dmabuf_frame_cb = latest_dmabuf_frame.clone();
                 let egl_importer_cb = egl_importer_cb.clone();
@@ -681,12 +684,14 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 .unwrap_or((texture_size.x as u32, texture_size.y as u32));
 
                             let is_mining_capture = bank_capture_cb.has_pending();
-                            let current_software_mouse_pos = if is_mining_capture {
+                            let hide_mouse_capture =
+                                is_mining_capture || screenshot_capture_cb.has_pending();
+                            let current_software_mouse_pos = if hide_mouse_capture {
                                 None
                             } else {
                                 software_mouse_pos
                             };
-                            let current_software_mouse_clip = if is_mining_capture {
+                            let current_software_mouse_clip = if hide_mouse_capture {
                                 None
                             } else {
                                 software_mouse_clip
@@ -961,6 +966,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
             let ocr_dispatch_cb = ocr_dispatch.clone();
             let bank_capture_cb = bank_capture.clone();
+            let screenshot_capture_cb = screenshot_capture.clone();
 
             let latest_dmabuf_frame_cb = latest_dmabuf_frame.clone();
             let egl_importer_cb = egl_importer_cb.clone();
@@ -1021,12 +1027,14 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         })
                         .unwrap_or((texture_size.x as u32, texture_size.y as u32));
                     let is_mining_capture = bank_capture_cb.has_pending();
-                    let current_software_mouse_pos = if is_mining_capture {
+                    let hide_mouse_capture =
+                        is_mining_capture || screenshot_capture_cb.has_pending();
+                    let current_software_mouse_pos = if hide_mouse_capture {
                         None
                     } else {
                         software_mouse_pos
                     };
-                    let current_software_mouse_clip = if is_mining_capture {
+                    let current_software_mouse_clip = if hide_mouse_capture {
                         None
                     } else {
                         software_mouse_clip
@@ -1190,6 +1198,49 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             } else if state.whiteboard.is_visible() && state.bank.has_pending() {
                 ctx.request_repaint();
             }
+
+            if screenshot_capture_this_frame {
+                let screenshot_capture_cb = screenshot_capture.clone();
+                let clipboard_cb = state.replay.clipboard();
+                let repaint_ctx = ctx.clone();
+                let full_window_effects = retro_pc_frame || night_mode_glow_intensity > 0.001;
+                let normal_capture_area = if full_window_effects {
+                    crate::video::gpu::geometry::RenderedArea::full(output_size)
+                } else {
+                    rendered_area_geom
+                };
+                let screen_only_area = rendered_area_geom;
+                let shot_cb = egui::PaintCallback {
+                    rect: response.rect,
+                    callback: std::sync::Arc::new(egui_glow::CallbackFn::new(
+                        move |_info, painter| {
+                            if let Some(request) = screenshot_capture_cb.take_pending() {
+                                let area = match request.mode {
+                                    crate::screenshot::ScreenshotMode::Normal => {
+                                        normal_capture_area
+                                    }
+                                    crate::screenshot::ScreenshotMode::PhonePhoto => {
+                                        screen_only_area
+                                    }
+                                };
+                                let shot = capture_frame_pixels(painter.gl(), area);
+                                screenshot_capture_cb.save_to_clipboard(
+                                    request,
+                                    shot,
+                                    clipboard_cb.clone(),
+                                    repaint_ctx.clone(),
+                                );
+                                repaint_ctx.request_repaint();
+                            }
+                        },
+                    )),
+                };
+                ctx.layer_painter(egui::LayerId::new(
+                    egui::Order::PanelResizeLine,
+                    egui::Id::new("whiteboard_overlay"),
+                ))
+                .add(shot_cb);
+            }
         }
 
         // Draw webcam overlay on top of everything (suppressed during pre-roll and outro)
@@ -1198,7 +1249,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         }
 
         // Draw real Gamescope cursor if active
-        if real_mouse_active && !is_roll_active {
+        if real_mouse_active && !is_roll_active && !screenshot_capture_this_frame {
             if let Some(hook) = &mut state.gamescope_hook {
                 if let Some(img) = hook.cursor_image() {
                     let needs_new_texture = match &hook.cursor_texture {

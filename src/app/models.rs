@@ -833,6 +833,7 @@ pub struct AppState {
     pub mic: MicState,
     pub webcam: WebcamState,
     pub whiteboard: crate::ui::whiteboard::WhiteboardState,
+    pub screenshot: crate::screenshot::ScreenshotState,
     pub config_load_error: Option<String>,
     pub config_quarantine_path: Option<std::path::PathBuf>,
 }

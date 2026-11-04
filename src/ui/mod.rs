@@ -141,6 +141,12 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
             state.toggle_audio_reactive();
             hotkey_repaint = true;
         }
+        if state.ui.video_window_open {
+            if let Some(mode) = crate::screenshot::check_screenshot_hotkeys(ctx) {
+                state.request_screenshot(mode, ctx);
+                hotkey_repaint = true;
+            }
+        }
         // Ignore Space while typing in a text field (e.g. the mining tag) or when constant scanning is active.
         if !state.ocr.is_constant_scanning_active()
             && !ctx.wants_keyboard_input()

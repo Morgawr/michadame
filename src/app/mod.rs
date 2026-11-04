@@ -192,6 +192,7 @@ impl Default for AppState {
             mic: crate::app::models::MicState::default(),
             webcam: crate::app::models::WebcamState::default(),
             whiteboard: crate::ui::whiteboard::WhiteboardState::default(),
+            screenshot: crate::screenshot::ScreenshotState::default(),
             config_load_error: None,
             config_quarantine_path: None,
         }
@@ -243,6 +244,56 @@ impl AppState {
     pub fn clear_ocr(&mut self) {
         self.ocr.clear();
         self.dict.popup = None;
+    }
+
+    pub fn request_screenshot(
+        &mut self,
+        mode: crate::screenshot::ScreenshotMode,
+        ctx: &egui::Context,
+    ) {
+        if !self.ui.video_window_open {
+            return;
+        }
+        let filter = CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed));
+        let is_crt_on = filter != CrtFilter::Off;
+        let night_mode_active = is_crt_on && self.video.effective_lights_off_night_mode();
+        let dark_room = night_mode_active
+            || self.video.lights_off_night_mode
+            || (is_crt_on && self.video.retro_pc_frame_dark_mode);
+        let warp = match filter {
+            CrtFilter::Lottes => [self.crt.warp_x, self.crt.warp_y],
+            CrtFilter::Halo if self.halo.curvature => [0.031, 0.041],
+            _ => [0.0, 0.0],
+        };
+        let corner_size = if filter == CrtFilter::Halo {
+            self.halo.corner_size
+        } else {
+            0.0
+        };
+        let scene = crate::screenshot::PhotoSceneContext {
+            crt_filter: filter,
+            dark_room,
+            retro_pc_frame_already_drawn: is_crt_on && self.video.retro_pc_frame,
+            crt_glass_already_drawn: self.video.crt_glass_enabled,
+            is_fullscreen: self.ui.is_fullscreen,
+            window_title: if self.last_window_title.is_empty() {
+                "Michadame".to_string()
+            } else {
+                self.last_window_title.clone()
+            },
+            warp,
+            corner_size,
+            border_crop: [
+                self.video.border_crop_left,
+                self.video.border_crop_right,
+                self.video.border_crop_top,
+                self.video.border_crop_bottom,
+            ],
+        };
+        if self.screenshot.request(mode, scene) {
+            ctx.request_repaint();
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+        }
     }
 
     pub(crate) fn update_ocr_projection(
@@ -966,6 +1017,12 @@ impl eframe::App for AppState {
                     self.bank.enlarged = None;
                 }
             }
+            if self.ui.video_window_open {
+                if let Some(mode) = crate::screenshot::check_screenshot_hotkeys(ctx) {
+                    self.request_screenshot(mode, ctx);
+                    repaint_requested = true;
+                }
+            }
         }
 
         // Playback hotkeys when in video file mode
@@ -1311,6 +1368,24 @@ impl eframe::App for AppState {
             match message {
                 Ok(info) => self.info(info),
                 Err(err) => self.error(err),
+            }
+            repaint_requested = true;
+        }
+        for event in self.screenshot.poll_events() {
+            match event {
+                crate::screenshot::ScreenshotEvent::Copied(
+                    crate::screenshot::ScreenshotMode::Normal,
+                ) => {
+                    self.info("Copied screenshot to clipboard");
+                }
+                crate::screenshot::ScreenshotEvent::Copied(
+                    crate::screenshot::ScreenshotMode::PhonePhoto,
+                ) => {
+                    self.info("Copied smartphone photo to clipboard");
+                }
+                crate::screenshot::ScreenshotEvent::Failed(_, err) => {
+                    self.error(format!("Screenshot failed: {err}"));
+                }
             }
             repaint_requested = true;
         }

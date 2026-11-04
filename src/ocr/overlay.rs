@@ -119,6 +119,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
     let deck_mode = state.steam_deck.is_some();
     let mut tapped_word = false;
     let hide_for_mining_capture = state.bank.has_pending() && state.whiteboard.is_visible();
+    let hide_boxes_for_screenshot = state.screenshot.has_pending();
     // The dictionary popup "eats" pointer events: if the cursor is currently over the
     // popup window (using its rect from the last drawn frame), words/boxes underneath it
     // must not react to hover or clicks. This is checked against the *current* pointer
@@ -207,7 +208,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
             )
         };
 
-        if !state.ocr.hide_overlay && !hide_for_mining_capture {
+        if !state.ocr.hide_overlay && !hide_for_mining_capture && !hide_boxes_for_screenshot {
             ui.painter().rect(box_rect, 4.0, fill, stroke);
 
             // When hovered or actively displaying a dictionary popup, render the OCR text inside the darkened box!
@@ -517,7 +518,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
             ui,
             &mut state.dict.popup,
             target_rect,
-            !state.ocr.hide_overlay,
+            !state.ocr.hide_overlay && !hide_boxes_for_screenshot,
             state.dict.popup_under_crt,
             if deck_mode {
                 crate::steam_deck::dictionary_scale(ui.ctx())
