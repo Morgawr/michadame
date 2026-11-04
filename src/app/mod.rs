@@ -273,7 +273,7 @@ impl AppState {
         let scene = crate::screenshot::PhotoSceneContext {
             crt_filter: filter,
             dark_room,
-            retro_pc_frame_already_drawn: is_crt_on && self.video.retro_pc_frame,
+            retro_pc_frame_already_drawn: false,
             crt_glass_already_drawn: self.video.crt_glass_enabled,
             is_fullscreen: self.ui.is_fullscreen,
             window_title: if self.last_window_title.is_empty() {

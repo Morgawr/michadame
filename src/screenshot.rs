@@ -430,14 +430,15 @@ impl PhotoCameraParams {
             0.0
         };
 
-        // 4. Subtle unsteady hand micro-blur (2015 smartphone with fast auto-shutter / OIS)
+        // 4. Subtle unsteady hand micro-tremor (2015 smartphone with fast auto-shutter / OIS)
+        // Kept tight enough that fine 480-line CRT scanlines and RGB phosphor triads remain crisp.
         let shake_angle_rad = rng.gen_range(0.0f32..std::f32::consts::TAU);
         let shake_px = if dark {
-            rng.gen_range(0.75f32..1.45f32)
+            rng.gen_range(0.22f32..0.42f32)
         } else {
-            rng.gen_range(0.40f32..0.95f32)
+            rng.gen_range(0.14f32..0.30f32)
         };
-        let defocus_strength = rng.gen_range(0.12f32..0.28f32);
+        let defocus_strength = rng.gen_range(0.06f32..0.16f32);
 
         // 5. Auto-exposure & white balance shift (phone cameras render emissive screens slightly cool/blue-cyan)
         let exposure_gain = if dark {
@@ -452,8 +453,8 @@ impl PhotoCameraParams {
         ];
 
         // 6. Camera sensor moiré & CRT rolling shutter band
-        // CRT mode uses shadow-mask/scanline beat frequencies; Flat LCD mode uses 2D perspective
-        // LCD subpixel-grid vs CMOS Bayer sensor beat frequencies.
+        // CRT mode uses shadow-mask/scanline beat frequencies complementing the physical CRT scanline raster;
+        // Flat LCD mode uses 2D perspective LCD subpixel-grid vs CMOS Bayer sensor beat frequencies.
         let moire_freq = if is_crt {
             rng.gen_range(135.0f32..205.0f32)
         } else {
@@ -461,7 +462,7 @@ impl PhotoCameraParams {
         };
         let moire_angle_rad = roll_rad + rng.gen_range(-0.14f32..0.14f32);
         let moire_strength = if is_crt {
-            rng.gen_range(0.038f32..0.072f32)
+            rng.gen_range(0.018f32..0.036f32)
         } else {
             rng.gen_range(0.030f32..0.056f32)
         };
@@ -1257,8 +1258,10 @@ fn eval_monitor_plane_point(
         }
 
         // Inside the CRT glass aperture:
-        // Note: `pixels` already has the CRT shader warp applied on the GPU, so we sample `pixels`
-        // at `(u, v)` to avoid double-warping the video content.
+        // Sample `pixels` directly with `sample_rgb_bilinear` (preserving the exact in-game CRT
+        // scanline and phosphor detail already rendered by the GPU shader without vertical blurring),
+        // then apply a subtle, high-density 480-line VGA/PC-98 CRT scanline & triad reinforcement
+        // and curved sensor-vs-raster moiré ripple in curved tube space `(su, sv)`.
         let mut col = sample_rgb_bilinear(pixels, width, height, u, v);
 
         // 1. Bezel overhang drop-shadow onto the curved glass edge (if not already drawn by `retro_pc_frame`)
@@ -1275,15 +1278,77 @@ fn eval_monitor_plane_point(
             }
         }
 
-        // 2. CRT Phosphor Halation / Bloom (stronger in Dark Room due to phone camera exposure)
-        let bloom_weight = if dark_room { 0.38 } else { 0.18 };
+        // 2. Fine, Subtle High-Density CRT Horizontal Scanlines & Phosphor Triads in Curved Tube Space `(su, sv)`
+        // Matches the fine ~480-line VGA/PC-98 CRT raster from the in-game CRT shader and real CRT monitor
+        // photos: scanlines are delicate (~3px pitch at 1440p) with a gentle ~10-16% peak-to-trough dip
+        // (`trough = 0.85..0.94`), never thick dark bars.
+        let scan_count = if width.max(height) >= 320 {
+            480.0f32
+        } else {
+            (height as f32 * 0.40).clamp(32.0, 56.0)
+        };
+        let scan_coord = sv * scan_count;
+        let scan_phase = scan_coord.fract();
+        // `cos_wave` is 1.0 at the center of the scanline beam (`scan_phase = 0.5`) and 0.0 in the gap (`0.0`/`1.0`)
+        let cos_wave = 0.5 - 0.5 * (scan_phase * std::f32::consts::TAU).cos();
+        let col_max = col[0].max(col[1]).max(col[2]).clamp(0.0, 1.0);
+
+        // Bright highlights widen the Gaussian electron beam into adjacent scanline gaps (`beam_size` bloom),
+        // while midtones have a delicate, natural ~8-12% scanline ripple matching the in-game shader.
+        let beam = cos_wave.powf(1.02 - 0.32 * col_max);
+        let trough = 0.90 + 0.05 * col_max;
+        let peak = 1.025 - 0.01 * col_max;
+        let scan_mult = trough + (peak - trough) * beam;
+
+        // Fine vertical RGB phosphor triad pitch (`640` triads) with subtle modulation (`mask_str = 0.038`)
+        let triad_count = if width.max(height) >= 320 {
+            640.0f32
+        } else {
+            (width as f32 * 0.45).clamp(36.0, 80.0)
+        };
+        let triad_x = su * triad_count;
+        let theta = triad_x * std::f32::consts::TAU;
+        let mask_str = 0.038 * (1.0 - 0.45 * col_max * col_max);
+        let mut mask_r = 1.0 + mask_str * theta.cos();
+        let mut mask_g = 1.0 + mask_str * (theta - 2.0943951).cos();
+        let mut mask_b = 1.0 + mask_str * (theta - 4.1887902).cos();
+
+        if scene.crt_filter == CrtFilter::Lottes {
+            // Subtle staggered slot-mask shadow bridges
+            let slot_col = (triad_x * 2.0).floor() as i32;
+            let slot_row =
+                ((scan_coord + if (slot_col & 1) != 0 { 1.0 } else { 0.0 }) * 0.5).fract();
+            let slot_bridge = 1.0
+                - (1.0 - (slot_row * std::f32::consts::TAU).cos().abs())
+                    * 0.025
+                    * (1.0 - 0.45 * col_max);
+            mask_r *= slot_bridge;
+            mask_g *= slot_bridge;
+            mask_b *= slot_bridge;
+        } else {
+            // Very faint Trinitron aperture-grille tension damper wires at sv = 0.30 and sv = 0.70
+            let damper = 1.0
+                - ((-0.5 * ((sv - 0.30) / 0.0010).powi(2)).exp()
+                    + (-0.5 * ((sv - 0.70) / 0.0010).powi(2)).exp())
+                    * 0.03;
+            mask_r *= damper;
+            mask_g *= damper;
+            mask_b *= damper;
+        }
+
+        col[0] *= scan_mult * mask_r;
+        col[1] *= scan_mult * mask_g;
+        col[2] *= scan_mult * mask_b;
+
+        // 3. CRT Phosphor Halation / Bloom
+        let bloom_weight = (if dark_room { 0.32 } else { 0.15 }) * (0.75 + 0.25 * beam);
         let amb_lum =
             0.2126 * ambient_edge[0] + 0.7152 * ambient_edge[1] + 0.0722 * ambient_edge[2];
         for c in 0..3 {
             col[c] += ambient_edge[c] * (amb_lum * 0.65 + 0.15) * bloom_weight;
         }
 
-        // 3. CRT 60Hz Rolling Shutter Phosphor Refresh Band (classic phone camera vs CRT effect)
+        // 4. CRT 60Hz Rolling Shutter Phosphor Refresh Band (classic phone camera vs CRT effect)
         let band_dist = ((v - params.shutter_band_y) + (u - 0.5) * 0.06).abs();
         let refresh_boost = (-0.5 * (band_dist / 0.18).powi(2)).exp();
         let shutter_mult = 1.0 + params.shutter_band_strength * (refresh_boost * 1.4 - 0.45);
@@ -1291,20 +1356,29 @@ fn eval_monitor_plane_point(
         col[1] *= shutter_mult;
         col[2] *= shutter_mult * (1.0 + 0.04 * refresh_boost);
 
-        // 4. Curved CRT Shadow-Mask / Scanline Camera Sensor Moiré Interference
+        // 5. Curved CRT Scanline-vs-Sensor Moiré Ripple (like a real smartphone photo of a 480-line CRT)
+        // Because the CRT scanlines follow curved tube coordinates `sv` while the smartphone CMOS sensor
+        // rows follow straight tilted coordinates `ny_sensor`, their slight frequency difference creates
+        // gentle curved horizontal/hyperbolic moiré wave bands across the screen.
         let cos_m = params.moire_angle_rad.cos();
         let sin_m = params.moire_angle_rad.sin();
         let mx = nx_sensor * cos_m - ny_sensor * sin_m;
         let my = nx_sensor * sin_m + ny_sensor * cos_m;
-        let beat_phase = (mx * params.moire_freq + (pos_x * pos_x + pos_y * pos_y) * 9.5).sin()
-            * (my * params.moire_freq * 0.38).cos();
+        let sensor_v = my * 0.5 + 0.5;
+        let scanline_beat = ((sv - sensor_v * 0.94) * params.moire_freq * 2.1
+            + (pos_x * pos_x - pos_y * pos_y * 0.35) * 7.5)
+            .sin();
+        let shadow_beat = (mx * params.moire_freq * 0.85 + (pos_x * pos_x + pos_y * pos_y) * 8.0)
+            .sin()
+            * (my * params.moire_freq * 0.35).cos();
         let lum = 0.2126 * col[0] + 0.7152 * col[1] + 0.0722 * col[2];
         let moire_mod = params.moire_strength * (0.35 + 0.65 * lum);
-        col[0] *= 1.0 + beat_phase * moire_mod;
-        col[1] *= 1.0 - beat_phase * moire_mod * 0.65;
-        col[2] *= 1.0 + (beat_phase * 1.7 + 1.1).sin() * moire_mod * 0.85;
+        let luma_ripple = 1.0 + scanline_beat * moire_mod * 1.15;
+        col[0] *= luma_ripple * (1.0 + shadow_beat * moire_mod * 0.75);
+        col[1] *= luma_ripple * (1.0 - shadow_beat * moire_mod * 0.50);
+        col[2] *= luma_ripple * (1.0 + (shadow_beat * 1.7 + 1.1).sin() * moire_mod * 0.65);
 
-        // 5. CRT Glass Reflections (Light Room vs Dark Room)
+        // 6. CRT Glass Reflections (Light Room vs Dark Room)
         let glass_scale = if scene.crt_glass_already_drawn {
             0.35
         } else {
@@ -1316,7 +1390,7 @@ fn eval_monitor_plane_point(
 
         if !dark_room {
             // Light Room: Overhead fluorescent ceiling fixture reflection + photographer silhouette
-            // + ambient room light lifted blacks on phosphor coat
+            // + ambient room light lifted blacks on phosphor coat (modulated by `beam` so carbon gaps stay darker)
             let rx = 2.0 * nx_glass + params.light_offset[0];
             let ry = -2.0 * ny_glass + params.light_offset[1];
             let troffer1 = eval_ceiling_troffer(-0.22, 0.42, 0.34, 0.046, rx, ry, 0.62);
@@ -1330,12 +1404,13 @@ fn eval_monitor_plane_point(
             let sil_v = (v + ny_glass * 0.04 + params.pan_y * 0.5).clamp(0.0, 1.0);
             let sil_mask = sample_rgb_bilinear(silhouette.as_raw(), sw, sh, sil_u, sil_v)[0] * 0.78;
 
-            let room_refl = ((troffer1 + troffer2) * 0.34 + diffuse_room + fresnel * 0.55)
+            let room_refl = ((troffer1 + troffer2) * 0.32 + diffuse_room + fresnel * 0.50)
                 * (1.0 - 0.72 * sil_mask)
-                * glass_scale;
+                * glass_scale
+                * (0.72 + 0.28 * beam);
 
-            // Dusty phosphor black-level lift in a lit room, occluded slightly by the photographer's shadow
-            let black_lift = 0.028 * (1.0 - 0.48 * sil_mask) * glass_scale;
+            // Dusty phosphor black-level lift in a lit room (lower on black carbon matrix between scanlines)
+            let black_lift = 0.024 * (1.0 - 0.48 * sil_mask) * glass_scale * (0.42 + 0.58 * beam);
             col[0] = col[0] * (1.0 - 0.18 * sil_mask * glass_scale) + black_lift + room_refl * 0.90;
             col[1] = col[1] * (1.0 - 0.18 * sil_mask * glass_scale) + black_lift + room_refl * 0.95;
             col[2] = col[2] * (1.0 - 0.18 * sil_mask * glass_scale)
@@ -1530,16 +1605,13 @@ pub fn render_phone_photo_rgba(
         }
     }
 
-    // Pass 2: Subtle Hand Micro-Shake + Corner Chromatic Aberration + 2015 Smartphone ISP
+    // Pass 2: Sharp Center-Weighted OIS Hand Micro-Tremor + Corner Chromatic Aberration + 2015 Smartphone ISP
+    // Strong center weight (0.78) preserves fine 480-line CRT scanlines and RGB phosphor triads
+    // while two asymmetric ghost taps (0.12, 0.10) add natural handheld micro-tremor softness.
     let shake_dx = params.shake_angle_rad.cos() * params.shake_px;
     let shake_dy = params.shake_angle_rad.sin() * params.shake_px;
-    let tap_offsets: [(f32, f32, f32); 5] = [
-        (-1.0, -0.85, 0.12),
-        (-0.5, -0.45, 0.22),
-        (0.0, 0.0, 0.32),
-        (0.5, 0.45, 0.22),
-        (1.0, 0.85, 0.12),
-    ];
+    let tap_offsets: [(f32, f32, f32); 3] =
+        [(-0.55, -0.35, 0.10), (0.0, 0.0, 0.78), (0.65, 0.45, 0.12)];
 
     let sample_scene_bilinear = |fx: f32, fy: f32| -> [f32; 3] {
         let cx = fx.clamp(0.0, (out_w - 1) as f32);
@@ -1916,6 +1988,68 @@ mod tests {
         let decoded = image::load_from_memory(&jpeg).unwrap();
         assert_eq!(decoded.width(), width);
         assert_eq!(decoded.height(), height);
+    }
+
+    #[test]
+    fn test_crt_phone_photo_renders_visible_scanlines() {
+        let width = 160;
+        let height = 120;
+        let pixels = vec![190u8; (width * height * 4) as usize];
+        let mut rng = rand::rngs::StdRng::seed_from_u64(777);
+
+        for (filter, dark_room) in [
+            (CrtFilter::Lottes, false),
+            (CrtFilter::Lottes, true),
+            (CrtFilter::Halo, false),
+            (CrtFilter::Halo, true),
+        ] {
+            let scene = PhotoSceneContext {
+                crt_filter: filter,
+                dark_room,
+                ..Default::default()
+            };
+            let mut params = PhotoCameraParams::random(&mut rng, &scene);
+            params.iso_noise_lum = 0.0;
+            params.iso_noise_chroma = 0.0;
+
+            let (rgba, out_w, out_h) =
+                render_phone_photo_rgba(&pixels, width, height, &scene, &params);
+
+            // Inspect a vertical slice down the center of the screen (`y` in 25%..75% of `out_h`)
+            // and verify subtle, natural scanline peak-to-trough modulation is present without harsh dark bars.
+            let cx = out_w / 2;
+            let mut max_step_delta = 0.0f32;
+            let mut direction_changes = 0usize;
+            let mut prev_delta = 0.0f32;
+
+            for y in (out_h / 4 + 1)..(out_h * 3 / 4) {
+                let idx = ((y * out_w + cx) as usize) * 4;
+                let lum = 0.2126 * (rgba[idx] as f32)
+                    + 0.7152 * (rgba[idx + 1] as f32)
+                    + 0.0722 * (rgba[idx + 2] as f32);
+                let prev_idx = (((y - 1) * out_w + cx) as usize) * 4;
+                let prev_lum = 0.2126 * (rgba[prev_idx] as f32)
+                    + 0.7152 * (rgba[prev_idx + 1] as f32)
+                    + 0.0722 * (rgba[prev_idx + 2] as f32);
+                let delta = lum - prev_lum;
+                max_step_delta = max_step_delta.max(delta.abs());
+                if delta.abs() > 0.8 {
+                    if (delta > 0.0 && prev_delta < 0.0) || (delta < 0.0 && prev_delta > 0.0) {
+                        direction_changes += 1;
+                    }
+                    prev_delta = delta;
+                }
+            }
+
+            assert!(
+                (3.0..=28.0).contains(&max_step_delta),
+                "Expected subtle, natural adjacent-scanline contrast (3..28 luma levels), got {max_step_delta:.1} for {filter:?} dark_room={dark_room}",
+            );
+            assert!(
+                direction_changes >= 18,
+                "Expected fine alternating horizontal scanline peaks and troughs, got {direction_changes} reversals for {filter:?} dark_room={dark_room}"
+            );
+        }
     }
 
     #[test]

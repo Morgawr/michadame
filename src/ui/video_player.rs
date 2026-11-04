@@ -684,6 +684,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 .unwrap_or((texture_size.x as u32, texture_size.y as u32));
 
                             let is_mining_capture = bank_capture_cb.has_pending();
+                            let is_phone_photo_capture = screenshot_capture_cb.pending_mode()
+                                == Some(crate::screenshot::ScreenshotMode::PhonePhoto);
                             let hide_mouse_capture =
                                 is_mining_capture || screenshot_capture_cb.has_pending();
                             let current_software_mouse_pos = if hide_mouse_capture {
@@ -732,7 +734,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 ocr_dispatch_cb.dispatch(pixels, w, h);
                             }
 
-                            if retro_pc_frame {
+                            if retro_pc_frame && !is_phone_photo_capture {
                                 let (warp, corner_size, filter_type) = if run_lottes {
                                     ([params.warp_x, params.warp_y], 0.0, 1)
                                 } else if run_halo {
@@ -763,7 +765,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 );
                             }
 
-                            if night_mode_glow_intensity > 0.001 {
+                            if night_mode_glow_intensity > 0.001 && !is_phone_photo_capture {
                                 let (warp, corner_size, filter_type) = if run_lottes {
                                     ([params.warp_x, params.warp_y], 0.0, 1)
                                 } else if run_halo {
@@ -1027,6 +1029,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         })
                         .unwrap_or((texture_size.x as u32, texture_size.y as u32));
                     let is_mining_capture = bank_capture_cb.has_pending();
+                    let is_phone_photo_capture = screenshot_capture_cb.pending_mode()
+                        == Some(crate::screenshot::ScreenshotMode::PhonePhoto);
                     let hide_mouse_capture =
                         is_mining_capture || screenshot_capture_cb.has_pending();
                     let current_software_mouse_pos = if hide_mouse_capture {
@@ -1091,7 +1095,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         ocr_dispatch_cb.dispatch(pixels, w, h);
                     }
 
-                    if retro_pc_frame && !is_showing_roll {
+                    if retro_pc_frame && !is_showing_roll && !is_phone_photo_capture {
                         renderer_clone.lock().unwrap().draw_retro_frame(
                             painter.gl(),
                             res,
