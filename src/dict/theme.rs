@@ -328,14 +328,15 @@ pub fn apply_widget_visuals(ui: &mut egui::Ui) {
     let visuals = &mut ui.style_mut().visuals;
     visuals.extreme_bg_color = BACKDROP;
     let w = &mut visuals.widgets;
-    for (state, fill) in [
-        (&mut w.inactive, RULE),
-        (&mut w.hovered, MUTED),
-        (&mut w.active, GOLD),
+    for (state, fill, fg) in [
+        (&mut w.inactive, RULE, TEXT),
+        (&mut w.hovered, MUTED, HEAD),
+        (&mut w.active, GOLD, HEAD),
     ] {
         state.bg_fill = fill;
-        state.weak_bg_fill = fill;
-        state.fg_stroke.color = fill;
+        state.weak_bg_fill = TAG_BG;
+        state.bg_stroke = Stroke::new(1.5, fill);
+        state.fg_stroke.color = fg;
         state.rounding = egui::Rounding::ZERO;
     }
 }
@@ -357,5 +358,20 @@ mod tests {
         assert!(blink_on(0.1));
         assert!(!blink_on(0.6));
         assert!(blink_on(1.1));
+    }
+
+    #[test]
+    fn apply_widget_visuals_keeps_button_text_contrasted_against_background() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                apply_widget_visuals(ui);
+                let w = &ui.style().visuals.widgets;
+                for state in [&w.inactive, &w.hovered, &w.active] {
+                    assert_ne!(state.fg_stroke.color, state.weak_bg_fill);
+                    assert_ne!(state.fg_stroke.color, state.bg_fill);
+                }
+            });
+        });
     }
 }

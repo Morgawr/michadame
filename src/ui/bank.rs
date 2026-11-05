@@ -482,13 +482,20 @@ fn draw_row(
                         let _controls_resp =
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                                 if state.bank.pending_delete == Some(entry.id) {
-                                    if ui.button("Cancel").clicked() {
+                                    let cancel_btn = egui::Button::new(
+                                        RichText::new("Cancel").color(COLOR_TERM),
+                                    )
+                                    .fill(COLOR_TAG_BG)
+                                    .stroke(egui::Stroke::new(1.5, COLOR_TAG_STROKE));
+                                    if ui.add(cancel_btn).clicked() {
                                         state.bank.pending_delete = None;
                                     }
-                                    if ui
-                                        .button(RichText::new("Delete").color(theme::DANGER_TEXT))
-                                        .clicked()
-                                    {
+                                    let delete_btn = egui::Button::new(
+                                        RichText::new("Delete").color(theme::DANGER_TEXT),
+                                    )
+                                    .fill(theme::BUTTON_DANGER_HOVER)
+                                    .stroke(egui::Stroke::new(1.5, theme::BRICK));
+                                    if ui.add(delete_btn).clicked() {
                                         action = RowAction::Delete;
                                     }
                                 } else {
