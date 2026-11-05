@@ -24,7 +24,7 @@ impl std::fmt::Display for CrtFilter {
             CrtFilter::Off => "Off",
             CrtFilter::Lottes => "Lottes (CRT)",
             CrtFilter::Halo => "Halo (CRT)",
-            CrtFilter::Beam => "Beam (CRT)",
+            CrtFilter::Beam => "Beam (CRT) (Experimental)",
         };
         write!(f, "{}", text)
     }
@@ -48,6 +48,6 @@ mod tests {
         assert_eq!(CrtFilter::Off.to_string(), "Off");
         assert_eq!(CrtFilter::Lottes.to_string(), "Lottes (CRT)");
         assert_eq!(CrtFilter::Halo.to_string(), "Halo (CRT)");
-        assert_eq!(CrtFilter::Beam.to_string(), "Beam (CRT)");
+        assert_eq!(CrtFilter::Beam.to_string(), "Beam (CRT) (Experimental)");
     }
 }

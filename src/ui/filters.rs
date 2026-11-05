@@ -59,7 +59,7 @@ pub fn draw_shaders_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         changed = true;
                     }
                     if ui
-                        .selectable_value(&mut current_filter.clone(), 3, "Beam")
+                        .selectable_value(&mut current_filter.clone(), 3, "Beam (Experimental)")
                         .clicked()
                     {
                         state.selected_crt_filter = CrtFilter::Beam;
