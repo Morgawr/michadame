@@ -2556,6 +2556,13 @@ impl CrtFilterRenderer {
                                 OcrProjection::lottes(params.warp_x, params.warp_y)
                             } else if run_halo {
                                 OcrProjection::halo(halo_params.curvature, halo_params.halo_zoom)
+                            } else if run_beam {
+                                OcrProjection::beam(
+                                    beam_params.curvature,
+                                    beam_params.warp_x,
+                                    beam_params.warp_y,
+                                    beam_params.screen_scale,
+                                )
                             } else {
                                 OcrProjection::default()
                             },
@@ -2597,6 +2604,13 @@ impl CrtFilterRenderer {
                         OcrProjection::lottes(params.warp_x, params.warp_y)
                     } else if run_halo {
                         OcrProjection::halo(halo_params.curvature, halo_params.halo_zoom)
+                    } else if run_beam {
+                        OcrProjection::beam(
+                            beam_params.curvature,
+                            beam_params.warp_x,
+                            beam_params.warp_y,
+                            beam_params.screen_scale,
+                        )
                     } else {
                         OcrProjection::default()
                     },
@@ -2777,6 +2791,12 @@ impl CrtFilterRenderer {
                     halo_params.shadow_mask,
                     0.5,
                     halo_params.brightboost.max(1.0),
+                )
+            } else if run_beam {
+                (
+                    beam_params.shadow_mask,
+                    beam_params.scanline_strength.clamp(0.0, 1.0),
+                    beam_params.brightboost.max(1.0),
                 )
             } else {
                 (0.0, 0.0, 1.0)
@@ -4059,6 +4079,7 @@ mod tests {
                 ("Halo zoom", false, true, false, true, 95.0, false),
                 ("Halo zoom flat", false, true, false, false, 95.0, false),
                 ("Beam", false, false, true, false, 100.0, false),
+                ("Beam curved zoom", false, false, true, true, 95.0, false),
                 (
                     "Off after capture",
                     false,
@@ -4094,6 +4115,11 @@ mod tests {
                     frames_per_hz: 1.0,
                     scan_direction: 0,
                     lcd_anti_retention: false,
+                    curvature,
+                    screen_scale: zoom,
+                    shadow_mask: 0.0,
+                    scanline_strength: 0.0,
+                    halation: 0.0,
                     ..Default::default()
                 };
                 renderer.capture_ocr_next_paint = true;
@@ -4137,7 +4163,7 @@ mod tests {
                     (a.0 - b.0).abs() < 1.0 && (a.1 - b.1).abs() < 1.0,
                     "{name}: misaligned OCR"
                 );
-                if !lottes && !halo {
+                if !lottes && !halo && !(beam && (curvature || zoom != 100.0)) {
                     let fitted = if pixelate {
                         super::super::geometry::pixelate_size((source_width, source_height))
                     } else {

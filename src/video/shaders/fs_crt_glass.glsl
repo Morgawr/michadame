@@ -89,6 +89,12 @@ void main() {
             pos *= vec2(1.0 + (pos.y * pos.y) * 0.031, 1.0 + (pos.x * pos.x) * 0.041);
             screen_tc = pos * 0.5 + 0.5;
         }
+    } else if (filter_type == 3) { // Beam curvature
+        if (warp.x > 0.001 || warp.y > 0.001) {
+            vec2 pos = centered_tc * 2.0 - 1.0;
+            pos *= vec2(1.0 + (pos.y * pos.y) * warp.x, 1.0 + (pos.x * pos.x) * warp.y);
+            screen_tc = pos * 0.5 + 0.5;
+        }
     }
 
     // 3. Signed distance to active video boundaries
@@ -101,8 +107,8 @@ void main() {
     vec2 d = max(vec2(d_left, d_top), vec2(d_right, d_bottom));
     float max_d = max(d.x, d.y);
 
-    // Halo rounded corners matching
-    if (filter_type == 2 && corner_size > 0.001) {
+    // Halo / Beam rounded corners matching
+    if ((filter_type == 2 || filter_type == 3) && corner_size > 0.001) {
         vec2 cd1 = abs(2.0 * centered_tc - 1.0) - (vec2(1.0) - vec2(corner_size * 2.0));
         if (cd1.x > 0.0 && cd1.y > 0.0) {
             float cdist1 = length(cd1) - corner_size * 2.0;

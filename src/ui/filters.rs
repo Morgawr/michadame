@@ -869,6 +869,7 @@ pub fn draw_shaders_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
         });
         ui.add_space(4.0);
     } else if current_filter == CrtFilter::Beam {
+        state.ensure_beam_presets();
         technical_group(ui, "", |ui| {
             ui.horizontal(|ui| {
                 ui.label(
@@ -879,8 +880,26 @@ pub fn draw_shaders_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         .color(egui::Color32::from_rgb(224, 224, 224)),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Reset Defaults").clicked() {
-                        state.beam = crate::app::models::BeamSettings::default();
+                    if ui
+                        .button("Reset Simulator Defaults")
+                        .on_hover_text("Reset Stage 1 CRT Beam Simulator parameters without changing the Stage 2 CRT tube/mask preset")
+                        .clicked()
+                    {
+                        let def = crate::app::models::BeamSettings::default();
+                        state.beam.frames_per_hz = def.frames_per_hz;
+                        state.beam.target_hz = def.target_hz;
+                        state.beam.gamma = def.gamma;
+                        state.beam.gain_vs_blur = def.gain_vs_blur;
+                        state.beam.fps_divisor = def.fps_divisor;
+                        state.beam.lcd_anti_retention = def.lcd_anti_retention;
+                        state.beam.lcd_inversion_compensation_slew =
+                            def.lcd_inversion_compensation_slew;
+                        state.beam.scan_direction = def.scan_direction;
+                        state.beam.splitscreen = def.splitscreen;
+                        state.beam.splitscreen_x = def.splitscreen_x;
+                        state.beam.splitscreen_y = def.splitscreen_y;
+                        state.beam.splitscreen_border_px = def.splitscreen_border_px;
+                        state.beam.splitscreen_match_brightness = def.splitscreen_match_brightness;
                         state.beam_defaults = state.beam.clone();
                         changed = true;
                     }
@@ -1119,6 +1138,419 @@ pub fn draw_shaders_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     }
                 });
             }
+
+            technical_separator(ui);
+
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new("Beam CRT Preset:")
+                        .monospace()
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(224, 224, 224)),
+                );
+
+                let current_mask = state.beam.mask_preset();
+                let is_modified = state
+                    .beam_presets
+                    .get(&state.active_beam_preset)
+                    .map_or(true, |saved| *saved != current_mask);
+                let combo_label = if is_modified {
+                    format!("{} *", state.active_beam_preset)
+                } else {
+                    state.active_beam_preset.clone()
+                };
+
+                let mut preset_names: Vec<String> =
+                    crate::app::models::BeamMaskPreset::builtin_preset_list()
+                        .into_iter()
+                        .filter_map(|(name, _)| {
+                            state
+                                .beam_presets
+                                .contains_key(name)
+                                .then(|| name.to_string())
+                        })
+                        .collect();
+                for key in state.beam_presets.keys() {
+                    if !crate::app::models::BeamMaskPreset::is_builtin_preset(key) {
+                        preset_names.push(key.clone());
+                    }
+                }
+                let mut selected_preset = state.active_beam_preset.clone();
+                egui::ComboBox::from_id_source("beam_preset_selector")
+                    .width(235.0)
+                    .selected_text(combo_label)
+                    .show_ui(ui, |ui| {
+                        for name in &preset_names {
+                            if ui
+                                .selectable_value(&mut selected_preset, name.clone(), name)
+                                .clicked()
+                            {
+                                if state.apply_beam_preset(name) {
+                                    state.info(format!("Loaded Beam CRT preset '{}'", name));
+                                    changed = true;
+                                }
+                            }
+                        }
+                    });
+
+                let name_resp = ui.add(
+                    egui::TextEdit::singleline(&mut state.new_beam_preset_name)
+                        .hint_text("New preset name (optional)")
+                        .desired_width(155.0),
+                );
+                let trimmed_new = state.new_beam_preset_name.trim().to_string();
+                let enter_pressed = !trimmed_new.is_empty()
+                    && name_resp.lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+                let save_hover = if trimmed_new.is_empty() {
+                    "Override the currently selected preset with current Beam CRT scanline/mask/curvature settings"
+                } else {
+                    "Save current Beam CRT scanline/mask/curvature settings as a new preset"
+                };
+                if ui
+                    .button("Save Preset")
+                    .on_hover_text(save_hover)
+                    .clicked()
+                    || enter_pressed
+                {
+                    let target_name = if trimmed_new.is_empty() {
+                        state.active_beam_preset.clone()
+                    } else {
+                        trimmed_new.clone()
+                    };
+                    let clean = state.beam.mask_preset().sanitized();
+                    state.beam.apply_mask_preset(&clean);
+                    state.beam_defaults.apply_mask_preset(&clean);
+                    state.beam_presets.insert(target_name.clone(), clean);
+                    state.active_beam_preset = target_name.clone();
+                    if !trimmed_new.is_empty() {
+                        state.new_beam_preset_name.clear();
+                        state.info(format!("Created Beam CRT preset '{}'", target_name));
+                    } else {
+                        state.info(format!("Updated Beam CRT preset '{}'", target_name));
+                    }
+                    changed = true;
+                }
+
+                let is_builtin =
+                    crate::app::models::BeamMaskPreset::is_builtin_preset(&state.active_beam_preset);
+                if ui
+                    .button("Reset")
+                    .on_hover_text(if is_builtin {
+                        "Reset this built-in preset to its factory defaults"
+                    } else {
+                        "Revert unsaved changes back to the stored preset"
+                    })
+                    .clicked()
+                {
+                    let active_name = state.active_beam_preset.clone();
+                    if let Some(factory) =
+                        crate::app::models::BeamMaskPreset::builtin_preset(&active_name)
+                    {
+                        state
+                            .beam_presets
+                            .insert(active_name.clone(), factory.clone());
+                        state.beam.apply_mask_preset(&factory);
+                        state.beam_defaults.apply_mask_preset(&factory);
+                        state.info(format!(
+                            "Reset Beam CRT preset '{}' to factory defaults",
+                            active_name
+                        ));
+                        changed = true;
+                    } else if let Some(saved) = state.beam_presets.get(&active_name).cloned() {
+                        state.beam.apply_mask_preset(&saved);
+                        state.beam_defaults.apply_mask_preset(&saved);
+                        changed = true;
+                    }
+                }
+
+                if ui
+                    .add_enabled(!is_builtin, egui::Button::new("Delete"))
+                    .on_hover_text(if is_builtin {
+                        "Built-in presets cannot be deleted (use Save Preset to override or Reset to restore)"
+                    } else {
+                        "Delete this custom preset"
+                    })
+                    .clicked()
+                {
+                    let removed = state.active_beam_preset.clone();
+                    state.beam_presets.remove(&removed);
+                    state.ensure_beam_presets();
+                    let fallback = crate::app::models::BEAM_DEFAULT_PRESET.to_string();
+                    state.apply_beam_preset(&fallback);
+                    state.info(format!("Deleted Beam CRT preset '{}'", removed));
+                    changed = true;
+                }
+            });
+            ui.add_space(4.0);
+
+            sub_heading(ui, "Scanlines, Sharpness & Brightness (Gamma-Preserving):");
+            two_columns(ui, |c1, c2| {
+                if slider_item(
+                    c1,
+                    "BrightBoost:",
+                    egui::Slider::new(&mut state.beam.brightboost, 0.5..=2.5).step_by(0.05),
+                    Some("Talbot-Plateau temporal photon budget boost (widens phosphor emission window before applying post-gain)."),
+                )
+                .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+                if slider_item(
+                    c2,
+                    "H-Sharpness:",
+                    egui::Slider::new(&mut state.beam.h_sharp, 1.0..=10.0).step_by(0.25),
+                    Some("Analog CRT horizontal video bandwidth sharpness and edge peaking."),
+                )
+                .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+            });
+
+            two_columns(ui, |c1, c2| {
+                if slider_item(
+                    c1,
+                    "Scanlines:",
+                    percent_slider(&mut state.beam.scanline_strength, 0.0..=1.0),
+                    Some("Gamma-curve-preserving CRT scanline depth (mean-normalized in linear light so Talbot-Plateau brightness is preserved)."),
+                )
+                .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+                if slider_item(
+                    c2,
+                    "Halation:",
+                    percent_slider(&mut state.beam.halation, 0.0..=1.0),
+                    Some(
+                        "Linear-light optical glass backscatter halation across the CRT faceplate.",
+                    ),
+                )
+                .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+            });
+
+            two_columns(ui, |c1, c2| {
+                if slider_item(
+                    c1,
+                    "Beam Min:",
+                    egui::Slider::new(&mut state.beam.beam_min, 0.3..=3.0).step_by(0.05),
+                    Some("Scanline beam focus on dark pixels (higher = thinner dark scanlines)."),
+                )
+                .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+                if slider_item(
+                    c2,
+                    "Beam Max:",
+                    egui::Slider::new(&mut state.beam.beam_max, 0.2..=3.0).step_by(0.05),
+                    Some("Scanline beam focus on bright pixels (lower = wider bright scanline bloom)."),
+                )
+                .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+            });
+
+            technical_separator(ui);
+
+            sub_heading(ui, "Phosphor Aperture & Shadow Mask:");
+            two_columns(ui, |c1, c2| {
+                c1.horizontal(|ui| {
+                    ui.add_sized(
+                        [130.0, 18.0],
+                        egui::Label::new(
+                            egui::RichText::new("Mask Type:")
+                                .monospace()
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(153, 153, 153)),
+                        ),
+                    );
+                    let mask_options: [(f32, &str); 7] = [
+                        (0.0, "0: None"),
+                        (1.0, "1: CGWG (2-Subpixel)"),
+                        (2.0, "2: Lottes (Aperture)"),
+                        (3.0, "3: Stretched (Shadow)"),
+                        (4.0, "4: VGA (Staggered)"),
+                        (5.0, "5: Fine (Aperture)"),
+                        (6.0, "6: Trinitron (RGB)"),
+                    ];
+                    let current_text = mask_options
+                        .iter()
+                        .find(|(v, _)| (*v - state.beam.shadow_mask).abs() < 0.1)
+                        .map(|(_, t)| *t)
+                        .unwrap_or("6: Trinitron (RGB)");
+                    let avail_w = (ui.available_width() - 4.0).max(60.0);
+                    egui::ComboBox::from_id_source("beam_mask_combo")
+                        .selected_text(current_text)
+                        .width(avail_w)
+                        .show_ui(ui, |ui| {
+                            for (val, text) in mask_options {
+                                if ui
+                                    .selectable_value(&mut state.beam.shadow_mask, val, text)
+                                    .clicked()
+                                {
+                                    state.beam_defaults = state.beam.clone();
+                                    changed = true;
+                                }
+                            }
+                        });
+                });
+
+                if slider_item(
+                    c2,
+                    "Mask Strength:",
+                    percent_slider(&mut state.beam.mask_strength, 0.0..=1.0),
+                    Some("Phosphor mask contrast (energy-normalized so macroscopic brightness and gamma curve remain invariant)."),
+                )
+                .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+            });
+
+            two_columns(ui, |c1, c2| {
+                if slider_item(
+                    c1,
+                    "Mask Scale:",
+                    egui::Slider::new(&mut state.beam.mask_size, 1.0..=4.0).step_by(1.0),
+                    Some("Physical sub-pixel scale of the phosphor triad (1x for 1080p, 2x for 1440p/4K)."),
+                )
+                .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+                if slider_item(
+                    c2,
+                    "Mask Cutoff:",
+                    percent_slider(&mut state.beam.mask_cutoff, 0.0..=1.0),
+                    Some("Bright-pixel phosphor bloom across mask gaps."),
+                )
+                .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+            });
+
+            two_columns(ui, |c1, c2| {
+                if slider_item(
+                    c1,
+                    "Slot Mask:",
+                    percent_slider(&mut state.beam.slot_mask, 0.0..=1.0),
+                    Some("Staggered horizontal slot-mask bridge strength."),
+                )
+                .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+                if slider_item(
+                    c2,
+                    "Slot Height:",
+                    egui::Slider::new(&mut state.beam.double_slot, 1.0..=4.0).step_by(1.0),
+                    Some("Vertical height multiplier of slot-mask cells."),
+                )
+                .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+            });
+
+            two_columns(ui, |c1, _c2| {
+                if slider_item(
+                    c1,
+                    "Mask Smooth:",
+                    percent_slider(&mut state.beam.smooth_mask, 0.0..=1.0),
+                    Some("Smooths phosphor triad edges on bright highlights."),
+                )
+                .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+            });
+
+            technical_separator(ui);
+
+            sub_heading(ui, "CRT Tube Geometry & Curvature:");
+            two_columns(ui, |c1, c2| {
+                if c1
+                    .checkbox(&mut state.beam.curvature, "Enable Tube Curvature")
+                    .on_hover_text("Applies barrel distortion and rounded CRT bezel corners after the electron beam stage.")
+                    .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+                if slider_item(
+                    c2,
+                    "Screen Scale:",
+                    egui::Slider::new(&mut state.beam.screen_scale, 50.0..=100.0)
+                        .step_by(0.5)
+                        .suffix("%"),
+                    Some("CRT tube screen zoom scale."),
+                )
+                .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+            });
+
+            two_columns(ui, |c1, c2| {
+                if slider_item(
+                    c1,
+                    "Warp X:",
+                    egui::Slider::new(&mut state.beam.warp_x, 0.0..=0.15).step_by(0.002),
+                    Some("Horizontal CRT tube curvature amount."),
+                )
+                .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+                if slider_item(
+                    c2,
+                    "Warp Y:",
+                    egui::Slider::new(&mut state.beam.warp_y, 0.0..=0.15).step_by(0.002),
+                    Some("Vertical CRT tube curvature amount."),
+                )
+                .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+            });
+
+            two_columns(ui, |c1, _c2| {
+                if slider_item(
+                    c1,
+                    "Corner Size:",
+                    egui::Slider::new(&mut state.beam.corner_size, 0.0..=0.10).step_by(0.002),
+                    Some("Rounded CRT tube corner radius."),
+                )
+                .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+            });
         });
         ui.add_space(4.0);
     } else {

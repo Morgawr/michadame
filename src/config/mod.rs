@@ -64,6 +64,8 @@ impl From<LegacyConfig> for MichadameConfig {
                 border_crop_top: None,
                 border_crop_bottom: None,
                 selected_crt_filter: legacy.selected_crt_filter,
+                active_halo_preset: None,
+                active_beam_preset: None,
                 halo_brightboost: legacy.halo_brightboost,
                 halo_brightboost1: legacy.halo_brightboost1,
                 halo_beam_min: legacy.halo_beam_min,
@@ -135,6 +137,19 @@ impl From<LegacyConfig> for MichadameConfig {
             crate::app::models::HALO_DEFAULT_PRESET.to_string()
         };
 
+        let mut beam_presets = legacy.beam_presets;
+        for (name, preset) in crate::app::models::BeamMaskPreset::builtin_presets() {
+            beam_presets.entry(name).or_insert(preset);
+        }
+        for preset in beam_presets.values_mut() {
+            *preset = preset.sanitized();
+        }
+        let active_beam_preset = if beam_presets.contains_key(&legacy.active_beam_preset) {
+            legacy.active_beam_preset
+        } else {
+            crate::app::models::BEAM_DEFAULT_PRESET.to_string()
+        };
+
         MichadameConfig {
             replay: legacy.replay,
             video_device: legacy.video_device,
@@ -150,6 +165,7 @@ impl From<LegacyConfig> for MichadameConfig {
             master_volume: legacy.master_volume,
             active_profile,
             active_halo_preset,
+            active_beam_preset,
             ocr_backend: legacy.ocr_backend,
             ocr_sticky_distance: legacy.ocr_sticky_distance,
             ocr_hide_overlay: legacy.ocr_hide_overlay,
@@ -183,6 +199,7 @@ impl From<LegacyConfig> for MichadameConfig {
                 ar
             },
             halo_presets,
+            beam_presets,
             profiles,
         }
     }
@@ -205,7 +222,9 @@ mod tests {
             has_shown_first_run_warning: Some(true),
             active_profile: "Default".to_string(),
             active_halo_preset: crate::app::models::HALO_DEFAULT_PRESET.to_string(),
+            active_beam_preset: crate::app::models::BEAM_DEFAULT_PRESET.to_string(),
             halo_presets: BTreeMap::new(),
+            beam_presets: BTreeMap::new(),
             profiles: BTreeMap::new(),
             audio_source: Some("mic".to_string()),
             video_format_fourcc: Some("MJPG".to_string()),
@@ -356,7 +375,9 @@ mod tests {
             replay: Default::default(),
             active_profile: "Custom".to_string(),
             active_halo_preset: crate::app::models::HALO_DEFAULT_PRESET.to_string(),
+            active_beam_preset: crate::app::models::BEAM_DEFAULT_PRESET.to_string(),
             halo_presets: BTreeMap::new(),
+            beam_presets: BTreeMap::new(),
             profiles,
             video_device: None,
             usb_device: None,

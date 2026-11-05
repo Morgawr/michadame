@@ -231,6 +231,8 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         border_crop_bottom: Some(state.video.border_crop_bottom),
 
         selected_crt_filter: Some(state.selected_crt_filter as u8),
+        active_halo_preset: Some(state.active_halo_preset.clone()),
+        active_beam_preset: Some(state.active_beam_preset.clone()),
         halo_brightboost: None,
         halo_brightboost1: None,
         halo_beam_min: None,
@@ -432,6 +434,8 @@ pub fn save_global_hardware_config_at(
         .map(crate::ui::scaling::sanitize_manual_scale);
     cfg.active_halo_preset = state.active_halo_preset.clone();
     cfg.halo_presets = state.halo_presets.clone();
+    cfg.active_beam_preset = state.active_beam_preset.clone();
+    cfg.beam_presets = state.beam_presets.clone();
     cfg.default_halo = Some(state.halo.clone());
     cfg.default_beam = Some(state.beam_defaults.clone());
     cfg.default_cathode_interference = Some(state.cathode_interference_defaults.clone());
@@ -590,6 +594,12 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) -> bool {
     state.video.border_crop_right = sanitize_finite_f32(profile.border_crop_right, 0.0, 0.0, 0.2);
     state.video.border_crop_top = sanitize_finite_f32(profile.border_crop_top, 0.0, 0.0, 0.2);
     state.video.border_crop_bottom = sanitize_finite_f32(profile.border_crop_bottom, 0.0, 0.0, 0.2);
+    if let Some(ref preset_name) = profile.active_halo_preset {
+        state.apply_halo_preset(preset_name);
+    }
+    if let Some(ref preset_name) = profile.active_beam_preset {
+        state.apply_beam_preset(preset_name);
+    }
     state.video.vibrance = state.halo.vibrance;
 
     let def_beam = state.beam_defaults.clone();
@@ -968,6 +978,13 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
         state.halo = clean;
     }
     state.video.vibrance = state.halo.vibrance;
+    state.beam_presets = cfg.beam_presets.clone();
+    state.active_beam_preset = cfg.active_beam_preset.clone();
+    state.ensure_beam_presets();
+    if let Some(preset) = state.beam_presets.get(&state.active_beam_preset).cloned() {
+        state.beam.apply_mask_preset(&preset);
+        state.beam_defaults.apply_mask_preset(&preset);
+    }
     if let Some(defaults) = &cfg.default_beam {
         let mut clean = defaults.sanitized();
         if clean.lcd_anti_retention
@@ -1003,6 +1020,21 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     let profile_to_apply = state.profiles.get(&state.active_profile).cloned();
     if let Some(profile) = profile_to_apply {
         apply_profile_to_state(state, &profile);
+    }
+    if let Some(defaults) = &cfg.default_halo {
+        if state.active_halo_preset == cfg.active_halo_preset {
+            let clean = defaults.sanitized();
+            state.halo_defaults = clean.clone();
+            state.halo = clean;
+            state.video.vibrance = state.halo.vibrance;
+        }
+    }
+    if let Some(defaults) = &cfg.default_beam {
+        if state.active_beam_preset == cfg.active_beam_preset {
+            let clean_mask = defaults.mask_preset().sanitized();
+            state.beam.apply_mask_preset(&clean_mask);
+            state.beam_defaults.apply_mask_preset(&clean_mask);
+        }
     }
 }
 
@@ -2524,5 +2556,143 @@ crt_brightboost = 1.6
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("toml.bak"));
+    }
+
+    #[test]
+    fn test_beam_presets_roundtrip_and_override() {
+        let path = std::env::temp_dir().join(format!(
+            "michadame-beam-presets-test-{}-{}.toml",
+            std::process::id(),
+            crate::replay::now_us()
+        ));
+
+        let mut state = AppState::default();
+        assert!(state
+            .beam_presets
+            .contains_key(crate::app::models::HALO_PRESET_SONY_WEGA));
+        assert!(state
+            .beam_presets
+            .contains_key(crate::app::models::HALO_PRESET_TOSHIBA_AF));
+
+        // Set custom Stage 1 Beam simulator parameters on the profile
+        state.beam.frames_per_hz = 3.0;
+        state.beam.target_hz = 180;
+        state.beam.gain_vs_blur = 0.65;
+
+        // 1. Modify Sony Trinitron (90s) Beam preset and override it
+        assert!(state.apply_beam_preset(crate::app::models::HALO_PRESET_SONY_90S));
+        // Stage 1 parameters must be untouched when switching Beam presets
+        assert_eq!(state.beam.frames_per_hz, 3.0);
+        assert_eq!(state.beam.target_hz, 180);
+        assert_eq!(state.beam.gain_vs_blur, 0.65);
+
+        state.beam.scanline_strength = 0.58;
+        state.beam.beam_min = 1.92;
+        let updated_90s = state.beam.mask_preset().sanitized();
+        state.beam_presets.insert(
+            crate::app::models::HALO_PRESET_SONY_90S.to_string(),
+            updated_90s,
+        );
+
+        // 2. Create a custom Beam preset "Custom Trinitron RGB"
+        let mut custom = state.beam.mask_preset();
+        custom.h_sharp = 6.2;
+        custom.slot_mask = 0.0;
+        custom.shadow_mask = 6.0;
+        state
+            .beam_presets
+            .insert("Custom Trinitron RGB".to_string(), custom.clone());
+        assert!(state.apply_beam_preset("Custom Trinitron RGB"));
+
+        save_config_at(&path, &mut state).unwrap();
+
+        let loaded: MichadameConfig = confy::load_path(&path).unwrap();
+        let mut fresh_state = AppState::default();
+        apply_config(&mut fresh_state, &loaded);
+
+        assert_eq!(fresh_state.active_beam_preset, "Custom Trinitron RGB");
+        assert_eq!(fresh_state.beam.h_sharp, 6.2);
+        assert_eq!(fresh_state.beam.frames_per_hz, 3.0);
+        assert_eq!(fresh_state.beam.target_hz, 180);
+        assert_eq!(fresh_state.beam.gain_vs_blur, 0.65);
+
+        let sony_90s = fresh_state
+            .beam_presets
+            .get(crate::app::models::HALO_PRESET_SONY_90S)
+            .unwrap();
+        assert_eq!(sony_90s.scanline_strength, 0.58);
+        assert_eq!(sony_90s.beam_min, 1.92);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("toml.bak"));
+    }
+
+    #[test]
+    fn test_profile_switching_restores_per_profile_halo_and_beam_presets() {
+        let mut state = AppState::default();
+
+        // Configure "PS2" profile with Sony Trinitron (90s) for both Halo and Beam, and 120Hz 2.0 fph
+        state.active_profile = "PS2".to_string();
+        assert!(state.apply_halo_preset(crate::app::models::HALO_PRESET_SONY_90S));
+        assert!(state.apply_beam_preset(crate::app::models::HALO_PRESET_SONY_90S));
+        state.beam.frames_per_hz = 2.0;
+        state.beam.target_hz = 120;
+        let ps2_profile = build_profile_from_state(&state);
+        state.profiles.insert("PS2".to_string(), ps2_profile);
+
+        // Configure "Local game" profile with Toshiba AF Series for both Halo and Beam, and 240Hz 4.0 fph
+        state.active_profile = "Local game".to_string();
+        assert!(state.apply_halo_preset(crate::app::models::HALO_PRESET_TOSHIBA_AF));
+        assert!(state.apply_beam_preset(crate::app::models::HALO_PRESET_TOSHIBA_AF));
+        state.beam.frames_per_hz = 4.0;
+        state.beam.target_hz = 240;
+        let local_profile = build_profile_from_state(&state);
+        state
+            .profiles
+            .insert("Local game".to_string(), local_profile);
+
+        // Switch back to "PS2" profile
+        let ps2_to_apply = state.profiles.get("PS2").unwrap().clone();
+        apply_profile_to_state(&mut state, &ps2_to_apply);
+        assert_eq!(
+            state.active_halo_preset,
+            crate::app::models::HALO_PRESET_SONY_90S
+        );
+        assert_eq!(
+            state.halo,
+            crate::app::models::HaloSettings::preset_sony_trinitron_90s()
+        );
+        assert_eq!(
+            state.active_beam_preset,
+            crate::app::models::HALO_PRESET_SONY_90S
+        );
+        assert_eq!(
+            state.beam.mask_preset(),
+            crate::app::models::BeamMaskPreset::preset_sony_trinitron_90s()
+        );
+        assert_eq!(state.beam.frames_per_hz, 2.0);
+        assert_eq!(state.beam.target_hz, 120);
+
+        // Switch to "Local game" profile
+        let local_to_apply = state.profiles.get("Local game").unwrap().clone();
+        apply_profile_to_state(&mut state, &local_to_apply);
+        assert_eq!(
+            state.active_halo_preset,
+            crate::app::models::HALO_PRESET_TOSHIBA_AF
+        );
+        assert_eq!(
+            state.halo,
+            crate::app::models::HaloSettings::preset_toshiba_af()
+        );
+        assert_eq!(
+            state.active_beam_preset,
+            crate::app::models::HALO_PRESET_TOSHIBA_AF
+        );
+        assert_eq!(
+            state.beam.mask_preset(),
+            crate::app::models::BeamMaskPreset::preset_toshiba_af()
+        );
+        assert_eq!(state.beam.frames_per_hz, 4.0);
+        assert_eq!(state.beam.target_hz, 240);
     }
 }

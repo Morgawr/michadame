@@ -64,6 +64,17 @@ impl OcrProjection {
             zoom: zoom_percent / 100.0,
         }
     }
+
+    pub fn beam(curvature: bool, warp_x: f32, warp_y: f32, zoom_percent: f32) -> Self {
+        Self {
+            warp: if curvature {
+                [warp_x.clamp(0.0, 0.25), warp_y.clamp(0.0, 0.25)]
+            } else {
+                [0.0; 2]
+            },
+            zoom: zoom_percent.clamp(50.0, 100.0) / 100.0,
+        }
+    }
 }
 
 impl RenderedArea {

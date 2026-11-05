@@ -314,6 +314,8 @@ pub struct Profile {
     pub border_crop_bottom: Option<f32>,
 
     pub selected_crt_filter: Option<u8>,
+    pub active_halo_preset: Option<String>,
+    pub active_beam_preset: Option<String>,
 
     // Halo params
     pub halo_brightboost: Option<f32>,
@@ -338,7 +340,7 @@ pub struct Profile {
     pub halo_corner_size: Option<f32>,
     pub halo_curvature: Option<bool>,
 
-    // Beam CRT params
+    // Beam CRT simulator params (Stage 1; Stage 2 mask params are stored in beam_presets)
     pub beam_frames_per_hz: Option<f32>,
     pub beam_target_hz: Option<u32>,
     pub beam_gamma: Option<f32>,
@@ -424,10 +426,14 @@ pub struct LegacyConfig {
     pub active_profile: String,
     #[serde(default = "default_active_halo_preset")]
     pub active_halo_preset: String,
+    #[serde(default = "default_active_beam_preset")]
+    pub active_beam_preset: String,
     #[serde(default)]
     pub profiles: BTreeMap<String, Profile>,
     #[serde(default)]
     pub halo_presets: BTreeMap<String, crate::app::models::HaloSettings>,
+    #[serde(default)]
+    pub beam_presets: BTreeMap<String, crate::app::models::BeamMaskPreset>,
 
     pub audio_source: Option<String>,
     pub video_format_fourcc: Option<String>,
@@ -566,8 +572,10 @@ impl Default for LegacyConfig {
             has_shown_first_run_warning: None,
             active_profile: default_active_profile(),
             active_halo_preset: default_active_halo_preset(),
+            active_beam_preset: default_active_beam_preset(),
             profiles: BTreeMap::new(),
             halo_presets: BTreeMap::new(),
+            beam_presets: BTreeMap::new(),
             audio_source: None,
             video_format_fourcc: None,
             crt_filter: None,
@@ -694,6 +702,14 @@ pub fn default_halo_presets() -> BTreeMap<String, crate::app::models::HaloSettin
     crate::app::models::HaloSettings::builtin_presets()
 }
 
+pub fn default_active_beam_preset() -> String {
+    crate::app::models::BEAM_DEFAULT_PRESET.to_string()
+}
+
+pub fn default_beam_presets() -> BTreeMap<String, crate::app::models::BeamMaskPreset> {
+    crate::app::models::BeamMaskPreset::builtin_presets()
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(from = "LegacyConfig")]
 pub struct MichadameConfig {
@@ -711,6 +727,8 @@ pub struct MichadameConfig {
     pub active_profile: String,
     #[serde(default = "default_active_halo_preset")]
     pub active_halo_preset: String,
+    #[serde(default = "default_active_beam_preset")]
+    pub active_beam_preset: String,
     pub ocr_backend: Option<crate::ocr::OcrBackend>,
     pub ocr_sticky_distance: Option<f32>,
     pub ocr_hide_overlay: Option<bool>,
@@ -754,6 +772,8 @@ pub struct MichadameConfig {
     pub audio_reactive: crate::app::models::AudioReactiveConfig,
     #[serde(default = "default_halo_presets")]
     pub halo_presets: BTreeMap<String, crate::app::models::HaloSettings>,
+    #[serde(default = "default_beam_presets")]
+    pub beam_presets: BTreeMap<String, crate::app::models::BeamMaskPreset>,
     pub profiles: BTreeMap<String, Profile>,
 }
 
@@ -776,6 +796,7 @@ impl Default for MichadameConfig {
             master_volume: None,
             active_profile: "Default".to_string(),
             active_halo_preset: default_active_halo_preset(),
+            active_beam_preset: default_active_beam_preset(),
             ocr_backend: Some(crate::ocr::OcrBackend::default()),
             ocr_sticky_distance: Some(0.6),
             ocr_hide_overlay: Some(false),
@@ -805,6 +826,7 @@ impl Default for MichadameConfig {
             pc88_profile: None,
             audio_reactive: crate::app::models::AudioReactiveConfig::default(),
             halo_presets: default_halo_presets(),
+            beam_presets: default_beam_presets(),
             profiles,
         }
     }

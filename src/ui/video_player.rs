@@ -259,7 +259,13 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     state.halo.curvature,
                     state.halo.halo_zoom,
                 ),
-                CrtFilter::Beam | CrtFilter::Off => video::gpu::geometry::OcrProjection::default(),
+                CrtFilter::Beam => video::gpu::geometry::OcrProjection::beam(
+                    state.beam.curvature,
+                    state.beam.warp_x,
+                    state.beam.warp_y,
+                    state.beam.screen_scale,
+                ),
+                CrtFilter::Off => video::gpu::geometry::OcrProjection::default(),
             }
         };
         state.update_ocr_projection(ocr_projection);
@@ -595,7 +601,15 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         2,
                     )
                 } else if run_beam {
-                    ([0.0, 0.0], 0.0, 3)
+                    (
+                        if beam_params.curvature {
+                            [beam_params.warp_x, beam_params.warp_y]
+                        } else {
+                            [0.0, 0.0]
+                        },
+                        beam_params.corner_size,
+                        3,
+                    )
                 } else {
                     ([0.0, 0.0], 0.0, 0)
                 };
@@ -768,7 +782,15 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                         2,
                                     )
                                 } else if run_beam {
-                                    ([0.0, 0.0], 0.0, 3)
+                                    (
+                                        if beam_params.curvature {
+                                            [beam_params.warp_x, beam_params.warp_y]
+                                        } else {
+                                            [0.0, 0.0]
+                                        },
+                                        beam_params.corner_size,
+                                        3,
+                                    )
                                 } else {
                                     ([0.0, 0.0], 0.0, 0)
                                 };
@@ -801,7 +823,15 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                         2,
                                     )
                                 } else if run_beam {
-                                    ([0.0, 0.0], 0.0, 3)
+                                    (
+                                        if beam_params.curvature {
+                                            [beam_params.warp_x, beam_params.warp_y]
+                                        } else {
+                                            [0.0, 0.0]
+                                        },
+                                        beam_params.corner_size,
+                                        3,
+                                    )
                                 } else {
                                     ([0.0, 0.0], 0.0, 0)
                                 };

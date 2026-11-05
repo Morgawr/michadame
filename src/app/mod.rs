@@ -80,6 +80,9 @@ impl Default for AppState {
             new_halo_preset_name: String::new(),
             beam: crate::app::models::BeamSettings::default(),
             beam_defaults: crate::app::models::BeamSettings::default(),
+            beam_presets: crate::app::models::BeamMaskPreset::builtin_presets(),
+            active_beam_preset: crate::app::models::BEAM_DEFAULT_PRESET.to_string(),
+            new_beam_preset_name: String::new(),
             beam_lockstep: crate::app::models::BeamLockstepState::default(),
             cathode_interference: crate::app::models::CathodeInterferenceSettings::default(),
             cathode_interference_defaults: crate::app::models::CathodeInterferenceSettings::default(
@@ -280,6 +283,33 @@ impl AppState {
         }
     }
 
+    pub fn ensure_beam_presets(&mut self) {
+        for (name, preset) in crate::app::models::BeamMaskPreset::builtin_presets() {
+            self.beam_presets.entry(name).or_insert(preset);
+        }
+        for preset in self.beam_presets.values_mut() {
+            *preset = preset.sanitized();
+        }
+        if self.active_beam_preset.trim().is_empty()
+            || !self.beam_presets.contains_key(&self.active_beam_preset)
+        {
+            self.active_beam_preset = crate::app::models::BEAM_DEFAULT_PRESET.to_string();
+        }
+    }
+
+    pub fn apply_beam_preset(&mut self, name: &str) -> bool {
+        self.ensure_beam_presets();
+        if let Some(preset) = self.beam_presets.get(name).cloned() {
+            let clean = preset.sanitized();
+            self.active_beam_preset = name.to_string();
+            self.beam.apply_mask_preset(&clean);
+            self.beam_defaults.apply_mask_preset(&clean);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn request_screenshot(
         &mut self,
         mode: crate::screenshot::ScreenshotMode,
@@ -297,12 +327,13 @@ impl AppState {
         let warp = match filter {
             CrtFilter::Lottes => [self.crt.warp_x, self.crt.warp_y],
             CrtFilter::Halo if self.halo.curvature => [0.031, 0.041],
+            CrtFilter::Beam if self.beam.curvature => [self.beam.warp_x, self.beam.warp_y],
             _ => [0.0, 0.0],
         };
-        let corner_size = if filter == CrtFilter::Halo {
-            self.halo.corner_size
-        } else {
-            0.0
+        let corner_size = match filter {
+            CrtFilter::Halo => self.halo.corner_size,
+            CrtFilter::Beam => self.beam.corner_size,
+            _ => 0.0,
         };
         let scene = crate::screenshot::PhotoSceneContext {
             crt_filter: filter,

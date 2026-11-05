@@ -4,6 +4,7 @@ use eframe::glow::{self, HasContext};
 
 pub struct BeamRenderer {
     beam_prog: glow::Program,
+    mask_prog: glow::Program,
     copy_prog: glow::Program,
 
     output_res_loc: Option<glow::UniformLocation>,
@@ -27,9 +28,38 @@ pub struct BeamRenderer {
     splitscreen_y_loc: Option<glow::UniformLocation>,
     splitscreen_border_px_loc: Option<glow::UniformLocation>,
     splitscreen_match_brightness_loc: Option<glow::UniformLocation>,
+    h_sharp_loc: Option<glow::UniformLocation>,
+    brightboost_loc: Option<glow::UniformLocation>,
+
+    // Stage 2 (CRT Geometry, Scanlines & Phosphor Mask) uniform locations
+    mask_output_res_loc: Option<glow::UniformLocation>,
+    mask_source_size_loc: Option<glow::UniformLocation>,
+    mask_background_color_loc: Option<glow::UniformLocation>,
+    mask_horizontal_stretch_loc: Option<glow::UniformLocation>,
+    mask_border_crop_loc: Option<glow::UniformLocation>,
+    mask_gamma_loc: Option<glow::UniformLocation>,
+    mask_post_gain_loc: Option<glow::UniformLocation>,
+    mask_curvature_loc: Option<glow::UniformLocation>,
+    mask_warp_x_loc: Option<glow::UniformLocation>,
+    mask_warp_y_loc: Option<glow::UniformLocation>,
+    mask_corner_size_loc: Option<glow::UniformLocation>,
+    mask_screen_scale_loc: Option<glow::UniformLocation>,
+    mask_scanline_strength_loc: Option<glow::UniformLocation>,
+    mask_beam_min_loc: Option<glow::UniformLocation>,
+    mask_beam_max_loc: Option<glow::UniformLocation>,
+    mask_shadow_mask_loc: Option<glow::UniformLocation>,
+    mask_strength_loc: Option<glow::UniformLocation>,
+    mask_size_loc: Option<glow::UniformLocation>,
+    mask_cutoff_loc: Option<glow::UniformLocation>,
+    mask_slot_mask_loc: Option<glow::UniformLocation>,
+    mask_double_slot_loc: Option<glow::UniformLocation>,
+    mask_smooth_mask_loc: Option<glow::UniformLocation>,
+    mask_halation_loc: Option<glow::UniformLocation>,
 
     cycle_fbos: [glow::Framebuffer; 3],
     cycle_textures: [glow::Texture; 3],
+    beam_fbo: glow::Framebuffer,
+    beam_texture: glow::Texture,
     vertex_array: glow::VertexArray,
     vbo: glow::Buffer,
 
@@ -39,6 +69,7 @@ pub struct BeamRenderer {
     frame_counter: i32,
     history_initialized: bool,
     last_input_size: (u32, u32),
+    last_beam_output_size: (u32, u32),
     last_scaler_filter: Option<u8>,
     last_effective_fph: f32,
     last_fps_divisor: f32,
@@ -48,6 +79,7 @@ impl BeamRenderer {
     pub fn new(gl: &glow::Context) -> Self {
         unsafe {
             let beam_prog = compile_program(gl, VS_SRC, FS_CRT_BEAM);
+            let mask_prog = compile_program(gl, VS_SRC, FS_CRT_BEAM_MASK);
             let copy_prog = compile_program(gl, VS_SRC, FS_BLIT);
 
             gl.use_program(Some(beam_prog));
@@ -59,6 +91,12 @@ impl BeamRenderer {
             gl.uniform_1_i32(
                 gl.get_uniform_location(beam_prog, "frame_prev2").as_ref(),
                 2,
+            );
+
+            gl.use_program(Some(mask_prog));
+            gl.uniform_1_i32(
+                gl.get_uniform_location(mask_prog, "beam_texture").as_ref(),
+                0,
             );
 
             gl.use_program(Some(copy_prog));
@@ -89,6 +127,34 @@ impl BeamRenderer {
                 gl.get_uniform_location(beam_prog, "splitscreen_border_px");
             let splitscreen_match_brightness_loc =
                 gl.get_uniform_location(beam_prog, "splitscreen_match_brightness");
+            let h_sharp_loc = gl.get_uniform_location(beam_prog, "h_sharp");
+            let brightboost_loc = gl.get_uniform_location(beam_prog, "brightboost");
+
+            let mask_output_res_loc = gl.get_uniform_location(mask_prog, "outputResolution");
+            let mask_source_size_loc = gl.get_uniform_location(mask_prog, "source_size");
+            let mask_background_color_loc = gl.get_uniform_location(mask_prog, "background_color");
+            let mask_horizontal_stretch_loc =
+                gl.get_uniform_location(mask_prog, "horizontal_stretch");
+            let mask_border_crop_loc = gl.get_uniform_location(mask_prog, "border_crop");
+            let mask_gamma_loc = gl.get_uniform_location(mask_prog, "gamma");
+            let mask_post_gain_loc = gl.get_uniform_location(mask_prog, "post_gain");
+            let mask_curvature_loc = gl.get_uniform_location(mask_prog, "curvature");
+            let mask_warp_x_loc = gl.get_uniform_location(mask_prog, "warp_x");
+            let mask_warp_y_loc = gl.get_uniform_location(mask_prog, "warp_y");
+            let mask_corner_size_loc = gl.get_uniform_location(mask_prog, "corner_size");
+            let mask_screen_scale_loc = gl.get_uniform_location(mask_prog, "screen_scale");
+            let mask_scanline_strength_loc =
+                gl.get_uniform_location(mask_prog, "scanline_strength");
+            let mask_beam_min_loc = gl.get_uniform_location(mask_prog, "beam_min");
+            let mask_beam_max_loc = gl.get_uniform_location(mask_prog, "beam_max");
+            let mask_shadow_mask_loc = gl.get_uniform_location(mask_prog, "shadow_mask");
+            let mask_strength_loc = gl.get_uniform_location(mask_prog, "mask_strength");
+            let mask_size_loc = gl.get_uniform_location(mask_prog, "mask_size");
+            let mask_cutoff_loc = gl.get_uniform_location(mask_prog, "mask_cutoff");
+            let mask_slot_mask_loc = gl.get_uniform_location(mask_prog, "slot_mask");
+            let mask_double_slot_loc = gl.get_uniform_location(mask_prog, "double_slot");
+            let mask_smooth_mask_loc = gl.get_uniform_location(mask_prog, "smooth_mask");
+            let mask_halation_loc = gl.get_uniform_location(mask_prog, "halation");
 
             let cycle_fbos = [
                 gl.create_framebuffer().unwrap(),
@@ -100,6 +166,8 @@ impl BeamRenderer {
                 gl.create_texture().unwrap(),
                 gl.create_texture().unwrap(),
             ];
+            let beam_fbo = gl.create_framebuffer().unwrap();
+            let beam_texture = gl.create_texture().unwrap();
 
             let vertex_array = gl
                 .create_vertex_array()
@@ -140,6 +208,7 @@ impl BeamRenderer {
 
             Self {
                 beam_prog,
+                mask_prog,
                 copy_prog,
 
                 output_res_loc,
@@ -163,9 +232,37 @@ impl BeamRenderer {
                 splitscreen_y_loc,
                 splitscreen_border_px_loc,
                 splitscreen_match_brightness_loc,
+                h_sharp_loc,
+                brightboost_loc,
+
+                mask_output_res_loc,
+                mask_source_size_loc,
+                mask_background_color_loc,
+                mask_horizontal_stretch_loc,
+                mask_border_crop_loc,
+                mask_gamma_loc,
+                mask_post_gain_loc,
+                mask_curvature_loc,
+                mask_warp_x_loc,
+                mask_warp_y_loc,
+                mask_corner_size_loc,
+                mask_screen_scale_loc,
+                mask_scanline_strength_loc,
+                mask_beam_min_loc,
+                mask_beam_max_loc,
+                mask_shadow_mask_loc,
+                mask_strength_loc,
+                mask_size_loc,
+                mask_cutoff_loc,
+                mask_slot_mask_loc,
+                mask_double_slot_loc,
+                mask_smooth_mask_loc,
+                mask_halation_loc,
 
                 cycle_fbos,
                 cycle_textures,
+                beam_fbo,
+                beam_texture,
                 vertex_array,
                 vbo,
 
@@ -175,11 +272,63 @@ impl BeamRenderer {
                 frame_counter: 0,
                 history_initialized: false,
                 last_input_size: (0, 0),
+                last_beam_output_size: (0, 0),
                 last_scaler_filter: None,
                 last_effective_fph: 0.0,
                 last_fps_divisor: 0.0,
             }
         }
+    }
+
+    unsafe fn setup_beam_output_buffer(&mut self, gl: &glow::Context, out_w: u32, out_h: u32) {
+        let w = out_w.max(1);
+        let h = out_h.max(1);
+        if self.last_beam_output_size == (w, h) {
+            return;
+        }
+        gl.bind_texture(glow::TEXTURE_2D, Some(self.beam_texture));
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA16F as i32,
+            w as i32,
+            h as i32,
+            0,
+            glow::RGBA,
+            glow::FLOAT,
+            None,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_S,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_T,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.beam_fbo));
+        gl.framebuffer_texture_2d(
+            glow::FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::TEXTURE_2D,
+            Some(self.beam_texture),
+            0,
+        );
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        self.last_beam_output_size = (w, h);
     }
 
     unsafe fn copy_texture_to_fbo(
@@ -293,6 +442,8 @@ impl BeamRenderer {
             self.last_scaler_filter = Some(params.scaler_filter);
         }
 
+        self.setup_beam_output_buffer(gl, out_w, out_h);
+
         let effective_fph = params.effective_frames_per_hz();
         let fps_divisor = params.fps_divisor.clamp(0.05, 1.0);
         if (effective_fph - self.last_effective_fph).abs() > 1e-6
@@ -365,11 +516,10 @@ impl BeamRenderer {
             prev1_tex
         };
 
-        gl.bind_framebuffer(glow::FRAMEBUFFER, target_fbo);
+        // Stage 1: CRT Electron Beam Yoke Simulator -> renders linear light + steady luma to `self.beam_fbo` (RGBA16F)
+        gl.disable(glow::SCISSOR_TEST);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.beam_fbo));
         gl.viewport(0, 0, out_w as i32, out_h as i32);
-        if scissor_enabled {
-            gl.enable(glow::SCISSOR_TEST);
-        }
 
         gl.use_program(Some(self.beam_prog));
         gl.active_texture(glow::TEXTURE0);
@@ -448,6 +598,11 @@ impl BeamRenderer {
                 0
             },
         );
+        gl.uniform_1_f32(self.h_sharp_loc.as_ref(), params.h_sharp.clamp(1.0, 10.0));
+        gl.uniform_1_f32(
+            self.brightboost_loc.as_ref(),
+            params.brightboost.clamp(0.5, 2.5),
+        );
 
         gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
@@ -455,6 +610,115 @@ impl BeamRenderer {
         gl.bind_texture(glow::TEXTURE_2D, None);
         gl.active_texture(glow::TEXTURE1);
         gl.bind_texture(glow::TEXTURE_2D, None);
+
+        // Stage 2: CRT Tube Geometry Transformation + Gamma-Curve-Preserving Scanlines & Phosphor Mask -> `target_fbo`
+        gl.bind_framebuffer(glow::FRAMEBUFFER, target_fbo);
+        gl.viewport(0, 0, out_w as i32, out_h as i32);
+        if scissor_enabled {
+            gl.enable(glow::SCISSOR_TEST);
+        }
+
+        gl.use_program(Some(self.mask_prog));
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(glow::TEXTURE_2D, Some(self.beam_texture));
+
+        let gvb = params.gain_vs_blur.clamp(0.01, 1.0);
+        let bb = params.brightboost.clamp(0.5, 2.5);
+        let eff_gain = (gvb * bb).clamp(0.01, 1.0);
+        let post_gain = (gvb * bb) / eff_gain;
+
+        gl.uniform_2_f32(
+            self.mask_output_res_loc.as_ref(),
+            out_w as f32,
+            out_h as f32,
+        );
+        gl.uniform_2_f32(self.mask_source_size_loc.as_ref(), in_w as f32, in_h as f32);
+        gl.uniform_3_f32(
+            self.mask_background_color_loc.as_ref(),
+            params.background_color[0],
+            params.background_color[1],
+            params.background_color[2],
+        );
+        gl.uniform_1_f32(
+            self.mask_horizontal_stretch_loc.as_ref(),
+            params.horizontal_stretch,
+        );
+        gl.uniform_4_f32(
+            self.mask_border_crop_loc.as_ref(),
+            params.border_crop[0],
+            params.border_crop[1],
+            params.border_crop[2],
+            params.border_crop[3],
+        );
+        gl.uniform_1_f32(self.mask_gamma_loc.as_ref(), params.gamma.clamp(1.0, 5.0));
+        gl.uniform_1_f32(self.mask_post_gain_loc.as_ref(), post_gain);
+        gl.uniform_1_i32(
+            self.mask_curvature_loc.as_ref(),
+            if params.curvature { 1 } else { 0 },
+        );
+        gl.uniform_1_f32(
+            self.mask_warp_x_loc.as_ref(),
+            params.warp_x.clamp(0.0, 0.25),
+        );
+        gl.uniform_1_f32(
+            self.mask_warp_y_loc.as_ref(),
+            params.warp_y.clamp(0.0, 0.25),
+        );
+        gl.uniform_1_f32(
+            self.mask_corner_size_loc.as_ref(),
+            params.corner_size.clamp(0.0, 0.10),
+        );
+        gl.uniform_1_f32(
+            self.mask_screen_scale_loc.as_ref(),
+            params.screen_scale.clamp(50.0, 100.0),
+        );
+        gl.uniform_1_f32(
+            self.mask_scanline_strength_loc.as_ref(),
+            params.scanline_strength.clamp(0.0, 1.0),
+        );
+        gl.uniform_1_f32(
+            self.mask_beam_min_loc.as_ref(),
+            params.beam_min.clamp(0.3, 3.0),
+        );
+        gl.uniform_1_f32(
+            self.mask_beam_max_loc.as_ref(),
+            params.beam_max.clamp(0.2, 3.0),
+        );
+        gl.uniform_1_f32(
+            self.mask_shadow_mask_loc.as_ref(),
+            params.shadow_mask.clamp(0.0, 6.0).round(),
+        );
+        gl.uniform_1_f32(
+            self.mask_strength_loc.as_ref(),
+            params.mask_strength.clamp(0.0, 1.0),
+        );
+        gl.uniform_1_f32(
+            self.mask_size_loc.as_ref(),
+            params.mask_size.clamp(1.0, 4.0).round(),
+        );
+        gl.uniform_1_f32(
+            self.mask_cutoff_loc.as_ref(),
+            params.mask_cutoff.clamp(0.0, 1.0),
+        );
+        gl.uniform_1_f32(
+            self.mask_slot_mask_loc.as_ref(),
+            params.slot_mask.clamp(0.0, 1.0),
+        );
+        gl.uniform_1_f32(
+            self.mask_double_slot_loc.as_ref(),
+            params.double_slot.clamp(1.0, 4.0).round(),
+        );
+        gl.uniform_1_f32(
+            self.mask_smooth_mask_loc.as_ref(),
+            params.smooth_mask.clamp(0.0, 1.5),
+        );
+        gl.uniform_1_f32(
+            self.mask_halation_loc.as_ref(),
+            params.halation.clamp(0.0, 1.0),
+        );
+
+        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
         gl.active_texture(glow::TEXTURE0);
         gl.bind_texture(glow::TEXTURE_2D, None);
         gl.use_program(None);
@@ -467,6 +731,7 @@ impl BeamRenderer {
     pub fn destroy(&self, gl: &glow::Context) {
         unsafe {
             gl.delete_program(self.beam_prog);
+            gl.delete_program(self.mask_prog);
             gl.delete_program(self.copy_prog);
             gl.delete_vertex_array(self.vertex_array);
             gl.delete_buffer(self.vbo);
@@ -476,6 +741,8 @@ impl BeamRenderer {
             for texture in self.cycle_textures {
                 gl.delete_texture(texture);
             }
+            gl.delete_framebuffer(self.beam_fbo);
+            gl.delete_texture(self.beam_texture);
         }
     }
 }
@@ -624,11 +891,139 @@ mod tests {
             "uniform float splitscreen_y;",
             "uniform int splitscreen_border_px;",
             "uniform int splitscreen_match_brightness;",
+            "uniform float h_sharp;",
+            "uniform float brightboost;",
         ];
         for decl in required_uniforms {
             assert!(
                 FS_CRT_BEAM.contains(decl),
                 "FS_CRT_BEAM is missing exact uniform declaration `{decl}`"
+            );
+        }
+
+        let required_mask_uniforms = [
+            "uniform sampler2D beam_texture;",
+            "uniform vec2 outputResolution;",
+            "uniform vec2 source_size;",
+            "uniform vec3 background_color;",
+            "uniform float horizontal_stretch;",
+            "uniform vec4 border_crop;",
+            "uniform float gamma;",
+            "uniform float post_gain;",
+            "uniform int curvature;",
+            "uniform float warp_x;",
+            "uniform float warp_y;",
+            "uniform float corner_size;",
+            "uniform float screen_scale;",
+            "uniform float scanline_strength;",
+            "uniform float beam_min;",
+            "uniform float beam_max;",
+            "uniform float shadow_mask;",
+            "uniform float mask_strength;",
+            "uniform float mask_size;",
+            "uniform float mask_cutoff;",
+            "uniform float slot_mask;",
+            "uniform float double_slot;",
+            "uniform float smooth_mask;",
+            "uniform float halation;",
+        ];
+        for decl in required_mask_uniforms {
+            assert!(
+                FS_CRT_BEAM_MASK.contains(decl),
+                "FS_CRT_BEAM_MASK is missing exact uniform declaration `{decl}`"
+            );
+        }
+    }
+
+    #[test]
+    fn test_post_beam_mask_preserves_talbot_plateau_and_gamma_curve() {
+        // Verify that applying Stage 2 (scanline profile + phosphor mask) in linear light
+        // parameterized by steady-state cycle luminance `steady_luma` preserves:
+        // 1. Talbot-Plateau vertical phase invariance (zero stationary horizontal banding across pos in [0, 1]).
+        // 2. Macroscopic gamma curve across IRE levels (mean transmittance across a scanline + mask triad is 1.0).
+        let frames_per_hz = 3; // 180Hz / 60Hz = 3 subframes per cycle
+        let fph = frames_per_hz as f32;
+        let gain_vs_blur = 0.65f32;
+        let brightboost = 1.15f32;
+        let eff_gain = (gain_vs_blur * brightboost).clamp(0.01, 1.0);
+        let scanline_strength = 0.55f32;
+        let beam_min = 1.35f32;
+        let beam_max = 1.05f32;
+
+        // Mean-normalized raised-cosine scanline profile matching `fs_crt_beam_mask.glsl`
+        let eval_scanline_gain = |f_line: f32, steady_luma: f32| -> f32 {
+            let luma = steady_luma.clamp(0.0, 1.0);
+            let p = (beam_min + (beam_max - beam_min) * luma).clamp(0.30, 3.0);
+            let cos_wave = 0.5 + 0.5 * (2.0 * std::f32::consts::PI * f_line).cos();
+            let raw_profile = cos_wave.powf(p);
+            let mean_profile = 1.0 / (1.0 + 3.0 * p + (0.14159265 * p * p) / (1.0 + p)).sqrt();
+            let norm_profile = 1.0 + (raw_profile / mean_profile.max(0.25) - 1.0) * 0.65;
+            1.0 + (norm_profile - 1.0) * scanline_strength
+        };
+
+        // Check across multiple IRE levels
+        for ire_step in 1..=10 {
+            let c_linear = (ire_step as f32 / 10.0).powf(2.4);
+            let steady_luma = c_linear;
+
+            // 1. Verify Talbot-Plateau phase invariance at a fixed sub-scanline position f_line = 0.25:
+            // Changing macro vertical position `pos` changes how energy is split across subframes,
+            // e.g. (1.0, 0.4, 0.0) vs (0.7, 0.7, 0.0), but the time-integrated linear light after Stage 2
+            // must be identical for every `pos` in [0, 1] (zero horizontal phase banding).
+            let f_line_test = 0.25f32;
+            let scan_gain = eval_scanline_gain(f_line_test, steady_luma);
+            let mut ref_integrated: Option<f32> = None;
+
+            for y_step in 0..=20 {
+                let pos = y_step as f32 / 20.0;
+                let mut accum_linear = 0.0f32;
+                for f in 0..frames_per_hz {
+                    let crt_raster_pos = f as f32 / fph;
+                    let w_prev2 = get_overlap(
+                        pos - 2.0,
+                        pos - 2.0 + c_linear * eff_gain,
+                        crt_raster_pos,
+                        crt_raster_pos + 1.0 / fph,
+                    );
+                    let w_prev1 = get_overlap(
+                        pos - 1.0,
+                        pos - 1.0 + c_linear * eff_gain,
+                        crt_raster_pos,
+                        crt_raster_pos + 1.0 / fph,
+                    );
+                    let w_curr = get_overlap(
+                        pos,
+                        pos + c_linear * eff_gain,
+                        crt_raster_pos,
+                        crt_raster_pos + 1.0 / fph,
+                    );
+                    // Stage 1 linear output
+                    let stage1_linear = (w_prev2 + w_prev1 + w_curr) * fph;
+                    // Stage 2 linear spatial filter
+                    let stage2_linear = stage1_linear * scan_gain;
+                    accum_linear += stage2_linear / fph;
+                }
+                if let Some(expected) = ref_integrated {
+                    assert!(
+                        (accum_linear - expected).abs() < 1e-5,
+                        "Talbot-Plateau banding detected at pos={pos}: got {accum_linear}, expected {expected}"
+                    );
+                } else {
+                    ref_integrated = Some(accum_linear);
+                }
+            }
+
+            // 2. Verify gamma-curve preservation: spatial average across a scanline period f_line in [0, 1]
+            // preserves the macroscopic linear luminance ratio `c_linear * eff_gain` within ~3%.
+            let n_samples = 64;
+            let mut line_avg_gain = 0.0f32;
+            for i in 0..n_samples {
+                let f_line = (i as f32 + 0.5) / n_samples as f32;
+                line_avg_gain += eval_scanline_gain(f_line, steady_luma) / n_samples as f32;
+            }
+            assert!(
+                (line_avg_gain - 1.0).abs() < 0.035,
+                "Scanline profile distorted macroscopic gamma curve at c_linear={c_linear}: mean gain={line_avg_gain}"
             );
         }
     }
