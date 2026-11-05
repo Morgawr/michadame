@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const EXPECTED_MIN_SHADERS: usize = 57;
+const EXPECTED_MIN_SHADERS: usize = 58;
 
 fn shaders_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

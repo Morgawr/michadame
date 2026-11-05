@@ -58,6 +58,17 @@ pub fn draw_shaders_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         crate::config::save_config(state);
                         changed = true;
                     }
+                    if ui
+                        .selectable_value(&mut current_filter.clone(), 3, "Beam")
+                        .clicked()
+                    {
+                        state.selected_crt_filter = CrtFilter::Beam;
+                        state
+                            .crt_filter
+                            .store(3, std::sync::atomic::Ordering::Relaxed);
+                        crate::config::save_config(state);
+                        changed = true;
+                    }
                 });
 
             ui.add_space(8.0);
@@ -855,6 +866,259 @@ pub fn draw_shaders_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     changed = true;
                 }
             });
+        });
+        ui.add_space(4.0);
+    } else if current_filter == CrtFilter::Beam {
+        technical_group(ui, "", |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Beam CRT Simulator (Blur Busters):")
+                        .monospace()
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(224, 224, 224)),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Reset Defaults").clicked() {
+                        state.beam = crate::app::models::BeamSettings::default();
+                        state.beam_defaults = state.beam.clone();
+                        changed = true;
+                    }
+                });
+            });
+            ui.add_space(4.0);
+
+            sub_heading(ui, "VRR Display Refresh & Beam Sweep:");
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new("Refresh Mode:")
+                        .monospace()
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(153, 153, 153)),
+                );
+                let rate_presets: [(u32, f32, &str); 7] = [
+                    (
+                        120,
+                        2.0,
+                        "2x Source Lockstep (~120Hz VRR for 59.94/60fps - Recommended)",
+                    ),
+                    (144, 2.4, "144 Hz Native (2.4x 60Hz Fixed Refresh)"),
+                    (180, 3.0, "3x Source Lockstep (~180Hz VRR)"),
+                    (240, 4.0, "4x Source Lockstep (~240Hz VRR)"),
+                    (300, 5.0, "5x Source Lockstep (~300Hz VRR)"),
+                    (360, 6.0, "6x Source Lockstep (~360Hz VRR)"),
+                    (480, 8.0, "8x Source Lockstep (~480Hz VRR)"),
+                ];
+                let current_preset_text = rate_presets
+                    .iter()
+                    .find(|(hz, fph, _)| {
+                        *hz == state.beam.target_hz
+                            && (*fph - state.beam.frames_per_hz).abs() < 0.01
+                    })
+                    .map(|(_, _, label)| *label)
+                    .unwrap_or("Custom");
+                egui::ComboBox::from_id_source("beam_vrr_rate_preset")
+                    .width(340.0)
+                    .selected_text(current_preset_text)
+                    .show_ui(ui, |ui| {
+                        for (hz, fph, label) in rate_presets {
+                            let is_sel = hz == state.beam.target_hz
+                                && (fph - state.beam.frames_per_hz).abs() < 0.01;
+                            if ui.selectable_label(is_sel, label).clicked() {
+                                state.beam.target_hz = hz;
+                                state.beam.frames_per_hz = fph;
+                                state.beam_defaults = state.beam.clone();
+                                changed = true;
+                            }
+                        }
+                    });
+            });
+            ui.add_space(2.0);
+
+            two_columns(ui, |c1, c2| {
+                if slider_item(
+                    c1,
+                    "Target VRR Hz:",
+                    egui::Slider::new(&mut state.beam.target_hz, 60..=480)
+                        .suffix(" Hz"),
+                    Some("Target presentation rate when no source stream interval is locked or in non-integer fixed-refresh mode."),
+                )
+                .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+                if slider_item(
+                    c2,
+                    "Frames Per Hz:",
+                    egui::Slider::new(&mut state.beam.frames_per_hz, 1.0..=16.0).step_by(0.1),
+                    Some("Sub-frames per simulated CRT sweep (integer 2.0/3.0/4.0 locks in exact phase lockstep with 59.94/60fps source; 2.4 runs at 144Hz)."),
+                )
+                .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+            });
+
+            two_columns(ui, |c1, c2| {
+                if slider_item(
+                    c1,
+                    "Gain vs Blur:",
+                    percent_slider(&mut state.beam.gain_vs_blur, 0.05..=1.0),
+                    Some("Brightness vs motion blur reduction tradeoff (lower = sharper motion clarity, higher = brighter image)."),
+                )
+                .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+                if slider_item(
+                    c2,
+                    "Phosphor Gamma:",
+                    egui::Slider::new(&mut state.beam.gamma, 1.0..=5.0).step_by(0.05),
+                    Some("Simulated CRT phosphor gamma (default 2.4)."),
+                )
+                .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+            });
+
+            two_columns(ui, |c1, c2| {
+                c1.horizontal(|ui| {
+                    ui.add_sized(
+                        [130.0, 18.0],
+                        egui::Label::new(
+                            egui::RichText::new("Scan Direction:")
+                                .monospace()
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(153, 153, 153)),
+                        ),
+                    );
+                    let scan_dirs: [(u8, &str); 5] = [
+                        (0, "0: Global (No Sweep)"),
+                        (1, "1: Top to Bottom"),
+                        (2, "2: Bottom to Top"),
+                        (3, "3: Left to Right"),
+                        (4, "4: Right to Left"),
+                    ];
+                    let cur_text = scan_dirs
+                        .iter()
+                        .find(|(v, _)| *v == state.beam.scan_direction)
+                        .map(|(_, t)| *t)
+                        .unwrap_or("1: Top to Bottom");
+                    let avail_w = (ui.available_width() - 4.0).max(60.0);
+                    egui::ComboBox::from_id_source("beam_scan_dir_combo")
+                        .selected_text(cur_text)
+                        .width(avail_w)
+                        .show_ui(ui, |ui| {
+                            for (val, text) in scan_dirs {
+                                if ui
+                                    .selectable_value(&mut state.beam.scan_direction, val, text)
+                                    .clicked()
+                                {
+                                    state.beam_defaults = state.beam.clone();
+                                    changed = true;
+                                }
+                            }
+                        });
+                });
+
+                if slider_item(
+                    c2,
+                    "FPS Divisor:",
+                    egui::Slider::new(&mut state.beam.fps_divisor, 0.05..=1.0).step_by(0.05),
+                    Some("Slow-motion inspection of the sweeping CRT beam (1.0 = normal real-time speed)."),
+                )
+                .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+            });
+
+            technical_separator(ui);
+
+            sub_heading(ui, "LCD Anti-Retention & Splitscreen:");
+            two_columns(ui, |c1, c2| {
+                if c1
+                    .checkbox(
+                        &mut state.beam.lcd_anti_retention,
+                        "LCD Anti-Retention Slew",
+                    )
+                    .on_hover_text(
+                        "Prevents LCD voltage polarity inversion image retention on even integer Frames Per Hz (e.g. 2.0 at 120Hz).",
+                    )
+                    .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+                if slider_item(
+                    c2,
+                    "Inversion Slew:",
+                    egui::Slider::new(&mut state.beam.lcd_inversion_compensation_slew, 0.0..=0.02)
+                        .step_by(0.0005),
+                    Some("Fractional slew added to even integer Frames Per Hz when LCD Anti-Retention is enabled."),
+                )
+                .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+            });
+
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .checkbox(&mut state.beam.splitscreen, "Splitscreen Comparison")
+                    .changed()
+                {
+                    state.beam_defaults = state.beam.clone();
+                    changed = true;
+                }
+                if state.beam.splitscreen {
+                    ui.add_space(8.0);
+                    if ui
+                        .checkbox(
+                            &mut state.beam.splitscreen_match_brightness,
+                            "Match Unstrobed Brightness",
+                        )
+                        .changed()
+                    {
+                        state.beam_defaults = state.beam.clone();
+                        changed = true;
+                    }
+                }
+            });
+
+            if state.beam.splitscreen {
+                two_columns(ui, |c1, c2| {
+                    if slider_item(
+                        c1,
+                        "Split X:",
+                        percent_slider(&mut state.beam.splitscreen_x, 0.0..=1.0),
+                        None,
+                    )
+                    .changed()
+                    {
+                        state.beam_defaults = state.beam.clone();
+                        changed = true;
+                    }
+                    if slider_item(
+                        c2,
+                        "Split Y:",
+                        percent_slider(&mut state.beam.splitscreen_y, 0.0..=1.0),
+                        None,
+                    )
+                    .changed()
+                    {
+                        state.beam_defaults = state.beam.clone();
+                        changed = true;
+                    }
+                });
+            }
         });
         ui.add_space(4.0);
     } else {

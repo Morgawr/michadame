@@ -1,10 +1,11 @@
 use super::anime4k::{Anime4kUpscaler, Anime4kVariant};
+use super::beam::BeamRenderer;
 use super::fft_filter::FftFilter;
 use super::geometry::{OcrProjection, RenderedArea};
 use super::halo::HaloRenderer;
 use super::params::{
-    AudioReactiveShaderParams, CathodeInterferenceShaderParams, GlassShaderParams,
-    HaloShaderParams, ShaderParams,
+    AudioReactiveShaderParams, BeamShaderParams, CathodeInterferenceShaderParams,
+    GlassShaderParams, HaloShaderParams, ShaderParams,
 };
 use super::programs::*;
 use crate::video::types::{RawFrame, ScalerFilter};
@@ -115,6 +116,7 @@ pub struct CrtFilterRenderer {
     anime4k_medium: Anime4kUpscaler,
     anime4k_large: Anime4kUpscaler,
     pub halo: HaloRenderer,
+    pub beam: BeamRenderer,
 
     fbos: [glow::Framebuffer; 7],
     pass_textures: [glow::Texture; 7],
@@ -286,9 +288,46 @@ pub struct CrtFilterRenderer {
     last_fft_thresholds: (f32, f32),
     last_fft_mask_gen: u64,
     last_input_tex: Option<glow::Texture>,
+    last_preprocess_sig: Option<PreprocessCacheSig>,
+    last_preprocess_out: Option<(glow::Texture, (u32, u32), bool)>,
     history_count: u32,
     pub capture_ocr_next_paint: bool,
+    pub capture_ocr_async_next_paint: bool,
+    pub ocr_recycled_buffer: Option<Vec<u8>>,
     pub last_ocr_capture: Option<(Vec<u8>, u32, u32)>,
+    ocr_fbo: glow::Framebuffer,
+    ocr_texture: glow::Texture,
+    last_ocr_fbo_size: (u32, u32),
+    ocr_pbo: glow::Buffer,
+    ocr_pbo_size: usize,
+    ocr_pending_readback: Option<PendingOcrReadback>,
+}
+
+struct PendingOcrReadback {
+    fence: glow::Fence,
+    width: u32,
+    height: u32,
+}
+
+// SAFETY: `glow::Fence` is an opaque GL sync handle only accessed on the main thread
+// while the owning GL context is current (in `paint`, `draw_passthrough`, and `destroy`).
+unsafe impl Send for PendingOcrReadback {}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PreprocessCacheSig {
+    captured_at: i64,
+    resolution: (u32, u32),
+    effective_res: (u32, u32),
+    scaler_filter: u8,
+    scan_and_color: [u32; 6],
+    deinterlace_enabled: bool,
+    deinterlace_mode: u8,
+    deinterlace_params: [u32; 4],
+    median_enabled: bool,
+    median_mix: u32,
+    fft_enabled: bool,
+    fft_thresholds: [u32; 2],
+    fft_gen: u64,
 }
 
 pub fn read_framebuffer_pixels_raw(
@@ -865,6 +904,9 @@ impl CrtFilterRenderer {
                 gl.create_framebuffer().unwrap(),
             ];
             let post_textures = [gl.create_texture().unwrap(), gl.create_texture().unwrap()];
+            let ocr_fbo = gl.create_framebuffer().unwrap();
+            let ocr_texture = gl.create_texture().unwrap();
+            let ocr_pbo = gl.create_buffer().unwrap();
 
             let vertex_array = gl
                 .create_vertex_array()
@@ -1159,6 +1201,7 @@ impl CrtFilterRenderer {
                 anime4k_medium: Anime4kUpscaler::new(gl, Anime4kVariant::Medium),
                 anime4k_large: Anime4kUpscaler::new(gl, Anime4kVariant::Large),
                 halo: HaloRenderer::new(gl),
+                beam: BeamRenderer::new(gl),
                 last_size: (0, 0),
                 last_scaler_filter: None,
                 last_pass_res: (0, 0),
@@ -1172,9 +1215,19 @@ impl CrtFilterRenderer {
                 last_fft_thresholds: (0.0, 0.0),
                 last_fft_mask_gen: 0,
                 last_input_tex: None,
+                last_preprocess_sig: None,
+                last_preprocess_out: None,
                 history_count: 0,
                 capture_ocr_next_paint: false,
+                capture_ocr_async_next_paint: false,
+                ocr_recycled_buffer: None,
                 last_ocr_capture: None,
+                ocr_fbo,
+                ocr_texture,
+                last_ocr_fbo_size: (0, 0),
+                ocr_pbo,
+                ocr_pbo_size: 0,
+                ocr_pending_readback: None,
             }
         }
     }
@@ -1269,13 +1322,11 @@ impl CrtFilterRenderer {
                     );
                 }
                 gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[0]));
-                if needs_realloc {
-                    gl.buffer_data_size(
-                        glow::PIXEL_UNPACK_BUFFER,
-                        y_data.len() as i32,
-                        glow::STREAM_DRAW,
-                    );
-                }
+                gl.buffer_data_size(
+                    glow::PIXEL_UNPACK_BUFFER,
+                    y_data.len() as i32,
+                    glow::STREAM_DRAW,
+                );
                 gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, y_data);
                 gl.tex_sub_image_2d(
                     glow::TEXTURE_2D,
@@ -1305,13 +1356,11 @@ impl CrtFilterRenderer {
                     );
                 }
                 gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[1]));
-                if needs_realloc {
-                    gl.buffer_data_size(
-                        glow::PIXEL_UNPACK_BUFFER,
-                        u_data.len() as i32,
-                        glow::STREAM_DRAW,
-                    );
-                }
+                gl.buffer_data_size(
+                    glow::PIXEL_UNPACK_BUFFER,
+                    u_data.len() as i32,
+                    glow::STREAM_DRAW,
+                );
                 gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, u_data);
                 gl.tex_sub_image_2d(
                     glow::TEXTURE_2D,
@@ -1341,13 +1390,11 @@ impl CrtFilterRenderer {
                     );
                 }
                 gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[2]));
-                if needs_realloc {
-                    gl.buffer_data_size(
-                        glow::PIXEL_UNPACK_BUFFER,
-                        v_data.len() as i32,
-                        glow::STREAM_DRAW,
-                    );
-                }
+                gl.buffer_data_size(
+                    glow::PIXEL_UNPACK_BUFFER,
+                    v_data.len() as i32,
+                    glow::STREAM_DRAW,
+                );
                 gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, v_data);
                 gl.tex_sub_image_2d(
                     glow::TEXTURE_2D,
@@ -1407,13 +1454,11 @@ impl CrtFilterRenderer {
                     );
                 }
                 gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[0]));
-                if needs_realloc {
-                    gl.buffer_data_size(
-                        glow::PIXEL_UNPACK_BUFFER,
-                        frame.data.len() as i32,
-                        glow::STREAM_DRAW,
-                    );
-                }
+                gl.buffer_data_size(
+                    glow::PIXEL_UNPACK_BUFFER,
+                    frame.data.len() as i32,
+                    glow::STREAM_DRAW,
+                );
                 gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, &frame.data);
                 gl.tex_sub_image_2d(
                     glow::TEXTURE_2D,
@@ -1472,13 +1517,11 @@ impl CrtFilterRenderer {
                     );
                 }
                 gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(self.pbos[0]));
-                if needs_realloc {
-                    gl.buffer_data_size(
-                        glow::PIXEL_UNPACK_BUFFER,
-                        frame.data.len() as i32,
-                        glow::STREAM_DRAW,
-                    );
-                }
+                gl.buffer_data_size(
+                    glow::PIXEL_UNPACK_BUFFER,
+                    frame.data.len() as i32,
+                    glow::STREAM_DRAW,
+                );
                 gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, &frame.data);
                 gl.tex_sub_image_2d(
                     glow::TEXTURE_2D,
@@ -1779,6 +1822,124 @@ impl CrtFilterRenderer {
         }
     }
 
+    pub fn has_pending_ocr_readback(&self) -> bool {
+        self.ocr_pending_readback.is_some()
+    }
+
+    unsafe fn setup_ocr_framebuffer(&mut self, gl: &glow::Context, w: u32, h: u32) {
+        let w = w.max(1);
+        let h = h.max(1);
+        if (w, h) != self.last_ocr_fbo_size {
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.ocr_texture));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA8 as i32,
+                w as i32,
+                h as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                None,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.ocr_fbo));
+            gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(self.ocr_texture),
+                0,
+            );
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.last_ocr_fbo_size = (w, h);
+        }
+    }
+
+    unsafe fn poll_async_ocr_readback(&mut self, gl: &glow::Context) {
+        if let Some(pending) = &self.ocr_pending_readback {
+            let status = gl.client_wait_sync(pending.fence, 0, 0);
+            if status == glow::ALREADY_SIGNALED || status == glow::CONDITION_SATISFIED {
+                let pending = self.ocr_pending_readback.take().unwrap();
+                gl.delete_sync(pending.fence);
+                let byte_len = (pending.width as usize) * (pending.height as usize) * 4;
+                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(self.ocr_pbo));
+                let mut buf = self.ocr_recycled_buffer.take().unwrap_or_default();
+                if buf.len() != byte_len {
+                    buf.resize(byte_len, 0);
+                }
+                let ptr = gl.map_buffer_range(
+                    glow::PIXEL_PACK_BUFFER,
+                    0,
+                    byte_len as i32,
+                    glow::MAP_READ_BIT,
+                );
+                if !ptr.is_null() {
+                    std::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr(), byte_len);
+                    gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
+                    gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                    self.last_ocr_capture = Some((buf, pending.width, pending.height));
+                } else {
+                    gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                    self.ocr_recycled_buffer = Some(buf);
+                }
+            } else if status == glow::WAIT_FAILED {
+                let pending = self.ocr_pending_readback.take().unwrap();
+                gl.delete_sync(pending.fence);
+            }
+        }
+    }
+
+    unsafe fn start_async_ocr_readback(&mut self, gl: &glow::Context, area: RenderedArea) {
+        if area.width == 0 || area.height == 0 || self.ocr_pending_readback.is_some() {
+            return;
+        }
+        let byte_len = (area.width as usize) * (area.height as usize) * 4;
+        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(self.ocr_pbo));
+        if self.ocr_pbo_size != byte_len {
+            gl.buffer_data_size(glow::PIXEL_PACK_BUFFER, byte_len as i32, glow::STREAM_READ);
+            self.ocr_pbo_size = byte_len;
+        }
+        gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+        gl.read_pixels(
+            area.x as i32,
+            area.y as i32,
+            area.width as i32,
+            area.height as i32,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelPackData::BufferOffset(0),
+        );
+        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+        if let Ok(fence) = gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
+            self.ocr_pending_readback = Some(PendingOcrReadback {
+                fence,
+                width: area.width,
+                height: area.height,
+            });
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     unsafe fn preprocess_video_chain(
         &mut self,
@@ -1856,10 +2017,50 @@ impl CrtFilterRenderer {
             self.last_size = resolution;
             self.last_scaler_filter = Some(scaler_filter);
             self.last_pass_res = effective_res;
+            self.last_preprocess_sig = None;
+            self.last_preprocess_out = None;
         }
 
+        let current_sig = raw_frame.filter(|f| f.captured_at > 0).map(|f| {
+            let fft_gen = fft_filter
+                .and_then(|arc| arc.lock().ok().map(|fft| fft.mask_generation()))
+                .unwrap_or(0);
+            PreprocessCacheSig {
+                captured_at: f.captured_at,
+                resolution,
+                effective_res,
+                scaler_filter,
+                scan_and_color: [
+                    overscan_x.to_bits(),
+                    overscan_y.to_bits(),
+                    underscan_x.to_bits(),
+                    underscan_y.to_bits(),
+                    brightness.to_bits(),
+                    gamma.to_bits(),
+                ],
+                deinterlace_enabled: deinterlace_filter_enabled,
+                deinterlace_mode,
+                deinterlace_params: [
+                    deinterlace_blend.to_bits(),
+                    deinterlace_motion_threshold.to_bits(),
+                    deinterlace_line_spacing.to_bits(),
+                    deinterlace_spatial_mix.to_bits(),
+                ],
+                median_enabled: median_filter_enabled,
+                median_mix: median_mix.to_bits(),
+                fft_enabled: fft_filter.is_some(),
+                fft_thresholds: [fft_mask_threshold.to_bits(), fft_black_threshold.to_bits()],
+                fft_gen,
+            }
+        });
         gl.bind_vertex_array(Some(self.vertex_array));
         gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
+
+        if let (Some(sig), Some(cached_out)) = (current_sig, self.last_preprocess_out) {
+            if self.last_preprocess_sig == Some(sig) {
+                return cached_out;
+            }
+        }
 
         let mut input_is_srgb = false;
         if let Some(tex) = self.update_frame_history_and_prepare_input(
@@ -1998,7 +2199,10 @@ impl CrtFilterRenderer {
             current_res = (upscaled.1, upscaled.2);
         }
 
-        (current_video_texture, current_res, input_is_srgb)
+        let out = (current_video_texture, current_res, input_is_srgb);
+        self.last_preprocess_sig = current_sig;
+        self.last_preprocess_out = Some(out);
+        out
     }
 
     unsafe fn prepare_postprocess_targets(
@@ -2256,6 +2460,7 @@ impl CrtFilterRenderer {
         output_size: (f32, f32),
         params: &ShaderParams,
         halo_params: &HaloShaderParams,
+        beam_params: &BeamShaderParams,
         cathode_params: &CathodeInterferenceShaderParams,
         audio_reactive_params: Option<&AudioReactiveShaderParams>,
         glass_params: Option<&GlassShaderParams>,
@@ -2263,6 +2468,7 @@ impl CrtFilterRenderer {
         run_pixelate: bool,
         run_lottes: bool,
         run_halo: bool,
+        run_beam: bool,
         fft_filter: Option<&Arc<Mutex<FftFilter>>>,
         fft_mask_threshold: f32,
         fft_black_threshold: f32,
@@ -2277,7 +2483,7 @@ impl CrtFilterRenderer {
             let blend_enabled = gl.is_enabled(glow::BLEND);
             gl.disable(glow::BLEND);
 
-            let allow_srgb_fastpath = !run_lottes && !run_halo && !run_pixelate;
+            let allow_srgb_fastpath = !run_lottes && !run_halo && !run_beam && !run_pixelate;
             let (current_video_texture, current_res, input_is_srgb) = self.preprocess_video_chain(
                 gl,
                 raw_frame,
@@ -2304,6 +2510,69 @@ impl CrtFilterRenderer {
                 fft_black_threshold,
                 allow_srgb_fastpath,
             );
+
+            self.poll_async_ocr_readback(gl);
+
+            if self.capture_ocr_async_next_paint {
+                self.capture_ocr_async_next_paint = false;
+                if self.ocr_pending_readback.is_none() && self.last_ocr_capture.is_none() {
+                    let ocr_src_res = if run_pixelate {
+                        pixelate_subrender_size(current_res.0, current_res.1)
+                    } else {
+                        current_res
+                    };
+                    let full_clean_area =
+                        RenderedArea::fit(ocr_src_res, output_size, params.horizontal_stretch);
+                    if full_clean_area.width > 0 && full_clean_area.height > 0 {
+                        let ocr_max_dim = ocr_src_res.0.max(ocr_src_res.1).clamp(1280, 1920);
+                        let (target_w, target_h) =
+                            crate::ocr::screen_ai::calculate_screen_ai_target_dimensions(
+                                full_clean_area.width,
+                                full_clean_area.height,
+                                ocr_max_dim,
+                            );
+                        let target_w = target_w.max(1);
+                        let target_h = target_h.max(1);
+                        self.setup_ocr_framebuffer(gl, target_w, target_h);
+                        let stretch_for_exact_fit = if ocr_src_res.0 > 0 && ocr_src_res.1 > 0 {
+                            (target_w as f32 * ocr_src_res.1 as f32)
+                                / (target_h as f32 * ocr_src_res.0 as f32)
+                        } else {
+                            params.horizontal_stretch
+                        };
+                        let _ = self.draw_passthrough_internal(
+                            gl,
+                            current_video_texture,
+                            ocr_src_res,
+                            (target_w as f32, target_h as f32),
+                            [0.0, 0.0, 0.0],
+                            stretch_for_exact_fit,
+                            1.0,
+                            params.scaler_filter,
+                            params.border_crop,
+                            Some(self.ocr_fbo),
+                            input_is_srgb,
+                            if run_lottes {
+                                OcrProjection::lottes(params.warp_x, params.warp_y)
+                            } else if run_halo {
+                                OcrProjection::halo(halo_params.curvature, halo_params.halo_zoom)
+                            } else {
+                                OcrProjection::default()
+                            },
+                        );
+                        self.start_async_ocr_readback(
+                            gl,
+                            RenderedArea {
+                                x: 0,
+                                y: 0,
+                                width: target_w,
+                                height: target_h,
+                            },
+                        );
+                        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                    }
+                }
+            }
 
             if self.capture_ocr_next_paint {
                 self.capture_ocr_next_paint = false;
@@ -2424,6 +2693,16 @@ impl CrtFilterRenderer {
                     scissor_enabled && !has_post,
                     upstream_target_fbo,
                     !run_pixelate,
+                );
+            } else if run_beam {
+                self.beam.paint(
+                    gl,
+                    final_input_texture,
+                    final_input_res,
+                    output_size,
+                    beam_params,
+                    scissor_enabled && !has_post,
+                    upstream_target_fbo,
                 );
             } else if run_pixelate {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, upstream_target_fbo);
@@ -2633,6 +2912,61 @@ impl CrtFilterRenderer {
                 OcrProjection::default(),
             );
 
+            self.poll_async_ocr_readback(gl);
+
+            if self.capture_ocr_async_next_paint {
+                self.capture_ocr_async_next_paint = false;
+                if self.ocr_pending_readback.is_none()
+                    && self.last_ocr_capture.is_none()
+                    && rendered_area.width > 0
+                    && rendered_area.height > 0
+                {
+                    let ocr_max_dim = current_res.0.max(current_res.1).clamp(1280, 1920);
+                    let (target_w, target_h) =
+                        crate::ocr::screen_ai::calculate_screen_ai_target_dimensions(
+                            rendered_area.width,
+                            rendered_area.height,
+                            ocr_max_dim,
+                        );
+                    let target_w = target_w.max(1);
+                    let target_h = target_h.max(1);
+                    self.setup_ocr_framebuffer(gl, target_w, target_h);
+                    let stretch_for_exact_fit = if current_res.0 > 0 && current_res.1 > 0 {
+                        (target_w as f32 * current_res.1 as f32)
+                            / (target_h as f32 * current_res.0 as f32)
+                    } else {
+                        horizontal_stretch
+                    };
+                    if scissor_enabled && !has_post {
+                        gl.disable(glow::SCISSOR_TEST);
+                    }
+                    let _ = self.draw_passthrough_internal(
+                        gl,
+                        current_video_texture,
+                        current_res,
+                        (target_w as f32, target_h as f32),
+                        [0.0, 0.0, 0.0],
+                        stretch_for_exact_fit,
+                        1.0,
+                        scaler_filter,
+                        border_crop,
+                        Some(self.ocr_fbo),
+                        input_is_srgb,
+                        OcrProjection::default(),
+                    );
+                    self.start_async_ocr_readback(
+                        gl,
+                        RenderedArea {
+                            x: 0,
+                            y: 0,
+                            width: target_w,
+                            height: target_h,
+                        },
+                    );
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, upstream_target_fbo);
+                }
+            }
+
             if self.capture_ocr_next_paint {
                 self.capture_ocr_next_paint = false;
                 self.last_ocr_capture = read_framebuffer_pixels_raw(gl, rendered_area);
@@ -2683,6 +3017,7 @@ impl CrtFilterRenderer {
     ) -> RenderedArea {
         let final_input_texture = video_texture;
 
+        gl.bind_vertex_array(Some(self.vertex_array));
         gl.bind_framebuffer(glow::FRAMEBUFFER, target_fbo);
         gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
         gl.use_program(Some(self.passthrough_prog));
@@ -3518,6 +3853,7 @@ impl CrtFilterRenderer {
             self.anime4k_medium.destroy(gl);
             self.anime4k_large.destroy(gl);
             self.halo.destroy(gl);
+            self.beam.destroy(gl);
             gl.delete_vertex_array(self.vertex_array);
             gl.delete_buffer(self.vbo);
             for fbo in self.fbos {
@@ -3532,6 +3868,12 @@ impl CrtFilterRenderer {
             for pbo in self.pbos {
                 gl.delete_buffer(pbo);
             }
+            if let Some(pending) = &self.ocr_pending_readback {
+                gl.delete_sync(pending.fence);
+            }
+            gl.delete_framebuffer(self.ocr_fbo);
+            gl.delete_texture(self.ocr_texture);
+            gl.delete_buffer(self.ocr_pbo);
         }
     }
 
@@ -3711,13 +4053,30 @@ mod tests {
                 assert!(sum.2 > 100.0, "Missing marker in readback");
                 (sum.0 / sum.2, sum.1 / sum.2)
             }
-            for (name, lottes, halo, curvature, zoom, pixelate) in [
-                ("Lottes", true, false, true, 100.0, false),
-                ("Halo", false, true, true, 100.0, false),
-                ("Halo zoom", false, true, true, 95.0, false),
-                ("Halo zoom flat", false, true, false, 95.0, false),
-                ("Off after capture", false, false, false, 100.0, false),
-                ("Pixelate after capture", false, false, false, 100.0, true),
+            for (name, lottes, halo, beam, curvature, zoom, pixelate) in [
+                ("Lottes", true, false, false, true, 100.0, false),
+                ("Halo", false, true, false, true, 100.0, false),
+                ("Halo zoom", false, true, false, true, 95.0, false),
+                ("Halo zoom flat", false, true, false, false, 95.0, false),
+                ("Beam", false, false, true, false, 100.0, false),
+                (
+                    "Off after capture",
+                    false,
+                    false,
+                    false,
+                    false,
+                    100.0,
+                    false,
+                ),
+                (
+                    "Pixelate after capture",
+                    false,
+                    false,
+                    false,
+                    false,
+                    100.0,
+                    true,
+                ),
             ] {
                 frame.captured_at += 1;
                 let halo_params = HaloShaderParams {
@@ -3731,6 +4090,12 @@ mod tests {
                     ..Default::default()
                 };
                 let output = (1280.0, 801.0);
+                let beam_params = BeamShaderParams {
+                    frames_per_hz: 1.0,
+                    scan_direction: 0,
+                    lcd_anti_retention: false,
+                    ..Default::default()
+                };
                 renderer.capture_ocr_next_paint = true;
                 let area = renderer.paint(
                     &gl,
@@ -3742,6 +4107,7 @@ mod tests {
                     output,
                     &params,
                     &halo_params,
+                    &beam_params,
                     &cathode,
                     None,
                     None,
@@ -3749,6 +4115,7 @@ mod tests {
                     pixelate,
                     lottes,
                     halo,
+                    beam,
                     None,
                     0.0,
                     0.0,
@@ -3793,6 +4160,239 @@ mod tests {
                 assert_eq!(unsafe { gl.get_error() }, glow::NO_ERROR, "{name}");
             }
         }
+        renderer.destroy(&gl);
+        painter.destroy();
+    }
+
+    #[test]
+    #[ignore = "opt-in Mesa software EGL readback; set LIBGL_ALWAYS_SOFTWARE=1 EGL_PLATFORM=surfaceless"]
+    fn beam_crt_sweeps_top_then_bottom_across_subframes() {
+        let egl = software_gl::SoftwareGl::new(640, 480);
+        #[allow(clippy::arc_with_non_send_sync)]
+        let gl = Arc::new(egl.context());
+        let mut painter = egui_glow::Painter::new(gl.clone(), "", None).unwrap();
+        let mut renderer = CrtFilterRenderer::new(&gl);
+
+        let mut pixels = vec![0u8; 640 * 480 * 4];
+        for p in pixels.chunks_exact_mut(4) {
+            p[0] = 200;
+            p[1] = 200;
+            p[2] = 200;
+            p[3] = 255;
+        }
+        let frame = RawFrame {
+            captured_at: 1,
+            rate: crate::replay::config::Rate { num: 60, den: 1 },
+            width: 640,
+            height: 480,
+            data: pixels,
+            format: Pixel::RGBA,
+            color_range: crate::video::types::ColorRange::Full,
+        };
+        let params = ShaderParams::default();
+        let halo_params = HaloShaderParams::default();
+        let beam_params = BeamShaderParams {
+            frames_per_hz: 2.0,
+            scan_direction: 1, // Top to Bottom
+            lcd_anti_retention: false,
+            ..Default::default()
+        };
+        let cathode = CathodeInterferenceShaderParams::default();
+        let output = (640.0, 480.0);
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(output.0, output.1));
+
+        // Subframe 0: crtRasterPos = 0.0 -> top half illuminated
+        let area0 = renderer.paint(
+            &gl,
+            &painter,
+            rect,
+            Some(&frame),
+            None,
+            (640, 480),
+            output,
+            &params,
+            &halo_params,
+            &beam_params,
+            &cathode,
+            None,
+            None,
+            0.0,
+            false,
+            false,
+            false,
+            true,
+            None,
+            0.0,
+            0.0,
+            None,
+            None,
+            false,
+        );
+        let (sub0, _, _) = read_framebuffer_pixels_raw(&gl, area0).unwrap();
+        // OpenGL read_pixels y=0 is bottom, y=479 is top
+        let top_row_idx = (420 * 640 + 320) * 4;
+        let bot_row_idx = (60 * 640 + 320) * 4;
+        assert!(
+            sub0[top_row_idx] > 150,
+            "Subframe 0 top half should be bright, got {}",
+            sub0[top_row_idx]
+        );
+        assert!(
+            sub0[bot_row_idx] < sub0[top_row_idx],
+            "Subframe 0 bottom half ({}) should be dimmer than top half ({})",
+            sub0[bot_row_idx],
+            sub0[top_row_idx]
+        );
+
+        // Subframe 1: crtRasterPos = 0.5 -> bottom half illuminated
+        let area1 = renderer.paint(
+            &gl,
+            &painter,
+            rect,
+            Some(&frame),
+            None,
+            (640, 480),
+            output,
+            &params,
+            &halo_params,
+            &beam_params,
+            &cathode,
+            None,
+            None,
+            0.0,
+            false,
+            false,
+            false,
+            true,
+            None,
+            0.0,
+            0.0,
+            None,
+            None,
+            false,
+        );
+        let (sub1, _, _) = read_framebuffer_pixels_raw(&gl, area1).unwrap();
+        assert!(
+            sub1[bot_row_idx] > 120,
+            "Subframe 1 bottom half should be bright, got {}",
+            sub1[bot_row_idx]
+        );
+        assert!(
+            sub1[top_row_idx] < sub1[bot_row_idx],
+            "Subframe 1 top half ({}) should be dimmer than bottom half ({})",
+            sub1[top_row_idx],
+            sub1[bot_row_idx]
+        );
+
+        // Subframe 2 (Cycle 1, crtRasterPos = 0.0): supply a brand new GREEN source frame
+        // and verify zero-latency ring-buffer latching on integer frames_per_hz = 2.0!
+        let mut green_pixels = vec![0u8; 640 * 480 * 4];
+        for p in green_pixels.chunks_exact_mut(4) {
+            p[0] = 0;
+            p[1] = 220;
+            p[2] = 0;
+            p[3] = 255;
+        }
+        let green_frame = RawFrame {
+            captured_at: 2,
+            rate: crate::replay::config::Rate { num: 60, den: 1 },
+            width: 640,
+            height: 480,
+            data: green_pixels,
+            format: Pixel::RGBA,
+            color_range: crate::video::types::ColorRange::Full,
+        };
+        let area2 = renderer.paint(
+            &gl,
+            &painter,
+            rect,
+            Some(&green_frame),
+            None,
+            (640, 480),
+            output,
+            &params,
+            &halo_params,
+            &beam_params,
+            &cathode,
+            None,
+            None,
+            0.0,
+            false,
+            false,
+            false,
+            true,
+            None,
+            0.0,
+            0.0,
+            None,
+            None,
+            false,
+        );
+        let (sub2, _, _) = read_framebuffer_pixels_raw(&gl, area2).unwrap();
+        assert!(
+            sub2[top_row_idx + 1] > 160 && sub2[top_row_idx] < 20,
+            "Subframe 2 top half must immediately display the new green frame without 1-cycle lag: R={}, G={}",
+            sub2[top_row_idx],
+            sub2[top_row_idx + 1]
+        );
+
+        // Now turn the CRT shader completely OFF (`draw_passthrough`) and render the same frame
+        // across repeated UI repaints after unbinding VAO and clearing the default FBO to black.
+        for repaint_idx in 0..2 {
+            unsafe {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                gl.clear_color(0.0, 0.0, 0.0, 1.0);
+                gl.clear(glow::COLOR_BUFFER_BIT);
+                gl.bind_vertex_array(None);
+            }
+            let pass_area = renderer.draw_passthrough(
+                &gl,
+                &painter,
+                rect,
+                Some(&green_frame),
+                None,
+                (640, 480),
+                output,
+                [0.0, 0.0, 0.0],
+                1.0,
+                false,
+                0.0,
+                false,
+                0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+                0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                [0.0, 0.0, 0.0, 0.0],
+                None,
+                0.0,
+                0.0,
+                None,
+                None,
+                None,
+                0.0,
+                None,
+                None,
+                false,
+            );
+            let (pass_pixels, _, _) = read_framebuffer_pixels_raw(&gl, pass_area).unwrap();
+            assert!(
+                pass_pixels[top_row_idx + 1] > 160 && pass_pixels[bot_row_idx + 1] > 160,
+                "Passthrough repaint {} must not go black when CRT shader is off! top G={}, bot G={}",
+                repaint_idx,
+                pass_pixels[top_row_idx + 1],
+                pass_pixels[bot_row_idx + 1]
+            );
+        }
+
         renderer.destroy(&gl);
         painter.destroy();
     }

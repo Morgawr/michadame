@@ -253,6 +253,20 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         halo_corner_size: None,
         halo_curvature: None,
 
+        beam_frames_per_hz: Some(state.beam.frames_per_hz),
+        beam_target_hz: Some(state.beam.target_hz),
+        beam_gamma: Some(state.beam.gamma),
+        beam_gain_vs_blur: Some(state.beam.gain_vs_blur),
+        beam_fps_divisor: Some(state.beam.fps_divisor),
+        beam_lcd_anti_retention: Some(state.beam.lcd_anti_retention),
+        beam_lcd_inversion_compensation_slew: Some(state.beam.lcd_inversion_compensation_slew),
+        beam_scan_direction: Some(state.beam.scan_direction),
+        beam_splitscreen: Some(state.beam.splitscreen),
+        beam_splitscreen_x: Some(state.beam.splitscreen_x),
+        beam_splitscreen_y: Some(state.beam.splitscreen_y),
+        beam_splitscreen_border_px: Some(state.beam.splitscreen_border_px),
+        beam_splitscreen_match_brightness: Some(state.beam.splitscreen_match_brightness),
+
         cathode_interference_enabled: Some(state.cathode_interference.enabled),
         cathode_intensity: Some(state.cathode_interference.intensity),
         cathode_frequency: Some(state.cathode_interference.frequency),
@@ -419,6 +433,7 @@ pub fn save_global_hardware_config_at(
     cfg.active_halo_preset = state.active_halo_preset.clone();
     cfg.halo_presets = state.halo_presets.clone();
     cfg.default_halo = Some(state.halo.clone());
+    cfg.default_beam = Some(state.beam_defaults.clone());
     cfg.default_cathode_interference = Some(state.cathode_interference_defaults.clone());
     cfg.popup_under_crt = Some(state.dict.popup_under_crt);
     cfg.retro_pc_system = state.retro_pc_system;
@@ -576,6 +591,56 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) -> bool {
     state.video.border_crop_top = sanitize_finite_f32(profile.border_crop_top, 0.0, 0.0, 0.2);
     state.video.border_crop_bottom = sanitize_finite_f32(profile.border_crop_bottom, 0.0, 0.0, 0.2);
     state.video.vibrance = state.halo.vibrance;
+
+    let def_beam = state.beam_defaults.clone();
+    state.beam.frames_per_hz = sanitize_finite_f32(
+        profile.beam_frames_per_hz,
+        def_beam.frames_per_hz,
+        1.0,
+        16.0,
+    );
+    state.beam.target_hz = profile
+        .beam_target_hz
+        .unwrap_or(def_beam.target_hz)
+        .clamp(60, 480);
+    state.beam.gamma = sanitize_finite_f32(profile.beam_gamma, def_beam.gamma, 1.0, 5.0);
+    state.beam.gain_vs_blur =
+        sanitize_finite_f32(profile.beam_gain_vs_blur, def_beam.gain_vs_blur, 0.01, 1.0);
+    state.beam.fps_divisor =
+        sanitize_finite_f32(profile.beam_fps_divisor, def_beam.fps_divisor, 0.05, 1.0);
+    state.beam.lcd_anti_retention = profile
+        .beam_lcd_anti_retention
+        .unwrap_or(def_beam.lcd_anti_retention);
+    state.beam.lcd_inversion_compensation_slew = sanitize_finite_f32(
+        profile.beam_lcd_inversion_compensation_slew,
+        def_beam.lcd_inversion_compensation_slew,
+        0.0,
+        0.05,
+    );
+    state.beam.scan_direction = profile
+        .beam_scan_direction
+        .unwrap_or(def_beam.scan_direction)
+        .min(4);
+    state.beam.splitscreen = profile.beam_splitscreen.unwrap_or(def_beam.splitscreen);
+    state.beam.splitscreen_x =
+        sanitize_finite_f32(profile.beam_splitscreen_x, def_beam.splitscreen_x, 0.0, 1.0);
+    state.beam.splitscreen_y =
+        sanitize_finite_f32(profile.beam_splitscreen_y, def_beam.splitscreen_y, 0.0, 1.0);
+    state.beam.splitscreen_border_px = profile
+        .beam_splitscreen_border_px
+        .unwrap_or(def_beam.splitscreen_border_px)
+        .min(32);
+    state.beam.splitscreen_match_brightness = profile
+        .beam_splitscreen_match_brightness
+        .unwrap_or(def_beam.splitscreen_match_brightness);
+    if state.beam.lcd_anti_retention
+        && (state.beam.gain_vs_blur - 0.7).abs() < 1e-4
+        && (state.beam.lcd_inversion_compensation_slew - 0.001).abs() < 1e-5
+        && (state.beam.frames_per_hz - 2.0).abs() < 1e-4
+    {
+        state.beam.lcd_anti_retention = false;
+        state.beam.gain_vs_blur = 0.75;
+    }
 
     let def_cathode = state.cathode_interference_defaults.clone();
     state.cathode_interference.enabled = profile
@@ -903,6 +968,19 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
         state.halo = clean;
     }
     state.video.vibrance = state.halo.vibrance;
+    if let Some(defaults) = &cfg.default_beam {
+        let mut clean = defaults.sanitized();
+        if clean.lcd_anti_retention
+            && (clean.gain_vs_blur - 0.7).abs() < 1e-4
+            && (clean.lcd_inversion_compensation_slew - 0.001).abs() < 1e-5
+            && (clean.frames_per_hz - 2.0).abs() < 1e-4
+        {
+            clean.lcd_anti_retention = false;
+            clean.gain_vs_blur = 0.75;
+        }
+        state.beam_defaults = clean.clone();
+        state.beam = clean;
+    }
     if let Some(defaults) = &cfg.default_cathode_interference {
         state.cathode_interference_defaults = defaults.clone();
         state.cathode_interference = defaults.clone();

@@ -610,6 +610,394 @@ impl HaloSettings {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+pub struct BeamSettings {
+    pub frames_per_hz: f32,
+    pub target_hz: u32,
+    pub gamma: f32,
+    pub gain_vs_blur: f32,
+    pub fps_divisor: f32,
+    pub lcd_anti_retention: bool,
+    pub lcd_inversion_compensation_slew: f32,
+    pub scan_direction: u8,
+    pub splitscreen: bool,
+    pub splitscreen_x: f32,
+    pub splitscreen_y: f32,
+    pub splitscreen_border_px: u32,
+    pub splitscreen_match_brightness: bool,
+}
+
+impl Default for BeamSettings {
+    fn default() -> Self {
+        Self {
+            frames_per_hz: 2.0,
+            target_hz: 120,
+            gamma: 2.4,
+            gain_vs_blur: 0.75,
+            fps_divisor: 1.0,
+            lcd_anti_retention: false,
+            lcd_inversion_compensation_slew: 0.001,
+            scan_direction: 1,
+            splitscreen: false,
+            splitscreen_x: 0.50,
+            splitscreen_y: 0.00,
+            splitscreen_border_px: 2,
+            splitscreen_match_brightness: true,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct BeamLockstepState {
+    pub sweep_start_time: Option<Instant>,
+    pub last_present_time: Option<Instant>,
+    pub next_subframe_time: Option<Instant>,
+    pub last_source_frame_arrival: Option<Instant>,
+    pub last_live_frame_arrival: Option<Instant>,
+    pub last_captured_at_us: Option<i64>,
+    pub prev_candidate_sweep_dt: Option<std::time::Duration>,
+    pub staged_video_frame: Option<std::sync::Arc<crate::video::types::RawFrame>>,
+    pub staged_dmabuf_frame: Option<std::sync::Arc<crate::gamescope::pipewire_dma::DmaBufFrame>>,
+    pub staged_just_after_sub0: bool,
+    pub sweeps_since_live_arrival: u32,
+    pub sweeps_per_frame: u32,
+    pub smoothed_sweep_duration: std::time::Duration,
+    pub current_sweep_duration: std::time::Duration,
+    pub last_raw_frame_dt: std::time::Duration,
+    pub frame_jitter_ema: std::time::Duration,
+    pub sub0_render_dur: std::time::Duration,
+    pub sub_render_ema: std::time::Duration,
+    pub has_measured_interval: bool,
+    pub phase_locked: bool,
+    pub received_on_last_sweep: bool,
+    pub subframe_index: u32,
+    pub sweep_counter: u32,
+    pub current_i_frame: i32,
+    pub last_effective_fph: f32,
+    pub last_fps_divisor: f32,
+    pub last_target_hz: u32,
+}
+
+impl Default for BeamLockstepState {
+    fn default() -> Self {
+        let default_sweep = std::time::Duration::from_nanos(16_683_333);
+        Self {
+            sweep_start_time: None,
+            last_present_time: None,
+            next_subframe_time: None,
+            last_source_frame_arrival: None,
+            last_live_frame_arrival: None,
+            last_captured_at_us: None,
+            prev_candidate_sweep_dt: None,
+            staged_video_frame: None,
+            staged_dmabuf_frame: None,
+            staged_just_after_sub0: false,
+            sweeps_since_live_arrival: 0,
+            sweeps_per_frame: 1,
+            // Default to 59.94 Hz NTSC period (1001 / 60000 s = 16,683,333 ns)
+            smoothed_sweep_duration: default_sweep,
+            current_sweep_duration: default_sweep,
+            last_raw_frame_dt: default_sweep,
+            frame_jitter_ema: std::time::Duration::ZERO,
+            sub0_render_dur: std::time::Duration::ZERO,
+            sub_render_ema: std::time::Duration::ZERO,
+            has_measured_interval: false,
+            phase_locked: false,
+            received_on_last_sweep: false,
+            subframe_index: 0,
+            sweep_counter: 0,
+            current_i_frame: 0,
+            last_effective_fph: 2.0,
+            last_fps_divisor: 1.0,
+            last_target_hz: 144,
+        }
+    }
+}
+
+impl BeamLockstepState {
+    pub fn reset(&mut self, effective_fph: f32, fps_divisor: f32) {
+        let default_sweep = std::time::Duration::from_nanos(16_683_333);
+        self.sweep_start_time = None;
+        self.last_present_time = None;
+        self.next_subframe_time = None;
+        self.last_source_frame_arrival = None;
+        self.last_live_frame_arrival = None;
+        self.last_captured_at_us = None;
+        self.prev_candidate_sweep_dt = None;
+        self.staged_video_frame = None;
+        self.staged_dmabuf_frame = None;
+        self.staged_just_after_sub0 = false;
+        self.sweeps_since_live_arrival = 0;
+        self.sweeps_per_frame = 1;
+        self.smoothed_sweep_duration = default_sweep;
+        self.current_sweep_duration = default_sweep;
+        self.last_raw_frame_dt = default_sweep;
+        self.frame_jitter_ema = std::time::Duration::ZERO;
+        self.sub0_render_dur = std::time::Duration::ZERO;
+        self.sub_render_ema = std::time::Duration::ZERO;
+        self.has_measured_interval = false;
+        self.phase_locked = false;
+        self.received_on_last_sweep = false;
+        self.subframe_index = 0;
+        self.sweep_counter = 0;
+        self.current_i_frame = 0;
+        self.last_effective_fph = effective_fph;
+        self.last_fps_divisor = fps_divisor;
+    }
+
+    /// Clears transient sweep and arrival timestamps when the Beam CRT shader is deactivated
+    /// (e.g. toggled off with `C` or switched to another filter) so re-enabling Beam starts a
+    /// clean sweep without stale timestamps.
+    pub fn deactivate(&mut self) {
+        if self.sweep_start_time.is_some() || self.next_subframe_time.is_some() {
+            let n_subframes = (self.last_effective_fph.round() as u32).max(1);
+            self.sweep_counter = (self.sweep_counter + 1) % (8_000_000 / n_subframes);
+        }
+        self.sweep_start_time = None;
+        self.last_present_time = None;
+        self.next_subframe_time = None;
+        self.last_source_frame_arrival = None;
+        self.last_live_frame_arrival = None;
+        self.last_captured_at_us = None;
+        self.prev_candidate_sweep_dt = None;
+        self.staged_just_after_sub0 = false;
+        self.sweeps_since_live_arrival = 0;
+        self.phase_locked = false;
+        self.received_on_last_sweep = false;
+        self.subframe_index = 0;
+        self.sub0_render_dur = std::time::Duration::ZERO;
+        self.sub_render_ema = std::time::Duration::ZERO;
+    }
+
+    /// Minimum CRT sweep duration so that `N` sub-frames per sweep never exceed the display's
+    /// VRR ceiling (at least 144Hz or `N * 65Hz` so 60fps streams are never throttled by a lower
+    /// manual `target_hz` setting).
+    pub fn min_sweep_duration(&self) -> std::time::Duration {
+        let n_subframes = (self.last_effective_fph.round() as u64).max(1);
+        let min_lockstep_hz = (n_subframes * 65).max(144);
+        let target_hz = (self.last_target_hz as u64).max(min_lockstep_hz);
+        // Include a 120us safety margin below the physical display refresh ceiling so VRR swaps
+        // never collide with the monitor's maximum scanout frequency.
+        let min_vrr_subframe_ns = (1_000_000_000 / target_hz) + 120_000;
+        std::time::Duration::from_nanos(min_vrr_subframe_ns * n_subframes)
+    }
+
+    pub fn max_sweep_duration(&self) -> std::time::Duration {
+        std::time::Duration::from_micros(28_500)
+    }
+
+    fn choose_sweeps_per_frame(&self, raw_dt: std::time::Duration) -> u32 {
+        let min_sweep = self.min_sweep_duration();
+        let current_k = self.sweeps_per_frame.clamp(1, 4);
+        for k in [4u32, 3, 2] {
+            let threshold = if current_k >= k {
+                // Hysteresis to stay in k-sweep LFC mode
+                (min_sweep * k)
+                    .checked_sub(std::time::Duration::from_micros(400))
+                    .unwrap_or(min_sweep * k)
+            } else {
+                // Hysteresis to enter k-sweep LFC mode
+                min_sweep * k + std::time::Duration::from_micros(900)
+            };
+            if raw_dt >= threshold {
+                return k;
+            }
+        }
+        1
+    }
+
+    /// Records a newly arrived source frame using its producer `captured_at` timestamp (microseconds
+    /// from `CLOCK_MONOTONIC`), the host `arrival` `Instant` when it was popped from the channel,
+    /// and whether it arrived in the narrow window right after Sub-frame 0 (`just_after_sub0`).
+    pub fn record_source_frame(
+        &mut self,
+        captured_at_us: i64,
+        arrival: Instant,
+        just_after_sub0: bool,
+    ) {
+        let mut measured_raw_dt = None;
+
+        if captured_at_us > 0 {
+            if let Some(prev_us) = self.last_captured_at_us {
+                let diff_us = captured_at_us.saturating_sub(prev_us);
+                if (4_000..=200_000).contains(&diff_us) {
+                    measured_raw_dt = Some(std::time::Duration::from_micros(diff_us as u64));
+                }
+            }
+            self.last_captured_at_us = Some(captured_at_us);
+        }
+
+        if measured_raw_dt.is_none() {
+            if let Some(prev_arrival) = self.last_source_frame_arrival {
+                let dt = arrival.saturating_duration_since(prev_arrival);
+                if dt >= std::time::Duration::from_micros(4_000)
+                    && dt <= std::time::Duration::from_micros(200_000)
+                {
+                    let sweeps = self.sweeps_since_live_arrival.max(1);
+                    if captured_at_us <= 0 && sweeps > 1 && sweeps <= 4 {
+                        let per_sweep = dt / sweeps;
+                        if per_sweep >= self.min_sweep_duration()
+                            && per_sweep <= std::time::Duration::from_micros(21_000)
+                        {
+                            measured_raw_dt = Some(per_sweep);
+                        } else {
+                            measured_raw_dt = Some(dt);
+                        }
+                    } else {
+                        measured_raw_dt = Some(dt);
+                    }
+                }
+            }
+        }
+
+        self.last_source_frame_arrival = Some(arrival);
+        self.last_live_frame_arrival = Some(arrival);
+        self.staged_just_after_sub0 = just_after_sub0;
+
+        if let Some(raw_dt) = measured_raw_dt {
+            self.last_raw_frame_dt = raw_dt;
+            let min_sweep = self.min_sweep_duration();
+            let max_sweep = self.max_sweep_duration();
+
+            let new_k = self.choose_sweeps_per_frame(raw_dt);
+            let k_changed = new_k != self.sweeps_per_frame;
+            self.sweeps_per_frame = new_k;
+            let candidate_sweep_dt =
+                (raw_dt / self.sweeps_per_frame.max(1)).clamp(min_sweep, max_sweep);
+
+            if !self.has_measured_interval {
+                self.smoothed_sweep_duration = candidate_sweep_dt;
+                self.current_sweep_duration = candidate_sweep_dt;
+                self.prev_candidate_sweep_dt = Some(candidate_sweep_dt);
+                self.frame_jitter_ema = std::time::Duration::ZERO;
+                self.has_measured_interval = true;
+            } else if k_changed {
+                self.smoothed_sweep_duration = candidate_sweep_dt;
+                self.prev_candidate_sweep_dt = Some(candidate_sweep_dt);
+            } else {
+                let old_ns = self.smoothed_sweep_duration.as_nanos() as f64;
+                let new_ns = candidate_sweep_dt.as_nanos() as f64;
+                let diff_ns = (new_ns - old_ns).abs();
+                let jitter_ns = self.frame_jitter_ema.as_nanos() as f64 * 0.70 + diff_ns * 0.30;
+                self.frame_jitter_ema = std::time::Duration::from_nanos(jitter_ns.round() as u64)
+                    .min(std::time::Duration::from_millis(6));
+
+                let prev_cand_ns = self
+                    .prev_candidate_sweep_dt
+                    .map(|d| d.as_nanos() as f64)
+                    .unwrap_or(old_ns);
+                self.prev_candidate_sweep_dt = Some(candidate_sweep_dt);
+
+                let delta_prev = prev_cand_ns - old_ns;
+                let delta_curr = new_ns - old_ns;
+
+                let (target_ns, alpha) =
+                    if delta_prev * delta_curr < 0.0 && delta_curr.abs() > 150_000.0 {
+                        // Opposite-sign bounce (e.g. a delayed frame `T + d` followed by an
+                        // on-schedule catch-up frame `T - d`): blend toward the 2-frame midpoint
+                        // `(prev + curr) / 2` so transit/scheduling jitter cancels out to zero!
+                        (0.5 * (prev_cand_ns + new_ns), 0.65)
+                    } else if delta_prev * delta_curr > 0.0
+                        && delta_prev.abs() > 200_000.0
+                        && delta_curr.abs() > 200_000.0
+                    {
+                        // 2+ consecutive frames shifted in the same direction: genuine framerate
+                        // change (e.g. 60 -> 48 FPS or 48 -> 40 FPS), lock on rapidly.
+                        (new_ns, 0.65)
+                    } else {
+                        // Isolated 1-frame deviation or sub-200us steady-state ripple: filter gently.
+                        (new_ns, 0.25)
+                    };
+
+                let blended = (old_ns * (1.0 - alpha) + target_ns * alpha).round() as u64;
+                self.smoothed_sweep_duration =
+                    std::time::Duration::from_nanos(blended).clamp(min_sweep, max_sweep);
+            }
+        }
+
+        self.sweeps_since_live_arrival = 0;
+        self.phase_locked = true;
+    }
+
+    /// Commits the exact duration for the CRT sweep starting at `sweep_start`.
+    pub fn commit_next_sweep_duration(
+        &mut self,
+        _sweep_start: Instant,
+        got_frame_this_sweep: bool,
+        stream_active: bool,
+    ) -> std::time::Duration {
+        let min_sweep = self.min_sweep_duration();
+        let max_sweep = self.max_sweep_duration();
+
+        let base_s = self.smoothed_sweep_duration.as_secs_f64();
+
+        // Only apply a small phase nudge (+0.25ms) if a frame arrived in the narrow window
+        // immediately after Sub-frame 0 started (`staged_just_after_sub0`). For the remaining
+        // ~92% of the sweep cycle, `trim_s = 0.0` so the UI maintains an exact 1:1 frequency lock.
+        let trim_s = if stream_active && got_frame_this_sweep && self.staged_just_after_sub0 {
+            0.000_25
+        } else {
+            0.0
+        };
+        self.staged_just_after_sub0 = false;
+
+        let target_sweep_ns = ((base_s + trim_s) * 1e9).round();
+
+        // Limit sweep-to-sweep duration step so adjacent sweeps transition smoothly across
+        // framerate drops without a sudden cross-sweep brightness step.
+        let prev_ns = self.current_sweep_duration.as_nanos() as f64;
+        let max_step_ns = 1_600_000.0;
+        let slewed_ns = if self.sweep_counter == 0 {
+            target_sweep_ns
+        } else {
+            target_sweep_ns.clamp(prev_ns - max_step_ns, prev_ns + max_step_ns)
+        };
+
+        let committed =
+            std::time::Duration::from_nanos(slewed_ns.max(1.0) as u64).clamp(min_sweep, max_sweep);
+        self.current_sweep_duration = committed;
+        committed
+    }
+}
+
+impl BeamSettings {
+    pub fn sanitized(&self) -> Self {
+        let def = Self::default();
+        let clean = |v: f32, fallback: f32, min: f32, max: f32| -> f32 {
+            if v.is_finite() {
+                v.clamp(min, max)
+            } else {
+                fallback.clamp(min, max)
+            }
+        };
+        Self {
+            frames_per_hz: clean(self.frames_per_hz, def.frames_per_hz, 1.0, 16.0),
+            target_hz: self.target_hz.clamp(60, 480),
+            gamma: clean(self.gamma, def.gamma, 1.0, 5.0),
+            gain_vs_blur: clean(self.gain_vs_blur, def.gain_vs_blur, 0.01, 1.0),
+            fps_divisor: clean(self.fps_divisor, def.fps_divisor, 0.05, 1.0),
+            lcd_anti_retention: self.lcd_anti_retention,
+            lcd_inversion_compensation_slew: clean(
+                self.lcd_inversion_compensation_slew,
+                def.lcd_inversion_compensation_slew,
+                0.0,
+                0.05,
+            ),
+            scan_direction: self.scan_direction.min(4),
+            splitscreen: self.splitscreen,
+            splitscreen_x: clean(self.splitscreen_x, def.splitscreen_x, 0.0, 1.0),
+            splitscreen_y: clean(self.splitscreen_y, def.splitscreen_y, 0.0, 1.0),
+            splitscreen_border_px: self.splitscreen_border_px.min(32),
+            splitscreen_match_brightness: self.splitscreen_match_brightness,
+        }
+    }
+
+    pub fn effective_target_hz(&self) -> u32 {
+        self.target_hz.clamp(60, 480)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CathodeInterferenceSettings {
     pub enabled: bool,
     pub intensity: f32,
@@ -1235,6 +1623,9 @@ pub struct AppState {
     pub halo_presets: BTreeMap<String, HaloSettings>,
     pub active_halo_preset: String,
     pub new_halo_preset_name: String,
+    pub beam: BeamSettings,
+    pub beam_defaults: BeamSettings,
+    pub beam_lockstep: BeamLockstepState,
     pub cathode_interference: CathodeInterferenceSettings,
     pub cathode_interference_defaults: CathodeInterferenceSettings,
     pub audio_reactive: AudioReactiveConfig,

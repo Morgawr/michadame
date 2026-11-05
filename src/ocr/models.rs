@@ -133,11 +133,16 @@ pub struct OcrDispatchHandle {
     pub backend: OcrBackend,
     pub constant_scan: bool,
     pub sender: Option<crossbeam_channel::Sender<OcrCaptureRequest>>,
+    pub free_rgba_rx: Option<crossbeam_channel::Receiver<Vec<u8>>>,
 }
 
 impl OcrDispatchHandle {
     pub fn take_capture_requested(&self) -> bool {
         self.capture_requested.swap(false, Ordering::AcqRel)
+    }
+
+    pub fn try_take_recycled_buffer(&self) -> Option<Vec<u8>> {
+        self.free_rgba_rx.as_ref()?.try_recv().ok()
     }
 
     pub fn dispatch(&self, raw_rgba: Vec<u8>, width: u32, height: u32) -> Option<u64> {
@@ -371,6 +376,8 @@ pub struct OcrState {
     pub last_error: Option<String>,
     /// Channel sender for dispatching raw frame captures to the persistent OCR background worker.
     pub ocr_request_sender: Option<crossbeam_channel::Sender<OcrCaptureRequest>>,
+    /// Channel receiver for recycling multi-megabyte RGBA capture buffers from the background worker.
+    pub free_rgba_rx: Option<crossbeam_channel::Receiver<Vec<u8>>>,
     /// Sender for OCR worker results.
     pub ocr_sender: Option<crossbeam_channel::Sender<OcrWorkerResult>>,
     /// Channel receiver for completed OCR results from the background worker.
@@ -405,6 +412,7 @@ impl OcrState {
             backend: self.backend,
             constant_scan: self.is_constant_scanning_active(),
             sender: self.ocr_request_sender.clone(),
+            free_rgba_rx: self.free_rgba_rx.clone(),
         }
     }
 
@@ -578,7 +586,9 @@ impl OcrState {
         }
 
         let (req_tx, req_rx) = crossbeam_channel::unbounded::<OcrCaptureRequest>();
+        let (free_tx, free_rx) = crossbeam_channel::bounded::<Vec<u8>>(2);
         self.ocr_request_sender = Some(req_tx);
+        self.free_rgba_rx = Some(free_rx);
 
         let res_tx = self.ocr_sender.as_ref().unwrap().clone();
         let is_processing = self.is_processing.clone();
@@ -615,6 +625,7 @@ impl OcrState {
                     match req_rx.recv_timeout(std::time::Duration::from_secs(45)) {
                         Ok(req) => {
                             if req.generation != session_generation.load(Ordering::Acquire) {
+                                let _ = free_tx.try_send(req.raw_rgba);
                                 let _ = res_tx.send(OcrWorkerResult {
                                     request_id: req.request_id,
                                     generation: req.generation,
@@ -730,6 +741,7 @@ impl OcrState {
                                 }
                             };
 
+                            let _ = free_tx.try_send(req.raw_rgba);
                             let _ = res_tx.send(OcrWorkerResult {
                                 request_id: req.request_id,
                                 generation: req.generation,
@@ -855,6 +867,7 @@ impl Default for OcrState {
             copy_feedback_time: None,
             last_error: None,
             ocr_request_sender: None,
+            free_rgba_rx: None,
             ocr_sender: Some(tx),
             result_receiver: Some(rx),
         }

@@ -137,6 +137,114 @@ impl Default for HaloShaderParams {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BeamShaderParams {
+    pub frames_per_hz: f32,
+    pub gamma: f32,
+    pub gain_vs_blur: f32,
+    pub fps_divisor: f32,
+    pub lcd_anti_retention: bool,
+    pub lcd_inversion_compensation_slew: f32,
+    pub scan_direction: u8,
+    pub splitscreen: bool,
+    pub splitscreen_x: f32,
+    pub splitscreen_y: f32,
+    pub splitscreen_border_px: u32,
+    pub splitscreen_match_brightness: bool,
+    pub background_color: [f32; 3],
+    pub horizontal_stretch: f32,
+    pub vibrance: f32,
+    pub scaler_filter: u8,
+    pub border_crop: [f32; 4],
+    #[serde(skip)]
+    pub i_frame_override: Option<i32>,
+}
+
+impl BeamShaderParams {
+    pub fn from_state(state: &AppState) -> Self {
+        let base_fph = if state.beam.frames_per_hz.is_finite() {
+            state.beam.frames_per_hz.max(1.0)
+        } else {
+            2.0
+        };
+        let fps_divisor = state.beam.fps_divisor.clamp(0.05, 1.0);
+        let is_integer_lockstep =
+            (base_fph - base_fph.round()).abs() < 1e-4 && (fps_divisor - 1.0).abs() < 1e-4;
+        Self {
+            frames_per_hz: state.beam.frames_per_hz,
+            gamma: state.beam.gamma,
+            gain_vs_blur: state.beam.gain_vs_blur,
+            fps_divisor: state.beam.fps_divisor,
+            // In integer VRR lockstep mode (`i_frame = sweep_counter * N + subframe_index`),
+            // keep `effective_frames_per_hz` equal to the exact integer `N` so `crtHzCounter`
+            // and `crtRasterPos` never drift out of phase with Sub-frame 0.
+            lcd_anti_retention: state.beam.lcd_anti_retention && !is_integer_lockstep,
+            lcd_inversion_compensation_slew: state.beam.lcd_inversion_compensation_slew,
+            scan_direction: state.beam.scan_direction,
+            splitscreen: state.beam.splitscreen,
+            splitscreen_x: state.beam.splitscreen_x,
+            splitscreen_y: state.beam.splitscreen_y,
+            splitscreen_border_px: state.beam.splitscreen_border_px,
+            splitscreen_match_brightness: state.beam.splitscreen_match_brightness,
+            background_color: if state.video.use_magenta_background {
+                [1.0, 0.0, 1.0]
+            } else {
+                [0.0, 0.0, 0.0]
+            },
+            horizontal_stretch: state.video.horizontal_stretch,
+            vibrance: state.video.vibrance,
+            scaler_filter: state.scaler_filter.load(Ordering::Relaxed),
+            border_crop: [
+                state.video.border_crop_left,
+                state.video.border_crop_right,
+                state.video.border_crop_top,
+                state.video.border_crop_bottom,
+            ],
+            i_frame_override: Some(state.beam_lockstep.current_i_frame),
+        }
+    }
+
+    pub fn effective_frames_per_hz(&self) -> f32 {
+        let base = if self.frames_per_hz.is_finite() {
+            self.frames_per_hz.max(1.0)
+        } else {
+            2.0
+        };
+        let is_integer = (base - base.floor()).abs() < 1e-4;
+        let is_even = is_integer && ((base.round() as i64) % 2 == 0);
+        if self.lcd_anti_retention && is_even {
+            base + self.lcd_inversion_compensation_slew.clamp(0.0, 0.05)
+        } else {
+            base
+        }
+    }
+}
+
+impl Default for BeamShaderParams {
+    fn default() -> Self {
+        Self {
+            frames_per_hz: 2.0,
+            gamma: 2.4,
+            gain_vs_blur: 0.75,
+            fps_divisor: 1.0,
+            lcd_anti_retention: false,
+            lcd_inversion_compensation_slew: 0.001,
+            scan_direction: 1,
+            splitscreen: false,
+            splitscreen_x: 0.50,
+            splitscreen_y: 0.00,
+            splitscreen_border_px: 2,
+            splitscreen_match_brightness: true,
+            background_color: [0.0, 0.0, 0.0],
+            horizontal_stretch: 1.0,
+            vibrance: 1.0,
+            scaler_filter: 2,
+            border_crop: [0.0, 0.0, 0.0, 0.0],
+            i_frame_override: None,
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CathodeInterferenceShaderParams {
     pub enabled: bool,

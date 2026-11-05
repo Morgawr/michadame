@@ -148,16 +148,21 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
     let mut new_dma_frame_received = false;
     state.poll_gamescope_dma_retry(ctx);
+    let active_filter_top = CrtFilter::from_u8(state.crt_filter.load(Ordering::Relaxed));
+    let beam_lockstep_active =
+        state.ui.video_window_open && !deck_mode && active_filter_top == CrtFilter::Beam;
     if let Some(hook) = &mut state.gamescope_hook {
         if hook.is_active {
             if !deck_mode {
                 hook.poll_late_connections();
             }
-            if let Some(dma) = &hook.dma_handle {
-                while let Ok(frame) = dma.rx.try_recv() {
-                    hook.current_dmabuf_frame = Some(std::sync::Arc::new(frame));
-                    state.video_frames_since_last_check += 1;
-                    new_dma_frame_received = true;
+            if !beam_lockstep_active {
+                if let Some(dma) = &hook.dma_handle {
+                    while let Ok(frame) = dma.rx.try_recv() {
+                        hook.current_dmabuf_frame = Some(std::sync::Arc::new(frame));
+                        state.video_frames_since_last_check += 1;
+                        new_dma_frame_received = true;
+                    }
                 }
             }
         }
@@ -254,7 +259,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     state.halo.curvature,
                     state.halo.halo_zoom,
                 ),
-                CrtFilter::Off => video::gpu::geometry::OcrProjection::default(),
+                CrtFilter::Beam | CrtFilter::Off => video::gpu::geometry::OcrProjection::default(),
             }
         };
         state.update_ocr_projection(ocr_projection);
@@ -433,15 +438,15 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         // Keep UI surface rendering strictly tied to Gamescope's frame delivery in both active
         // and input-paused modes. This prevents 144Hz presentation spikes when hovering/interacting
         // with UI controls or moving the mouse while input is paused.
-        if is_gamescope && !new_dma_frame_received {
+        if is_gamescope && !new_dma_frame_received && filter != CrtFilter::Beam {
             if let Some(ref mut hook) = state.gamescope_hook {
                 if hook.is_active {
                     if let Some(dma) = &hook.dma_handle {
-                        // Use a 25ms safety timeout (1.5 frame periods):
-                        // Under active 60 FPS streaming, this unblocks immediately when Gamescope delivers
-                        // the frame (~16.67ms cadence).
                         if let Ok(frame) = dma.rx.recv_timeout(std::time::Duration::from_millis(25))
                         {
+                            // Use a 25ms safety timeout (1.5 frame periods):
+                            // Under active 60 FPS streaming, this unblocks immediately when Gamescope delivers
+                            // the frame (~16.67ms cadence).
                             hook.current_dmabuf_frame = Some(std::sync::Arc::new(frame));
                             state.video_frames_since_last_check += 1;
                             while let Ok(extra) = dma.rx.try_recv() {
@@ -548,7 +553,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
         }
 
-        if state.cathode_interference.enabled
+        if !is_showing_roll && filter == CrtFilter::Beam {
+            ui.ctx().request_repaint();
+        } else if state.cathode_interference.enabled
             || state.audio_reactive.enabled
             || retro_pc_frame
             || (night_mode_glow_intensity > 0.001)
@@ -569,10 +576,12 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 let renderer_clone = renderer_arc.clone();
                 let params = video::gpu::ShaderParams::from_state(state);
                 let halo_params = video::gpu::HaloShaderParams::from_state(state);
+                let beam_params = video::gpu::BeamShaderParams::from_state(state);
                 let cathode_params_cb = cathode_params.clone();
                 let pixelate = state.video.pixelate_filter_enabled;
                 let run_lottes = filter == CrtFilter::Lottes;
                 let run_halo = filter == CrtFilter::Halo;
+                let run_beam = filter == CrtFilter::Beam;
                 let (warp, corner_size, filter_type) = if run_lottes {
                     ([params.warp_x, params.warp_y], 0.0, 1)
                 } else if run_halo {
@@ -585,6 +594,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         halo_params.corner_size,
                         2,
                     )
+                } else if run_beam {
+                    ([0.0, 0.0], 0.0, 3)
                 } else {
                     ([0.0, 0.0], 0.0, 0)
                 };
@@ -699,8 +710,15 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 software_mouse_clip
                             };
 
-                            renderer.capture_ocr_next_paint =
+                            renderer.capture_ocr_async_next_paint =
                                 ocr_dispatch_cb.take_capture_requested();
+                            if renderer.ocr_recycled_buffer.is_none()
+                                && (renderer.capture_ocr_async_next_paint
+                                    || renderer.has_pending_ocr_readback())
+                            {
+                                renderer.ocr_recycled_buffer =
+                                    ocr_dispatch_cb.try_take_recycled_buffer();
+                            }
                             let rendered_area = renderer.paint(
                                 painter.gl(),
                                 painter,
@@ -711,6 +729,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 output_size,
                                 &params,
                                 &halo_params,
+                                &beam_params,
                                 &cathode_params_cb,
                                 Some(&audio_reactive_params),
                                 Some(&glass_params),
@@ -718,6 +737,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 pixelate,
                                 run_lottes,
                                 run_halo,
+                                run_beam,
                                 fft_clone.as_ref(),
                                 fft_threshold,
                                 fft_black,
@@ -747,6 +767,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                         halo_params.corner_size,
                                         2,
                                     )
+                                } else if run_beam {
+                                    ([0.0, 0.0], 0.0, 3)
                                 } else {
                                     ([0.0, 0.0], 0.0, 0)
                                 };
@@ -778,6 +800,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                         halo_params.corner_size,
                                         2,
                                     )
+                                } else if run_beam {
+                                    ([0.0, 0.0], 0.0, 3)
                                 } else {
                                     ([0.0, 0.0], 0.0, 0)
                                 };
@@ -1045,7 +1069,15 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     };
                     let (rendered_area, ocr_captured) = {
                         let mut renderer = renderer_clone.lock().unwrap();
-                        renderer.capture_ocr_next_paint = ocr_dispatch_cb.take_capture_requested();
+                        renderer.capture_ocr_async_next_paint =
+                            ocr_dispatch_cb.take_capture_requested();
+                        if renderer.ocr_recycled_buffer.is_none()
+                            && (renderer.capture_ocr_async_next_paint
+                                || renderer.has_pending_ocr_readback())
+                        {
+                            renderer.ocr_recycled_buffer =
+                                ocr_dispatch_cb.try_take_recycled_buffer();
+                        }
                         let area = renderer.draw_passthrough(
                             painter.gl(),
                             painter,

@@ -78,6 +78,9 @@ impl Default for AppState {
             halo_presets: crate::app::models::HaloSettings::builtin_presets(),
             active_halo_preset: crate::app::models::HALO_DEFAULT_PRESET.to_string(),
             new_halo_preset_name: String::new(),
+            beam: crate::app::models::BeamSettings::default(),
+            beam_defaults: crate::app::models::BeamSettings::default(),
+            beam_lockstep: crate::app::models::BeamLockstepState::default(),
             cathode_interference: crate::app::models::CathodeInterferenceSettings::default(),
             cathode_interference_defaults: crate::app::models::CathodeInterferenceSettings::default(
             ),
@@ -518,7 +521,9 @@ impl AppState {
         let now = Instant::now();
         match self.ocr.next_constant_scan_time {
             Some(target) if now < target => {
-                ctx.request_repaint_after(target.saturating_duration_since(now));
+                if CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed)) != CrtFilter::Beam {
+                    ctx.request_repaint_after(target.saturating_duration_since(now));
+                }
                 false
             }
             _ => {
@@ -702,7 +707,11 @@ impl AppState {
                         let updated = self.ocr.apply_constant_scan_lines(lines);
                         let delay = self.ocr.current_constant_scan_delay();
                         self.ocr.next_constant_scan_time = Some(Instant::now() + delay);
-                        ctx.request_repaint_after(delay);
+                        if CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed))
+                            != CrtFilter::Beam
+                        {
+                            ctx.request_repaint_after(delay);
+                        }
                         if updated {
                             repaint_requested = true;
                         }
@@ -750,6 +759,175 @@ impl AppState {
         repaint_requested
     }
 
+    pub fn apply_received_video_frame(&mut self, frame: Arc<video::types::RawFrame>) {
+        if self.video.fft_filter_enabled {
+            let (fft_w, fft_h) =
+                crate::video::gpu::FftFilter::fft_dimensions(frame.width, frame.height);
+            if self.fft_mask_resolution != (fft_w, fft_h) {
+                self.fft_mask_resolution = (fft_w, fft_h);
+                self.fft_mask_data = vec![255u8; (fft_w * fft_h) as usize];
+            }
+        }
+        self.latest_frame = Some(frame);
+        self.video_frames_since_last_check += 1;
+    }
+
+    /// Drains any newly arrived source video frames from the bounded channel during intermediate
+    /// CRT sub-frames (`s = 1 .. N-1`) or post-update into `self.beam_lockstep.staged_*` without
+    /// mutating `self.latest_frame` or `hook.current_dmabuf_frame` mid-sweep.
+    ///
+    /// Because `self.frame_receiver` has capacity 1 (`bounded(1)`), draining it multiple times per
+    /// sweep prevents the producer thread (`try_send`) from ever dropping frames due to a full
+    /// channel while the CRT beam is scanning.
+    pub fn stage_source_frames_for_next_sweep(&mut self, just_after_sub0: bool) {
+        if let Some(ref mut hook) = self.gamescope_hook {
+            if hook.is_active {
+                if let Some(ref dma) = hook.dma_handle {
+                    let mut drained_timestamps = Vec::new();
+                    let mut latest = None;
+                    while let Ok(frame) = dma.rx.try_recv() {
+                        drained_timestamps.push(frame.captured_at);
+                        latest = Some(frame);
+                        self.video_frames_since_last_check += 1;
+                    }
+                    if let Some(frame) = latest {
+                        self.beam_lockstep.staged_dmabuf_frame = Some(Arc::new(frame));
+                        let now_inst = Instant::now();
+                        for ts in drained_timestamps {
+                            self.beam_lockstep
+                                .record_source_frame(ts, now_inst, just_after_sub0);
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+
+        let mut drained = Vec::new();
+        if let Some(ref rx) = self.frame_receiver {
+            while let Ok(frame) = rx.try_recv() {
+                drained.push(frame);
+            }
+        }
+        if !drained.is_empty() {
+            let now_inst = Instant::now();
+            for frame in drained {
+                let ts = frame.captured_at;
+                if self
+                    .beam_lockstep
+                    .staged_video_frame
+                    .replace(frame)
+                    .is_some()
+                {
+                    self.video_frames_since_last_check += 1;
+                }
+                self.beam_lockstep
+                    .record_source_frame(ts, now_inst, just_after_sub0);
+            }
+        }
+    }
+
+    /// Polls or waits up to `timeout` for a new source video frame from either Gamescope DMA-BUF
+    /// or `self.frame_receiver`. Returns `(got_frame, is_live_edge)` where `is_live_edge` is true
+    /// if the queue was initially empty and the frame arrived during `recv_timeout`.
+    pub fn poll_or_wait_source_frame(&mut self, timeout: std::time::Duration) -> (bool, bool) {
+        let record_beam_arrival =
+            CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed)) == CrtFilter::Beam;
+
+        if let Some(ref mut hook) = self.gamescope_hook {
+            if hook.is_active {
+                if let Some(ref dma) = hook.dma_handle {
+                    let mut got_staged = false;
+                    if let Some(staged) = self.beam_lockstep.staged_dmabuf_frame.take() {
+                        hook.current_dmabuf_frame = Some(staged);
+                        self.beam_lockstep.sweeps_since_live_arrival = 0;
+                        self.beam_lockstep.phase_locked = true;
+                        got_staged = true;
+                    }
+                    let mut drained_timestamps = Vec::new();
+                    let mut latest = None;
+                    while let Ok(frame) = dma.rx.try_recv() {
+                        drained_timestamps.push(frame.captured_at);
+                        latest = Some(frame);
+                        self.video_frames_since_last_check += 1;
+                    }
+                    if let Some(frame) = latest {
+                        hook.current_dmabuf_frame = Some(Arc::new(frame));
+                        if record_beam_arrival {
+                            let now_inst = Instant::now();
+                            for ts in drained_timestamps {
+                                self.beam_lockstep.record_source_frame(ts, now_inst, false);
+                            }
+                        }
+                        return (true, false);
+                    }
+                    if got_staged {
+                        return (true, false);
+                    }
+                    if !timeout.is_zero() {
+                        if let Ok(frame) = dma.rx.recv_timeout(timeout) {
+                            drained_timestamps.push(frame.captured_at);
+                            let mut newest = frame;
+                            self.video_frames_since_last_check += 1;
+                            while let Ok(extra) = dma.rx.try_recv() {
+                                drained_timestamps.push(extra.captured_at);
+                                newest = extra;
+                                self.video_frames_since_last_check += 1;
+                            }
+                            hook.current_dmabuf_frame = Some(Arc::new(newest));
+                            if record_beam_arrival {
+                                let now_inst = Instant::now();
+                                for ts in drained_timestamps {
+                                    self.beam_lockstep.record_source_frame(ts, now_inst, false);
+                                }
+                            }
+                            return (true, true);
+                        }
+                    }
+                    return (false, false);
+                }
+            }
+        }
+
+        let mut got_staged = false;
+        if let Some(staged) = self.beam_lockstep.staged_video_frame.take() {
+            self.apply_received_video_frame(staged);
+            self.beam_lockstep.sweeps_since_live_arrival = 0;
+            self.beam_lockstep.phase_locked = true;
+            got_staged = true;
+        }
+
+        let mut drained = Vec::new();
+        let mut live = false;
+        if let Some(ref rx) = self.frame_receiver {
+            while let Ok(frame) = rx.try_recv() {
+                drained.push(frame);
+            }
+            if drained.is_empty() && !got_staged && !timeout.is_zero() {
+                if let Ok(frame) = rx.recv_timeout(timeout) {
+                    live = true;
+                    drained.push(frame);
+                    while let Ok(extra) = rx.try_recv() {
+                        drained.push(extra);
+                    }
+                }
+            }
+        }
+        if drained.is_empty() {
+            (got_staged, false)
+        } else {
+            let now_inst = Instant::now();
+            for frame in drained {
+                let ts = frame.captured_at;
+                self.apply_received_video_frame(frame);
+                if record_beam_arrival {
+                    self.beam_lockstep.record_source_frame(ts, now_inst, false);
+                }
+            }
+            (true, live)
+        }
+    }
+
     /// Deck mode has a real presentation limit even when Xwayland ignores VSync.
     /// Desktop mode retains its existing event-driven scheduling.
     pub fn pace_gui_frame(&mut self) {
@@ -764,13 +942,212 @@ impl AppState {
             return;
         }
         if self.ui.video_window_open {
+            let active_filter = CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed));
+            if active_filter == CrtFilter::Beam {
+                let beam_params = crate::video::gpu::BeamShaderParams::from_state(self);
+                let effective_fph = beam_params.effective_frames_per_hz();
+                let fps_divisor = self.beam.fps_divisor.clamp(0.05, 1.0);
+                let target_hz = self.beam.effective_target_hz().max(60);
+
+                if (effective_fph - self.beam_lockstep.last_effective_fph).abs() > 1e-4
+                    || (fps_divisor - self.beam_lockstep.last_fps_divisor).abs() > 1e-4
+                    || target_hz != self.beam_lockstep.last_target_hz
+                {
+                    self.beam_lockstep.reset(effective_fph, fps_divisor);
+                    self.beam_lockstep.last_target_hz = target_hz;
+                }
+
+                let base_fph = if self.beam.frames_per_hz.is_finite() {
+                    self.beam.frames_per_hz.max(1.0)
+                } else {
+                    2.0
+                };
+                let rounded_fph = base_fph.round();
+                let is_integer_lockstep =
+                    (base_fph - rounded_fph).abs() < 1e-4 && (fps_divisor - 1.0).abs() < 1e-4;
+                let n_subframes = (rounded_fph as u32).max(1);
+
+                if is_integer_lockstep {
+                    match self.beam_lockstep.sweep_start_time {
+                        None => {
+                            let (got, _) =
+                                self.poll_or_wait_source_frame(std::time::Duration::ZERO);
+                            let start = Instant::now();
+                            self.beam_lockstep.received_on_last_sweep = got;
+                            self.beam_lockstep.sweep_start_time = Some(start);
+                            self.beam_lockstep.last_present_time = Some(start);
+                            self.beam_lockstep.subframe_index = 0;
+                            self.beam_lockstep.current_i_frame =
+                                ((self.beam_lockstep.sweep_counter * n_subframes) % 8_000_000)
+                                    as i32;
+                            self.beam_lockstep
+                                .commit_next_sweep_duration(start, got, got);
+                        }
+                        Some(sweep_start) => {
+                            let entry_now = Instant::now();
+                            let sweep_dur = self.beam_lockstep.current_sweep_duration;
+                            let next_sub = self.beam_lockstep.subframe_index + 1;
+                            if next_sub == 1 {
+                                let render_dur = entry_now
+                                    .saturating_duration_since(sweep_start)
+                                    .min(sweep_dur / n_subframes.max(1));
+                                if self.beam_lockstep.sub0_render_dur.is_zero() {
+                                    self.beam_lockstep.sub0_render_dur = render_dur;
+                                } else {
+                                    self.beam_lockstep.sub0_render_dur =
+                                        self.beam_lockstep.sub0_render_dur.mul_f64(0.75)
+                                            + render_dur.mul_f64(0.25);
+                                }
+                            } else if let Some(prev_wake) = self.beam_lockstep.last_present_time {
+                                let render_dur = entry_now
+                                    .saturating_duration_since(prev_wake)
+                                    .min(sweep_dur / n_subframes.max(1));
+                                if self.beam_lockstep.sub_render_ema.is_zero() {
+                                    self.beam_lockstep.sub_render_ema = render_dur;
+                                } else {
+                                    self.beam_lockstep.sub_render_ema =
+                                        self.beam_lockstep.sub_render_ema.mul_f64(0.75)
+                                            + render_dur.mul_f64(0.25);
+                                }
+                            }
+                            if next_sub < n_subframes {
+                                // Intermediate sub-frame (s = 1 .. N-1) of the current CRT sweep:
+                                // Stage any newly arrived frame out of the `bounded(1)` channel
+                                // without mutating `self.latest_frame` mid-sweep.
+                                // Compensate for the render/swap duration asymmetry between
+                                // Sub-frame 0 (video upload + 5 preprocess passes) and Sub-frame 1..
+                                // (PreprocessCacheSig hit) so `swap_buffers()` lands at the exact
+                                // `next_sub / n_subframes` midpoint between Sub-frame 0 swaps.
+                                let frac = (next_sub as f64) / (n_subframes as f64);
+                                let lead_offset = self
+                                    .beam_lockstep
+                                    .sub0_render_dur
+                                    .saturating_sub(self.beam_lockstep.sub_render_ema)
+                                    .min(sweep_dur / (n_subframes * 3).max(1));
+                                let target_time =
+                                    sweep_start + sweep_dur.mul_f64(frac) + lead_offset;
+                                sleep_until_precise(target_time);
+                                self.beam_lockstep.last_present_time = Some(Instant::now());
+                                self.stage_source_frames_for_next_sweep(false);
+                                self.beam_lockstep.subframe_index = next_sub;
+                                self.beam_lockstep.current_i_frame =
+                                    ((self.beam_lockstep.sweep_counter * n_subframes + next_sub)
+                                        % 8_000_000) as i32;
+                            } else {
+                                // Sub-frame 0 of the next CRT sweep:
+                                // Ensure Sub-frame 1 gets at least the same VRR exposure duration
+                                // as Sub-frame 0 even when UI work (e.g. open Debug window or
+                                // secondary viewport) pushes Sub-frame 0 beyond `sweep_dur / N`.
+                                self.beam_lockstep.sweeps_since_live_arrival = self
+                                    .beam_lockstep
+                                    .sweeps_since_live_arrival
+                                    .saturating_add(1);
+                                let prev_sub_start =
+                                    self.beam_lockstep.last_present_time.unwrap_or(sweep_start);
+                                let max_sub_dur =
+                                    self.beam_lockstep.max_sweep_duration() / n_subframes;
+                                let actual_sub0_dur = prev_sub_start
+                                    .saturating_duration_since(sweep_start)
+                                    .min(max_sub_dur);
+                                let nominal_next_sweep =
+                                    (sweep_start + sweep_dur).max(prev_sub_start + actual_sub0_dur);
+                                sleep_until_precise(nominal_next_sweep);
+
+                                let (got_frame, _) =
+                                    self.poll_or_wait_source_frame(std::time::Duration::ZERO);
+                                let post_now = Instant::now();
+                                let has_channel = self.frame_receiver.is_some()
+                                    || self
+                                        .gamescope_hook
+                                        .as_ref()
+                                        .map_or(false, |h| h.is_active && h.dma_handle.is_some());
+                                let stream_recently_active = has_channel
+                                    && (got_frame
+                                        || self.beam_lockstep.last_source_frame_arrival.map_or(
+                                            false,
+                                            |t| {
+                                                post_now.saturating_duration_since(t)
+                                                    < std::time::Duration::from_millis(120)
+                                            },
+                                        ));
+
+                                let next_sweep_start = nominal_next_sweep.max(post_now);
+                                self.beam_lockstep.sweep_start_time = Some(next_sweep_start);
+                                self.beam_lockstep.last_present_time = Some(next_sweep_start);
+                                self.beam_lockstep.received_on_last_sweep = got_frame;
+                                if !got_frame
+                                    && self.beam_lockstep.sweeps_since_live_arrival
+                                        > self.beam_lockstep.sweeps_per_frame
+                                {
+                                    self.beam_lockstep.phase_locked = false;
+                                }
+
+                                self.beam_lockstep.sweep_counter =
+                                    (self.beam_lockstep.sweep_counter + 1)
+                                        % (8_000_000 / n_subframes.max(1));
+                                self.beam_lockstep.subframe_index = 0;
+                                self.beam_lockstep.current_i_frame =
+                                    (self.beam_lockstep.sweep_counter * n_subframes) as i32;
+                                self.beam_lockstep.commit_next_sweep_duration(
+                                    next_sweep_start,
+                                    got_frame,
+                                    stream_recently_active,
+                                );
+                            }
+                        }
+                    }
+                    return;
+                }
+
+                // Non-integer `frames_per_hz` (e.g. 2.4 for 144Hz Native) or slow-motion `fps_divisor < 1.0`:
+                // Drain any arrived source frame before `draw_video_player` and pace at
+                // `smoothed_sweep_duration / effective_fph` (or `1 / target_hz` when no stream is measured).
+                let _ = self.poll_or_wait_source_frame(std::time::Duration::ZERO);
+                let target_duration = if self.beam_lockstep.has_measured_interval
+                    && (fps_divisor - 1.0).abs() < 1e-4
+                {
+                    self.beam_lockstep
+                        .smoothed_sweep_duration
+                        .div_f64(effective_fph.max(1.0) as f64)
+                } else {
+                    std::time::Duration::from_nanos(1_000_000_000 / (target_hz as u64))
+                };
+                if let Some(next_time) = self.beam_lockstep.next_subframe_time {
+                    sleep_until_precise(next_time);
+                    let post_now = Instant::now();
+                    if post_now > next_time + target_duration * 2
+                        || next_time > post_now + target_duration * 2
+                    {
+                        self.beam_lockstep.next_subframe_time = Some(post_now + target_duration);
+                    } else {
+                        self.beam_lockstep.next_subframe_time = Some(next_time + target_duration);
+                    }
+                } else {
+                    self.beam_lockstep.next_subframe_time = Some(Instant::now() + target_duration);
+                }
+                self.beam_lockstep.current_i_frame =
+                    (self.beam_lockstep.current_i_frame + 1) % 8_000_000;
+                return;
+            }
+
+            if let Some(staged) = self.beam_lockstep.staged_video_frame.take() {
+                self.apply_received_video_frame(staged);
+            }
+            if let Some(staged_dma) = self.beam_lockstep.staged_dmabuf_frame.take() {
+                if let Some(ref mut hook) = self.gamescope_hook {
+                    hook.current_dmabuf_frame = Some(staged_dma);
+                }
+            }
+            self.beam_lockstep.deactivate();
             const TARGET_FRAME_DURATION: std::time::Duration =
                 std::time::Duration::from_nanos(1_000_000_000 / 60);
 
             let now = Instant::now();
             if let Some(ref mut next_time) = self.next_gui_frame_time {
                 let post_now = Instant::now();
-                if post_now > *next_time + TARGET_FRAME_DURATION * 2 {
+                if post_now > *next_time + TARGET_FRAME_DURATION * 2
+                    || *next_time > post_now + TARGET_FRAME_DURATION * 2
+                {
                     *next_time = post_now + TARGET_FRAME_DURATION;
                 } else {
                     *next_time += TARGET_FRAME_DURATION;
@@ -779,8 +1156,34 @@ impl AppState {
                 self.next_gui_frame_time = Some(now + TARGET_FRAME_DURATION);
             }
         } else {
+            if let Some(staged) = self.beam_lockstep.staged_video_frame.take() {
+                self.apply_received_video_frame(staged);
+            }
+            if let Some(staged_dma) = self.beam_lockstep.staged_dmabuf_frame.take() {
+                if let Some(ref mut hook) = self.gamescope_hook {
+                    hook.current_dmabuf_frame = Some(staged_dma);
+                }
+            }
+            self.beam_lockstep.deactivate();
             self.next_gui_frame_time = None;
         }
+    }
+}
+
+fn sleep_until_precise(target: Instant) {
+    const MAX_SLEEP: std::time::Duration = std::time::Duration::from_millis(30);
+    const SPIN_MARGIN: std::time::Duration = std::time::Duration::from_micros(1200);
+    let now = Instant::now();
+    if target <= now {
+        return;
+    }
+    let target = target.min(now + MAX_SLEEP);
+    let remaining = target - now;
+    if remaining > SPIN_MARGIN {
+        std::thread::sleep(remaining - SPIN_MARGIN);
+    }
+    while Instant::now() < target {
+        std::hint::spin_loop();
     }
 }
 
@@ -991,6 +1394,7 @@ impl eframe::App for AppState {
                     CrtFilter::Lottes
                 };
                 self.crt_filter.store(next_filter as u8, Ordering::Relaxed);
+                self.beam_lockstep.deactivate();
                 config::save_config(self);
                 self.info(format!("CRT filter set to: {}", next_filter));
                 ctx.request_repaint();
@@ -1141,20 +1545,19 @@ impl eframe::App for AppState {
             p.is_eof = p.is_eof_shared.load(Ordering::Relaxed);
         }
 
-        if let Some(rx) = &self.frame_receiver {
-            while let Ok(frame) = rx.try_recv() {
-                // Initialize or resize FFT mask when frame dimensions change
-                if self.video.fft_filter_enabled {
-                    let (fft_w, fft_h) =
-                        crate::video::gpu::FftFilter::fft_dimensions(frame.width, frame.height);
-                    if self.fft_mask_resolution != (fft_w, fft_h) {
-                        self.fft_mask_resolution = (fft_w, fft_h);
-                        self.fft_mask_data = vec![255u8; (fft_w * fft_h) as usize];
-                    }
+        let beam_lockstep_active = self.ui.video_window_open
+            && self.steam_deck.is_none()
+            && CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed)) == CrtFilter::Beam;
+        if !beam_lockstep_active {
+            if let Some(rx) = &self.frame_receiver {
+                let mut incoming = Vec::new();
+                while let Ok(frame) = rx.try_recv() {
+                    incoming.push(frame);
                 }
-                self.latest_frame = Some(frame);
-                self.video_frames_since_last_check += 1;
-                repaint_requested = true;
+                for frame in incoming {
+                    self.apply_received_video_frame(frame);
+                    repaint_requested = true;
+                }
             }
         }
 
@@ -1453,6 +1856,13 @@ impl eframe::App for AppState {
         if self.steam_deck.is_none() {
             ui::debug::draw(self, ctx);
             self.toasts.show(ctx);
+            if self.ui.video_window_open
+                && CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed)) == CrtFilter::Beam
+                && self.beam_lockstep.sweep_start_time.is_some()
+            {
+                let just_after_sub0 = self.beam_lockstep.subframe_index == 0;
+                self.stage_source_frames_for_next_sweep(just_after_sub0);
+            }
         }
 
         self.ui.in_egui_frame = false;
@@ -1944,5 +2354,292 @@ mod tests {
         assert_eq!(state.ocr.boxes.len(), 1);
         assert_eq!(state.ocr.boxes[0].text, "新しいテキスト");
         assert!(!state.ocr.is_processing.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn test_beam_lockstep_59_94fps_and_29_97fps_synchronization() {
+        let mut state = AppState::default();
+        state.ui.video_window_open = true;
+        state
+            .crt_filter
+            .store(CrtFilter::Beam as u8, Ordering::Relaxed);
+        state.beam.frames_per_hz = 2.0;
+        state.beam.lcd_anti_retention = false;
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        state.frame_receiver = Some(rx);
+
+        let make_frame = |pts: i64| -> Arc<video::types::RawFrame> {
+            Arc::new(video::types::RawFrame {
+                captured_at: pts,
+                rate: crate::replay::config::Rate {
+                    num: 60000,
+                    den: 1001,
+                },
+                width: 64,
+                height: 64,
+                data: vec![0u8; 64 * 64 * 4],
+                format: ffmpeg_next::format::Pixel::RGBA,
+                color_range: crate::video::types::ColorRange::Full,
+            })
+        };
+
+        // Send Frame 1 before Sweep 0 starts
+        tx.send(make_frame(1)).unwrap();
+        state.pace_gui_frame();
+        assert_eq!(state.beam_lockstep.subframe_index, 0);
+        assert_eq!(state.beam_lockstep.current_i_frame, 0);
+        assert_eq!(state.latest_frame.as_ref().map(|f| f.captured_at), Some(1));
+
+        // Send Frame 2 while Sweep 0 is in progress: Sub-frame 1 MUST NOT pull Frame 2 mid-sweep!
+        tx.send(make_frame(2)).unwrap();
+        // Fast-forward sweep_start_time so pace_gui_frame doesn't sleep in unit test
+        state.beam_lockstep.sweep_start_time =
+            Some(Instant::now() - std::time::Duration::from_millis(9));
+        state.pace_gui_frame();
+        assert_eq!(state.beam_lockstep.subframe_index, 1);
+        assert_eq!(state.beam_lockstep.current_i_frame, 1);
+        assert_eq!(
+            state.latest_frame.as_ref().map(|f| f.captured_at),
+            Some(1),
+            "Sub-frame 1 must not switch source textures mid-sweep!"
+        );
+        assert_eq!(
+            state
+                .beam_lockstep
+                .staged_video_frame
+                .as_ref()
+                .map(|f| f.captured_at),
+            Some(2),
+            "Sub-frame 1 must drain bounded(1) channel into staged_video_frame to prevent queue drops!"
+        );
+
+        // Next call wraps to Sweep 1, Sub-frame 0 (`iFrame = 2`) and latches staged Frame 2!
+        state.beam_lockstep.sweep_start_time =
+            Some(Instant::now() - std::time::Duration::from_millis(17));
+        state.pace_gui_frame();
+        assert_eq!(state.beam_lockstep.subframe_index, 0);
+        assert_eq!(state.beam_lockstep.current_i_frame, 2);
+        assert_eq!(
+            state.latest_frame.as_ref().map(|f| f.captured_at),
+            Some(2),
+            "Sub-frame 0 of Sweep 1 must latch Frame 2!"
+        );
+
+        // Verify EMA convergence for 59.94 FPS (16,683,333 ns) and 29.97 FPS (33,366,667 ns across 2 sweeps)
+        let mut lockstep = crate::app::models::BeamLockstepState::default();
+        let t0 = Instant::now();
+        let ntsc_60 = std::time::Duration::from_nanos(16_683_333);
+        lockstep.record_source_frame(0, t0, false);
+        for i in 1..=10 {
+            lockstep.sweeps_since_live_arrival = 1;
+            lockstep.record_source_frame(0, t0 + ntsc_60 * i, false);
+        }
+        assert!(lockstep.has_measured_interval);
+        assert!(lockstep.phase_locked);
+        let diff_ns = (lockstep.smoothed_sweep_duration.as_nanos() as i128
+            - ntsc_60.as_nanos() as i128)
+            .abs();
+        assert!(
+            diff_ns < 5_000,
+            "Expected ~16.683ms, got {:?}",
+            lockstep.smoothed_sweep_duration
+        );
+
+        // 29.97 FPS (1 live frame every 2 sweeps)
+        lockstep.sweeps_since_live_arrival = 2;
+        lockstep.record_source_frame(0, t0 + ntsc_60 * 12, false);
+        let diff_30_ns = (lockstep.smoothed_sweep_duration.as_nanos() as i128
+            - ntsc_60.as_nanos() as i128)
+            .abs();
+        assert!(diff_30_ns < 5_000);
+    }
+
+    #[test]
+    fn test_beam_lockstep_framerate_drops_and_vrr_lfc_multiples() {
+        let mut lockstep = crate::app::models::BeamLockstepState::default();
+        lockstep.last_effective_fph = 2.0;
+        lockstep.last_target_hz = 144;
+
+        let t0 = Instant::now();
+        let mut ts_us = 1_000_000_i64;
+        let mut cur_inst = t0;
+
+        // 1. Start at 60 FPS (16,667 us) with variable CPU sws_scale arrival jitter (+1.5ms / -1.5ms)
+        lockstep.record_source_frame(ts_us, cur_inst, false);
+        for i in 0..4 {
+            ts_us += 16_667;
+            cur_inst += std::time::Duration::from_micros(16_667);
+            let jitter_us = if i % 2 == 0 { 1_500_i64 } else { -1_500_i64 };
+            let pop_inst = if jitter_us >= 0 {
+                cur_inst + std::time::Duration::from_micros(jitter_us as u64)
+            } else {
+                cur_inst - std::time::Duration::from_micros((-jitter_us) as u64)
+            };
+            lockstep.record_source_frame(ts_us, pop_inst, false);
+            let committed = lockstep.commit_next_sweep_duration(pop_inst, true, true);
+            lockstep.sweep_counter += 1;
+            assert!(
+                (committed.as_micros() as i64 - 16_667).abs() < 30,
+                "Expected exact 16.667ms (60.0 FPS / 120.0 FPS UI) despite sws_scale arrival jitter, got {:?}",
+                committed
+            );
+        }
+        assert_eq!(lockstep.sweeps_per_frame, 1);
+        assert!(
+            (lockstep.smoothed_sweep_duration.as_micros() as i64 - 16_667).abs() < 50,
+            "Expected ~16.67ms at 60 FPS, got {:?}",
+            lockstep.smoothed_sweep_duration
+        );
+
+        // 2. Drop framerate to 48 FPS (20,833 us)
+        for _ in 0..5 {
+            ts_us += 20_833;
+            cur_inst += std::time::Duration::from_micros(20_833);
+            lockstep.record_source_frame(ts_us, cur_inst, false);
+            let committed = lockstep.commit_next_sweep_duration(
+                cur_inst + std::time::Duration::from_micros(900),
+                true,
+                true,
+            );
+            lockstep.sweep_counter += 1;
+            // Every sub-frame at 2x must stay above the 144Hz ceiling (>= 6.944ms)
+            let subframe_dur = committed / 2;
+            assert!(
+                subframe_dur >= std::time::Duration::from_nanos(6_944_444),
+                "Sub-frame duration {:?} violated 144Hz VRR ceiling!",
+                subframe_dur
+            );
+        }
+        assert_eq!(lockstep.sweeps_per_frame, 1);
+        assert!(
+            (lockstep.smoothed_sweep_duration.as_micros() as i64 - 20_833).abs() < 200,
+            "Expected ~20.83ms at 48 FPS (96Hz VRR 2x lockstep), got {:?}",
+            lockstep.smoothed_sweep_duration
+        );
+
+        // 3. Drop framerate to 40 FPS (25,000 us) -> 80Hz VRR 2x lockstep (12.5ms per sub-frame)
+        for _ in 0..5 {
+            ts_us += 25_000;
+            cur_inst += std::time::Duration::from_micros(25_000);
+            lockstep.record_source_frame(ts_us, cur_inst, false);
+        }
+        assert_eq!(lockstep.sweeps_per_frame, 1);
+        assert!(
+            (lockstep.smoothed_sweep_duration.as_micros() as i64 - 25_000).abs() < 250,
+            "Expected ~25.0ms at 40 FPS (80Hz VRR 2x lockstep), got {:?}",
+            lockstep.smoothed_sweep_duration
+        );
+
+        // 4. Drop framerate to 30 FPS (33,333 us) -> LFC 2 sweeps per frame (60Hz CRT sweep, 120Hz VRR 4x lockstep)
+        for _ in 0..5 {
+            ts_us += 33_333;
+            cur_inst += std::time::Duration::from_micros(33_333);
+            lockstep.record_source_frame(ts_us, cur_inst, false);
+        }
+        assert_eq!(
+            lockstep.sweeps_per_frame, 2,
+            "30 FPS should engage 2x LFC sweeps per source frame (120Hz VRR)"
+        );
+        assert!(
+            (lockstep.smoothed_sweep_duration.as_micros() as i64 - 16_667).abs() < 250,
+            "Expected ~16.67ms per LFC sweep at 30 FPS, got {:?}",
+            lockstep.smoothed_sweep_duration
+        );
+
+        // 5. Simulate disabling Beam (e.g. pressing 'C') and re-enabling it later:
+        // `deactivate()` must advance `sweep_counter` so `BeamRenderer` never sees a duplicate
+        // `crt_hz_counter` on re-enable, and clear all stale timestamps.
+        let prev_sweep_counter = lockstep.sweep_counter;
+        lockstep.sweep_start_time = Some(cur_inst);
+        lockstep.last_present_time = Some(cur_inst);
+        lockstep.deactivate();
+        assert_eq!(lockstep.sweep_start_time, None);
+        assert_eq!(lockstep.last_present_time, None);
+        assert_eq!(
+            lockstep.sweep_counter,
+            (prev_sweep_counter + 1) % 4_000_000,
+            "deactivate() must advance sweep_counter so BeamRenderer never sees a duplicate crt_hz_counter"
+        );
+
+        // 6. Simulate unstable / jittery frame times (16.7ms, 22.0ms, 18.5ms, 24.0ms, 17.0ms)
+        // Verify sweep-to-sweep slew rate is bounded and jitter cushion expands smoothly.
+        let unstable_dts_us = [16_700_i64, 22_000, 18_500, 24_000, 17_000];
+        let mut prev_committed = lockstep.current_sweep_duration;
+        for dt_us in unstable_dts_us {
+            ts_us += dt_us;
+            cur_inst += std::time::Duration::from_micros(dt_us as u64);
+            lockstep.record_source_frame(ts_us, cur_inst, false);
+            let committed = lockstep.commit_next_sweep_duration(
+                cur_inst + std::time::Duration::from_micros(1200),
+                true,
+                true,
+            );
+            lockstep.sweep_counter += 1;
+            let step_diff_us =
+                (committed.as_micros() as i64 - prev_committed.as_micros() as i64).abs();
+            assert!(
+                step_diff_us <= 1_650,
+                "Sweep-to-sweep step {}us exceeded max slew limit!",
+                step_diff_us
+            );
+            assert!(
+                committed / 2 >= std::time::Duration::from_nanos(6_944_444),
+                "Sub-frame duration {:?} violated 144Hz VRR ceiling!",
+                committed / 2
+            );
+            prev_committed = committed;
+        }
+        assert!(
+            lockstep.frame_jitter_ema > std::time::Duration::from_micros(200),
+            "Jitter EMA should detect unstable frame intervals: {:?}",
+            lockstep.frame_jitter_ema
+        );
+    }
+
+    #[test]
+    fn test_beam_disable_and_reenable_never_locks_up() {
+        for fph in [2.0_f32, 2.4_f32] {
+            let mut state = AppState::default();
+            state.ui.video_window_open = true;
+            state.beam.frames_per_hz = fph;
+            state.beam.target_hz = 100;
+            state.beam.lcd_anti_retention = true;
+            state.beam.lcd_inversion_compensation_slew = 0.001;
+
+            // 1. Enable Beam
+            state
+                .crt_filter
+                .store(CrtFilter::Beam as u8, Ordering::Relaxed);
+            state.pace_gui_frame();
+            if (fph - 2.0).abs() < 1e-4 {
+                assert!(
+                    state.beam_lockstep.sweep_start_time.is_some(),
+                    "2.0 frames_per_hz with lcd_anti_retention=true must still engage integer lockstep"
+                );
+            }
+
+            // 2. Disable Beam (e.g. pressing 'C') and run 600 UI frames while CRT is Off
+            state
+                .crt_filter
+                .store(CrtFilter::Off as u8, Ordering::Relaxed);
+            for _ in 0..600 {
+                state.pace_gui_frame();
+            }
+
+            // 3. Re-enable Beam and verify pace_gui_frame completes instantaneously without sleeping on stale timestamps
+            state
+                .crt_filter
+                .store(CrtFilter::Beam as u8, Ordering::Relaxed);
+            let t0 = Instant::now();
+            state.pace_gui_frame();
+            let elapsed = t0.elapsed();
+            assert!(
+                elapsed < std::time::Duration::from_millis(5),
+                "Re-enabling Beam (fph={}) locked up pace_gui_frame for {:?}!",
+                fph,
+                elapsed
+            );
+        }
     }
 }

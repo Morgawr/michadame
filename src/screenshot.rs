@@ -430,7 +430,7 @@ impl PhotoCameraParams {
                 scene.halo.curvature && (scene.warp[0] > 0.001 || scene.warp[1] > 0.001)
             }
             CrtFilter::Lottes => scene.warp[0] > 0.001 || scene.warp[1] > 0.001,
-            CrtFilter::Off => false,
+            CrtFilter::Beam | CrtFilter::Off => false,
         };
         let barrel_k1 = if is_crt && has_warp {
             rng.gen_range(0.002f32..0.007f32)
@@ -1221,7 +1221,7 @@ fn eval_monitor_plane_point(
                 scene.halo.curvature && (scene.warp[0] > 0.001 || scene.warp[1] > 0.001)
             }
             CrtFilter::Lottes => scene.warp[0] > 0.001 || scene.warp[1] > 0.001,
-            CrtFilter::Off => false,
+            CrtFilter::Beam | CrtFilter::Off => false,
         };
         let (warp_x, warp_y) = if has_warp {
             (scene.warp[0].max(0.036), scene.warp[1].max(0.046))
