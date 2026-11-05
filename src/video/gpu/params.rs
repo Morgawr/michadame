@@ -180,6 +180,7 @@ pub struct BeamShaderParams {
 
 impl BeamShaderParams {
     pub fn from_state(state: &AppState) -> Self {
+        let focused = state.ui.is_window_focused;
         let base_fph = if state.beam.frames_per_hz.is_finite() {
             state.beam.frames_per_hz.max(1.0)
         } else {
@@ -189,16 +190,28 @@ impl BeamShaderParams {
         let is_integer_lockstep =
             (base_fph - base_fph.round()).abs() < 1e-4 && (fps_divisor - 1.0).abs() < 1e-4;
         Self {
-            frames_per_hz: state.beam.frames_per_hz,
+            // When the video window loses focus, drop out of sub-frame rolling-shutter scanout
+            // into steady-state 1x persistence (`frames_per_hz = 1.0, scan_direction = 0`) so
+            // background compositor throttling cannot cause rolling-shutter flicker while
+            // keeping Stage 2 CRT curvature, scanlines, phosphor mask, and halation active.
+            frames_per_hz: if focused {
+                state.beam.frames_per_hz
+            } else {
+                1.0
+            },
             gamma: state.beam.gamma,
             gain_vs_blur: state.beam.gain_vs_blur,
-            fps_divisor: state.beam.fps_divisor,
+            fps_divisor: if focused { state.beam.fps_divisor } else { 1.0 },
             // In integer VRR lockstep mode (`i_frame = sweep_counter * N + subframe_index`),
             // keep `effective_frames_per_hz` equal to the exact integer `N` so `crtHzCounter`
             // and `crtRasterPos` never drift out of phase with Sub-frame 0.
-            lcd_anti_retention: state.beam.lcd_anti_retention && !is_integer_lockstep,
+            lcd_anti_retention: focused && state.beam.lcd_anti_retention && !is_integer_lockstep,
             lcd_inversion_compensation_slew: state.beam.lcd_inversion_compensation_slew,
-            scan_direction: state.beam.scan_direction,
+            scan_direction: if focused {
+                state.beam.scan_direction
+            } else {
+                0
+            },
             splitscreen: state.beam.splitscreen,
             splitscreen_x: state.beam.splitscreen_x,
             splitscreen_y: state.beam.splitscreen_y,
@@ -236,7 +249,11 @@ impl BeamShaderParams {
                 state.video.border_crop_top,
                 state.video.border_crop_bottom,
             ],
-            i_frame_override: Some(state.beam_lockstep.current_i_frame),
+            i_frame_override: if focused {
+                Some(state.beam_lockstep.current_i_frame)
+            } else {
+                None
+            },
         }
     }
 
@@ -971,5 +988,52 @@ mod tests {
         let params = ShaderParams::from_state(&state);
         assert_eq!(params.brightness, 1.35);
         assert_eq!(params.gamma, 1.45);
+    }
+
+    #[test]
+    fn test_beam_shader_params_unfocused_steady_state_fallback() {
+        let mut state = AppState::default();
+        state.beam.frames_per_hz = 2.0;
+        state.beam.fps_divisor = 0.5;
+        state.beam.scan_direction = 1;
+        state.beam.lcd_anti_retention = true;
+        state.beam.curvature = true;
+        state.beam.warp_x = 0.031;
+        state.beam.warp_y = 0.041;
+        state.beam.scanline_strength = 0.85;
+        state.beam.mask_strength = 0.45;
+        state.beam.halation = 0.25;
+        state.beam_lockstep.current_i_frame = 42;
+
+        // Focused: full sub-frame rolling-shutter scanout parameters
+        state.ui.is_window_focused = true;
+        let focused = BeamShaderParams::from_state(&state);
+        assert_eq!(focused.frames_per_hz, 2.0);
+        assert_eq!(focused.fps_divisor, 0.5);
+        assert_eq!(focused.scan_direction, 1);
+        assert!(focused.lcd_anti_retention);
+        assert_eq!(focused.i_frame_override, Some(42));
+        assert!(focused.curvature);
+        assert_eq!(focused.scanline_strength, 0.85);
+        assert_eq!(focused.mask_strength, 0.45);
+        assert_eq!(focused.halation, 0.25);
+
+        // Unfocused: Stage 1 drops to 1x global persistence (`frames_per_hz = 1.0`,
+        // `scan_direction = 0`, `i_frame_override = None`), while Stage 2 CRT geometry,
+        // scanlines, mask, and halation remain 100% preserved.
+        state.ui.is_window_focused = false;
+        let unfocused = BeamShaderParams::from_state(&state);
+        assert_eq!(unfocused.frames_per_hz, 1.0);
+        assert_eq!(unfocused.effective_frames_per_hz(), 1.0);
+        assert_eq!(unfocused.fps_divisor, 1.0);
+        assert_eq!(unfocused.scan_direction, 0);
+        assert!(!unfocused.lcd_anti_retention);
+        assert_eq!(unfocused.i_frame_override, None);
+        assert!(unfocused.curvature);
+        assert_eq!(unfocused.warp_x, 0.031);
+        assert_eq!(unfocused.warp_y, 0.041);
+        assert_eq!(unfocused.scanline_strength, 0.85);
+        assert_eq!(unfocused.mask_strength, 0.45);
+        assert_eq!(unfocused.halation, 0.25);
     }
 }

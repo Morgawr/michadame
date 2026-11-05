@@ -33,6 +33,52 @@ fn capture_frame_pixels(
     Some((raw_pixels, w, h))
 }
 
+/// Resolves the effective CRT filter to render for the current frame.
+///
+/// When capturing a screenshot (such as mining a vocabulary word with a screenshot or copying
+/// a screenshot to the clipboard) while [`CrtFilter::Beam`] is active, temporarily substitutes
+/// [`CrtFilter::Halo`] so the captured still image has full-frame CRT scanlines, phosphor mask,
+/// and halation instead of a rolling-shutter sub-frame slice.
+#[inline]
+pub fn resolve_paint_crt_filter(filter: CrtFilter, is_screenshot_capture: bool) -> CrtFilter {
+    if is_screenshot_capture && filter == CrtFilter::Beam {
+        CrtFilter::Halo
+    } else {
+        filter
+    }
+}
+
+#[inline]
+pub fn crt_geometry_for_filter(
+    filter: CrtFilter,
+    params: &video::gpu::ShaderParams,
+    halo_params: &video::gpu::HaloShaderParams,
+    beam_params: &video::gpu::BeamShaderParams,
+) -> ([f32; 2], f32, i32) {
+    match filter {
+        CrtFilter::Lottes => ([params.warp_x, params.warp_y], 0.0, 1),
+        CrtFilter::Halo => (
+            if halo_params.curvature {
+                [0.031, 0.041]
+            } else {
+                [0.0, 0.0]
+            },
+            halo_params.corner_size,
+            2,
+        ),
+        CrtFilter::Beam => (
+            if beam_params.curvature {
+                [beam_params.warp_x, beam_params.warp_y]
+            } else {
+                [0.0, 0.0]
+            },
+            beam_params.corner_size,
+            3,
+        ),
+        CrtFilter::Off => ([0.0, 0.0], 0.0, 0),
+    }
+}
+
 pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Context) {
     state.ocr.start_worker(Some(ctx.clone()));
 
@@ -148,9 +194,13 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
     let mut new_dma_frame_received = false;
     state.poll_gamescope_dma_retry(ctx);
+    let is_window_focused = crate::app::is_root_viewport_focused(ctx);
+    state.ui.is_window_focused = is_window_focused;
     let active_filter_top = CrtFilter::from_u8(state.crt_filter.load(Ordering::Relaxed));
-    let beam_lockstep_active =
-        state.ui.video_window_open && !deck_mode && active_filter_top == CrtFilter::Beam;
+    let beam_lockstep_active = state.ui.video_window_open
+        && !deck_mode
+        && is_window_focused
+        && active_filter_top == CrtFilter::Beam;
     if let Some(hook) = &mut state.gamescope_hook {
         if hook.is_active {
             if !deck_mode {
@@ -346,7 +396,6 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         );
         let video_rect = egui::Rect::from_min_size(video_rect_min, video_rect_size);
 
-        let is_window_focused = ctx.input(|i| i.focused);
         if deck_mode {
             crate::steam_deck::forward_inputs(state, ctx, video_rect);
         } else if is_gamescope && passthrough_active {
@@ -444,7 +493,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         // Keep UI surface rendering strictly tied to Gamescope's frame delivery in both active
         // and input-paused modes. This prevents 144Hz presentation spikes when hovering/interacting
         // with UI controls or moving the mouse while input is paused.
-        if is_gamescope && !new_dma_frame_received && filter != CrtFilter::Beam {
+        if is_gamescope && !new_dma_frame_received && !beam_lockstep_active {
             if let Some(ref mut hook) = state.gamescope_hook {
                 if hook.is_active {
                     if let Some(dma) = &hook.dma_handle {
@@ -559,9 +608,10 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
         }
 
-        if !is_showing_roll && filter == CrtFilter::Beam {
+        if !is_showing_roll && filter == CrtFilter::Beam && is_window_focused {
             ui.ctx().request_repaint();
-        } else if state.cathode_interference.enabled
+        } else if (!is_showing_roll && filter == CrtFilter::Beam)
+            || state.cathode_interference.enabled
             || state.audio_reactive.enabled
             || retro_pc_frame
             || (night_mode_glow_intensity > 0.001)
@@ -585,34 +635,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 let beam_params = video::gpu::BeamShaderParams::from_state(state);
                 let cathode_params_cb = cathode_params.clone();
                 let pixelate = state.video.pixelate_filter_enabled;
-                let run_lottes = filter == CrtFilter::Lottes;
-                let run_halo = filter == CrtFilter::Halo;
-                let run_beam = filter == CrtFilter::Beam;
-                let (warp, corner_size, filter_type) = if run_lottes {
-                    ([params.warp_x, params.warp_y], 0.0, 1)
-                } else if run_halo {
-                    (
-                        if halo_params.curvature {
-                            [0.031, 0.041]
-                        } else {
-                            [0.0, 0.0]
-                        },
-                        halo_params.corner_size,
-                        2,
-                    )
-                } else if run_beam {
-                    (
-                        if beam_params.curvature {
-                            [beam_params.warp_x, beam_params.warp_y]
-                        } else {
-                            [0.0, 0.0]
-                        },
-                        beam_params.corner_size,
-                        3,
-                    )
-                } else {
-                    ([0.0, 0.0], 0.0, 0)
-                };
+                let (warp, corner_size, filter_type) =
+                    crt_geometry_for_filter(filter, &params, &halo_params, &beam_params);
                 let audio_reactive_params = video::gpu::AudioReactiveShaderParams::from_state(
                     state,
                     warp,
@@ -713,6 +737,33 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 == Some(crate::screenshot::ScreenshotMode::PhonePhoto);
                             let hide_mouse_capture =
                                 is_mining_capture || screenshot_capture_cb.has_pending();
+                            let is_screenshot_capture = (if whiteboard_visible {
+                                mining_capture_this_frame && is_mining_capture
+                            } else {
+                                is_mining_capture
+                            }) || screenshot_capture_cb.has_pending();
+                            let paint_filter =
+                                resolve_paint_crt_filter(filter, is_screenshot_capture);
+                            let run_lottes = paint_filter == CrtFilter::Lottes;
+                            let run_halo = paint_filter == CrtFilter::Halo;
+                            let run_beam = paint_filter == CrtFilter::Beam;
+                            let (warp, corner_size, filter_type) = crt_geometry_for_filter(
+                                paint_filter,
+                                &params,
+                                &halo_params,
+                                &beam_params,
+                            );
+                            let mut audio_reactive_params = audio_reactive_params.clone();
+                            let mut glass_params = glass_params.clone();
+                            if paint_filter != filter {
+                                audio_reactive_params.warp = warp;
+                                audio_reactive_params.corner_size = corner_size;
+                                audio_reactive_params.filter_type = filter_type;
+                                glass_params.warp = warp;
+                                glass_params.corner_size = corner_size;
+                                glass_params.filter_type = filter_type;
+                            }
+
                             let current_software_mouse_pos = if hide_mouse_capture {
                                 None
                             } else {
@@ -724,8 +775,11 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 software_mouse_clip
                             };
 
-                            renderer.capture_ocr_async_next_paint =
-                                ocr_dispatch_cb.take_capture_requested();
+                            renderer.capture_ocr_async_next_paint = if paint_filter != filter {
+                                false
+                            } else {
+                                ocr_dispatch_cb.take_capture_requested()
+                            };
                             if renderer.ocr_recycled_buffer.is_none()
                                 && (renderer.capture_ocr_async_next_paint
                                     || renderer.has_pending_ocr_readback())
@@ -769,31 +823,6 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                             }
 
                             if retro_pc_frame && !is_phone_photo_capture {
-                                let (warp, corner_size, filter_type) = if run_lottes {
-                                    ([params.warp_x, params.warp_y], 0.0, 1)
-                                } else if run_halo {
-                                    (
-                                        if halo_params.curvature {
-                                            [0.031, 0.041]
-                                        } else {
-                                            [0.0, 0.0]
-                                        },
-                                        halo_params.corner_size,
-                                        2,
-                                    )
-                                } else if run_beam {
-                                    (
-                                        if beam_params.curvature {
-                                            [beam_params.warp_x, beam_params.warp_y]
-                                        } else {
-                                            [0.0, 0.0]
-                                        },
-                                        beam_params.corner_size,
-                                        3,
-                                    )
-                                } else {
-                                    ([0.0, 0.0], 0.0, 0)
-                                };
                                 renderer.draw_retro_frame(
                                     painter.gl(),
                                     res,
@@ -810,31 +839,6 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                             }
 
                             if night_mode_glow_intensity > 0.001 && !is_phone_photo_capture {
-                                let (warp, corner_size, filter_type) = if run_lottes {
-                                    ([params.warp_x, params.warp_y], 0.0, 1)
-                                } else if run_halo {
-                                    (
-                                        if halo_params.curvature {
-                                            [0.031, 0.041]
-                                        } else {
-                                            [0.0, 0.0]
-                                        },
-                                        halo_params.corner_size,
-                                        2,
-                                    )
-                                } else if run_beam {
-                                    (
-                                        if beam_params.curvature {
-                                            [beam_params.warp_x, beam_params.warp_y]
-                                        } else {
-                                            [0.0, 0.0]
-                                        },
-                                        beam_params.corner_size,
-                                        3,
-                                    )
-                                } else {
-                                    ([0.0, 0.0], 0.0, 0)
-                                };
                                 renderer.draw_night_mode_glow(
                                     painter.gl(),
                                     res,
@@ -2442,5 +2446,40 @@ mod tests {
             !is_passthrough_host_cursor_hidden(&state, cursor_pos, video_rect, false),
             "Host hardware cursor must be restored when passthrough is paused"
         );
+    }
+
+    #[test]
+    fn test_resolve_paint_crt_filter_uses_halo_for_screenshots_when_beam_enabled() {
+        // When capturing a screenshot (mining a word with screenshot or clipboard screenshot),
+        // Beam is substituted with Halo so the captured image is clean and readable.
+        assert_eq!(
+            resolve_paint_crt_filter(CrtFilter::Beam, true),
+            CrtFilter::Halo
+        );
+        // Normal live rendering with Beam keeps Beam.
+        assert_eq!(
+            resolve_paint_crt_filter(CrtFilter::Beam, false),
+            CrtFilter::Beam
+        );
+        // Other CRT filters (Off, Lottes, Halo) are unchanged during screenshot capture.
+        for filter in [CrtFilter::Off, CrtFilter::Lottes, CrtFilter::Halo] {
+            assert_eq!(resolve_paint_crt_filter(filter, true), filter);
+            assert_eq!(resolve_paint_crt_filter(filter, false), filter);
+        }
+
+        let state = AppState::default();
+        let params = video::gpu::ShaderParams::from_state(&state);
+        let halo_params = video::gpu::HaloShaderParams::from_state(&state);
+        let beam_params = video::gpu::BeamShaderParams::from_state(&state);
+        let (_, _, beam_type) =
+            crt_geometry_for_filter(CrtFilter::Beam, &params, &halo_params, &beam_params);
+        let (_, _, halo_type) = crt_geometry_for_filter(
+            resolve_paint_crt_filter(CrtFilter::Beam, true),
+            &params,
+            &halo_params,
+            &beam_params,
+        );
+        assert_eq!(beam_type, 3);
+        assert_eq!(halo_type, 2);
     }
 }

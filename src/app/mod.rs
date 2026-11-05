@@ -59,6 +59,7 @@ impl Default for AppState {
                 config_save_pending: false,
                 in_egui_frame: false,
                 any_pointer_down: false,
+                is_window_focused: true,
                 scale: Default::default(),
             },
             crt: CrtSettings {
@@ -310,6 +311,13 @@ impl AppState {
         }
     }
 
+    pub fn is_beam_lockstep_active(&self) -> bool {
+        self.ui.video_window_open
+            && self.steam_deck.is_none()
+            && self.ui.is_window_focused
+            && CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed)) == CrtFilter::Beam
+    }
+
     pub fn request_screenshot(
         &mut self,
         mode: crate::screenshot::ScreenshotMode,
@@ -318,7 +326,10 @@ impl AppState {
         if !self.ui.video_window_open {
             return;
         }
-        let filter = CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed));
+        let filter = crate::ui::video_player::resolve_paint_crt_filter(
+            CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed)),
+            true,
+        );
         let is_crt_on = filter != CrtFilter::Off;
         let night_mode_active = is_crt_on && self.video.effective_lights_off_night_mode();
         let dark_room = night_mode_active
@@ -552,7 +563,7 @@ impl AppState {
         let now = Instant::now();
         match self.ocr.next_constant_scan_time {
             Some(target) if now < target => {
-                if CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed)) != CrtFilter::Beam {
+                if !self.is_beam_lockstep_active() {
                     ctx.request_repaint_after(target.saturating_duration_since(now));
                 }
                 false
@@ -738,9 +749,7 @@ impl AppState {
                         let updated = self.ocr.apply_constant_scan_lines(lines);
                         let delay = self.ocr.current_constant_scan_delay();
                         self.ocr.next_constant_scan_time = Some(Instant::now() + delay);
-                        if CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed))
-                            != CrtFilter::Beam
-                        {
+                        if !self.is_beam_lockstep_active() {
                             ctx.request_repaint_after(delay);
                         }
                         if updated {
@@ -862,8 +871,7 @@ impl AppState {
     /// or `self.frame_receiver`. Returns `(got_frame, is_live_edge)` where `is_live_edge` is true
     /// if the queue was initially empty and the frame arrived during `recv_timeout`.
     pub fn poll_or_wait_source_frame(&mut self, timeout: std::time::Duration) -> (bool, bool) {
-        let record_beam_arrival =
-            CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed)) == CrtFilter::Beam;
+        let record_beam_arrival = self.is_beam_lockstep_active();
 
         if let Some(ref mut hook) = self.gamescope_hook {
             if hook.is_active {
@@ -974,7 +982,7 @@ impl AppState {
         }
         if self.ui.video_window_open {
             let active_filter = CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed));
-            if active_filter == CrtFilter::Beam {
+            if active_filter == CrtFilter::Beam && self.ui.is_window_focused {
                 let beam_params = crate::video::gpu::BeamShaderParams::from_state(self);
                 let effective_fph = beam_params.effective_frames_per_hz();
                 let fps_divisor = self.beam.fps_divisor.clamp(0.05, 1.0);
@@ -1218,6 +1226,20 @@ fn sleep_until_precise(target: Instant) {
     }
 }
 
+/// Returns true when the root (video) viewport currently holds OS focus and no secondary
+/// viewport (`control_window`, `bank_window`, `studio_window`, etc.) has taken focus.
+pub fn is_root_viewport_focused(ctx: &egui::Context) -> bool {
+    ctx.input(|i| {
+        let root_focused = i.focused && i.viewport().focused.unwrap_or(true);
+        let child_focused = i
+            .raw
+            .viewports
+            .iter()
+            .any(|(id, info)| *id != egui::ViewportId::ROOT && info.focused == Some(true));
+        root_focused && !child_focused
+    })
+}
+
 impl eframe::App for AppState {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0, 0.0, 0.0, 1.0]
@@ -1245,6 +1267,7 @@ impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ui.in_egui_frame = true;
         self.ui.any_pointer_down = ctx.input(|i| i.pointer.any_down());
+        self.ui.is_window_focused = is_root_viewport_focused(ctx);
         if self.steam_deck.is_none() {
             ui::scaling::apply_ui_scale(ctx, &mut self.ui.scale);
         }
@@ -1576,9 +1599,7 @@ impl eframe::App for AppState {
             p.is_eof = p.is_eof_shared.load(Ordering::Relaxed);
         }
 
-        let beam_lockstep_active = self.ui.video_window_open
-            && self.steam_deck.is_none()
-            && CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed)) == CrtFilter::Beam;
+        let beam_lockstep_active = self.is_beam_lockstep_active();
         if !beam_lockstep_active {
             if let Some(rx) = &self.frame_receiver {
                 let mut incoming = Vec::new();
@@ -1887,10 +1908,7 @@ impl eframe::App for AppState {
         if self.steam_deck.is_none() {
             ui::debug::draw(self, ctx);
             self.toasts.show(ctx);
-            if self.ui.video_window_open
-                && CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed)) == CrtFilter::Beam
-                && self.beam_lockstep.sweep_start_time.is_some()
-            {
+            if self.is_beam_lockstep_active() && self.beam_lockstep.sweep_start_time.is_some() {
                 let just_after_sub0 = self.beam_lockstep.subframe_index == 0;
                 self.stage_source_frames_for_next_sweep(just_after_sub0);
             }
@@ -2672,5 +2690,69 @@ mod tests {
                 elapsed
             );
         }
+    }
+
+    #[test]
+    fn test_beam_unfocused_deactivates_lockstep_and_refocus_resumes_cleanly() {
+        let mut state = AppState::default();
+        state.ui.video_window_open = true;
+        state.ui.is_window_focused = true;
+        state.beam.frames_per_hz = 2.0;
+        state.beam.target_hz = 120;
+        state
+            .crt_filter
+            .store(CrtFilter::Beam as u8, Ordering::Relaxed);
+
+        // Focused: integer VRR lockstep is active
+        assert!(state.is_beam_lockstep_active());
+        state.pace_gui_frame();
+        assert!(state.beam_lockstep.sweep_start_time.is_some());
+
+        // Lose focus: lockstep deactivates and paces at 60Hz steady state without sleeping in pace_gui_frame
+        state.ui.is_window_focused = false;
+        assert!(!state.is_beam_lockstep_active());
+        let prev_sweep_counter = state.beam_lockstep.sweep_counter;
+        let t0 = Instant::now();
+        state.pace_gui_frame();
+        assert!(t0.elapsed() < std::time::Duration::from_millis(5));
+        assert!(state.beam_lockstep.sweep_start_time.is_none());
+        assert_eq!(
+            state.beam_lockstep.sweep_counter,
+            (prev_sweep_counter + 1) % 4_000_000
+        );
+        assert!(state.next_gui_frame_time.is_some());
+
+        // Regain focus: immediately re-engages VRR lockstep on Sub-frame 0 without stalling
+        state.ui.is_window_focused = true;
+        assert!(state.is_beam_lockstep_active());
+        let t1 = Instant::now();
+        state.pace_gui_frame();
+        assert!(t1.elapsed() < std::time::Duration::from_millis(5));
+        assert!(state.beam_lockstep.sweep_start_time.is_some());
+        assert_eq!(state.beam_lockstep.subframe_index, 0);
+    }
+
+    #[test]
+    fn test_request_screenshot_substitutes_halo_when_beam_enabled() {
+        let mut state = AppState::default();
+        let ctx = egui::Context::default();
+        state.ui.video_window_open = true;
+        state.halo.curvature = true;
+        state.halo.corner_size = 0.025;
+        state.beam.curvature = false;
+        state.beam.corner_size = 0.0;
+        state
+            .crt_filter
+            .store(CrtFilter::Beam as u8, Ordering::Relaxed);
+
+        state.request_screenshot(crate::screenshot::ScreenshotMode::PhonePhoto, &ctx);
+        let req = state
+            .screenshot
+            .capture_handle()
+            .take_pending()
+            .expect("screenshot request should be queued");
+        assert_eq!(req.scene.crt_filter, CrtFilter::Halo);
+        assert_eq!(req.scene.warp, [0.031, 0.041]);
+        assert_eq!(req.scene.corner_size, 0.025);
     }
 }

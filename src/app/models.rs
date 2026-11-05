@@ -63,6 +63,7 @@ pub struct UiState {
     pub config_save_pending: bool,
     pub in_egui_frame: bool,
     pub any_pointer_down: bool,
+    pub is_window_focused: bool,
     /// Resolution-aware UI scale (desktop only).
     pub scale: crate::ui::scaling::UiScaleState,
 }

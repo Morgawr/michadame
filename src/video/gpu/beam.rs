@@ -73,6 +73,7 @@ pub struct BeamRenderer {
     last_scaler_filter: Option<u8>,
     last_effective_fph: f32,
     last_fps_divisor: f32,
+    last_override_active: bool,
 }
 
 impl BeamRenderer {
@@ -276,6 +277,7 @@ impl BeamRenderer {
                 last_scaler_filter: None,
                 last_effective_fph: 0.0,
                 last_fps_divisor: 0.0,
+                last_override_active: false,
             }
         }
     }
@@ -446,14 +448,17 @@ impl BeamRenderer {
 
         let effective_fph = params.effective_frames_per_hz();
         let fps_divisor = params.fps_divisor.clamp(0.05, 1.0);
+        let override_active = params.i_frame_override.is_some();
         if (effective_fph - self.last_effective_fph).abs() > 1e-6
             || (fps_divisor - self.last_fps_divisor).abs() > 1e-6
+            || override_active != self.last_override_active
         {
             self.frame_counter = 0;
             self.curr_cycle_started = false;
             self.last_crt_hz_counter = None;
             self.last_effective_fph = effective_fph;
             self.last_fps_divisor = fps_divisor;
+            self.last_override_active = override_active;
         }
 
         // Keep iFrame well within 24-bit float mantissa integer precision (16,777,216)
