@@ -203,6 +203,7 @@ impl Default for AppState {
             webcam: crate::app::models::WebcamState::default(),
             whiteboard: crate::ui::whiteboard::WhiteboardState::default(),
             screenshot: crate::screenshot::ScreenshotState::default(),
+            replay_scrub: crate::ui::replay_scrub::ReplayScrubState::default(),
             config_load_error: None,
             config_quarantine_path: None,
         }
@@ -1885,6 +1886,7 @@ impl eframe::App for AppState {
         if self.steam_deck.is_none() {
             ui::bank::draw_bank_window(self, ctx);
             repaint_requested |= ui::studio::draw_studio_window(self, ctx);
+            repaint_requested |= ui::replay_scrub::draw_replay_scrub_window(self, ctx);
 
             self.twitch.studio_active = self.ui.studio_window_open;
             repaint_requested |= self.twitch.poll(ctx);

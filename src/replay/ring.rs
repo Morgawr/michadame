@@ -165,6 +165,31 @@ impl History {
         }
         Some(packets)
     }
+    /// Returns a snapshot copy of the entire decodable replay buffer up to `requested_end`
+    /// without mutating or stopping the ongoing background `History`.
+    pub fn snapshot(&self, requested_end: i64) -> Option<Vec<Arc<Encoded>>> {
+        let end = self.end()?.min(requested_end);
+        let start = self.packets.iter().find(|p| p.key && p.start < end)?.start;
+        let packets: Vec<_> = self
+            .packets
+            .iter()
+            .filter(|p| p.start >= start && p.start < end && (p.video || p.end <= end))
+            .map(|p| {
+                if p.video && p.end > end {
+                    let mut clipped = p.as_ref().clone();
+                    clipped.end = end;
+                    clipped.packet.set_duration(end - clipped.start);
+                    Arc::new(clipped)
+                } else {
+                    p.clone()
+                }
+            })
+            .collect();
+        if !packets.iter().any(|p| !p.video) || !packets.iter().any(|p| p.key) {
+            return None;
+        }
+        Some(packets)
+    }
     /// Audio packets covering `[end - seconds, end]`, plus `preroll_us` of earlier
     /// packets so a decoder can settle before the requested start. Returns the
     /// packets and the requested (clamped) `(start, end)` interval.
@@ -190,6 +215,59 @@ impl History {
         }
         Some((packets, target, end))
     }
+}
+
+/// Trims a snapshot of encoded packets to `[rel_start_secs, rel_end_secs]` relative to the
+/// snapshot's initial keyframe timestamp. Starts at the latest keyframe at or before
+/// `rel_start_secs` so the trimmed clip is immediately decodable without re-encoding.
+pub fn trim_packets(
+    packets: &[Arc<Encoded>],
+    rel_start_secs: f64,
+    rel_end_secs: f64,
+) -> Option<Vec<Arc<Encoded>>> {
+    let base_start = packets.iter().filter(|p| p.key).map(|p| p.start).min()?;
+    let snapshot_end = packets.iter().map(|p| p.end).max()?;
+    if snapshot_end <= base_start {
+        return None;
+    }
+    let lo_secs = rel_start_secs.min(rel_end_secs).max(0.0);
+    let hi_secs = rel_end_secs.max(rel_start_secs).max(0.0);
+    let target_start = base_start + (lo_secs * 1_000_000.0).round() as i64;
+    let raw_end =
+        (base_start + (hi_secs * 1_000_000.0).round() as i64).clamp(base_start + 1, snapshot_end);
+    let start = packets
+        .iter()
+        .rev()
+        .find(|p| p.key && p.start <= target_start && p.start < raw_end)
+        .or_else(|| packets.iter().find(|p| p.key && p.start < raw_end))?
+        .start;
+    let end = raw_end.max(start + 50_000).min(snapshot_end);
+    let mut trimmed: Vec<_> = packets
+        .iter()
+        .filter(|p| p.start >= start && p.start < end && (p.video || p.end <= end))
+        .map(|p| {
+            if p.video && p.end > end {
+                let mut clipped = p.as_ref().clone();
+                clipped.end = end;
+                clipped.packet.set_duration(end - clipped.start);
+                Arc::new(clipped)
+            } else {
+                p.clone()
+            }
+        })
+        .collect();
+    if !trimmed.iter().any(|p| !p.video) {
+        if let Some(audio_pkt) = packets
+            .iter()
+            .find(|p| !p.video && p.end > start && p.start < end)
+        {
+            trimmed.push(audio_pkt.clone());
+        }
+    }
+    if !trimmed.iter().any(|p| !p.video) || !trimmed.iter().any(|p| p.key) {
+        return None;
+    }
+    Some(trimmed)
 }
 
 #[cfg(test)]
@@ -295,5 +373,36 @@ mod tests {
         assert_eq!(during_gap[0].packet.duration(), 2_500_000);
         assert!(during_gap.iter().all(|p| p.end <= 2_500_000));
         assert_eq!(history.duration(), 5.);
+    }
+    #[test]
+    fn snapshot_and_trim_packets_preserve_background_history() {
+        let mut h = History::new(600);
+        for t in 0..10 {
+            h.push(packet(t, t % 2 == 0, true, 10), 100000);
+            h.push(packet(t, false, false, 10), 100000);
+        }
+        let snap = h.snapshot(10_000_000).unwrap();
+        assert!(snap[0].key);
+        assert_eq!(snap[0].start, 0);
+        assert_eq!(snap.iter().map(|p| p.end).max().unwrap(), 10_000_000);
+
+        // Background history keeps working after snapshot
+        for t in 10..14 {
+            h.push(packet(t, t % 2 == 0, true, 10), 100000);
+            h.push(packet(t, false, false, 10), 100000);
+        }
+        assert_eq!(h.duration(), 14.0);
+        assert_eq!(snap.iter().map(|p| p.end).max().unwrap(), 10_000_000);
+
+        // Default full duration trim [0..10]
+        let full = trim_packets(&snap, 0.0, 10.0).unwrap();
+        assert_eq!(full[0].start, 0);
+        assert_eq!(full.iter().map(|p| p.end).max().unwrap(), 10_000_000);
+
+        // Custom markers [4.5..8.0] snaps start back to keyframe at 4s and ends at 8s
+        let cut = trim_packets(&snap, 4.5, 8.0).unwrap();
+        assert!(cut[0].key);
+        assert_eq!(cut[0].start, 4_000_000);
+        assert_eq!(cut.iter().map(|p| p.end).max().unwrap(), 8_000_000);
     }
 }

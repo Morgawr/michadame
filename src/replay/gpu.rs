@@ -1532,6 +1532,7 @@ mod tests {
             status: Mutex::new(Status::default()),
             saving_bytes: AtomicUsize::new(0),
             game_volume: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            scrub_snapshot: Mutex::new(None),
         });
         let runtime = RuntimeView {
             queue: queue.clone(),

@@ -1068,8 +1068,6 @@ mod tests {
             history_seconds: 600,
             memory_mib: 2048,
             work_queue_mib: 768,
-            custom_seconds: 45,
-            keys: [1, 2, 3, 4, 5, 10],
             capture_overlays: true,
             directory: "/tmp/my replays".into(),
             render_device: "/dev/dri/renderD129".into(),

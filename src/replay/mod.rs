@@ -583,6 +583,17 @@ pub struct Status {
     pub saving: bool,
     pub clipboard_bytes: usize,
 }
+pub struct ScrubSnapshot {
+    pub packets: Vec<Arc<ring::Encoded>>,
+    pub video: ffmpeg_next::codec::Parameters,
+    pub audio: ffmpeg_next::codec::Parameters,
+    pub directory: String,
+    pub preview_file: Arc<tempfile::NamedTempFile>,
+    pub duration_secs: f64,
+    pub width: u32,
+    pub height: u32,
+}
+
 pub struct Shared {
     clipboard: Arc<clipboard::Clipboard>,
     pub generation: AtomicU64,
@@ -598,6 +609,7 @@ pub struct Shared {
     pub status: Mutex<Status>,
     pub saving_bytes: std::sync::atomic::AtomicUsize,
     pub game_volume: Arc<AtomicU32>,
+    pub scrub_snapshot: Mutex<Option<Result<ScrubSnapshot, String>>>,
 }
 impl Shared {
     /// Worker only: keep the reason visible after ordinary progress messages.
@@ -619,6 +631,8 @@ enum Destination {
     Clipboard,
     /// Audio only, transcoded to MP3.
     AudioClipboard,
+    /// Snapshot for the Replay Buffer Scrub Player window (F5).
+    ScrubPreview,
 }
 pub struct Save {
     destination: Destination,
@@ -658,6 +672,7 @@ pub struct Replay {
     memory_checked: Option<std::time::Instant>,
     pub available_now: Option<usize>,
     last_notice: String,
+    pub scrub_open_requested: bool,
 }
 impl Replay {
     pub fn clipboard(&self) -> Arc<clipboard::Clipboard> {
@@ -708,6 +723,7 @@ impl Replay {
             }),
             saving_bytes: Default::default(),
             game_volume: self.audio.game_volume.clone(),
+            scrub_snapshot: Mutex::new(None),
         });
         let queue = Arc::new(queue::WorkQueue::new());
         let worker_queue = queue.clone();
@@ -811,6 +827,62 @@ impl Replay {
     }
     pub fn save(&mut self, seconds: u32) -> anyhow::Result<()> {
         self.request_export(seconds, Destination::File)
+    }
+    pub fn request_scrub_preview(&mut self) -> anyhow::Result<()> {
+        if let Some(runtime) = &self.runtime {
+            *runtime.shared.scrub_snapshot.lock().unwrap() = None;
+        }
+        self.request_export(self.config.history_seconds, Destination::ScrubPreview)
+    }
+    pub fn take_scrub_snapshot(&mut self) -> Option<Result<ScrubSnapshot, String>> {
+        self.runtime
+            .as_ref()
+            .and_then(|r| r.shared.scrub_snapshot.lock().unwrap().take())
+    }
+    pub fn save_trimmed(
+        &mut self,
+        snapshot: ScrubSnapshot,
+        start_secs: f64,
+        end_secs: f64,
+    ) -> anyhow::Result<()> {
+        let trimmed =
+            ring::trim_packets(&snapshot.packets, start_secs, end_secs).ok_or_else(|| {
+                anyhow::anyhow!("Not enough decodable video and audio in selected range")
+            })?;
+        let duration =
+            (trimmed.iter().map(|p| p.end).max().unwrap() - trimmed[0].start) as f64 / 1e6;
+        let directory = if self.config.directory.trim().is_empty() {
+            snapshot.directory
+        } else {
+            self.config.directory.clone()
+        };
+        let video = snapshot.video;
+        let audio = snapshot.audio;
+        let export_shared = self.runtime.as_ref().map(|r| r.shared.clone());
+        if let Some(ref shared) = export_shared {
+            let mut status = shared.status.lock().unwrap();
+            status.saving = true;
+            status.message = "Saving trimmed replay clip…".into();
+            self.last_notice = status.message.clone();
+        }
+        std::thread::Builder::new()
+            .name("replay-trimmed-save".into())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    worker::save_file(&directory, video, audio, trimmed)
+                        .map(|path| format!("Saved {duration:.1}s: {}", path.display()))
+                }))
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("Replay writer panicked")));
+                if let Some(shared) = export_shared {
+                    let mut status = shared.status.lock().unwrap();
+                    status.saving = false;
+                    status.message = match result {
+                        Ok(message) => message,
+                        Err(e) => format!("Replay save failed: {e:#}"),
+                    };
+                }
+            })?;
+        Ok(())
     }
     fn request_export(&mut self, seconds: u32, destination: Destination) -> anyhow::Result<()> {
         let runtime = self
@@ -918,18 +990,8 @@ impl Replay {
                 }
             }
         }
-        for (key, seconds) in self.config.keys.into_iter().zip(self.config.durations()) {
-            if let Some(key) = ui::key(key) {
-                let pressed = ctx.input_mut(|i| i.consume_key(eframe::egui::Modifiers::NONE, key));
-                if pressed {
-                    if let Err(e) = self.save(seconds) {
-                        self.last_status.message = e.to_string();
-                        if let Some(r) = &self.runtime {
-                            r.shared.message(e.to_string());
-                        }
-                    }
-                }
-            }
+        if ctx.input_mut(|i| i.consume_key(eframe::egui::Modifiers::NONE, eframe::egui::Key::F5)) {
+            self.scrub_open_requested = true;
         }
     }
 }
@@ -1190,11 +1252,9 @@ mod tests {
         assert_eq!(legacy.history_seconds, 300);
         let mut updated = old;
         updated.replay.history_seconds = 600;
-        updated.replay.keys = [1, 2, 3, 4, 5, 6];
         let json = serde_json::to_string(&updated).unwrap();
         let loaded: crate::config::MichadameConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.replay.history_seconds, 600);
-        assert_eq!(loaded.replay.keys, [1, 2, 3, 4, 5, 6]);
         assert!(Replay::default().runtime.is_none());
     }
 

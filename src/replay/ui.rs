@@ -2,25 +2,8 @@ use super::{
     config::{DenoiseBackend, FilterPreset, HumFilterMode, SAFETY_RESERVE},
     Replay,
 };
-use eframe::egui::{self, Key};
-pub fn key(n: u8) -> Option<Key> {
-    [
-        Key::F1,
-        Key::F2,
-        Key::F3,
-        Key::F4,
-        Key::F5,
-        Key::F6,
-        Key::F7,
-        Key::F8,
-        Key::F9,
-        Key::F10,
-        Key::F11,
-        Key::F12,
-    ]
-    .get(n.wrapping_sub(1) as usize)
-    .copied()
-}
+use eframe::egui;
+
 fn gib(n: usize) -> String {
     format!("{:.2} GiB", n as f64 / (1024. * 1024. * 1024.))
 }
@@ -190,104 +173,21 @@ pub fn draw_replay_buffer_group(replay: &mut Replay, ui: &mut egui::Ui, streamin
         crate::ui::controls::technical_separator(ui);
         ui.horizontal(|ui| {
             ui.label(
-                egui::RichText::new("Save Shortcuts:")
-                    .monospace()
-                    .size(11.0)
-                    .strong()
-                    .color(egui::Color32::from_rgb(153, 153, 153)),
-            );
-            ui.add_space(16.0);
-            ui.label(
-                egui::RichText::new("Custom clip seconds:")
+                egui::RichText::new("Edit Clip")
                     .monospace()
                     .size(11.0)
                     .color(egui::Color32::from_rgb(170, 170, 170)),
             );
-            changed |= ui
-                .add(egui::DragValue::new(&mut replay.config.custom_seconds).clamp_range(1..=3600))
-                .changed();
-        });
-
-        ui.add_space(2.0);
-
-        let durations = replay.config.durations();
-        let items: Vec<(usize, u32)> = durations.into_iter().enumerate().collect();
-        if items.len() >= 6 {
-            let row1 = (items[0], items[1]);
-            let row2 = (items[2], items[3]);
-            let row3 = (items[4], items[5]);
-            for ((idx_a, sec_a), (idx_b, sec_b)) in [row1, row2, row3] {
-                crate::ui::controls::two_columns(ui, |c1, c2| {
-                    let mut draw_shortcut = |col: &mut egui::Ui, index: usize, seconds: u32| {
-                        col.horizontal(|ui| {
-                            let label_str = if index == 5 {
-                                format!("Save Custom ({}s):", seconds)
-                            } else {
-                                format!("Save {}s:", seconds)
-                            };
-                            ui.add_sized(
-                                [110.0, 18.0],
-                                egui::Label::new(
-                                    egui::RichText::new(label_str)
-                                        .monospace()
-                                        .size(11.0)
-                                        .color(egui::Color32::from_rgb(170, 170, 170)),
-                                ),
-                            );
-
-                            egui::ComboBox::from_id_source(("replay-key", index))
-                                .selected_text(if replay.config.keys[index] == 0 {
-                                    "Disabled".into()
-                                } else {
-                                    format!("F{}", replay.config.keys[index])
-                                })
-                                .show_ui(ui, |ui| {
-                                    for number in 0..=12 {
-                                        let assigned = number != 0
-                                            && replay
-                                                .config
-                                                .keys
-                                                .iter()
-                                                .enumerate()
-                                                .any(|(i, k)| i != index && *k == number);
-                                        ui.add_enabled_ui(!assigned, |ui| {
-                                            changed |= ui
-                                                .selectable_value(
-                                                    &mut replay.config.keys[index],
-                                                    number,
-                                                    if number == 0 {
-                                                        "Disabled".into()
-                                                    } else {
-                                                        format!("F{number}")
-                                                    },
-                                                )
-                                                .changed();
-                                        });
-                                    }
-                                });
-
-                            if ui
-                                .add_enabled(
-                                    replay.runtime.is_some() && !status.saving,
-                                    egui::Button::new("Save now"),
-                                )
-                                .clicked()
-                            {
-                                if let Err(e) = replay.save(seconds) {
-                                    replay.last_status.message = e.to_string();
-                                    if let Some(r) = &replay.runtime {
-                                        r.shared.message(e.to_string());
-                                    }
-                                }
-                            }
-                        });
-                    };
-
-                    draw_shortcut(c1, idx_a, sec_a);
-                    draw_shortcut(c2, idx_b, sec_b);
-                });
+            if ui
+                .add_enabled(
+                    replay.runtime.is_some() && !status.saving,
+                    egui::Button::new("Open Clip Trimmer (F5)"),
+                )
+                .clicked()
+            {
+                replay.scrub_open_requested = true;
             }
-        }
+        });
     });
 
     changed

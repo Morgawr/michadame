@@ -2241,6 +2241,7 @@ pub struct AppState {
     pub webcam: WebcamState,
     pub whiteboard: crate::ui::whiteboard::WhiteboardState,
     pub screenshot: crate::screenshot::ScreenshotState,
+    pub replay_scrub: crate::ui::replay_scrub::ReplayScrubState,
     pub config_load_error: Option<String>,
     pub config_quarantine_path: Option<std::path::PathBuf>,
 }

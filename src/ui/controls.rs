@@ -1361,7 +1361,7 @@ fn draw_hotkeys_tab(ui: &mut egui::Ui) {
             ("Ctrl + S", "Copy Smartphone Photo of Monitor"),
             ("Ctrl + C", "Export 15s Replay Clip to Clipboard"),
             ("Ctrl + Shift + C", "Export 7s Audio Clip to Clipboard"),
-            ("F1 – F12", "Save Replay Buffer (Capture & Replay tab)"),
+            ("F5", "Open Clip Trimmer"),
         ];
 
         let mid = (shortcuts.len() + 1) / 2;

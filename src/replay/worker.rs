@@ -580,6 +580,93 @@ pub(super) fn run(
                     pending_save = None;
                     continue;
                 }
+                if save.destination == Destination::ScrubPreview {
+                    let packets = history.snapshot(save.at);
+                    if let (Some(packets), Some(s)) = (packets, session.as_ref()) {
+                        let pinned: usize = packets.iter().map(|p| p.bytes).sum();
+                        let video_preview = s.video.parameters()?;
+                        let audio_preview = s.audio.parameters();
+                        let video_save = s.video.parameters()?;
+                        let audio_save = s.audio.parameters();
+                        let width = s.width;
+                        let height = s.height;
+                        shared.saving_bytes.store(pinned, Ordering::Release);
+                        history.trim(
+                            config
+                                .budget()
+                                .saturating_sub(surface_overhead)
+                                .saturating_sub(pinned)
+                                .saturating_sub(shared.clipboard.bytes()),
+                        );
+                        let duration = (packets.iter().map(|p| p.end).max().unwrap()
+                            - packets[0].start) as f64
+                            / 1e6;
+                        let directory = config.directory.clone();
+                        let export_shared = shared.clone();
+                        shared.status.lock().unwrap().saving = true;
+                        let spawned = std::thread::Builder::new()
+                            .name("replay-scrub-preview".into())
+                            .spawn(move || {
+                                let result =
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        let preview_file = tempfile::Builder::new()
+                                            .prefix("michadame-replay-scrub-")
+                                            .suffix(".mp4")
+                                            .tempfile()?;
+                                        encoder::export(
+                                            preview_file.path(),
+                                            video_preview,
+                                            audio_preview,
+                                            packets.clone(),
+                                        )?;
+                                        Ok::<_, anyhow::Error>(super::ScrubSnapshot {
+                                            packets,
+                                            video: video_save,
+                                            audio: audio_save,
+                                            directory,
+                                            preview_file: Arc::new(preview_file),
+                                            duration_secs: duration,
+                                            width,
+                                            height,
+                                        })
+                                    }))
+                                    .unwrap_or_else(|_| {
+                                        Err(anyhow::anyhow!("Replay preview writer panicked"))
+                                    });
+                                export_shared.saving_bytes.store(0, Ordering::Release);
+                                let mut status = export_shared.status.lock().unwrap();
+                                status.saving = false;
+                                match result {
+                                    Ok(snapshot) => {
+                                        status.message =
+                                            format!("Replay scrub preview ready ({duration:.1}s)");
+                                        *export_shared.scrub_snapshot.lock().unwrap() =
+                                            Some(Ok(snapshot));
+                                    }
+                                    Err(e) => {
+                                        let msg = format!("Replay preview failed: {e:#}");
+                                        status.message = msg.clone();
+                                        *export_shared.scrub_snapshot.lock().unwrap() =
+                                            Some(Err(msg));
+                                    }
+                                }
+                            });
+                        match spawned {
+                            Ok(thread) => export_thread = Some(thread),
+                            Err(e) => {
+                                shared.saving_bytes.store(0, Ordering::Release);
+                                shared.status.lock().unwrap().saving = false;
+                                return Err(e.into());
+                            }
+                        }
+                    } else {
+                        let msg = "Not enough decodable video and audio to save yet";
+                        shared.message(msg);
+                        *shared.scrub_snapshot.lock().unwrap() = Some(Err(msg.into()));
+                    }
+                    pending_save = None;
+                    continue;
+                }
                 let packets = history.clip(save.seconds, save.at);
                 if let (Some(packets), Some(s)) = (packets, session.as_ref()) {
                     let pinned: usize = packets.iter().map(|p| p.bytes).sum();
@@ -842,7 +929,7 @@ fn save_wait_expired(
         || (elapsed > Duration::from_secs(2)
             && (processed_at >= requested_at || (cpu_pending == 0 && gpu_pending == 0)))
 }
-fn save_file(
+pub(crate) fn save_file(
     directory: &str,
     video: ffmpeg_next::codec::Parameters,
     audio: ffmpeg_next::codec::Parameters,

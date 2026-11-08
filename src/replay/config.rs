@@ -220,9 +220,6 @@ pub struct ReplayConfig {
     pub work_queue_mib: u32,
     pub render_device: String,
     pub directory: String,
-    pub custom_seconds: u32,
-    /// Function key numbers; zero disables a binding.
-    pub keys: [u8; 6],
     pub capture_overlays: bool,
     pub audio_filter: AudioFilterConfig,
 }
@@ -240,8 +237,6 @@ impl Default for ReplayConfig {
                 .join("Videos/Michadame")
                 .to_string_lossy()
                 .into_owned(),
-            custom_seconds: 120,
-            keys: [5, 6, 7, 8, 9, 10],
             capture_overlays: false,
             audio_filter: AudioFilterConfig::default(),
         }
@@ -262,17 +257,7 @@ impl ReplayConfig {
             "Work queue budget must be 32–8192 MiB"
         );
         anyhow::ensure!(!self.directory.trim().is_empty(), "Choose a replay folder");
-        anyhow::ensure!(self.keys.iter().all(|k| *k <= 12), "Use F1–F12 or Disabled");
-        for (i, key) in self.keys.iter().enumerate() {
-            anyhow::ensure!(
-                *key == 0 || !self.keys[..i].contains(key),
-                "Replay shortcuts must be different"
-            );
-        }
         Ok(())
-    }
-    pub fn durations(&self) -> [u32; 6] {
-        [30, 60, 180, 300, 600, self.custom_seconds.clamp(1, 3600)]
     }
     pub fn budget(&self) -> usize {
         self.memory_mib as usize * 1024 * 1024
@@ -362,14 +347,12 @@ mod tests {
         assert_eq!(r.us(36001) - r.us(36000), 16_683);
     }
     #[test]
-    fn duplicate_keys_are_rejected_but_disabled_keys_are_allowed() {
-        let mut c = ReplayConfig {
-            keys: [5; 6],
+    fn empty_directory_is_rejected() {
+        let c = ReplayConfig {
+            directory: "   ".into(),
             ..Default::default()
         };
         assert!(c.validate().is_err());
-        c.keys = [0; 6];
-        assert!(c.validate().is_ok());
     }
     #[test]
     fn memory_uses_available_not_free_or_swap() {

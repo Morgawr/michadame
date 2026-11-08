@@ -171,7 +171,7 @@ impl AppState {
             self.replay.audio.clone(),
         ) {
             Ok(handle) => {
-                handle.set_volume(self.hardware.master_volume);
+                handle.set_volume(self.effective_local_volume());
                 self.replay.set_game_volume(self.hardware.master_volume);
                 self.hardware.active_audio_stream = Some(handle);
                 self.info("Stream started.");
@@ -502,7 +502,7 @@ impl AppState {
             self.replay.audio.clone(),
         ) {
             Ok(handle) => {
-                handle.stream.set_volume(self.hardware.master_volume);
+                handle.stream.set_volume(self.effective_local_volume());
                 self.replay.set_game_volume(self.hardware.master_volume);
                 self.info("Gamescope audio hooked successfully.");
                 Some(handle)
@@ -689,7 +689,7 @@ impl AppState {
                 self.replay.audio.clone(),
             ) {
                 Ok(handle) => {
-                    handle.set_volume(self.hardware.master_volume);
+                    handle.set_volume(self.effective_local_volume());
                     self.replay.set_game_volume(self.hardware.master_volume);
                     self.hardware.active_audio_stream = Some(handle);
                     self.info("Audio stream restarted with new buffer size.");
@@ -918,7 +918,7 @@ impl AppState {
             peak_amplitude: Arc::clone(&self.hardware.audio_peak_amplitude),
             audio_latency_ms: Arc::clone(&self.hardware.audio_latency_ms),
             replay_audio: self.replay.audio.clone(),
-            master_volume: self.hardware.master_volume,
+            master_volume: self.effective_local_volume(),
         };
 
         let pos_clone = Arc::clone(&position_us);
@@ -1059,30 +1059,55 @@ impl AppState {
         handled
     }
 
-    pub fn set_master_volume(&mut self, volume: f32) {
-        let volume = volume.clamp(0.0, 1.0);
-        self.hardware.master_volume = volume;
+    /// Effective volume for local speaker output sinks. When the Replay Buffer Scrub Player
+    /// window is open, local game/stream audio is muted (`0.0`) so it does not interfere with
+    /// the scrub player, while the background replay buffer and Twitch stream continue at
+    /// `self.hardware.master_volume`.
+    pub fn effective_local_volume(&self) -> f32 {
+        if self.replay_scrub.is_open() {
+            0.0
+        } else {
+            self.hardware.master_volume.clamp(0.0, 1.0)
+        }
+    }
+
+    pub fn sync_local_audio_volume(&self) {
+        let local_vol = self.effective_local_volume();
         if let Some(ref audio_stream) = self.hardware.active_audio_stream {
-            audio_stream.set_volume(volume);
+            audio_stream.set_volume(local_vol);
         }
         if let Some(ref gs) = self.gamescope_hook {
             if let Some(ref ah) = gs.audio_handle {
-                ah.stream.set_volume(volume);
+                ah.stream.set_volume(local_vol);
             }
         }
         if let Some(ref player) = self.video_player {
             let _ = player
                 .command_sender
-                .send(crate::video::player::PlayerCommand::SetVolume(volume));
+                .send(crate::video::player::PlayerCommand::SetVolume(local_vol));
         }
         if let Some(ref tx) = self.pc98.command_tx {
-            let _ = tx.send(crate::pc98::Pc98Command::SetVolume(volume));
+            let _ = tx.send(crate::pc98::Pc98Command::SetVolume(local_vol));
         }
         if let Some(ref tx) = self.pc88.command_tx {
-            let _ = tx.send(crate::pc88::Pc88Command::SetVolume(volume));
+            let _ = tx.send(crate::pc88::Pc88Command::SetVolume(local_vol));
         }
+        self.twitch.alert_player.set_volume(local_vol);
+    }
+
+    pub fn set_master_volume(&mut self, volume: f32) {
+        let volume = volume.clamp(0.0, 1.0);
+        self.hardware.master_volume = volume;
         self.replay.set_game_volume(volume);
-        self.twitch.set_master_volume(volume);
+        if let Some(ref tap) = self.twitch.audio_tap {
+            tap.set_game_volume(volume);
+        }
+        self.sync_local_audio_volume();
+        if let Some(ref scrub_player) = self.replay_scrub.player {
+            let _ = scrub_player
+                .command_sender
+                .send(crate::video::player::PlayerCommand::SetVolume(volume));
+        }
     }
 
     pub fn start_pc98_mode(&mut self, ctx: &egui::Context) {
@@ -1156,7 +1181,7 @@ impl AppState {
             peak_amplitude: Arc::clone(&self.hardware.audio_peak_amplitude),
             audio_latency_ms: Arc::clone(&self.hardware.audio_latency_ms),
             replay_audio: self.replay.audio.clone(),
-            master_volume: self.hardware.master_volume,
+            master_volume: self.effective_local_volume(),
         };
 
         let handle = thread::Builder::new()
@@ -1523,7 +1548,7 @@ impl AppState {
             peak_amplitude: Arc::clone(&self.hardware.audio_peak_amplitude),
             audio_latency_ms: Arc::clone(&self.hardware.audio_latency_ms),
             replay_audio: self.replay.audio.clone(),
-            master_volume: self.hardware.master_volume,
+            master_volume: self.effective_local_volume(),
         };
 
         let handle = thread::Builder::new()
@@ -2045,6 +2070,33 @@ mod tests {
         assert_eq!(state.hardware.master_volume, 1.0);
         assert_eq!(state.replay.audio.game_volume(), 1.0);
         assert_eq!(state.twitch.alert_player.volume(), 1.0);
+    }
+
+    #[test]
+    fn test_replay_scrub_mutes_only_local_playback_not_replay_or_twitch_stream() {
+        let mut state = AppState::default();
+        state.set_master_volume(0.8);
+        assert_eq!(state.effective_local_volume(), 0.8);
+        assert_eq!(state.replay.audio.game_volume(), 0.8);
+        assert_eq!(state.twitch.alert_player.volume(), 0.8);
+
+        state.replay_scrub.window_open = true;
+        state.sync_local_audio_volume();
+
+        // Local playback is muted while scrub window is open
+        assert_eq!(state.effective_local_volume(), 0.0);
+        assert_eq!(state.twitch.alert_player.volume(), 0.0);
+        // Background replay buffer and Twitch stream audio remain at master_volume
+        assert_eq!(state.replay.audio.game_volume(), 0.8);
+        assert_eq!(state.hardware.master_volume, 0.8);
+
+        state.replay_scrub.close();
+        state.sync_local_audio_volume();
+
+        // Local playback volume is restored when scrub window closes
+        assert_eq!(state.effective_local_volume(), 0.8);
+        assert_eq!(state.twitch.alert_player.volume(), 0.8);
+        assert_eq!(state.replay.audio.game_volume(), 0.8);
     }
 
     #[test]
