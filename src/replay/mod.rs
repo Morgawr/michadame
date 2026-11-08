@@ -828,11 +828,28 @@ impl Replay {
     pub fn save(&mut self, seconds: u32) -> anyhow::Result<()> {
         self.request_export(seconds, Destination::File)
     }
-    pub fn request_scrub_preview(&mut self) -> anyhow::Result<()> {
-        if let Some(runtime) = &self.runtime {
-            *runtime.shared.scrub_snapshot.lock().unwrap() = None;
+    pub fn request_scrub_preview(&mut self) -> bool {
+        if self.status().seconds < MIN_SCRUB_DURATION_SECS {
+            return false;
         }
-        self.request_export(self.config.history_seconds, Destination::ScrubPreview)
+        let Some(runtime) = &self.runtime else {
+            return false;
+        };
+        if runtime.shared.stop.load(Ordering::Acquire) {
+            return false;
+        }
+        if runtime.shared.status.lock().unwrap().saving {
+            return false;
+        }
+        *runtime.shared.scrub_snapshot.lock().unwrap() = None;
+        runtime
+            .save
+            .try_send(Save {
+                destination: Destination::ScrubPreview,
+                seconds: self.config.history_seconds,
+                at: now_us(),
+            })
+            .is_ok()
     }
     pub fn take_scrub_snapshot(&mut self) -> Option<Result<ScrubSnapshot, String>> {
         self.runtime
@@ -991,7 +1008,9 @@ impl Replay {
             }
         }
         if ctx.input_mut(|i| i.consume_key(eframe::egui::Modifiers::NONE, eframe::egui::Key::F5)) {
-            self.scrub_open_requested = true;
+            if self.status().seconds >= MIN_SCRUB_DURATION_SECS {
+                self.scrub_open_requested = true;
+            }
         }
     }
 }
@@ -1002,6 +1021,8 @@ impl Drop for Replay {
     }
 }
 
+/// Minimum buffered replay duration (in seconds) required to open the scrub player (F5).
+pub const MIN_SCRUB_DURATION_SECS: f64 = 5.0;
 /// Length of the Ctrl+C video clip.
 const VIDEO_CLIP_SECONDS: u32 = 15;
 /// Length of the Ctrl+Shift+C audio-only clip.

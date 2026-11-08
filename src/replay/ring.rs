@@ -165,11 +165,18 @@ impl History {
         }
         Some(packets)
     }
+    /// Minimum buffered replay duration (5 seconds) required to open the scrub player.
+    pub const MIN_SCRUB_DURATION_US: i64 = 5_000_000;
+
     /// Returns a snapshot copy of the entire decodable replay buffer up to `requested_end`
     /// without mutating or stopping the ongoing background `History`.
+    /// Requires at least 5 seconds (`MIN_SCRUB_DURATION_US`) of decodable history.
     pub fn snapshot(&self, requested_end: i64) -> Option<Vec<Arc<Encoded>>> {
         let end = self.end()?.min(requested_end);
         let start = self.packets.iter().find(|p| p.key && p.start < end)?.start;
+        if end - start < Self::MIN_SCRUB_DURATION_US {
+            return None;
+        }
         let packets: Vec<_> = self
             .packets
             .iter()
@@ -377,7 +384,14 @@ mod tests {
     #[test]
     fn snapshot_and_trim_packets_preserve_background_history() {
         let mut h = History::new(600);
-        for t in 0..10 {
+        for t in 0..4 {
+            h.push(packet(t, t % 2 == 0, true, 10), 100000);
+            h.push(packet(t, false, false, 10), 100000);
+        }
+        // Fewer than 5 seconds of buffered video must not produce a scrub snapshot
+        assert!(h.snapshot(4_000_000).is_none());
+
+        for t in 4..10 {
             h.push(packet(t, t % 2 == 0, true, 10), 100000);
             h.push(packet(t, false, false, 10), 100000);
         }

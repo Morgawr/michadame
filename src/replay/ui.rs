@@ -26,7 +26,12 @@ pub fn draw_toggle(replay: &mut Replay, ui: &mut egui::Ui, streaming: bool) {
     }
 }
 
-pub fn draw_replay_buffer_group(replay: &mut Replay, ui: &mut egui::Ui, streaming: bool) -> bool {
+pub fn draw_replay_buffer_group(
+    replay: &mut Replay,
+    ui: &mut egui::Ui,
+    streaming: bool,
+    steam_deck: bool,
+) -> bool {
     let mut changed = false;
 
     crate::ui::controls::technical_group(ui, "Live Replay Buffer:", |ui| {
@@ -170,24 +175,28 @@ pub fn draw_replay_buffer_group(replay: &mut Replay, ui: &mut egui::Ui, streamin
             });
         });
 
-        crate::ui::controls::technical_separator(ui);
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("Edit Clip")
-                    .monospace()
-                    .size(11.0)
-                    .color(egui::Color32::from_rgb(170, 170, 170)),
-            );
-            if ui
-                .add_enabled(
-                    replay.runtime.is_some() && !status.saving,
-                    egui::Button::new("Open Clip Trimmer (F5)"),
-                )
-                .clicked()
-            {
-                replay.scrub_open_requested = true;
-            }
-        });
+        if !steam_deck {
+            crate::ui::controls::technical_separator(ui);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Edit Clip")
+                        .monospace()
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(170, 170, 170)),
+                );
+                if ui
+                    .add_enabled(
+                        replay.runtime.is_some()
+                            && !status.saving
+                            && status.seconds >= super::MIN_SCRUB_DURATION_SECS,
+                        egui::Button::new("Open Clip Trimmer (F5)"),
+                    )
+                    .clicked()
+                {
+                    replay.scrub_open_requested = true;
+                }
+            });
+        }
     });
 
     changed

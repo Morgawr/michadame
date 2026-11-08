@@ -205,6 +205,7 @@ fn settings(state: &mut AppState, ui: &mut egui::Ui) {
                 &mut state.replay,
                 ui,
                 state.ui.video_window_open,
+                true,
             );
         }
         Settings::Audio => {

@@ -619,6 +619,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         &mut state.replay,
                         ui,
                         state.ui.video_window_open,
+                        state.steam_deck.is_some(),
                     ) {
                         changed = true;
                         if let Err(error) = crate::config::save_replay_config(&state.replay.config)

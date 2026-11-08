@@ -895,6 +895,7 @@ pub fn video_file_thread_main(
         let seek_generation = Arc::clone(&seek_generation);
         let scaler_filter = Arc::clone(&scaler_filter);
         let color_range = Arc::clone(&color_range);
+        let is_paused_demux = Arc::clone(&is_paused_shared);
 
         thread::spawn(move || {
             let mut current_scaler_val = scaler_filter.load(Ordering::Relaxed);
@@ -930,86 +931,140 @@ pub fn video_file_thread_main(
                     break;
                 }
 
-                // Handle demuxer commands
-                while let Ok(cmd) = demux_cmd_rx.try_recv() {
-                    match cmd {
-                        DemuxCommand::Seek {
-                            mut target_us,
-                            mut ack,
-                        } => {
-                            // Coalesce consecutive Seek commands
-                            while let Ok(next) = demux_cmd_rx.try_recv() {
-                                match next {
-                                    DemuxCommand::Seek {
-                                        target_us: newer_us,
-                                        ack: newer_ack,
-                                    } => {
-                                        let _ = ack.send(false);
-                                        target_us = newer_us;
-                                        ack = newer_ack;
-                                    }
-                                    DemuxCommand::Stop => {
-                                        let _ = ack.send(false);
-                                        return;
+                // Handle demuxer commands once any in-flight seek preroll frame is produced
+                if pending_video_seek_target_us.is_none() || demux_eof {
+                    while let Ok(cmd) = demux_cmd_rx.try_recv() {
+                        match cmd {
+                            DemuxCommand::Seek {
+                                mut target_us,
+                                mut ack,
+                            } => {
+                                // Coalesce consecutive Seek commands
+                                while let Ok(next) = demux_cmd_rx.try_recv() {
+                                    match next {
+                                        DemuxCommand::Seek {
+                                            target_us: newer_us,
+                                            ack: newer_ack,
+                                        } => {
+                                            let _ = ack.send(false);
+                                            target_us = newer_us;
+                                            ack = newer_ack;
+                                        }
+                                        DemuxCommand::Stop => {
+                                            let _ = ack.send(false);
+                                            return;
+                                        }
                                     }
                                 }
+
+                                // Fast path 1: target frame is already decoded in video_queue
+                                let already_in_queue =
+                                    video_queue.lock().ok().is_some_and(|mut vq| {
+                                        if let (Some((front_pts, _, _)), Some((back_pts, _, _))) =
+                                            (vq.front(), vq.back())
+                                        {
+                                            if target_us >= *front_pts && target_us <= *back_pts {
+                                                while vq.len() > 1 {
+                                                    if let Some((pts, _, _)) = vq.front() {
+                                                        if *pts + video_frame_interval_us
+                                                            <= target_us
+                                                        {
+                                                            vq.pop_front();
+                                                        } else {
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                                true
+                                            } else {
+                                                false
+                                            }
+                                        } else {
+                                            false
+                                        }
+                                    });
+
+                                if already_in_queue {
+                                    let gen = seek_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                                    if let Ok(mut vq) = video_queue.lock() {
+                                        for item in vq.iter_mut() {
+                                            item.2 = gen;
+                                        }
+                                    }
+                                    if let Ok(mut q) = audio_queue.lock() {
+                                        q.clear(target_us, gen);
+                                    }
+                                    audio_clock_pts_us.store(target_us, Ordering::Relaxed);
+                                    pending_video_seek_target_us = None;
+                                    pending_audio_seek_target_us = Some(target_us);
+                                    let _ = ack.send(true);
+                                    continue;
+                                }
+
+                                // Fast path 2: forward seek within 500ms of current decoder position
+                                let can_decode_forward = !demux_eof
+                                    && video_fallback_pts > 0
+                                    && target_us >= video_fallback_pts
+                                    && target_us - video_fallback_pts <= 500_000;
+
+                                if !can_decode_forward {
+                                    // Seek container streams with -1; fallback to video stream index if needed
+                                    let seek_succeeded = apply_seek_if_supported(
+                                        target_us,
+                                        video_stream_index as i32,
+                                        video_time_base,
+                                        |stream_idx, ts| unsafe {
+                                            ffmpeg_next::sys::av_seek_frame(
+                                                ictx.as_mut_ptr(),
+                                                stream_idx,
+                                                ts,
+                                                ffmpeg_next::sys::AVSEEK_FLAG_BACKWARD,
+                                            )
+                                        },
+                                    );
+
+                                    if !seek_succeeded {
+                                        tracing::warn!(
+                                            "Failed to seek video container to {}us; preserving current playback state",
+                                            target_us
+                                        );
+                                        let _ = ack.send(false);
+                                        continue;
+                                    }
+
+                                    video_decoder.flush();
+                                    if let Some(ref mut ad) = audio_decoder {
+                                        ad.flush();
+                                    }
+                                    resampler_needs_reset = true;
+                                }
+
+                                let gen = seek_generation.fetch_add(1, Ordering::SeqCst) + 1;
+
+                                if let Ok(mut q) = audio_queue.lock() {
+                                    q.clear(target_us, gen);
+                                }
+                                audio_clock_pts_us.store(target_us, Ordering::Relaxed);
+                                audio_fallback_pts = target_us;
+                                if !can_decode_forward {
+                                    video_fallback_pts = target_us;
+                                }
+
+                                if let Ok(mut vq) = video_queue.lock() {
+                                    vq.clear();
+                                }
+
+                                pending_video_seek_target_us = Some(target_us);
+                                pending_audio_seek_target_us = Some(target_us);
+                                last_video_frame = None;
+                                consecutive_read_errors = 0;
+                                demux_eof = false;
+                                is_demux_eof.store(false, Ordering::Release);
+                                let _ = ack.send(true);
                             }
-
-                            // Seek container streams with -1; fallback to video stream index if needed
-                            let seek_succeeded = apply_seek_if_supported(
-                                target_us,
-                                video_stream_index as i32,
-                                video_time_base,
-                                |stream_idx, ts| unsafe {
-                                    ffmpeg_next::sys::av_seek_frame(
-                                        ictx.as_mut_ptr(),
-                                        stream_idx,
-                                        ts,
-                                        ffmpeg_next::sys::AVSEEK_FLAG_BACKWARD,
-                                    )
-                                },
-                            );
-
-                            if !seek_succeeded {
-                                tracing::warn!(
-                                    "Failed to seek video container to {}us; preserving current playback state",
-                                    target_us
-                                );
-                                let _ = ack.send(false);
-                                continue;
+                            DemuxCommand::Stop => {
+                                return;
                             }
-
-                            let gen = seek_generation.fetch_add(1, Ordering::SeqCst) + 1;
-
-                            video_decoder.flush();
-                            if let Some(ref mut ad) = audio_decoder {
-                                ad.flush();
-                            }
-                            // Discard any audio still buffered inside swr from the old position:
-                            // the resampler is rebuilt from the first decoded frame after the seek.
-                            resampler_needs_reset = true;
-
-                            if let Ok(mut q) = audio_queue.lock() {
-                                q.clear(target_us, gen);
-                            }
-                            audio_clock_pts_us.store(target_us, Ordering::Relaxed);
-                            audio_fallback_pts = target_us;
-                            video_fallback_pts = target_us;
-
-                            if let Ok(mut vq) = video_queue.lock() {
-                                vq.clear();
-                            }
-
-                            pending_video_seek_target_us = Some(target_us);
-                            pending_audio_seek_target_us = Some(target_us);
-                            last_video_frame = None;
-                            consecutive_read_errors = 0;
-                            demux_eof = false;
-                            is_demux_eof.store(false, Ordering::Release);
-                            let _ = ack.send(true);
-                        }
-                        DemuxCommand::Stop => {
-                            return;
                         }
                     }
                 }
@@ -1177,7 +1232,10 @@ pub fn video_file_thread_main(
                             false,
                         );
                     }
-                } else if Some(stream_idx) == audio_stream_index {
+                } else if Some(stream_idx) == audio_stream_index
+                    && !(pending_video_seek_target_us.is_some()
+                        && is_paused_demux.load(Ordering::Relaxed))
+                {
                     if let (Some(ref mut dec), Some(ref mut rsm), Some(tb)) =
                         (&mut audio_decoder, &mut resampler, audio_time_base)
                     {
@@ -1205,6 +1263,7 @@ pub fn video_file_thread_main(
     let mut last_audio_clock = 0i64;
     let mut last_audio_adv_time = Instant::now();
     let mut first_frame_after_seek = true;
+    let mut seek_frame_deadline = Instant::now() + Duration::from_millis(200);
     let mut seek_stabilize_until = Instant::now();
 
     let request_demux_seek = |target_us: i64| -> bool {
@@ -1222,13 +1281,22 @@ pub fn video_file_thread_main(
     };
 
     while !stop_requested.load(Ordering::Relaxed) {
-        // Handle incoming UI commands
-        let mut next_cmd = command_receiver.try_recv().ok();
+        // Wait briefly for an in-flight seek's preview frame to be presented before
+        // starting the next seek so continuous dragging updates the preview in real time.
+        let waiting_for_seek_frame = first_frame_after_seek
+            && !is_demux_eof.load(Ordering::Acquire)
+            && Instant::now() < seek_frame_deadline;
+        let mut next_cmd = if waiting_for_seek_frame {
+            None
+        } else {
+            command_receiver.try_recv().ok()
+        };
         while let Some(cmd) = next_cmd.take() {
             match cmd {
                 PlayerCommand::Play => {
                     if is_eof_shared.load(Ordering::Relaxed) && request_demux_seek(0) {
                         first_frame_after_seek = true;
+                        seek_frame_deadline = Instant::now() + Duration::from_millis(200);
                         mono_clock.seek(0);
                         position_us.store(0, Ordering::Relaxed);
                         last_audio_clock = 0;
@@ -1256,6 +1324,7 @@ pub fn video_file_thread_main(
                     if paused {
                         if is_eof_shared.load(Ordering::Relaxed) && request_demux_seek(0) {
                             first_frame_after_seek = true;
+                            seek_frame_deadline = Instant::now() + Duration::from_millis(200);
                             mono_clock.seek(0);
                             position_us.store(0, Ordering::Relaxed);
                             last_audio_clock = 0;
@@ -1280,6 +1349,7 @@ pub fn video_file_thread_main(
                 PlayerCommand::Stop => {
                     if request_demux_seek(0) {
                         first_frame_after_seek = true;
+                        seek_frame_deadline = Instant::now() + Duration::from_millis(200);
                         mono_clock.seek(0);
                         position_us.store(0, Ordering::Relaxed);
                         last_audio_clock = 0;
@@ -1316,11 +1386,16 @@ pub fn video_file_thread_main(
                         mono_clock.seek(target_us);
                         position_us.store(target_us, Ordering::Relaxed);
                         first_frame_after_seek = true;
+                        seek_frame_deadline = Instant::now() + Duration::from_millis(200);
                         last_audio_clock = target_us;
                         last_audio_adv_time = Instant::now();
                         seek_stabilize_until = Instant::now() + Duration::from_millis(300);
                         is_eof_shared.store(false, Ordering::Relaxed);
                         request_repaint();
+                    }
+                    // Exit command loop so we immediately present the seek frame before processing further seeks
+                    if next_cmd.is_none() {
+                        break;
                     }
                 }
             }
@@ -1358,7 +1433,9 @@ pub fn video_file_thread_main(
                 first_frame_after_seek = false;
                 let popped = video_queue.lock().ok().and_then(|mut q| q.pop_front());
                 if let Some((pts, frame, _)) = popped {
-                    position_us.store(pts, Ordering::Relaxed);
+                    if !is_paused_shared.load(Ordering::Relaxed) {
+                        position_us.store(pts, Ordering::Relaxed);
+                    }
                     mono_clock.seek(pts);
                     let _ = frame_sender.try_send(frame);
                     request_repaint();
@@ -1368,7 +1445,11 @@ pub fn video_file_thread_main(
 
         let is_paused = is_paused_shared.load(Ordering::Relaxed);
         if is_paused {
-            thread::sleep(Duration::from_millis(10));
+            if first_frame_after_seek {
+                thread::sleep(Duration::from_millis(1));
+            } else {
+                thread::sleep(Duration::from_millis(4));
+            }
             continue;
         }
 

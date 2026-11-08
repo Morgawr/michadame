@@ -57,6 +57,8 @@ pub struct ReplayScrubState {
     pub was_playing_before_scrub: bool,
     pub start_marker_secs: Option<f64>,
     pub end_marker_secs: Option<f64>,
+    pub last_seek_sent_secs: Option<f64>,
+    pub pending_loop_seek_until: Option<std::time::Instant>,
     pub texture: Option<egui::TextureHandle>,
     pub video_size: (u32, u32),
 }
@@ -70,7 +72,7 @@ impl ReplayScrubState {
         self.player = None;
         self.snapshot = None;
         self.texture = None;
-        self.window_open = true;
+        self.window_open = false;
         self.loading = true;
         self.current_position_secs = 0.0;
         self.duration_secs = 0.0;
@@ -80,6 +82,8 @@ impl ReplayScrubState {
         self.was_playing_before_scrub = false;
         self.start_marker_secs = None;
         self.end_marker_secs = None;
+        self.last_seek_sent_secs = None;
+        self.pending_loop_seek_until = None;
     }
 
     pub fn close(&mut self) {
@@ -92,6 +96,8 @@ impl ReplayScrubState {
         self.was_playing_before_scrub = false;
         self.start_marker_secs = None;
         self.end_marker_secs = None;
+        self.last_seek_sent_secs = None;
+        self.pending_loop_seek_until = None;
     }
 
     pub fn start_with_snapshot(
@@ -113,13 +119,15 @@ impl ReplayScrubState {
         self.was_playing_before_scrub = false;
         self.start_marker_secs = None;
         self.end_marker_secs = None;
+        self.last_seek_sent_secs = None;
+        self.pending_loop_seek_until = None;
         self.loading = false;
         self.window_open = true;
 
         let preview_path = snapshot.preview_file.path().to_path_buf();
         self.snapshot = Some(snapshot);
 
-        let (frame_tx, frame_rx) = crossbeam_channel::bounded::<Arc<RawFrame>>(4);
+        let (frame_tx, frame_rx) = crossbeam_channel::bounded::<Arc<RawFrame>>(32);
         let (event_tx, event_rx) = crossbeam_channel::unbounded::<PlayerEvent>();
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<PlayerCommand>();
 
@@ -131,6 +139,7 @@ impl ReplayScrubState {
         let repaint_ctx = ctx.clone();
         let request_repaint: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             repaint_ctx.request_repaint();
+            repaint_ctx.request_repaint_of(egui::ViewportId::from_hash_of("replay_scrub_window"));
         });
         let notify_event = Arc::clone(&request_repaint);
 
@@ -236,14 +245,61 @@ impl ReplayScrubState {
     pub fn seek_to(&mut self, target_secs: f64) {
         let clamped = target_secs.clamp(0.0, self.duration_secs.max(0.0));
         self.current_position_secs = clamped;
+        if self
+            .last_seek_sent_secs
+            .is_some_and(|prev| (clamped - prev).abs() < 0.002)
+        {
+            return;
+        }
+        self.last_seek_sent_secs = Some(clamped);
         if let Some(ref player) = self.player {
+            player
+                .position_us
+                .store((clamped * 1_000_000.0) as i64, Ordering::Relaxed);
             let _ = player.command_sender.send(PlayerCommand::Seek(clamped));
         }
     }
 
-    pub fn toggle_pause(&self) {
+    pub fn loop_to_start(&mut self) {
+        let (eff_start, _) = self.effective_markers();
+        let clamped = eff_start.clamp(0.0, self.duration_secs.max(0.0));
+        self.current_position_secs = clamped;
+        self.last_seek_sent_secs = Some(clamped);
+        self.is_eof = false;
+        self.is_paused = false;
+        self.pending_loop_seek_until =
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(250));
         if let Some(ref player) = self.player {
-            let _ = player.command_sender.send(PlayerCommand::TogglePause);
+            player
+                .position_us
+                .store((clamped * 1_000_000.0) as i64, Ordering::Relaxed);
+            player.is_eof_shared.store(false, Ordering::Relaxed);
+            player.is_paused_shared.store(false, Ordering::Relaxed);
+            let _ = player.command_sender.send(PlayerCommand::Seek(clamped));
+            let _ = player.command_sender.send(PlayerCommand::Play);
+        }
+    }
+
+    pub fn toggle_pause(&mut self) {
+        if self.is_paused || self.is_eof {
+            let (_, eff_end) = self.effective_markers();
+            if self.is_eof || self.current_position_secs >= eff_end - 0.02 {
+                self.loop_to_start();
+                return;
+            }
+            self.is_paused = false;
+            self.is_eof = false;
+            if let Some(ref player) = self.player {
+                player.is_paused_shared.store(false, Ordering::Relaxed);
+                player.is_eof_shared.store(false, Ordering::Relaxed);
+                let _ = player.command_sender.send(PlayerCommand::Play);
+            }
+        } else {
+            self.is_paused = true;
+            if let Some(ref player) = self.player {
+                player.is_paused_shared.store(true, Ordering::Relaxed);
+                let _ = player.command_sender.send(PlayerCommand::Pause);
+            }
         }
     }
 }
@@ -354,28 +410,31 @@ enum ScrubAction {
 }
 
 pub fn draw_replay_scrub_window(state: &mut AppState, ctx: &egui::Context) -> bool {
+    if state.steam_deck.is_some() {
+        state.replay.scrub_open_requested = false;
+        if state.replay_scrub.is_open() || state.replay_scrub.loading {
+            state.replay_scrub.close();
+            state.sync_local_audio_volume();
+        }
+        return false;
+    }
+
     let mut repaint = false;
 
     if state.replay.scrub_open_requested {
         state.replay.scrub_open_requested = false;
-        if !state.replay_scrub.is_open() {
-            match state.replay.request_scrub_preview() {
-                Ok(()) => {
-                    state.replay_scrub.open_pending();
-                    state.sync_local_audio_volume();
-                    repaint = true;
-                }
-                Err(e) => {
-                    state.error(format!("Replay scrub failed: {e}"));
-                }
+        if !state.replay_scrub.is_open() && !state.replay_scrub.loading {
+            if state.replay.request_scrub_preview() {
+                state.replay_scrub.open_pending();
+                repaint = true;
             }
         }
     }
 
     if let Some(snapshot_res) = state.replay.take_scrub_snapshot() {
         match snapshot_res {
-            Ok(snapshot) => {
-                if state.replay_scrub.is_open() {
+            Ok(snapshot) if snapshot.duration_secs >= crate::replay::MIN_SCRUB_DURATION_SECS => {
+                if state.replay_scrub.loading || state.replay_scrub.is_open() {
                     state.replay_scrub.start_with_snapshot(
                         snapshot,
                         state.hardware.master_volume,
@@ -387,13 +446,17 @@ pub fn draw_replay_scrub_window(state: &mut AppState, ctx: &egui::Context) -> bo
                     repaint = true;
                 }
             }
-            Err(err) => {
+            _ => {
+                // Fewer than 5 seconds or snapshot unavailable: silently ignore without opening view or notifying user
                 state.replay_scrub.close();
                 state.sync_local_audio_volume();
-                state.error(err);
-                repaint = true;
             }
         }
+    }
+
+    if state.replay_scrub.loading && !state.replay_scrub.is_open() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        return repaint;
     }
 
     if !state.replay_scrub.is_open() || !state.ui.scale.settled_once {
@@ -403,6 +466,8 @@ pub fn draw_replay_scrub_window(state: &mut AppState, ctx: &egui::Context) -> bo
     // Poll scrub player frames and events
     let mut latest_frame = None;
     let mut failed_error = None;
+    let mut hit_eof = false;
+    let mut raw_pos_secs = state.replay_scrub.current_position_secs;
     if let Some(ref mut player) = state.replay_scrub.player {
         while let Ok(frame) = player.frame_rx.try_recv() {
             latest_frame = Some(frame);
@@ -424,8 +489,7 @@ pub fn draw_replay_scrub_window(state: &mut AppState, ctx: &egui::Context) -> bo
                     repaint = true;
                 }
                 PlayerEvent::Eof => {
-                    state.replay_scrub.is_eof = true;
-                    state.replay_scrub.is_paused = true;
+                    hit_eof = true;
                     repaint = true;
                 }
                 PlayerEvent::Failed(err) => {
@@ -434,13 +498,37 @@ pub fn draw_replay_scrub_window(state: &mut AppState, ctx: &egui::Context) -> bo
                 PlayerEvent::Stopped => {}
             }
         }
-        if !state.replay_scrub.is_seeking {
-            state.replay_scrub.current_position_secs =
-                (player.position_us.load(Ordering::Relaxed) as f64 / 1_000_000.0)
-                    .clamp(0.0, state.replay_scrub.duration_secs.max(0.0));
-        }
+        raw_pos_secs = (player.position_us.load(Ordering::Relaxed) as f64 / 1_000_000.0)
+            .clamp(0.0, state.replay_scrub.duration_secs.max(0.0));
         state.replay_scrub.is_paused = player.is_paused_shared.load(Ordering::Relaxed);
         state.replay_scrub.is_eof = player.is_eof_shared.load(Ordering::Relaxed);
+    }
+
+    let (eff_start, eff_end) = state.replay_scrub.effective_markers();
+    if hit_eof && !state.replay_scrub.is_seeking {
+        state.replay_scrub.loop_to_start();
+        repaint = true;
+    } else if !state.replay_scrub.is_seeking {
+        let waiting_for_loop_seek = state
+            .replay_scrub
+            .pending_loop_seek_until
+            .is_some_and(|until| std::time::Instant::now() < until);
+        if waiting_for_loop_seek {
+            if raw_pos_secs < eff_end - 0.05 {
+                state.replay_scrub.pending_loop_seek_until = None;
+                state.replay_scrub.current_position_secs = raw_pos_secs;
+            }
+        } else {
+            state.replay_scrub.pending_loop_seek_until = None;
+            if !state.replay_scrub.is_paused {
+                state.replay_scrub.current_position_secs = raw_pos_secs;
+                if eff_end > eff_start + 0.05 && state.replay_scrub.current_position_secs >= eff_end
+                {
+                    state.replay_scrub.loop_to_start();
+                    repaint = true;
+                }
+            }
+        }
     }
 
     if let Some(err) = failed_error {
@@ -510,7 +598,10 @@ pub fn draw_replay_scrub_window(state: &mut AppState, ctx: &egui::Context) -> bo
         }
     }
 
-    if state.replay_scrub.is_open() && (state.replay_scrub.loading || !state.replay_scrub.is_paused)
+    if state.replay_scrub.is_open()
+        && (state.replay_scrub.loading
+            || !state.replay_scrub.is_paused
+            || state.replay_scrub.is_seeking)
     {
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
@@ -885,15 +976,21 @@ fn draw_timeline_marker_bar(
         if let Some(pos) = response.interact_pointer_pos() {
             let frac = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64;
             scrub.seek_to(frac * duration);
+            ui.ctx().request_repaint();
         }
     }
     if response.drag_stopped() {
         scrub.is_seeking = false;
         if scrub.was_playing_before_scrub {
-            if let Some(ref player) = scrub.player {
+            let (_, eff_end) = scrub.effective_markers();
+            if scrub.current_position_secs >= eff_end - 0.02 {
+                scrub.loop_to_start();
+            } else if let Some(ref player) = scrub.player {
+                player.is_paused_shared.store(false, Ordering::Relaxed);
                 let _ = player.command_sender.send(PlayerCommand::Play);
             }
         }
+        ui.ctx().request_repaint();
     }
 
     let painter = ui.painter();
@@ -1018,5 +1115,51 @@ mod tests {
         assert_eq!(format_time_tenths(0.0), "00:00.0");
         assert_eq!(format_time_tenths(5.4), "00:05.4");
         assert_eq!(format_time_tenths(65.8), "01:05.8");
+    }
+
+    #[test]
+    fn loop_to_start_and_toggle_pause_at_end_marker_restart_from_start_marker() {
+        let mut scrub = ReplayScrubState {
+            duration_secs: 30.0,
+            current_position_secs: 8.0,
+            ..Default::default()
+        };
+        scrub.place_start_here();
+        scrub.current_position_secs = 20.0;
+        scrub.place_end_here();
+        assert_eq!(scrub.effective_markers(), (8.0, 20.0));
+
+        // Reached end marker while playing -> loop_to_start jumps back to 8.0s and keeps playing
+        scrub.loop_to_start();
+        assert_eq!(scrub.current_position_secs, 8.0);
+        assert!(!scrub.is_paused);
+        assert!(!scrub.is_eof);
+
+        // Paused at end marker -> toggle_pause restarts from start marker (8.0s)
+        scrub.current_position_secs = 20.0;
+        scrub.is_paused = true;
+        scrub.toggle_pause();
+        assert_eq!(scrub.current_position_secs, 8.0);
+        assert!(!scrub.is_paused);
+    }
+
+    #[test]
+    fn steam_deck_mode_and_short_buffer_do_not_open_scrub_window() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::default();
+
+        // 1. Short buffer (< 5s): pressing F5 or requesting scrub preview silently does nothing
+        state.replay.scrub_open_requested = true;
+        assert!(!draw_replay_scrub_window(&mut state, &ctx));
+        assert!(!state.replay_scrub.is_open());
+        assert!(!state.replay_scrub.loading);
+
+        // 2. Steam Deck mode: always disabled even if scrub_open_requested or window_open was set
+        state.steam_deck = Some(crate::steam_deck::SteamDeckState::default());
+        state.replay.scrub_open_requested = true;
+        state.replay_scrub.window_open = true;
+        assert!(!draw_replay_scrub_window(&mut state, &ctx));
+        assert!(!state.replay.scrub_open_requested);
+        assert!(!state.replay_scrub.is_open());
     }
 }

@@ -543,10 +543,14 @@ pub(super) fn run(
         invalidate_changed_surface(&mut session, &mut history, &mut pending_save, shared);
         if let Ok(save) = saves.try_recv() {
             if export_thread.is_some() || pending_save.is_some() {
-                shared.message("A replay save is already pending");
+                if save.destination != Destination::ScrubPreview {
+                    shared.message("A replay save is already pending");
+                }
             } else {
+                if save.destination != Destination::ScrubPreview {
+                    shared.message("Waiting for queued frames before saving replay…");
+                }
                 pending_save = Some((save, Instant::now()));
-                shared.message("Waiting for queued frames before saving replay…");
             }
         }
         if let Some((save, requested)) = &pending_save {
@@ -638,14 +642,11 @@ pub(super) fn run(
                                 status.saving = false;
                                 match result {
                                     Ok(snapshot) => {
-                                        status.message =
-                                            format!("Replay scrub preview ready ({duration:.1}s)");
                                         *export_shared.scrub_snapshot.lock().unwrap() =
                                             Some(Ok(snapshot));
                                     }
                                     Err(e) => {
                                         let msg = format!("Replay preview failed: {e:#}");
-                                        status.message = msg.clone();
                                         *export_shared.scrub_snapshot.lock().unwrap() =
                                             Some(Err(msg));
                                     }
@@ -660,9 +661,8 @@ pub(super) fn run(
                             }
                         }
                     } else {
-                        let msg = "Not enough decodable video and audio to save yet";
-                        shared.message(msg);
-                        *shared.scrub_snapshot.lock().unwrap() = Some(Err(msg.into()));
+                        *shared.scrub_snapshot.lock().unwrap() =
+                            Some(Err("insufficient_history".into()));
                     }
                     pending_save = None;
                     continue;

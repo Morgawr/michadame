@@ -121,7 +121,7 @@ pub fn draw_main_ui(state: &mut AppState, ctx: &egui::Context) -> bool {
         || (state.pc88.is_active && state.pc88.passthrough_enabled);
 
     let mut hotkey_repaint = false;
-    if !gamescope_passthrough && !pc98_passthrough {
+    if state.steam_deck.is_none() && !gamescope_passthrough && !pc98_passthrough {
         state.replay.shortcuts(ctx);
         if check_toggle_key(ctx, egui::Key::L) {
             state.ui.studio_window_open = !state.ui.studio_window_open;
