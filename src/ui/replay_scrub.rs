@@ -138,8 +138,14 @@ impl ReplayScrubState {
 
         let repaint_ctx = ctx.clone();
         let request_repaint: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            repaint_ctx.request_repaint();
-            repaint_ctx.request_repaint_of(egui::ViewportId::from_hash_of("replay_scrub_window"));
+            // Wake the root viewport so `AppState::update` runs `draw_replay_scrub_window`
+            // and repaints the immediate scrub viewport. Never call `request_repaint_of`
+            // with an unscaled `ViewportId::from_hash_of("replay_scrub_window")` here:
+            // `egui::Context::request_repaint_of` inserts a default `ViewportState` entry
+            // with `parent = ROOT` into `ctx.viewports`, which survives the immediate
+            // viewport's `end_frame` pass and causes `eframe` to spawn and immediately drop
+            // a phantom OS window (and Wayland clipboard device) on every decoded frame.
+            repaint_ctx.request_repaint_of(egui::ViewportId::ROOT);
         });
         let notify_event = Arc::clone(&request_repaint);
 
@@ -1161,5 +1167,81 @@ mod tests {
         assert!(!draw_replay_scrub_window(&mut state, &ctx));
         assert!(!state.replay.scrub_open_requested);
         assert!(!state.replay_scrub.is_open());
+    }
+
+    #[test]
+    fn scrub_repaint_callback_never_spawns_phantom_unscaled_viewport() {
+        let immediate_viewports = Arc::new(std::sync::Mutex::new(Vec::<egui::ViewportId>::new()));
+        let immediate_viewports_clone = Arc::clone(&immediate_viewports);
+
+        egui::Context::set_immediate_viewport_renderer(move |ctx, viewport| {
+            let mut input = egui::RawInput {
+                viewport_id: viewport.ids.this,
+                ..Default::default()
+            };
+            input.viewports.entry(viewport.ids.this).or_default();
+            let output = ctx.run(input, |ui_ctx| {
+                (viewport.viewport_ui_cb)(ui_ctx);
+            });
+            *immediate_viewports_clone.lock().unwrap() =
+                output.viewport_output.keys().copied().collect();
+        });
+
+        let ctx = egui::Context::default();
+        let mut state = AppState::default();
+
+        let snapshot = ScrubSnapshot {
+            packets: Vec::new(),
+            video: ffmpeg_next::codec::Parameters::new(),
+            audio: ffmpeg_next::codec::Parameters::new(),
+            directory: String::new(),
+            preview_file: Arc::new(tempfile::NamedTempFile::new().unwrap()),
+            duration_secs: 10.0,
+            width: 1280,
+            height: 720,
+        };
+
+        state.replay_scrub.start_with_snapshot(
+            snapshot,
+            0.0,
+            Arc::new(AtomicU8::new(0)),
+            Arc::new(AtomicU8::new(0)),
+            &ctx,
+        );
+
+        // Wait briefly for the player thread to emit its event and invoke `request_repaint`.
+        if let Some(ref mut player) = state.replay_scrub.player {
+            if let Some(handle) = player.player_thread.take() {
+                let _ = handle.join();
+            }
+        }
+
+        let mut root_input = egui::RawInput::default();
+        root_input
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default();
+        let root_output = ctx.run(root_input, |ui_ctx| {
+            let _ = draw_replay_scrub_window(&mut state, ui_ctx);
+        });
+
+        let expected_scrub_id =
+            crate::ui::scaling::viewport_id("replay_scrub_window", &ctx, SCRUB_WINDOW_SIZE);
+        let unscaled_phantom_id = egui::ViewportId::from_hash_of("replay_scrub_window");
+        assert_ne!(expected_scrub_id, unscaled_phantom_id);
+
+        let seen_in_immediate = immediate_viewports.lock().unwrap().clone();
+        assert!(
+            !seen_in_immediate.contains(&unscaled_phantom_id),
+            "phantom unscaled viewport leaked into immediate viewport_output: {seen_in_immediate:?}"
+        );
+        assert!(
+            !root_output
+                .viewport_output
+                .contains_key(&unscaled_phantom_id),
+            "phantom unscaled viewport leaked into root viewport_output"
+        );
+
+        state.replay_scrub.close();
     }
 }
