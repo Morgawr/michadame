@@ -44,6 +44,7 @@ pub struct PhotoSceneContext {
     pub corner_size: f32,
     pub border_crop: [f32; 4],
     pub halo: crate::app::models::HaloSettings,
+    pub beam: crate::app::models::BeamSettings,
 }
 
 impl Default for PhotoSceneContext {
@@ -59,6 +60,7 @@ impl Default for PhotoSceneContext {
             corner_size: 0.0,
             border_crop: [0.0; 4],
             halo: crate::app::models::HaloSettings::default(),
+            beam: crate::app::models::BeamSettings::default(),
         }
     }
 }
@@ -429,8 +431,11 @@ impl PhotoCameraParams {
             CrtFilter::Halo => {
                 scene.halo.curvature && (scene.warp[0] > 0.001 || scene.warp[1] > 0.001)
             }
+            CrtFilter::Beam => {
+                scene.beam.curvature && (scene.warp[0] > 0.001 || scene.warp[1] > 0.001)
+            }
             CrtFilter::Lottes => scene.warp[0] > 0.001 || scene.warp[1] > 0.001,
-            CrtFilter::Beam | CrtFilter::Off => false,
+            CrtFilter::Off => false,
         };
         let barrel_k1 = if is_crt && has_warp {
             rng.gen_range(0.002f32..0.007f32)
@@ -1220,28 +1225,43 @@ fn eval_monitor_plane_point(
             CrtFilter::Halo => {
                 scene.halo.curvature && (scene.warp[0] > 0.001 || scene.warp[1] > 0.001)
             }
+            CrtFilter::Beam => {
+                scene.beam.curvature && (scene.warp[0] > 0.001 || scene.warp[1] > 0.001)
+            }
             CrtFilter::Lottes => scene.warp[0] > 0.001 || scene.warp[1] > 0.001,
-            CrtFilter::Beam | CrtFilter::Off => false,
+            CrtFilter::Off => false,
         };
         let (warp_x, warp_y) = if has_warp {
-            (scene.warp[0].max(0.036), scene.warp[1].max(0.046))
+            if scene.crt_filter == CrtFilter::Beam {
+                (scene.warp[0] + 0.004, scene.warp[1] + 0.004)
+            } else {
+                (scene.warp[0].max(0.036), scene.warp[1].max(0.046))
+            }
         } else {
             (0.0, 0.0)
         };
         let su = (pos_x * (1.0 + pos_y * pos_y * warp_x)) * 0.5 + 0.5;
         let sv = (pos_y * (1.0 + pos_x * pos_x * warp_y)) * 0.5 + 0.5;
 
-        let r_corner = if scene.crt_filter == CrtFilter::Halo {
-            let eff_corner = if scene.corner_size > 0.0005 {
-                scene.corner_size
-            } else {
-                scene.halo.corner_size
-            };
-            eff_corner.clamp(0.003, 0.08)
-        } else if scene.corner_size > 0.001 {
-            scene.corner_size.clamp(0.004, 0.08)
-        } else {
-            0.035
+        let r_corner = match scene.crt_filter {
+            CrtFilter::Halo => {
+                let eff_corner = if scene.corner_size > 0.0005 {
+                    scene.corner_size
+                } else {
+                    scene.halo.corner_size
+                };
+                eff_corner.clamp(0.003, 0.08)
+            }
+            CrtFilter::Beam => {
+                let eff_corner = if scene.corner_size > 0.0005 {
+                    scene.corner_size
+                } else {
+                    scene.beam.corner_size
+                };
+                eff_corner.clamp(0.003, 0.08)
+            }
+            _ if scene.corner_size > 0.001 => scene.corner_size.clamp(0.004, 0.08),
+            _ => 0.035,
         };
         let qx = (su - 0.5).abs() - (0.5 - r_corner);
         let qy = (sv - 0.5).abs() - (0.5 - r_corner);
@@ -1311,21 +1331,28 @@ fn eval_monitor_plane_point(
 
         // Bright highlights widen the Gaussian electron beam into adjacent scanline gaps (`beam_size` bloom),
         // while midtones have a delicate, natural ~8-12% scanline ripple modulated by the preset's beam tightness.
-        let beam_tightness = if scene.crt_filter == CrtFilter::Halo {
-            ((scene.halo.beam_min - 1.30) / 0.85).clamp(0.0, 1.2)
-        } else {
-            0.6
+        let beam_tightness = match scene.crt_filter {
+            CrtFilter::Halo => ((scene.halo.beam_min - 1.30) / 0.85).clamp(0.0, 1.2),
+            CrtFilter::Beam => ((scene.beam.beam_min - 1.20) / 0.85).clamp(0.0, 1.2),
+            _ => 0.6,
         };
         let beam = cos_wave.powf((0.96 + 0.12 * beam_tightness) - 0.32 * col_max);
         let trough = (0.91 - 0.02 * beam_tightness) + 0.05 * col_max;
         let peak = 1.025 - 0.01 * col_max;
-        let scan_mult = trough + (peak - trough) * beam;
+        let raw_scan = trough + (peak - trough) * beam;
+        let scan_mult = if scene.crt_filter == CrtFilter::Beam {
+            let s = (scene.beam.scanline_strength / 0.35).clamp(0.0, 1.25);
+            let raw_mean = 0.5 * (trough + peak);
+            (1.0 + (raw_scan - raw_mean) * s).max(0.0)
+        } else {
+            raw_scan
+        };
 
         // Fine vertical RGB phosphor triad pitch (`640` triads, scaled by `masksize`)
-        let mask_scale = if scene.crt_filter == CrtFilter::Halo {
-            scene.halo.masksize.clamp(1.0, 4.0)
-        } else {
-            1.0
+        let mask_scale = match scene.crt_filter {
+            CrtFilter::Halo => scene.halo.masksize.clamp(1.0, 4.0),
+            CrtFilter::Beam => scene.beam.mask_size.clamp(1.0, 4.0),
+            _ => 1.0,
         };
         let triad_count = if width.max(height) >= 320 {
             640.0f32 / mask_scale
@@ -1334,29 +1361,46 @@ fn eval_monitor_plane_point(
         };
         let triad_x = su * triad_count;
         let theta = triad_x * std::f32::consts::TAU;
-        let preset_mask_weight = if scene.crt_filter == CrtFilter::Halo {
-            (scene.halo.maskstr / 0.42).clamp(0.4, 1.5)
-        } else {
-            1.0
+        let preset_mask_weight = match scene.crt_filter {
+            CrtFilter::Halo => (scene.halo.maskstr / 0.42).clamp(0.4, 1.5),
+            CrtFilter::Beam => {
+                if scene.beam.shadow_mask <= 0.0 || scene.beam.mask_strength <= 0.001 {
+                    0.0
+                } else {
+                    (scene.beam.mask_strength / 0.36).clamp(0.0, 1.5)
+                }
+            }
+            _ => 1.0,
         };
         let mask_str = 0.038 * preset_mask_weight * (1.0 - 0.45 * col_max * col_max);
         let mut mask_r = 1.0 + mask_str * theta.cos();
         let mut mask_g = 1.0 + mask_str * (theta - 2.0943951).cos();
         let mut mask_b = 1.0 + mask_str * (theta - 4.1887902).cos();
 
-        let uses_slot_mask = scene.crt_filter == CrtFilter::Lottes
-            || (scene.halo.slotmask + scene.halo.slotmask1) > 0.01;
+        let uses_slot_mask = match scene.crt_filter {
+            CrtFilter::Lottes => true,
+            CrtFilter::Halo => (scene.halo.slotmask + scene.halo.slotmask1) > 0.01,
+            CrtFilter::Beam => scene.beam.shadow_mask > 0.0 && scene.beam.slot_mask > 0.01,
+            CrtFilter::Off => false,
+        };
+        let active_shadow_mask = match scene.crt_filter {
+            CrtFilter::Halo => scene.halo.shadow_mask,
+            CrtFilter::Beam => scene.beam.shadow_mask,
+            _ => 0.0,
+        };
         if uses_slot_mask {
             // Staggered Invar Slot Mask bridges (Toshiba, JVC, Panasonic, Philips, Lottes)
-            let slot_strength = if scene.crt_filter == CrtFilter::Halo {
-                ((scene.halo.slotmask + scene.halo.slotmask1) * 0.5).clamp(0.10, 0.60)
-            } else {
-                0.30
+            let slot_strength = match scene.crt_filter {
+                CrtFilter::Halo => {
+                    ((scene.halo.slotmask + scene.halo.slotmask1) * 0.5).clamp(0.10, 0.60)
+                }
+                CrtFilter::Beam => scene.beam.slot_mask.clamp(0.05, 0.60),
+                _ => 0.30,
             };
-            let slot_pitch = if scene.crt_filter == CrtFilter::Halo {
-                (scene.halo.double_slot / 2.0).clamp(0.5, 2.0)
-            } else {
-                1.0
+            let slot_pitch = match scene.crt_filter {
+                CrtFilter::Halo => (scene.halo.double_slot / 2.0).clamp(0.5, 2.0),
+                CrtFilter::Beam => (scene.beam.double_slot / 2.0).clamp(0.5, 2.0),
+                _ => 1.0,
             };
             let slot_col = (triad_x * 2.0).floor() as i32;
             let slot_row =
@@ -1369,7 +1413,7 @@ fn eval_monitor_plane_point(
             mask_r *= slot_bridge;
             mask_g *= slot_bridge;
             mask_b *= slot_bridge;
-        } else if scene.halo.shadow_mask >= 5.0 {
+        } else if active_shadow_mask >= 5.0 {
             // Very faint Trinitron / Diamondtron aperture-grille tension damper wires at sv = 0.30 and sv = 0.70
             let damper = 1.0
                 - ((-0.5 * ((sv - 0.30) / 0.0010).powi(2)).exp()
@@ -1384,12 +1428,13 @@ fn eval_monitor_plane_point(
         col[1] *= scan_mult * mask_g;
         col[2] *= scan_mult * mask_b;
 
-        // 3. CRT Phosphor Halation / Bloom (scaled by active Halo preset's glow/bloom/halation)
-        let halo_bloom_scale = if scene.crt_filter == CrtFilter::Halo {
-            ((scene.halo.glow + scene.halo.bloom + scene.halo.halation * 2.0) / 1.20)
-                .clamp(0.45, 1.65)
-        } else {
-            1.0
+        // 3. CRT Phosphor Halation / Bloom (scaled by active Halo/Beam preset's halation & bloom)
+        let halo_bloom_scale = match scene.crt_filter {
+            CrtFilter::Halo => ((scene.halo.glow + scene.halo.bloom + scene.halo.halation * 2.0)
+                / 1.20)
+                .clamp(0.45, 1.65),
+            CrtFilter::Beam => (scene.beam.halation * 2.5).clamp(0.0, 1.20),
+            _ => 1.0,
         };
         let bloom_weight =
             (if dark_room { 0.32 } else { 0.15 }) * halo_bloom_scale * (0.75 + 0.25 * beam);
@@ -2055,6 +2100,8 @@ mod tests {
             (CrtFilter::Lottes, true),
             (CrtFilter::Halo, false),
             (CrtFilter::Halo, true),
+            (CrtFilter::Beam, false),
+            (CrtFilter::Beam, true),
         ] {
             let scene = PhotoSceneContext {
                 crt_filter: filter,
@@ -2261,6 +2308,103 @@ mod tests {
         assert_ne!(
             curved_rgba, blackstripe_rgba,
             "90s Trinitron (Aperture Grille) vs 80s Toshiba Blackstripe (Slot Mask + deeper corners) must render differently"
+        );
+    }
+
+    #[test]
+    fn test_beam_curvature_and_preset_settings_carry_over_to_phone_photo() {
+        let width = 160;
+        let height = 120;
+        let pixels = vec![190u8; (width * height * 4) as usize];
+        let mut rng = rand::rngs::StdRng::seed_from_u64(999);
+
+        let mut wega_beam = crate::app::models::BeamSettings::default();
+        wega_beam
+            .apply_mask_preset(&crate::app::models::BeamMaskPreset::preset_sony_trinitron_wega());
+        let wega_scene = PhotoSceneContext {
+            crt_filter: CrtFilter::Beam,
+            dark_room: false,
+            warp: [0.0, 0.0],
+            corner_size: wega_beam.corner_size,
+            beam: wega_beam,
+            ..Default::default()
+        };
+
+        let mut curved_beam = crate::app::models::BeamSettings::default();
+        curved_beam
+            .apply_mask_preset(&crate::app::models::BeamMaskPreset::preset_sony_trinitron_90s());
+        let curved_scene = PhotoSceneContext {
+            crt_filter: CrtFilter::Beam,
+            dark_room: false,
+            warp: [curved_beam.warp_x, curved_beam.warp_y],
+            corner_size: curved_beam.corner_size,
+            beam: curved_beam,
+            ..Default::default()
+        };
+
+        let mut blackstripe_beam = crate::app::models::BeamSettings::default();
+        blackstripe_beam.apply_mask_preset(
+            &crate::app::models::BeamMaskPreset::preset_toshiba_blackstripe_80s(),
+        );
+        let blackstripe_scene = PhotoSceneContext {
+            crt_filter: CrtFilter::Beam,
+            dark_room: false,
+            warp: [blackstripe_beam.warp_x, blackstripe_beam.warp_y],
+            corner_size: blackstripe_beam.corner_size,
+            beam: blackstripe_beam,
+            ..Default::default()
+        };
+
+        let wega_params = PhotoCameraParams::random(&mut rng, &wega_scene);
+        assert_eq!(
+            wega_params.barrel_k1, 0.0,
+            "Flat-glass Beam CRT (WEGA, curvature=false) must have zero barrel_k1"
+        );
+        let curved_params = PhotoCameraParams::random(&mut rng, &curved_scene);
+        assert!(
+            curved_params.barrel_k1 > 0.0,
+            "Curved Beam CRT (90s Trinitron, curvature=true) must have positive barrel_k1"
+        );
+
+        let mut clean_params = wega_params.clone();
+        clean_params.iso_noise_lum = 0.0;
+        clean_params.iso_noise_chroma = 0.0;
+        clean_params.exposure_gain = 1.0;
+
+        let (wega_rgba, _, _) =
+            render_phone_photo_rgba(&pixels, width, height, &wega_scene, &clean_params);
+        let (curved_rgba, _, _) =
+            render_phone_photo_rgba(&pixels, width, height, &curved_scene, &clean_params);
+        let (blackstripe_rgba, _, _) =
+            render_phone_photo_rgba(&pixels, width, height, &blackstripe_scene, &clean_params);
+
+        assert_ne!(
+            wega_rgba, curved_rgba,
+            "Flat WEGA vs Curved 90s Trinitron in Beam mode must render differently in Ctrl+S photo"
+        );
+        assert_ne!(
+            curved_rgba, blackstripe_rgba,
+            "90s Trinitron vs 80s Toshiba Blackstripe in Beam mode must render differently in Ctrl+S photo"
+        );
+
+        // Verify Beam mode does not suffer Halo's heavy additive sRGB bloom washout when halation = 0.0
+        let mut zero_halo_scene = wega_scene.clone();
+        zero_halo_scene.dark_room = true;
+        zero_halo_scene.beam.halation = 0.0;
+        let mut halo_washout_scene = zero_halo_scene.clone();
+        halo_washout_scene.crt_filter = CrtFilter::Halo;
+
+        let (beam_dark_rgba, out_w, out_h) =
+            render_phone_photo_rgba(&pixels, width, height, &zero_halo_scene, &clean_params);
+        let (halo_dark_rgba, _, _) =
+            render_phone_photo_rgba(&pixels, width, height, &halo_washout_scene, &clean_params);
+
+        let center_idx = (((out_h / 2) * out_w + (out_w / 2)) as usize) * 4;
+        assert!(
+            beam_dark_rgba[center_idx] < halo_dark_rgba[center_idx],
+            "Beam dark-room photo with halation=0 ({}) should avoid Halo's additive sRGB bloom boost ({})",
+            beam_dark_rgba[center_idx],
+            halo_dark_rgba[center_idx]
         );
     }
 }

@@ -176,6 +176,8 @@ pub struct BeamShaderParams {
     pub border_crop: [f32; 4],
     #[serde(skip)]
     pub i_frame_override: Option<i32>,
+    #[serde(skip)]
+    pub steady_state_one_shot: bool,
 }
 
 impl BeamShaderParams {
@@ -254,7 +256,24 @@ impl BeamShaderParams {
             } else {
                 None
             },
+            steady_state_one_shot: false,
         }
+    }
+
+    /// Returns a one-shot 1x global persistence copy of these parameters for still-image
+    /// screenshot capture. Preserves exact Talbot-Plateau perceived brightness (`gain_vs_blur`,
+    /// `brightboost`, `gamma`, `h_sharp`, `vibrance`) and all Stage 2 CRT geometry, scanline,
+    /// phosphor mask, and halation settings without capturing a rolling-shutter sub-frame slice
+    /// or mutating the live sub-frame history ring buffer.
+    pub fn as_steady_state_capture(&self) -> Self {
+        let mut copy = self.clone();
+        copy.frames_per_hz = 1.0;
+        copy.fps_divisor = 1.0;
+        copy.lcd_anti_retention = false;
+        copy.scan_direction = 0;
+        copy.i_frame_override = None;
+        copy.steady_state_one_shot = true;
+        copy
     }
 
     pub fn effective_frames_per_hz(&self) -> f32 {
@@ -312,6 +331,7 @@ impl Default for BeamShaderParams {
             scaler_filter: 2,
             border_crop: [0.0, 0.0, 0.0, 0.0],
             i_frame_override: None,
+            steady_state_one_shot: false,
         }
     }
 }
@@ -1035,5 +1055,26 @@ mod tests {
         assert_eq!(unfocused.scanline_strength, 0.85);
         assert_eq!(unfocused.mask_strength, 0.45);
         assert_eq!(unfocused.halation, 0.25);
+        assert!(!unfocused.steady_state_one_shot);
+
+        let capture = focused.as_steady_state_capture();
+        assert!(capture.steady_state_one_shot);
+        assert_eq!(capture.frames_per_hz, 1.0);
+        assert_eq!(capture.effective_frames_per_hz(), 1.0);
+        assert_eq!(capture.fps_divisor, 1.0);
+        assert_eq!(capture.scan_direction, 0);
+        assert!(!capture.lcd_anti_retention);
+        assert_eq!(capture.i_frame_override, None);
+        assert_eq!(capture.gain_vs_blur, focused.gain_vs_blur);
+        assert_eq!(capture.brightboost, focused.brightboost);
+        assert_eq!(capture.gamma, focused.gamma);
+        assert_eq!(capture.h_sharp, focused.h_sharp);
+        assert_eq!(capture.vibrance, focused.vibrance);
+        assert!(capture.curvature);
+        assert_eq!(capture.warp_x, 0.031);
+        assert_eq!(capture.warp_y, 0.041);
+        assert_eq!(capture.scanline_strength, 0.85);
+        assert_eq!(capture.mask_strength, 0.45);
+        assert_eq!(capture.halation, 0.25);
     }
 }

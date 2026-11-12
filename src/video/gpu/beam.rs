@@ -433,92 +433,155 @@ impl BeamRenderer {
         let out_w = (output_size.0 as u32).max(1);
         let out_h = (output_size.1 as u32).max(1);
 
-        if self.last_input_size != (in_w, in_h) {
-            self.setup_cycle_buffers(gl, (in_w, in_h), params.scaler_filter);
-            self.last_input_size = (in_w, in_h);
-            self.last_scaler_filter = Some(params.scaler_filter);
-            self.history_initialized = false;
-            self.last_crt_hz_counter = None;
-        } else if self.last_scaler_filter != Some(params.scaler_filter) {
-            self.update_filter_mode(gl, params.scaler_filter);
-            self.last_scaler_filter = Some(params.scaler_filter);
-        }
-
         self.setup_beam_output_buffer(gl, out_w, out_h);
 
-        let effective_fph = params.effective_frames_per_hz();
-        let fps_divisor = params.fps_divisor.clamp(0.05, 1.0);
-        let override_active = params.i_frame_override.is_some();
-        if (effective_fph - self.last_effective_fph).abs() > 1e-6
-            || (fps_divisor - self.last_fps_divisor).abs() > 1e-6
-            || override_active != self.last_override_active
-        {
-            self.frame_counter = 0;
-            self.curr_cycle_started = false;
-            self.last_crt_hz_counter = None;
-            self.last_effective_fph = effective_fph;
-            self.last_fps_divisor = fps_divisor;
-            self.last_override_active = override_active;
-        }
-
-        // Keep iFrame well within 24-bit float mantissa integer precision (16,777,216)
-        let i_frame = if let Some(override_frame) = params.i_frame_override {
-            override_frame.rem_euclid(8_000_000)
+        let (
+            curr_tex,
+            prev1_tex,
+            prev2_tex,
+            i_frame,
+            frames_per_hz_uniform,
+            fps_divisor,
+            lcd_anti_retention_uniform,
+            scan_direction_uniform,
+            saved_input_tex_params,
+        ) = if params.steady_state_one_shot {
+            // One-shot steady-state 1x capture (screenshots): sample `input_texture` directly
+            // without touching the sub-frame history ring buffer or phase counters so live
+            // 120Hz/144Hz/240Hz scanout resumes seamlessly on the very next sub-frame.
+            gl.bind_vertex_array(Some(self.vertex_array));
+            let filter_param = if params.scaler_filter == 0 {
+                glow::NEAREST as i32
+            } else {
+                glow::LINEAR as i32
+            };
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(input_texture));
+            let prev_min = gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER);
+            let prev_mag = gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER);
+            let prev_wrap_s = gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S);
+            let prev_wrap_t = gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, filter_param);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter_param);
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            (
+                input_texture,
+                input_texture,
+                input_texture,
+                0,
+                1.0f32,
+                1.0f32,
+                0,
+                0,
+                Some((prev_min, prev_mag, prev_wrap_s, prev_wrap_t)),
+            )
         } else {
-            if self.frame_counter >= 8_000_000 {
+            if self.last_input_size != (in_w, in_h) {
+                self.setup_cycle_buffers(gl, (in_w, in_h), params.scaler_filter);
+                self.last_input_size = (in_w, in_h);
+                self.last_scaler_filter = Some(params.scaler_filter);
+                self.history_initialized = false;
+                self.last_crt_hz_counter = None;
+            } else if self.last_scaler_filter != Some(params.scaler_filter) {
+                self.update_filter_mode(gl, params.scaler_filter);
+                self.last_scaler_filter = Some(params.scaler_filter);
+            }
+
+            let effective_fph = params.effective_frames_per_hz();
+            let fps_divisor = params.fps_divisor.clamp(0.05, 1.0);
+            let override_active = params.i_frame_override.is_some();
+            if (effective_fph - self.last_effective_fph).abs() > 1e-6
+                || (fps_divisor - self.last_fps_divisor).abs() > 1e-6
+                || override_active != self.last_override_active
+            {
                 self.frame_counter = 0;
                 self.curr_cycle_started = false;
                 self.last_crt_hz_counter = None;
+                self.last_effective_fph = effective_fph;
+                self.last_fps_divisor = fps_divisor;
+                self.last_override_active = override_active;
             }
-            self.frame_counter
-        };
-        let crt_hz_counter = compute_crt_hz_counter(i_frame, fps_divisor, effective_fph);
-        let crt_raster_pos = compute_crt_raster_pos(i_frame, fps_divisor, effective_fph);
-        let f_end = crt_raster_pos * effective_fph + 1.0;
 
-        gl.bind_vertex_array(Some(self.vertex_array));
+            // Keep iFrame well within 24-bit float mantissa integer precision (16,777,216)
+            let i_frame = if let Some(override_frame) = params.i_frame_override {
+                override_frame.rem_euclid(8_000_000)
+            } else {
+                if self.frame_counter >= 8_000_000 {
+                    self.frame_counter = 0;
+                    self.curr_cycle_started = false;
+                    self.last_crt_hz_counter = None;
+                }
+                self.frame_counter
+            };
+            let crt_hz_counter = compute_crt_hz_counter(i_frame, fps_divisor, effective_fph);
+            let crt_raster_pos = compute_crt_raster_pos(i_frame, fps_divisor, effective_fph);
+            let f_end = crt_raster_pos * effective_fph + 1.0;
 
-        if !self.history_initialized {
-            for i in 0..3 {
-                self.copy_texture_to_fbo(gl, input_texture, i, in_w, in_h);
-            }
-            self.head_idx = 0;
-            self.curr_cycle_started = f_end > effective_fph + 1e-5;
-            self.last_crt_hz_counter = Some(crt_hz_counter);
-            self.history_initialized = true;
-        } else if self.last_crt_hz_counter != Some(crt_hz_counter) {
-            self.head_idx = (self.head_idx + 1) % 3;
-            let prev1_idx = (self.head_idx + 2) % 3;
-            if !self.curr_cycle_started {
-                // On integer `frames_per_hz` (e.g. 2.0, 3.0, 4.0), `fEnd` never exceeded
-                // `effective_fph` during the previous cycle, so `frame_curr` was not yet
-                // revealed on screen. Latch the new source frame directly into `prev1_idx`
-                // so the new sweep (`[0, effective_fph]`) immediately scans the latest frame
-                // with zero 1-cycle latency!
-                self.copy_texture_to_fbo(gl, input_texture, prev1_idx, in_w, in_h);
-            }
-            let wraps_this_subframe = f_end > effective_fph + 1e-5;
-            if wraps_this_subframe {
+            gl.bind_vertex_array(Some(self.vertex_array));
+
+            if !self.history_initialized {
+                for i in 0..3 {
+                    self.copy_texture_to_fbo(gl, input_texture, i, in_w, in_h);
+                }
+                self.head_idx = 0;
+                self.curr_cycle_started = f_end > effective_fph + 1e-5;
+                self.last_crt_hz_counter = Some(crt_hz_counter);
+                self.history_initialized = true;
+            } else if self.last_crt_hz_counter != Some(crt_hz_counter) {
+                self.head_idx = (self.head_idx + 1) % 3;
+                let prev1_idx = (self.head_idx + 2) % 3;
+                if !self.curr_cycle_started {
+                    // On integer `frames_per_hz` (e.g. 2.0, 3.0, 4.0), `fEnd` never exceeded
+                    // `effective_fph` during the previous cycle, so `frame_curr` was not yet
+                    // revealed on screen. Latch the new source frame directly into `prev1_idx`
+                    // so the new sweep (`[0, effective_fph]`) immediately scans the latest frame
+                    // with zero 1-cycle latency!
+                    self.copy_texture_to_fbo(gl, input_texture, prev1_idx, in_w, in_h);
+                }
+                let wraps_this_subframe = f_end > effective_fph + 1e-5;
+                if wraps_this_subframe {
+                    self.copy_texture_to_fbo(gl, input_texture, self.head_idx, in_w, in_h);
+                }
+                self.curr_cycle_started = wraps_this_subframe;
+                self.last_crt_hz_counter = Some(crt_hz_counter);
+            } else if !self.curr_cycle_started && f_end > effective_fph + 1e-5 {
+                // Non-integer `frames_per_hz` (e.g. 2.4 at 144Hz): this sub-frame is the first
+                // sub-frame of the cycle whose beam wraps past `effective_fph` onto the top of
+                // the screen (`overlapCurr > 0`). Latch the latest `input_texture` into `curr`
+                // right now so the top wrap-around and the subsequent cycle (after rotation into
+                // `prev1`) scan the exact same frame seamlessly without mid-screen tearing!
                 self.copy_texture_to_fbo(gl, input_texture, self.head_idx, in_w, in_h);
+                self.curr_cycle_started = true;
             }
-            self.curr_cycle_started = wraps_this_subframe;
-            self.last_crt_hz_counter = Some(crt_hz_counter);
-        } else if !self.curr_cycle_started && f_end > effective_fph + 1e-5 {
-            // Non-integer `frames_per_hz` (e.g. 2.4 at 144Hz): this sub-frame is the first
-            // sub-frame of the cycle whose beam wraps past `effective_fph` onto the top of
-            // the screen (`overlapCurr > 0`). Latch the latest `input_texture` into `curr`
-            // right now so the top wrap-around and the subsequent cycle (after rotation into
-            // `prev1`) scan the exact same frame seamlessly without mid-screen tearing!
-            self.copy_texture_to_fbo(gl, input_texture, self.head_idx, in_w, in_h);
-            self.curr_cycle_started = true;
-        }
 
-        let prev1_tex = self.cycle_textures[(self.head_idx + 2) % 3];
-        let prev2_tex = self.cycle_textures[(self.head_idx + 1) % 3];
-        let curr_tex = if self.curr_cycle_started {
-            self.cycle_textures[self.head_idx]
-        } else {
-            prev1_tex
+            let prev1_tex = self.cycle_textures[(self.head_idx + 2) % 3];
+            let prev2_tex = self.cycle_textures[(self.head_idx + 1) % 3];
+            let curr_tex = if self.curr_cycle_started {
+                self.cycle_textures[self.head_idx]
+            } else {
+                prev1_tex
+            };
+
+            (
+                curr_tex,
+                prev1_tex,
+                prev2_tex,
+                i_frame,
+                params.frames_per_hz.max(1.0),
+                fps_divisor,
+                if params.lcd_anti_retention { 1 } else { 0 },
+                params.scan_direction.min(4) as i32,
+                None,
+            )
         };
 
         // Stage 1: CRT Electron Beam Yoke Simulator -> renders linear light + steady luma to `self.beam_fbo` (RGBA16F)
@@ -557,10 +620,7 @@ impl BeamRenderer {
         );
 
         gl.uniform_1_i32(self.iframe_loc.as_ref(), i_frame);
-        gl.uniform_1_f32(
-            self.frames_per_hz_loc.as_ref(),
-            params.frames_per_hz.max(1.0),
-        );
+        gl.uniform_1_f32(self.frames_per_hz_loc.as_ref(), frames_per_hz_uniform);
         gl.uniform_1_f32(self.gamma_loc.as_ref(), params.gamma.clamp(1.0, 5.0));
         gl.uniform_1_f32(
             self.gain_vs_blur_loc.as_ref(),
@@ -569,16 +629,13 @@ impl BeamRenderer {
         gl.uniform_1_f32(self.fps_divisor_loc.as_ref(), fps_divisor);
         gl.uniform_1_i32(
             self.lcd_anti_retention_loc.as_ref(),
-            if params.lcd_anti_retention { 1 } else { 0 },
+            lcd_anti_retention_uniform,
         );
         gl.uniform_1_f32(
             self.lcd_slew_loc.as_ref(),
             params.lcd_inversion_compensation_slew.clamp(0.0, 0.05),
         );
-        gl.uniform_1_i32(
-            self.scan_direction_loc.as_ref(),
-            params.scan_direction.min(4) as i32,
-        );
+        gl.uniform_1_i32(self.scan_direction_loc.as_ref(), scan_direction_uniform);
         gl.uniform_1_i32(
             self.splitscreen_loc.as_ref(),
             if params.splitscreen { 1 } else { 0 },
@@ -615,6 +672,14 @@ impl BeamRenderer {
         gl.bind_texture(glow::TEXTURE_2D, None);
         gl.active_texture(glow::TEXTURE1);
         gl.bind_texture(glow::TEXTURE_2D, None);
+        if let Some((prev_min, prev_mag, prev_wrap_s, prev_wrap_t)) = saved_input_tex_params {
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(input_texture));
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, prev_min);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, prev_mag);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, prev_wrap_s);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, prev_wrap_t);
+        }
 
         // Stage 2: CRT Tube Geometry Transformation + Gamma-Curve-Preserving Scanlines & Phosphor Mask -> `target_fbo`
         gl.bind_framebuffer(glow::FRAMEBUFFER, target_fbo);
@@ -728,7 +793,7 @@ impl BeamRenderer {
         gl.bind_texture(glow::TEXTURE_2D, None);
         gl.use_program(None);
 
-        if params.i_frame_override.is_none() {
+        if !params.steady_state_one_shot && params.i_frame_override.is_none() {
             self.frame_counter = self.frame_counter.wrapping_add(1);
         }
     }

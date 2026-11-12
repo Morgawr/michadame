@@ -367,6 +367,7 @@ impl AppState {
                 self.video.border_crop_bottom,
             ],
             halo: self.halo.clone(),
+            beam: self.beam.clone(),
         };
         if self.screenshot.request(mode, scene) {
             ctx.request_repaint();
@@ -2735,14 +2736,16 @@ mod tests {
     }
 
     #[test]
-    fn test_request_screenshot_substitutes_halo_when_beam_enabled() {
+    fn test_request_screenshot_preserves_beam_filter_and_settings() {
         let mut state = AppState::default();
         let ctx = egui::Context::default();
         state.ui.video_window_open = true;
         state.halo.curvature = true;
         state.halo.corner_size = 0.025;
         state.beam.curvature = false;
-        state.beam.corner_size = 0.0;
+        state.beam.corner_size = 0.005;
+        state.beam.gain_vs_blur = 0.60;
+        state.beam.halation = 0.06;
         state
             .crt_filter
             .store(CrtFilter::Beam as u8, Ordering::Relaxed);
@@ -2753,8 +2756,10 @@ mod tests {
             .capture_handle()
             .take_pending()
             .expect("screenshot request should be queued");
-        assert_eq!(req.scene.crt_filter, CrtFilter::Halo);
-        assert_eq!(req.scene.warp, [0.031, 0.041]);
-        assert_eq!(req.scene.corner_size, 0.025);
+        assert_eq!(req.scene.crt_filter, CrtFilter::Beam);
+        assert_eq!(req.scene.warp, [0.0, 0.0]);
+        assert_eq!(req.scene.corner_size, 0.005);
+        assert_eq!(req.scene.beam.gain_vs_blur, 0.60);
+        assert_eq!(req.scene.beam.halation, 0.06);
     }
 }

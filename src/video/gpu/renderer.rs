@@ -4192,6 +4192,203 @@ mod tests {
 
     #[test]
     #[ignore = "opt-in Mesa software EGL readback; set LIBGL_ALWAYS_SOFTWARE=1 EGL_PLATFORM=surfaceless"]
+    fn beam_crt_steady_state_capture_matches_subframe_average_without_disturbing_ring_buffer() {
+        let egl = software_gl::SoftwareGl::new(640, 480);
+        #[allow(clippy::arc_with_non_send_sync)]
+        let gl = Arc::new(egl.context());
+        let mut painter = egui_glow::Painter::new(gl.clone(), "", None).unwrap();
+        let mut renderer = CrtFilterRenderer::new(&gl);
+
+        let mut pixels = vec![0u8; 640 * 480 * 4];
+        for p in pixels.chunks_exact_mut(4) {
+            p[0] = 200;
+            p[1] = 200;
+            p[2] = 200;
+            p[3] = 255;
+        }
+        let frame = RawFrame {
+            captured_at: 1,
+            rate: crate::replay::config::Rate { num: 60, den: 1 },
+            width: 640,
+            height: 480,
+            data: pixels,
+            format: Pixel::RGBA,
+            color_range: crate::video::types::ColorRange::Full,
+        };
+        let params = ShaderParams::default();
+        let halo_params = HaloShaderParams::default();
+        let cathode = CathodeInterferenceShaderParams::default();
+        let output = (640.0, 480.0);
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(output.0, output.1));
+        let top_row_idx = (420 * 640 + 320) * 4;
+        let bot_row_idx = (60 * 640 + 320) * 4;
+
+        for gain_vs_blur in [0.75f32, 0.45f32] {
+            let gamma = 2.4f32;
+            let live_beam = BeamShaderParams {
+                frames_per_hz: 2.0,
+                gamma,
+                gain_vs_blur,
+                scan_direction: 1,
+                lcd_anti_retention: false,
+                curvature: false,
+                corner_size: 0.0,
+                ..Default::default()
+            };
+            let capture_beam = live_beam.as_steady_state_capture();
+
+            // Subframe 0 (top half illuminated)
+            let mut sub0_beam = live_beam.clone();
+            sub0_beam.i_frame_override = Some(0);
+            let area0 = renderer.paint(
+                &gl,
+                &painter,
+                rect,
+                Some(&frame),
+                None,
+                (640, 480),
+                output,
+                &params,
+                &halo_params,
+                &sub0_beam,
+                &cathode,
+                None,
+                None,
+                0.0,
+                false,
+                false,
+                false,
+                true,
+                None,
+                0.0,
+                0.0,
+                None,
+                None,
+                false,
+            );
+            let (sub0, _, _) = read_framebuffer_pixels_raw(&gl, area0).unwrap();
+
+            // Mid-sweep one-shot steady-state screenshot capture (`as_steady_state_capture`)
+            let area_cap = renderer.paint(
+                &gl,
+                &painter,
+                rect,
+                Some(&frame),
+                None,
+                (640, 480),
+                output,
+                &params,
+                &halo_params,
+                &capture_beam,
+                &cathode,
+                None,
+                None,
+                0.0,
+                false,
+                false,
+                false,
+                true,
+                None,
+                0.0,
+                0.0,
+                None,
+                None,
+                false,
+            );
+            let (cap_px, _, _) = read_framebuffer_pixels_raw(&gl, area_cap).unwrap();
+
+            // Subframe 1 immediately after screenshot capture (bottom half must still illuminate cleanly)
+            let mut sub1_beam = live_beam.clone();
+            sub1_beam.i_frame_override = Some(1);
+            let area1 = renderer.paint(
+                &gl,
+                &painter,
+                rect,
+                Some(&frame),
+                None,
+                (640, 480),
+                output,
+                &params,
+                &halo_params,
+                &sub1_beam,
+                &cathode,
+                None,
+                None,
+                0.0,
+                false,
+                false,
+                false,
+                true,
+                None,
+                0.0,
+                0.0,
+                None,
+                None,
+                false,
+            );
+            let (sub1, _, _) = read_framebuffer_pixels_raw(&gl, area1).unwrap();
+            assert!(
+                sub1[bot_row_idx] > sub1[top_row_idx],
+                "Live subframe 1 after one-shot capture must still illuminate bottom half (bot={}, top={})",
+                sub1[bot_row_idx],
+                sub1[top_row_idx]
+            );
+
+            let srgb_to_linear = |c: f32| -> f32 {
+                if c <= 0.04045 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(gamma)
+                }
+            };
+            let linear_to_srgb = |c: f32| -> f32 {
+                if c <= 0.0031308 {
+                    c * 12.92
+                } else {
+                    1.055 * c.powf(1.0 / gamma) - 0.055
+                }
+            };
+
+            // Average over a 16x16 patch in top & bottom halves to average out fine scanline/mask phase
+            let avg_patch_linear = |buf: &[u8], center_y: usize| -> f32 {
+                let mut sum = 0.0f32;
+                let mut count = 0.0f32;
+                for dy in 0..16 {
+                    for dx in 0..16 {
+                        let idx = (((center_y + dy) * 640 + (312 + dx)) * 4) as usize;
+                        let r = srgb_to_linear(buf[idx] as f32 / 255.0);
+                        let g = srgb_to_linear(buf[idx + 1] as f32 / 255.0);
+                        let b = srgb_to_linear(buf[idx + 2] as f32 / 255.0);
+                        sum += (r + g + b) / 3.0;
+                        count += 1.0;
+                    }
+                }
+                sum / count
+            };
+
+            let cap_top_lin = avg_patch_linear(&cap_px, 412);
+            let cap_bot_lin = avg_patch_linear(&cap_px, 52);
+            assert!(
+                (cap_top_lin - cap_bot_lin).abs() < 0.01,
+                "Steady-state capture must have uniform top/bottom brightness: top={cap_top_lin:.4}, bot={cap_bot_lin:.4}"
+            );
+
+            let live_talbot_top_lin =
+                0.5 * (avg_patch_linear(&sub0, 412) + avg_patch_linear(&sub1, 412));
+            let live_talbot_srgb = linear_to_srgb(live_talbot_top_lin) * 255.0;
+            let cap_srgb = linear_to_srgb(cap_top_lin) * 255.0;
+            assert!(
+                (cap_srgb - live_talbot_srgb).abs() <= 1.5,
+                "Steady-state Beam capture ({cap_srgb:.1}) must match Talbot-Plateau perceived brightness ({live_talbot_srgb:.1}) for gain_vs_blur={gain_vs_blur}"
+            );
+        }
+
+        renderer.destroy(&gl);
+        painter.destroy();
+    }
+
+    #[test]
+    #[ignore = "opt-in Mesa software EGL readback; set LIBGL_ALWAYS_SOFTWARE=1 EGL_PLATFORM=surfaceless"]
     fn beam_crt_sweeps_top_then_bottom_across_subframes() {
         let egl = software_gl::SoftwareGl::new(640, 480);
         #[allow(clippy::arc_with_non_send_sync)]

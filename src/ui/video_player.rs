@@ -35,17 +35,13 @@ fn capture_frame_pixels(
 
 /// Resolves the effective CRT filter to render for the current frame.
 ///
-/// When capturing a screenshot (such as mining a vocabulary word with a screenshot or copying
-/// a screenshot to the clipboard) while [`CrtFilter::Beam`] is active, temporarily substitutes
-/// [`CrtFilter::Halo`] so the captured still image has full-frame CRT scanlines, phosphor mask,
-/// and halation instead of a rolling-shutter sub-frame slice.
+/// [`CrtFilter::Beam`] remains [`CrtFilter::Beam`] during screenshot capture; the render callback
+/// switches [`video::gpu::BeamShaderParams`] into one-shot 1x global persistence mode
+/// (`as_steady_state_capture`) so the captured still image preserves Beam's exact brightness,
+/// gamma, scanlines, phosphor mask, curvature, and halation without a rolling-shutter slice.
 #[inline]
-pub fn resolve_paint_crt_filter(filter: CrtFilter, is_screenshot_capture: bool) -> CrtFilter {
-    if is_screenshot_capture && filter == CrtFilter::Beam {
-        CrtFilter::Halo
-    } else {
-        filter
-    }
+pub fn resolve_paint_crt_filter(filter: CrtFilter, _is_screenshot_capture: bool) -> CrtFilter {
+    filter
 }
 
 #[inline]
@@ -787,6 +783,11 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 renderer.ocr_recycled_buffer =
                                     ocr_dispatch_cb.try_take_recycled_buffer();
                             }
+                            let effective_beam_params = if is_screenshot_capture && run_beam {
+                                beam_params.as_steady_state_capture()
+                            } else {
+                                beam_params.clone()
+                            };
                             let rendered_area = renderer.paint(
                                 painter.gl(),
                                 painter,
@@ -797,7 +798,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 output_size,
                                 &params,
                                 &halo_params,
-                                &beam_params,
+                                &effective_beam_params,
                                 &cathode_params_cb,
                                 Some(&audio_reactive_params),
                                 Some(&glass_params),
@@ -2449,37 +2450,37 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_paint_crt_filter_uses_halo_for_screenshots_when_beam_enabled() {
-        // When capturing a screenshot (mining a word with screenshot or clipboard screenshot),
-        // Beam is substituted with Halo so the captured image is clean and readable.
-        assert_eq!(
-            resolve_paint_crt_filter(CrtFilter::Beam, true),
-            CrtFilter::Halo
-        );
-        // Normal live rendering with Beam keeps Beam.
-        assert_eq!(
-            resolve_paint_crt_filter(CrtFilter::Beam, false),
-            CrtFilter::Beam
-        );
-        // Other CRT filters (Off, Lottes, Halo) are unchanged during screenshot capture.
-        for filter in [CrtFilter::Off, CrtFilter::Lottes, CrtFilter::Halo] {
+    fn test_resolve_paint_crt_filter_keeps_beam_for_steady_state_screenshots() {
+        // When capturing a screenshot, Beam stays Beam (rendered via `as_steady_state_capture`)
+        // so brightness, gamma, curvature, scanlines, mask, and halation match live Beam mode.
+        for filter in [
+            CrtFilter::Off,
+            CrtFilter::Lottes,
+            CrtFilter::Halo,
+            CrtFilter::Beam,
+        ] {
             assert_eq!(resolve_paint_crt_filter(filter, true), filter);
             assert_eq!(resolve_paint_crt_filter(filter, false), filter);
         }
 
-        let state = AppState::default();
+        let mut state = AppState::default();
+        state.beam.gain_vs_blur = 0.55;
+        state.beam.brightboost = 1.15;
         let params = video::gpu::ShaderParams::from_state(&state);
         let halo_params = video::gpu::HaloShaderParams::from_state(&state);
         let beam_params = video::gpu::BeamShaderParams::from_state(&state);
-        let (_, _, beam_type) =
-            crt_geometry_for_filter(CrtFilter::Beam, &params, &halo_params, &beam_params);
-        let (_, _, halo_type) = crt_geometry_for_filter(
+        let capture_beam_params = beam_params.as_steady_state_capture();
+        let (_, _, beam_type) = crt_geometry_for_filter(
             resolve_paint_crt_filter(CrtFilter::Beam, true),
             &params,
             &halo_params,
-            &beam_params,
+            &capture_beam_params,
         );
         assert_eq!(beam_type, 3);
-        assert_eq!(halo_type, 2);
+        assert!(capture_beam_params.steady_state_one_shot);
+        assert_eq!(capture_beam_params.frames_per_hz, 1.0);
+        assert_eq!(capture_beam_params.scan_direction, 0);
+        assert_eq!(capture_beam_params.gain_vs_blur, 0.55);
+        assert_eq!(capture_beam_params.brightboost, 1.15);
     }
 }
