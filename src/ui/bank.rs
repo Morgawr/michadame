@@ -33,6 +33,12 @@ const THUMB_SIZE: egui::Vec2 = egui::vec2(240.0, 135.0);
 const THUMB_LOADS_PER_FRAME: usize = 6;
 /// Designed size (points) of the mining bank window.
 const BANK_WINDOW_SIZE: egui::Vec2 = egui::vec2(900.0, 900.0);
+/// Extra vertical padding (points) rendered above and below the scroll viewport to prevent pop-in.
+const VIRTUAL_OVERSCAN: f32 = 400.0;
+/// Default unmeasured card height in compact mode (collapsed).
+const DEFAULT_COMPACT_CARD_HEIGHT: f32 = 76.0;
+/// Default unmeasured card height in full / expanded mode.
+const DEFAULT_FULL_CARD_HEIGHT: f32 = 210.0;
 
 pub fn draw_bank_window(state: &mut AppState, ctx: &egui::Context) {
     if !state.bank.window_open || !state.ui.scale.settled_once {
@@ -93,7 +99,7 @@ pub(crate) fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
                 let text = if state.bank.filter_tag.trim().is_empty() {
                     format!("{total} word{}", plural(total))
                 } else {
-                    let shown = state.bank.visible_indices().len();
+                    let shown = state.bank.visible_indices_cached().len();
                     format!("{shown} of {total} word{}", plural(total))
                 };
                 ui.label(RichText::new(text).color(COLOR_MUTED));
@@ -144,6 +150,7 @@ pub(crate) fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
                     ui.checkbox(&mut bank.compact_mode, "Compact mode");
                     if bank.compact_mode != prev_compact {
                         bank.expanded_entries.clear();
+                        bank.card_heights.clear();
                         compact_changed = true;
                     }
                 }
@@ -183,7 +190,7 @@ pub(crate) fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
             return;
         }
 
-        let visible = state.bank.visible_indices();
+        let visible = state.bank.visible_indices_cached();
         if visible.is_empty() {
             ui.add_space(40.0);
             ui.vertical_centered(|ui| {
@@ -195,33 +202,118 @@ pub(crate) fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
             return;
         }
 
+        let today = crate::bank::current_local_day();
         let mut loads_left = THUMB_LOADS_PER_FRAME;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for idx in visible {
-                    let entry = state.bank.entries[idx].clone();
+            .show_viewport(ui, |ui, viewport| {
+                let avail_w = ui.available_width().max(1.0);
+                let width_bucket = (avail_w / 4.0).round() as u32;
+                state.bank.prepare_card_heights(width_bucket);
+
+                let default_item_spacing = ui.spacing().item_spacing;
+                ui.spacing_mut().item_spacing.y = 0.0;
+
+                let view_min = viewport.min.y - VIRTUAL_OVERSCAN;
+                let view_max = viewport.max.y + VIRTUAL_OVERSCAN;
+
+                let mut top_skip_height = 0.0f32;
+                let mut first_render_pos = visible.len();
+
+                for (pos, &idx) in visible.iter().enumerate() {
+                    let entry = &state.bank.entries[idx];
                     let is_expanded = !state.bank.compact_mode
                         || state.bank.expanded_entries.contains(&entry.id);
-                    let action = if is_expanded {
-                        draw_row(ui, ctx, state, &entry, &mut loads_left)
+                    let gap = default_item_spacing.y + if is_expanded { 8.0 } else { 4.0 };
+                    let est_card_h = state.bank.card_heights.get(&entry.id).copied().unwrap_or(
+                        if is_expanded {
+                            DEFAULT_FULL_CARD_HEIGHT
+                        } else {
+                            DEFAULT_COMPACT_CARD_HEIGHT
+                        },
+                    );
+                    let stride = est_card_h + gap;
+                    if top_skip_height + stride < view_min {
+                        top_skip_height += stride;
                     } else {
-                        let pitches = {
-                            let pitch_guard = state.dict.pitch_db.lock().ok();
-                            let pitch_db = pitch_guard.as_ref().and_then(|g| g.as_ref());
-                            state.bank.pitches_for_entry(&entry, pitch_db)
-                        };
-                        draw_compact_row(ui, &entry, &pitches)
+                        first_render_pos = pos;
+                        break;
+                    }
+                }
+
+                if top_skip_height > 0.0 {
+                    ui.allocate_space(egui::vec2(avail_w, top_skip_height));
+                }
+
+                let mut y_cursor = top_skip_height;
+                let mut trailing_start_pos = visible.len();
+
+                for (offset, &idx) in visible[first_render_pos..].iter().enumerate() {
+                    if y_cursor > view_max {
+                        trailing_start_pos = first_render_pos + offset;
+                        break;
+                    }
+                    let entry_id = state.bank.entries[idx].id;
+                    let created_at = state.bank.entries[idx].created_at;
+                    let is_expanded = !state.bank.compact_mode
+                        || state.bank.expanded_entries.contains(&entry_id);
+                    let gap = default_item_spacing.y + if is_expanded { 8.0 } else { 4.0 };
+                    let date_str = state
+                        .bank
+                        .formatted_friendly_date(entry_id, created_at, today);
+
+                    let (action, measured_card_h) = if is_expanded {
+                        draw_row_at(
+                            ui,
+                            ctx,
+                            state,
+                            idx,
+                            &date_str,
+                            default_item_spacing,
+                            &mut loads_left,
+                        )
+                    } else {
+                        let pitches = state.bank.compact_pitches_at(idx, &state.dict.pitch_db);
+                        let entry = &state.bank.entries[idx];
+                        draw_compact_row_with_date(
+                            ui,
+                            entry,
+                            &pitches,
+                            &date_str,
+                            default_item_spacing,
+                        )
                     };
+
+                    state.bank.card_heights.insert(entry_id, measured_card_h);
                     match action {
                         RowAction::None => {}
-                        RowAction::Enlarge => enlarge = Some(entry.id),
-                        RowAction::Delete => delete = Some(entry.id),
-                        RowAction::CopyScreenshot => copy_screenshot = Some(entry.id),
+                        RowAction::Enlarge => enlarge = Some(entry_id),
+                        RowAction::Delete => delete = Some(entry_id),
+                        RowAction::CopyScreenshot => copy_screenshot = Some(entry_id),
                         RowAction::ToggleExpand(id) => toggle_expand = Some(id),
                         RowAction::SetFilterTag(tag) => state.bank.filter_tag = tag,
                     }
-                    ui.add_space(if is_expanded { 8.0 } else { 4.0 });
+                    ui.add_space(gap);
+                    y_cursor += measured_card_h + gap;
+                }
+
+                let mut bottom_skip_height = 0.0f32;
+                for &idx in &visible[trailing_start_pos..] {
+                    let entry = &state.bank.entries[idx];
+                    let is_expanded = !state.bank.compact_mode
+                        || state.bank.expanded_entries.contains(&entry.id);
+                    let gap = default_item_spacing.y + if is_expanded { 8.0 } else { 4.0 };
+                    let est_card_h = state.bank.card_heights.get(&entry.id).copied().unwrap_or(
+                        if is_expanded {
+                            DEFAULT_FULL_CARD_HEIGHT
+                        } else {
+                            DEFAULT_COMPACT_CARD_HEIGHT
+                        },
+                    );
+                    bottom_skip_height += est_card_h + gap;
+                }
+                if bottom_skip_height > 0.0 {
+                    ui.allocate_space(egui::vec2(avail_w, bottom_skip_height));
                 }
             });
         if loads_left == 0 {
@@ -263,11 +355,13 @@ enum RowAction {
     SetFilterTag(String),
 }
 
-fn draw_compact_row(
+fn draw_compact_row_with_date(
     ui: &mut egui::Ui,
     entry: &BankEntryMeta,
     pitches: &[crate::dict::PitchAccent],
-) -> RowAction {
+    date_str: &str,
+    default_item_spacing: egui::Vec2,
+) -> (RowAction, f32) {
     let mut action = RowAction::None;
     let card_height = 36.0;
     let (rect, response) = ui.allocate_exact_size(
@@ -290,6 +384,7 @@ fn draw_compact_row(
     let mut tag_clicked = false;
 
     ui.allocate_ui_at_rect(inner_rect, |ui| {
+        ui.spacing_mut().item_spacing = default_item_spacing;
         ui.horizontal(|ui| {
             let arrow_color = if is_hovered { theme::GOLD } else { COLOR_MUTED };
             ui.label(RichText::new("▶").size(11.0).color(arrow_color));
@@ -318,7 +413,7 @@ fn draw_compact_row(
             // Timestamp aligned to the right
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
-                    RichText::new(format_friendly_timestamp(entry.created_at))
+                    RichText::new(date_str)
                         .font(egui::FontId::proportional(11.5))
                         .color(COLOR_MUTED),
                 );
@@ -330,23 +425,28 @@ fn draw_compact_row(
         action = RowAction::ToggleExpand(entry.id);
     }
 
-    action
+    (action, rect.height())
 }
 
-fn draw_row(
+fn draw_row_at(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
     state: &mut AppState,
-    entry: &BankEntryMeta,
+    idx: usize,
+    date_str: &str,
+    default_item_spacing: egui::Vec2,
     loads_left: &mut usize,
-) -> RowAction {
+) -> (RowAction, f32) {
     let mut action = RowAction::None;
+    let entry_id = state.bank.entries[idx].id;
+    let has_screenshot = state.bank.entries[idx].has_screenshot;
 
     // Retro panel chrome is painted behind the row once its size is known.
     let chrome_idx = ui.painter().add(egui::Shape::Noop);
     let row = egui::Frame::none()
         .inner_margin(egui::Margin::same(12.0))
         .show(ui, |ui| {
+            ui.spacing_mut().item_spacing = default_item_spacing;
             ui.set_width(ui.available_width());
             ui.horizontal_top(|ui| {
                 if state.bank.compact_mode {
@@ -379,33 +479,33 @@ fn draw_row(
                         .on_hover_text("Click to collapse entry")
                         .clicked()
                     {
-                        action = RowAction::ToggleExpand(entry.id);
+                        action = RowAction::ToggleExpand(entry_id);
                     }
                     ui.add_space(4.0);
                 }
 
                 // Screenshot preview
-                let sense = if entry.has_screenshot {
+                let sense = if has_screenshot {
                     egui::Sense::click()
                 } else {
                     egui::Sense::hover()
                 };
                 let (rect, response) = ui.allocate_exact_size(THUMB_SIZE, sense);
                 if ui.is_rect_visible(rect) {
-                    let cached = state.bank.thumbnails.contains_key(&entry.id);
+                    let cached = state.bank.thumbnails.contains_key(&entry_id);
                     let texture = if cached || *loads_left > 0 {
                         if !cached {
                             *loads_left -= 1;
                         }
-                        state.bank.thumbnail(ctx, entry)
+                        state.bank.thumbnail_by_id(ctx, entry_id, has_screenshot)
                     } else {
                         None
                     };
-                    paint_thumbnail(ui, rect, texture.as_ref(), entry.has_screenshot, cached);
+                    paint_thumbnail(ui, rect, texture.as_ref(), has_screenshot, cached);
                 }
-                if entry.has_screenshot {
-                    let copying = state.bank.copying_screenshot == Some(entry.id);
-                    let copy_id = ui.id().with(("copy_btn", entry.id));
+                if has_screenshot {
+                    let copying = state.bank.copying_screenshot == Some(entry_id);
+                    let copy_id = ui.id().with(("copy_btn", entry_id));
                     let btn_rect = egui::Rect::from_min_size(
                         rect.min + egui::vec2(6.0, 6.0),
                         egui::vec2(28.0, 28.0),
@@ -441,17 +541,9 @@ fn draw_row(
                 }
 
                 ui.add_space(8.0);
-                let (dict_entry, fallback_pitches) = {
-                    let pitch_guard = state.dict.pitch_db.lock().ok();
-                    let pitch_db = pitch_guard.as_ref().and_then(|g| g.as_ref());
-                    let de = state.bank.dict_entry_with_pitch(entry, pitch_db);
-                    let fp = if de.is_none() {
-                        state.bank.pitches_for_entry(entry, pitch_db)
-                    } else {
-                        Vec::new()
-                    };
-                    (de, fp)
-                };
+                let (dict_entry, fallback_pitches) = state
+                    .bank
+                    .dict_entry_and_pitches_at(idx, &state.dict.pitch_db);
                 ui.vertical(|ui| {
                     // Entry header (word, reading, frequency, tags), date and delete button
                     ui.horizontal(|ui| {
@@ -466,6 +558,7 @@ fn draw_row(
                                     render_entry_header(ui, de, false);
                                 }),
                                 None => {
+                                    let entry = &state.bank.entries[idx];
                                     render_headword_and_reading(
                                         ui,
                                         &entry.term,
@@ -481,7 +574,7 @@ fn draw_row(
                         );
                         let _controls_resp =
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                                if state.bank.pending_delete == Some(entry.id) {
+                                if state.bank.pending_delete == Some(entry_id) {
                                     let cancel_btn = egui::Button::new(
                                         RichText::new("Cancel").color(COLOR_TERM),
                                     )
@@ -508,32 +601,35 @@ fn draw_row(
                                     }
                                     paint_delete_button(ui.painter(), del_rect, del_hovered);
                                     if del_resp.on_hover_text("Delete this entry").clicked() {
-                                        state.bank.pending_delete = Some(entry.id);
+                                        state.bank.pending_delete = Some(entry_id);
                                     }
                                     ui.add_space(8.0);
-                                    if let Some(clip_url) = entry
-                                        .twitch_clip_url
-                                        .as_ref()
-                                        .filter(|_| state.steam_deck.is_none())
-                                    {
-                                        let clip_btn = ui.link(
-                                            RichText::new("🎬 Clip")
-                                                .color(theme::DEINFLECT_TEXT)
-                                                .font(egui::FontId::proportional(12.5)),
-                                        );
-                                        if clip_btn
-                                            .on_hover_text(format!("Open Twitch clip:\n{clip_url}"))
-                                            .clicked()
+                                    if state.steam_deck.is_none() {
+                                        if let Some(clip_url) =
+                                            state.bank.entries[idx].twitch_clip_url.as_deref()
                                         {
-                                            ctx.output_mut(|o| {
-                                                o.open_url =
-                                                    Some(egui::output::OpenUrl::same_tab(clip_url))
-                                            });
+                                            let clip_btn = ui.link(
+                                                RichText::new("🎬 Clip")
+                                                    .color(theme::DEINFLECT_TEXT)
+                                                    .font(egui::FontId::proportional(12.5)),
+                                            );
+                                            if clip_btn
+                                                .on_hover_text(format!(
+                                                    "Open Twitch clip:\n{clip_url}"
+                                                ))
+                                                .clicked()
+                                            {
+                                                ctx.output_mut(|o| {
+                                                    o.open_url = Some(
+                                                        egui::output::OpenUrl::same_tab(clip_url),
+                                                    )
+                                                });
+                                            }
+                                            ui.add_space(8.0);
                                         }
-                                        ui.add_space(8.0);
                                     }
                                     ui.label(
-                                        RichText::new(format_friendly_timestamp(entry.created_at))
+                                        RichText::new(date_str)
                                             .font(egui::FontId::proportional(12.5))
                                             .color(COLOR_MUTED),
                                     );
@@ -543,11 +639,12 @@ fn draw_row(
 
                     // Tag (click to edit)
                     ui.add_space(2.0);
-                    draw_tag_row(ui, state, entry);
+                    draw_tag_row_at(ui, state, Some(idx), entry_id, None);
 
                     // Sentence, with the mined word highlighted
                     ui.add_space(4.0);
-                    ui.label(sentence_job(entry, ui.available_width()));
+                    let job = sentence_job(&state.bank.entries[idx], ui.available_width());
+                    ui.label(job);
 
                     // Dictionary entry senses, as shown in the popup (without examples)
                     ui.add_space(6.0);
@@ -556,14 +653,16 @@ fn draw_row(
                             ui.spacing_mut().item_spacing = egui::vec2(6.0, 3.0);
                             render_glossaries(ui, de);
                         }),
-                        None if !entry.definition_text.is_empty() => {
-                            ui.label(
-                                RichText::new(&entry.definition_text)
-                                    .font(dict_font(17.0))
-                                    .color(COLOR_DEFINITION),
-                            );
+                        None => {
+                            let def_text = &state.bank.entries[idx].definition_text;
+                            if !def_text.is_empty() {
+                                ui.label(
+                                    RichText::new(def_text)
+                                        .font(dict_font(17.0))
+                                        .color(COLOR_DEFINITION),
+                                );
+                            }
                         }
-                        None => {}
                     }
                 });
             });
@@ -573,16 +672,27 @@ fn draw_row(
         egui::Shape::Vec(theme::panel_shapes(row.response.rect, 1.0, None)),
     );
 
-    action
+    (action, row.response.rect.height())
 }
 
 /// Draws the entry's tag chip with an integrated sleek remove button, or the inline tag editor if this entry is being edited.
+#[cfg(test)]
 fn draw_tag_row(ui: &mut egui::Ui, state: &mut AppState, entry: &BankEntryMeta) {
+    draw_tag_row_at(ui, state, None, entry.id, entry.tag.as_deref());
+}
+
+fn draw_tag_row_at(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    entry_idx: Option<usize>,
+    entry_id: i64,
+    fallback_tag: Option<&str>,
+) {
     let editing = state
         .bank
         .editing_tag
         .as_ref()
-        .map_or(false, |e| e.id == entry.id);
+        .map_or(false, |e| e.id == entry_id);
     ui.horizontal(|ui| {
         if editing {
             let bank = &mut state.bank;
@@ -594,7 +704,7 @@ fn draw_tag_row(ui: &mut egui::Ui, state: &mut AppState, entry: &BankEntryMeta) 
             ui.label(RichText::new("🏷").color(COLOR_TAG));
             let out = tag_input(
                 ui,
-                ("bank_tag_edit", entry.id),
+                ("bank_tag_edit", entry_id),
                 &mut edit.text,
                 &bank.known_tags,
                 "Tag (leave empty for none)",
@@ -611,7 +721,7 @@ fn draw_tag_row(ui: &mut egui::Ui, state: &mut AppState, entry: &BankEntryMeta) 
             } else if out.committed {
                 let text = edit.text.clone();
                 state.bank.editing_tag = None;
-                if let Err(e) = state.bank.set_tag(entry.id, &text) {
+                if let Err(e) = state.bank.set_tag(entry_id, &text) {
                     state.error(format!("Failed to update tag: {e}"));
                 }
             }
@@ -620,12 +730,16 @@ fn draw_tag_row(ui: &mut egui::Ui, state: &mut AppState, entry: &BankEntryMeta) 
 
         let start_edit = |state: &mut AppState, text: String| {
             state.bank.editing_tag = Some(TagEdit {
-                id: entry.id,
+                id: entry_id,
                 text,
                 focused: false,
             });
         };
-        match &entry.tag {
+        let current_tag = entry_idx
+            .and_then(|i| state.bank.entries.get(i))
+            .and_then(|e| e.tag.as_deref())
+            .or(fallback_tag);
+        match current_tag {
             Some(tag) => {
                 let font_id = egui::FontId::proportional(12.0);
                 let text = format!("🏷 {tag}");
@@ -729,11 +843,12 @@ fn draw_tag_row(ui: &mut egui::Ui, state: &mut AppState, entry: &BankEntryMeta) 
                     let click_pos = ui.ctx().input(|i| i.pointer.interact_pos());
                     let clicked_remove = click_pos.map_or(false, |p| remove_rect.contains(p));
                     if clicked_remove {
-                        if let Err(e) = state.bank.set_tag(entry.id, "") {
+                        if let Err(e) = state.bank.set_tag(entry_id, "") {
                             state.error(format!("Failed to remove tag: {e}"));
                         }
                     } else {
-                        start_edit(state, tag.clone());
+                        let tag_owned = tag.to_string();
+                        start_edit(state, tag_owned);
                     }
                 }
             }
@@ -912,10 +1027,17 @@ fn fit_rect(size: egui::Vec2, bounds: egui::Rect) -> egui::Rect {
     egui::Rect::from_center_size(bounds.center(), size * scale)
 }
 
+fn char_index_to_byte_offset(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map_or(s.len(), |(byte_pos, _)| byte_pos)
+}
+
 fn sentence_job(entry: &BankEntryMeta, wrap_width: f32) -> LayoutJob {
-    let chars: Vec<char> = entry.sentence.chars().collect();
-    let start = entry.word_range.0.min(chars.len());
-    let end = entry.word_range.1.clamp(start, chars.len());
+    let s = entry.sentence.as_str();
+    let start_byte = char_index_to_byte_offset(s, entry.word_range.0);
+    let end_char = entry.word_range.1.max(entry.word_range.0);
+    let end_byte = char_index_to_byte_offset(s, end_char).max(start_byte);
     let normal = TextFormat {
         font_id: dict_font(22.0),
         color: COLOR_SENTENCE,
@@ -929,14 +1051,13 @@ fn sentence_job(entry: &BankEntryMeta, wrap_width: f32) -> LayoutJob {
     };
     let mut job = LayoutJob::default();
     job.wrap.max_width = wrap_width;
-    for (range, format) in [
-        (0..start, &normal),
-        (start..end, &highlight),
-        (end..chars.len(), &normal),
+    for (slice, format) in [
+        (&s[..start_byte], &normal),
+        (&s[start_byte..end_byte], &highlight),
+        (&s[end_byte..], &normal),
     ] {
-        if !range.is_empty() {
-            let text: String = chars[range].iter().collect();
-            job.append(&text, 0.0, format.clone());
+        if !slice.is_empty() {
+            job.append(slice, 0.0, format.clone());
         }
     }
     job
@@ -1173,33 +1294,9 @@ fn render_close_button(ui: &mut egui::Ui, hover_text: &str) -> egui::Response {
     resp.on_hover_text(hover_text)
 }
 
+#[cfg(test)]
 fn format_friendly_timestamp(ms: i64) -> String {
-    let secs = (ms / 1000) as libc::time_t;
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    if unsafe { libc::localtime_r(&secs, &mut tm).is_null() } {
-        return String::new();
-    }
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as libc::time_t)
-        .unwrap_or(0);
-    let mut now_tm: libc::tm = unsafe { std::mem::zeroed() };
-    let is_today = unsafe { !libc::localtime_r(&now_secs, &mut now_tm).is_null() }
-        && now_tm.tm_year == tm.tm_year
-        && now_tm.tm_yday == tm.tm_yday;
-    let is_yesterday = unsafe { !libc::localtime_r(&now_secs, &mut now_tm).is_null() }
-        && now_tm.tm_year == tm.tm_year
-        && now_tm.tm_yday == tm.tm_yday + 1;
-
-    let hour = tm.tm_hour;
-    let min = tm.tm_min;
-    if is_today {
-        format!("Today {:02}:{:02}", hour, min)
-    } else if is_yesterday {
-        format!("Yesterday {:02}:{:02}", hour, min)
-    } else {
-        crate::bank::format_timestamp(ms)
-    }
+    crate::bank::format_friendly_timestamp_with_day(ms, crate::bank::current_local_day())
 }
 
 fn paint_delete_button(painter: &egui::Painter, rect: egui::Rect, hovered: bool) {
@@ -1324,5 +1421,70 @@ mod tests {
             draw_tag_row(ui, &mut state, &entry);
         });
         assert!(state.bank.editing_tag.is_none());
+    }
+
+    #[test]
+    fn test_bank_row_virtualization_renders_only_viewport_subset() {
+        let ctx = egui::Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "noto_sans_jp".to_owned(),
+            egui::FontData::from_static(include_bytes!("../../assets/NotoSansJP-Regular.ttf")),
+        );
+        fonts.families.insert(
+            egui::FontFamily::Name("GothicCJK".into()),
+            vec!["noto_sans_jp".to_owned()],
+        );
+        ctx.set_fonts(fonts);
+
+        let mut state = AppState::default();
+        state.bank.window_open = true;
+        for i in 0..200i64 {
+            state.bank.entries.push(BankEntryMeta {
+                id: i + 1,
+                created_at: 1_700_000_000_000 + i * 1_000,
+                term: format!("単語{i}"),
+                reading: "たんご".into(),
+                definition_text: "word".into(),
+                definition_json: r#"{"term":"単語","reading":"たんご","sequence":1,"pitches":[],"glossary":["word"]}"#.into(),
+                sentence: format!("これは単語{i}の例文です。"),
+                word_range: (3, 5),
+                has_screenshot: false,
+                tag: Some(if i % 2 == 0 {
+                    "Xenogears".into()
+                } else {
+                    "Grandia".into()
+                }),
+                twitch_clip_url: None,
+            });
+        }
+
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input.clone(), |ctx| {
+            draw_contents(&mut state, ctx);
+        });
+
+        let measured_full = state.bank.card_heights.len();
+        assert!(
+            measured_full > 0 && measured_full < 30,
+            "expected row virtualization to measure only viewport+overscan subset of 200 cards, got {measured_full}"
+        );
+
+        // Switching to compact mode clears old heights and virtualizes compact rows too.
+        state.bank.compact_mode = true;
+        let _ = ctx.run(input, |ctx| {
+            draw_contents(&mut state, ctx);
+        });
+        let measured_compact = state.bank.card_heights.len();
+        assert!(
+            measured_compact > 0 && measured_compact < 60,
+            "expected compact row virtualization to measure only viewport+overscan subset of 200 cards, got {measured_compact}"
+        );
     }
 }

@@ -170,9 +170,13 @@ fn entry_to_json(entry: &TermEntry) -> String {
 
 /// Extracts the sequence number from a stored `definition_json`, or 0 if missing.
 pub fn extract_sequence_from_json(json: &str) -> i64 {
-    serde_json::from_str::<serde_json::Value>(json)
+    #[derive(serde::Deserialize)]
+    struct SequenceOnly {
+        sequence: Option<i64>,
+    }
+    serde_json::from_str::<SequenceOnly>(json)
         .ok()
-        .and_then(|v| v.get("sequence").and_then(|s| s.as_i64()))
+        .and_then(|s| s.sequence)
         .unwrap_or(0)
 }
 
@@ -407,13 +411,73 @@ pub fn load_texture(
     Some(ctx.load_texture(name, color, egui::TextureOptions::LINEAR))
 }
 
+#[derive(Clone, Debug, Default)]
+struct MinedReadingEntry {
+    reading: String,
+    sequences: Vec<i64>,
+    sentences: Vec<String>,
+}
+
+fn insert_mined_lookup(
+    mined_by_term: &mut HashMap<String, Vec<MinedReadingEntry>>,
+    term: &str,
+    reading: &str,
+    sentence: &str,
+    seq: i64,
+) {
+    if !mined_by_term.contains_key(term) {
+        mined_by_term.insert(term.to_string(), Vec::new());
+    }
+    let readings = mined_by_term.get_mut(term).unwrap();
+    let bucket = if let Some(pos) = readings.iter().position(|b| b.reading == reading) {
+        &mut readings[pos]
+    } else {
+        readings.push(MinedReadingEntry {
+            reading: reading.to_string(),
+            sequences: Vec::new(),
+            sentences: Vec::new(),
+        });
+        readings.last_mut().unwrap()
+    };
+    if !bucket.sequences.contains(&seq) {
+        bucket.sequences.push(seq);
+    }
+    if !bucket.sentences.iter().any(|s| s == sentence) {
+        bucket.sentences.push(sentence.to_string());
+    }
+}
+
+#[derive(Clone, Debug)]
+struct VisibleIndicesCache {
+    revision: u64,
+    entries_len: usize,
+    filter_tag: String,
+    indices: Arc<[usize]>,
+}
+
 pub struct BankState {
     pub db: Arc<Mutex<Option<BankDatabase>>>,
     /// All entries, most recent first.
     pub entries: Vec<BankEntryMeta>,
-    mined_keys: HashSet<MineKey>,
-    mined_definitions: HashSet<(String, String, i64)>,
-    mined_terms: HashSet<(String, String)>,
+    /// Monotonic revision incremented whenever `entries` or any entry's `tag` changes.
+    entries_revision: u64,
+    /// Pre-lowercased tag per `entry.id` (`Some(None)` = untagged), avoiding `to_lowercase()` per entry per frame.
+    entry_tags_lower: HashMap<i64, Option<String>>,
+    /// Cached filtered indices keyed by `(entries_revision, entries.len(), filter_tag)`.
+    visible_cache: Option<VisibleIndicesCache>,
+    #[cfg(test)]
+    visible_cache_misses: u64,
+    /// Local calendar day `(tm_year, tm_yday)` for which `formatted_dates` strings ("Today"/"Yesterday") are valid.
+    formatted_dates_day: Option<(i32, i32)>,
+    /// Cached friendly timestamp string per `entry.id`.
+    formatted_dates: HashMap<i64, Arc<str>>,
+    /// Measured card heights (in points, excluding inter-row gap) by `entry.id` for UI row virtualization.
+    pub card_heights: HashMap<i64, f32>,
+    card_heights_compact_mode: bool,
+    card_heights_width_bucket: u32,
+    mined_by_term: HashMap<String, Vec<MinedReadingEntry>>,
+    entry_sequences: HashMap<i64, i64>,
+    last_pitch_backfill_revision: Option<String>,
     in_flight: HashSet<MineKey>,
     pending: Arc<Mutex<Option<MineRequest>>>,
     event_tx: Sender<BankEvent>,
@@ -507,14 +571,41 @@ impl BankState {
     }
 
     fn with_database(db: Option<BankDatabase>, load_error: Option<String>) -> Self {
+        let mut entry_sequences = HashMap::new();
+        let mut entry_tags_lower = HashMap::new();
         let entries = db
             .as_ref()
             .and_then(|db| {
-                db.list_meta()
+                let rows = db
+                    .list_meta_with_sequences()
                     .map_err(|e| tracing::warn!("Failed to list bank: {e}"))
-                    .ok()
+                    .ok()?;
+                let mut missing_seq_updates = Vec::new();
+                let mut out = Vec::with_capacity(rows.len());
+                for (meta, seq_opt) in rows {
+                    let seq = match seq_opt {
+                        Some(s) => s,
+                        None => {
+                            let parsed = extract_sequence_from_json(&meta.definition_json);
+                            missing_seq_updates.push((meta.id, parsed));
+                            parsed
+                        }
+                    };
+                    entry_sequences.insert(meta.id, seq);
+                    entry_tags_lower.insert(meta.id, meta.compute_tag_lower());
+                    out.push(meta);
+                }
+                if !missing_seq_updates.is_empty() {
+                    if let Err(e) = db.update_sequences(&missing_seq_updates) {
+                        tracing::warn!("Failed to persist backfilled bank sequences: {e}");
+                    }
+                }
+                Some(out)
             })
             .unwrap_or_default();
+        let last_pitch_backfill_revision = db
+            .as_ref()
+            .and_then(|db| db.get_meta_value("pitch_backfill_revision").ok().flatten());
         let custom_names = db
             .as_ref()
             .and_then(|db| {
@@ -527,9 +618,19 @@ impl BankState {
         let mut state = Self {
             db: Arc::new(Mutex::new(db)),
             entries,
-            mined_keys: HashSet::new(),
-            mined_definitions: HashSet::new(),
-            mined_terms: HashSet::new(),
+            entries_revision: 1,
+            entry_tags_lower,
+            visible_cache: None,
+            #[cfg(test)]
+            visible_cache_misses: 0,
+            formatted_dates_day: None,
+            formatted_dates: HashMap::new(),
+            card_heights: HashMap::new(),
+            card_heights_compact_mode: false,
+            card_heights_width_bucket: 0,
+            mined_by_term: HashMap::new(),
+            entry_sequences,
+            last_pitch_backfill_revision,
             in_flight: HashSet::new(),
             pending: Arc::new(Mutex::new(None)),
             event_tx,
@@ -601,27 +702,24 @@ impl BankState {
     }
 
     fn rebuild_keys(&mut self) {
-        self.mined_keys = self
-            .entries
-            .iter()
-            .map(|e| (e.term.clone(), e.reading.clone(), e.sentence.clone()))
-            .collect();
-        self.mined_definitions = self
-            .entries
-            .iter()
-            .map(|e| {
-                (
-                    e.term.clone(),
-                    e.reading.clone(),
-                    extract_sequence_from_json(&e.definition_json),
-                )
-            })
-            .collect();
-        self.mined_terms = self
-            .entries
-            .iter()
-            .map(|e| (e.term.clone(), e.reading.clone()))
-            .collect();
+        self.mined_by_term.clear();
+        for e in &self.entries {
+            let seq = match self.entry_sequences.get(&e.id).copied() {
+                Some(s) => s,
+                None => {
+                    let parsed = extract_sequence_from_json(&e.definition_json);
+                    self.entry_sequences.insert(e.id, parsed);
+                    parsed
+                }
+            };
+            insert_mined_lookup(
+                &mut self.mined_by_term,
+                &e.term,
+                &e.reading,
+                &e.sentence,
+                seq,
+            );
+        }
         self.rebuild_known_tags();
     }
 
@@ -720,14 +818,82 @@ impl BankState {
     }
 
     /// Indices into `entries` of the words matching the bank-window tag filter, most
-    /// recent first.
+    /// recent first. Uses pre-lowercased tags to avoid per-entry `String` allocations.
     pub fn visible_indices(&self) -> Vec<usize> {
+        let query = self.filter_tag.trim();
+        if query.is_empty() {
+            return (0..self.entries.len()).collect();
+        }
+        let query_lower = query.to_lowercase();
         self.entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| tags::tag_matches_filter(e.tag.as_deref(), &self.filter_tag))
+            .filter(|(_, e)| match self.entry_tags_lower.get(&e.id) {
+                Some(Some(tag_lower)) => tag_lower.contains(&query_lower),
+                Some(None) => false,
+                None => e
+                    .tag
+                    .as_deref()
+                    .is_some_and(|t| t.to_lowercase().contains(&query_lower)),
+            })
             .map(|(i, _)| i)
             .collect()
+    }
+
+    /// Cached `Arc<[usize]>` of indices into `entries` matching `filter_tag`, recomputed
+    /// only when `(entries_revision, entries.len(), filter_tag)` changes.
+    pub fn visible_indices_cached(&mut self) -> Arc<[usize]> {
+        if let Some(cache) = &self.visible_cache {
+            if cache.revision == self.entries_revision
+                && cache.entries_len == self.entries.len()
+                && cache.filter_tag == self.filter_tag
+            {
+                return Arc::clone(&cache.indices);
+            }
+        }
+        #[cfg(test)]
+        {
+            self.visible_cache_misses += 1;
+        }
+        let indices: Arc<[usize]> = self.visible_indices().into();
+        self.visible_cache = Some(VisibleIndicesCache {
+            revision: self.entries_revision,
+            entries_len: self.entries.len(),
+            filter_tag: self.filter_tag.clone(),
+            indices: Arc::clone(&indices),
+        });
+        indices
+    }
+
+    /// Invalidates cached virtualized card heights when `compact_mode` or the scroll area width bucket changes.
+    pub fn prepare_card_heights(&mut self, width_bucket: u32) {
+        if self.card_heights_compact_mode != self.compact_mode
+            || self.card_heights_width_bucket != width_bucket
+        {
+            self.card_heights.clear();
+            self.card_heights_compact_mode = self.compact_mode;
+            self.card_heights_width_bucket = width_bucket;
+        }
+    }
+
+    /// Returns a cached friendly timestamp string (`Today HH:MM`, `Yesterday HH:MM`, or `YYYY-MM-DD HH:MM`),
+    /// recomputing only once per entry per local calendar day.
+    pub fn formatted_friendly_date(
+        &mut self,
+        id: i64,
+        created_at: i64,
+        today: Option<(i32, i32)>,
+    ) -> Arc<str> {
+        if self.formatted_dates_day != today {
+            self.formatted_dates.clear();
+            self.formatted_dates_day = today;
+        }
+        if let Some(cached) = self.formatted_dates.get(&id) {
+            return Arc::clone(cached);
+        }
+        let formatted: Arc<str> = format_friendly_timestamp_with_day(created_at, today).into();
+        self.formatted_dates.insert(id, Arc::clone(&formatted));
+        formatted
     }
 
     /// Sets (or removes, if empty) the tag of an entry. The tag is trimmed and matched to an
@@ -744,7 +910,13 @@ impl BankState {
         }
         if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
             entry.tag = tag.clone();
+            self.entry_tags_lower.insert(id, entry.compute_tag_lower());
+        } else {
+            self.entry_tags_lower
+                .insert(id, tag.as_deref().map(str::to_lowercase));
         }
+        self.entries_revision = self.entries_revision.wrapping_add(1);
+        self.card_heights.remove(&id);
         self.rebuild_known_tags();
         Ok(tag)
     }
@@ -758,10 +930,18 @@ impl BankState {
     }
 
     pub fn status(&self, term: &str, reading: &str, sentence: &str) -> MineStatus {
-        let key = (term.to_string(), reading.to_string(), sentence.to_string());
-        if self.mined_keys.contains(&key) {
-            MineStatus::Mined
-        } else if self.in_flight.contains(&key) {
+        if let Some(readings) = self.mined_by_term.get(term) {
+            if let Some(bucket) = readings.iter().find(|b| b.reading == reading) {
+                if bucket.sentences.iter().any(|s| s == sentence) {
+                    return MineStatus::Mined;
+                }
+            }
+        }
+        if self
+            .in_flight
+            .iter()
+            .any(|(t, r, s)| t == term && r == reading && s == sentence)
+        {
             MineStatus::Pending
         } else {
             MineStatus::Available
@@ -770,44 +950,27 @@ impl BankState {
 
     /// Returns true if this specific dictionary entry is already in the mined bank.
     pub fn is_entry_mined(&self, term: &str, reading: &str, sequence: i64) -> bool {
-        if sequence != 0
-            && self
-                .mined_definitions
-                .contains(&(term.to_string(), reading.to_string(), sequence))
-        {
-            return true;
-        }
-        if sequence == 0
-            && self
-                .mined_terms
-                .contains(&(term.to_string(), reading.to_string()))
-        {
-            return true;
-        }
-        // Fallback: match if bank contains (term, reading, 0)
-        if sequence != 0
-            && self
-                .mined_definitions
-                .contains(&(term.to_string(), reading.to_string(), 0))
-        {
-            return true;
+        if let Some(readings) = self.mined_by_term.get(term) {
+            if let Some(bucket) = readings.iter().find(|b| b.reading == reading) {
+                if sequence == 0
+                    || bucket.sequences.contains(&sequence)
+                    || bucket.sequences.contains(&0)
+                {
+                    return true;
+                }
+            }
         }
         // Also check if any in-flight requests match
-        if self
-            .in_flight
+        self.in_flight
             .iter()
             .any(|(t, r, _)| t == term && r == reading)
-        {
-            return true;
-        }
-        false
     }
 
     /// Queues a mining request. The screenshot is captured by the video paint callback at
     /// the end of the current frame. Returns false if it was rejected (duplicate or busy).
     pub fn request_mine(&mut self, request: MineRequest) -> bool {
-        let key = request.key();
-        if self.mined_keys.contains(&key) || self.in_flight.contains(&key) {
+        if self.status(&request.term, &request.reading, &request.sentence) != MineStatus::Available
+        {
             return false;
         }
         let Ok(mut pending) = self.pending.lock() else {
@@ -816,6 +979,7 @@ impl BankState {
         if pending.is_some() {
             return false;
         }
+        let key = request.key();
         *pending = Some(request);
         self.in_flight.insert(key);
         true
@@ -885,18 +1049,20 @@ impl BankState {
                             }
                         }
                     }
-                    let key = (
-                        meta.term.clone(),
-                        meta.reading.clone(),
-                        meta.sentence.clone(),
-                    );
-                    self.in_flight.remove(&key);
-                    self.mined_keys.insert(key);
+                    self.in_flight.retain(|(t, r, s)| {
+                        !(t == &meta.term && r == &meta.reading && s == &meta.sentence)
+                    });
                     let seq = extract_sequence_from_json(&meta.definition_json);
-                    self.mined_definitions
-                        .insert((meta.term.clone(), meta.reading.clone(), seq));
-                    self.mined_terms
-                        .insert((meta.term.clone(), meta.reading.clone()));
+                    self.entry_sequences.insert(meta.id, seq);
+                    self.entry_tags_lower
+                        .insert(meta.id, meta.compute_tag_lower());
+                    insert_mined_lookup(
+                        &mut self.mined_by_term,
+                        &meta.term,
+                        &meta.reading,
+                        &meta.sentence,
+                        seq,
+                    );
                     messages.push(Ok(format!("Mined: {}", meta.term)));
                     let pos = self
                         .entries
@@ -905,6 +1071,7 @@ impl BankState {
                         .unwrap_or(self.entries.len());
                     self.newly_mined.push(meta.clone());
                     self.entries.insert(pos, meta);
+                    self.entries_revision = self.entries_revision.wrapping_add(1);
                     self.rebuild_known_tags();
                 }
                 BankEvent::Failed {
@@ -1011,6 +1178,11 @@ impl BankState {
             db.delete(id)?;
         }
         self.entries.retain(|e| e.id != id);
+        self.entries_revision = self.entries_revision.wrapping_add(1);
+        self.entry_tags_lower.remove(&id);
+        self.formatted_dates.remove(&id);
+        self.card_heights.remove(&id);
+        self.entry_sequences.remove(&id);
         self.thumbnails.remove(&id);
         self.dict_entries.remove(&id);
         if self.enlarged.as_ref().map_or(false, |(eid, _)| *eid == id) {
@@ -1026,6 +1198,7 @@ impl BankState {
 
     /// Toggles the expanded state of an entry in compact mode.
     pub fn toggle_entry_expanded(&mut self, id: i64) {
+        self.card_heights.remove(&id);
         if !self.expanded_entries.remove(&id) {
             self.expanded_entries.insert(id);
         }
@@ -1039,6 +1212,7 @@ impl BankState {
 
     /// Returns the (cached) renderable dictionary entry stored with a bank entry,
     /// enriching it with pitch accents from `pitch_db` if none were stored.
+    #[allow(dead_code)]
     pub fn dict_entry_with_pitch(
         &mut self,
         entry: &BankEntryMeta,
@@ -1061,15 +1235,14 @@ impl BankState {
 
     /// Returns the pitch accent patterns for `entry`, using the stored definition JSON
     /// or falling back to `pitch_db`.
+    #[allow(dead_code)]
     pub fn pitches_for_entry(
         &mut self,
         entry: &BankEntryMeta,
         pitch_db: Option<&crate::dict::PitchDatabase>,
     ) -> Vec<crate::dict::PitchAccent> {
         if let Some(de) = self.dict_entry_with_pitch(entry, pitch_db) {
-            if !de.pitches.is_empty() {
-                return de.pitches.clone();
-            }
+            return de.pitches.clone();
         }
         pitch_db
             .map(|pdb| pdb.get_pitches(&entry.term, &entry.reading))
@@ -1079,6 +1252,21 @@ impl BankState {
     /// Backfills pitch accent patterns for all already-mined words in the bank using `pitch_db`,
     /// persisting updated `definition_json` values to SQLite. Returns the number of entries updated.
     pub fn backfill_pitches(&mut self, pitch_db: &crate::dict::PitchDatabase) -> usize {
+        if self.entries.is_empty() {
+            self.dict_entries.clear();
+            return 0;
+        }
+        let max_id = self.entries.iter().map(|e| e.id).max().unwrap_or(0);
+        let rev = format!(
+            "{}|len={}|max_id={}",
+            pitch_db.fingerprint(),
+            self.entries.len(),
+            max_id
+        );
+        if self.last_pitch_backfill_revision.as_deref() == Some(rev.as_str()) {
+            return 0;
+        }
+
         let mut updates = Vec::new();
         for entry in &mut self.entries {
             let pitches = pitch_db.get_pitches(&entry.term, &entry.reading);
@@ -1093,46 +1281,126 @@ impl BankState {
                 }
             }
         }
-        if !updates.is_empty() {
-            if let Ok(guard) = self.db.lock() {
-                if let Some(db) = guard.as_ref() {
+        let mut persist_ok = true;
+        if let Ok(guard) = self.db.lock() {
+            if let Some(db) = guard.as_ref() {
+                if !updates.is_empty() {
                     if let Err(e) = db.update_definition_jsons(&updates) {
                         tracing::warn!(
                             "Failed to persist backfilled pitch accents to bank.db: {e}"
                         );
+                        persist_ok = false;
+                    }
+                }
+                if persist_ok {
+                    if let Err(e) = db.set_meta_value("pitch_backfill_revision", &rev) {
+                        tracing::warn!("Failed to persist pitch_backfill_revision to bank.db: {e}");
                     }
                 }
             }
         }
+        if persist_ok {
+            self.last_pitch_backfill_revision = Some(rev);
+        }
         self.dict_entries.clear();
+        self.card_heights.clear();
         updates.len()
     }
 
     /// Clears cached dictionary entries (e.g. when the pitch dictionary is removed or replaced).
     pub fn invalidate_dict_entries_cache(&mut self) {
         self.dict_entries.clear();
+        self.card_heights.clear();
+    }
+
+    /// Returns the cached `TermEntry` and fallback pitches for `entries[idx]` without cloning
+    /// `BankEntryMeta` or locking `pitch_db_mutex` on steady-state cache hits.
+    pub fn dict_entry_and_pitches_at(
+        &mut self,
+        idx: usize,
+        pitch_db_mutex: &Mutex<Option<crate::dict::PitchDatabase>>,
+    ) -> (Option<Arc<TermEntry>>, Vec<crate::dict::PitchAccent>) {
+        let entry_id = self.entries[idx].id;
+        if let Some(Some(cached)) = self.dict_entries.get(&entry_id) {
+            return (Some(Arc::clone(cached)), Vec::new());
+        }
+        let pitch_guard = pitch_db_mutex.lock().ok();
+        let pitch_db = pitch_guard.as_ref().and_then(|g| g.as_ref());
+        let entry = &self.entries[idx];
+        let de = self
+            .dict_entries
+            .entry(entry_id)
+            .or_insert_with(|| {
+                let mut parsed =
+                    entry_from_json(&entry.term, &entry.reading, &entry.definition_json)?;
+                if parsed.pitches.is_empty() {
+                    if let Some(pdb) = pitch_db {
+                        parsed.pitches = pdb.get_pitches(&entry.term, &entry.reading);
+                    }
+                }
+                Some(Arc::new(parsed))
+            })
+            .clone();
+        let fallback_pitches = if de.is_none() {
+            pitch_db
+                .map(|pdb| pdb.get_pitches(&entry.term, &entry.reading))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        (de, fallback_pitches)
+    }
+
+    /// Returns the pitch accent patterns for `entries[idx]` without cloning `BankEntryMeta`
+    /// or locking `pitch_db_mutex` on steady-state cache hits.
+    pub fn compact_pitches_at(
+        &mut self,
+        idx: usize,
+        pitch_db_mutex: &Mutex<Option<crate::dict::PitchDatabase>>,
+    ) -> Vec<crate::dict::PitchAccent> {
+        let entry_id = self.entries[idx].id;
+        if let Some(Some(cached)) = self.dict_entries.get(&entry_id) {
+            return cached.pitches.clone();
+        }
+        let (de, fallback) = self.dict_entry_and_pitches_at(idx, pitch_db_mutex);
+        match de {
+            Some(d) => d.pitches.clone(),
+            None => fallback,
+        }
+    }
+
+    /// Loads (and caches) the thumbnail texture for an entry by ID without borrowing `BankEntryMeta`.
+    pub fn thumbnail_by_id(
+        &mut self,
+        ctx: &egui::Context,
+        id: i64,
+        has_screenshot: bool,
+    ) -> Option<egui::TextureHandle> {
+        if let Some(cached) = self.thumbnails.get(&id) {
+            return cached.clone();
+        }
+        let texture = if has_screenshot {
+            let bytes = self
+                .db
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().and_then(|db| db.thumbnail(id).ok().flatten()));
+            bytes.and_then(|b| load_texture(ctx, format!("bank_thumb_{id}"), &b))
+        } else {
+            None
+        };
+        self.thumbnails.insert(id, texture.clone());
+        texture
     }
 
     /// Loads (and caches) the thumbnail texture for an entry.
+    #[allow(dead_code)]
     pub fn thumbnail(
         &mut self,
         ctx: &egui::Context,
         entry: &BankEntryMeta,
     ) -> Option<egui::TextureHandle> {
-        if let Some(cached) = self.thumbnails.get(&entry.id) {
-            return cached.clone();
-        }
-        let texture = if entry.has_screenshot {
-            let bytes = self.db.lock().ok().and_then(|g| {
-                g.as_ref()
-                    .and_then(|db| db.thumbnail(entry.id).ok().flatten())
-            });
-            bytes.and_then(|b| load_texture(ctx, format!("bank_thumb_{}", entry.id), &b))
-        } else {
-            None
-        };
-        self.thumbnails.insert(entry.id, texture.clone());
-        texture
+        self.thumbnail_by_id(ctx, entry.id, entry.has_screenshot)
     }
 
     /// Loads the full screenshot of an entry and shows it enlarged.
@@ -1182,7 +1450,48 @@ fn unix_millis() -> i64 {
         .unwrap_or(0)
 }
 
+/// Returns `(tm_year, tm_yday)` in local time for the current instant (called once per UI frame).
+pub fn current_local_day() -> Option<(i32, i32)> {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as libc::time_t)
+        .unwrap_or(0);
+    let mut now_tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&now_secs, &mut now_tm).is_null() } {
+        None
+    } else {
+        Some((now_tm.tm_year, now_tm.tm_yday))
+    }
+}
+
+/// Formats a unix-millisecond timestamp using a single `localtime_r` call, displaying
+/// `Today HH:MM` or `Yesterday HH:MM` when matching `today = Some((now_year, now_yday))`.
+pub fn format_friendly_timestamp_with_day(ms: i64, today: Option<(i32, i32)>) -> String {
+    let secs = (ms / 1000) as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&secs, &mut tm).is_null() } {
+        return String::new();
+    }
+    if let Some((now_year, now_yday)) = today {
+        if now_year == tm.tm_year && now_yday == tm.tm_yday {
+            return format!("Today {:02}:{:02}", tm.tm_hour, tm.tm_min);
+        }
+        if now_year == tm.tm_year && now_yday == tm.tm_yday + 1 {
+            return format!("Yesterday {:02}:{:02}", tm.tm_hour, tm.tm_min);
+        }
+    }
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min
+    )
+}
+
 /// Formats a unix-millisecond timestamp in local time as `YYYY-MM-DD HH:MM`.
+#[allow(dead_code)]
 pub fn format_timestamp(ms: i64) -> String {
     let secs = (ms / 1000) as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
@@ -1864,5 +2173,276 @@ mod tests {
             reloaded_entry.pitches[0].pattern,
             crate::dict::PitchPattern::Downstep(2)
         );
+    }
+
+    #[test]
+    fn test_pitches_for_entry_caches_pitchless_words_without_requerying_sqlite() {
+        let mut bank = BankState::new();
+        let entry = TermEntry {
+            term: "未知語".into(),
+            reading: "みちご".into(),
+            definition_tags: Some("n".into()),
+            rules: String::new(),
+            score: 0.0,
+            glossary: vec![crate::dict::GlossaryEntry::Text("unknown word".into())],
+            sequence: 500,
+            term_tags: None,
+            inflection_reasons: vec![],
+            frequency: None,
+            pitches: vec![],
+            custom_name_id: None,
+            custom_tag: None,
+        };
+        let req = MineRequest::from_lookup(&entry, "未知語だ。", (0, 3), None);
+        assert!(bank.request_mine(req));
+        let handle = bank.capture_handle();
+        handle.save(handle.take_pending().unwrap(), None);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while bank.is_busy() && Instant::now() < deadline {
+            bank.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mined_meta = bank.entries[0].clone();
+
+        let dir = tempfile::tempdir().unwrap();
+        let pitch_db_path = dir.path().join("pitchless_cache.db");
+        let pitch_db = crate::dict::PitchDatabase::open_or_create(&pitch_db_path).unwrap();
+
+        // First call caches the pitchless parsed TermEntry (`pitches: vec![]`).
+        assert!(bank
+            .pitches_for_entry(&mined_meta, Some(&pitch_db))
+            .is_empty());
+
+        // Insert a pitch behind BankState's back; without cache invalidation, `pitches_for_entry`
+        // must return the cached empty Vec rather than falling through to SQLite every frame.
+        let pitches_json = serde_json::to_string(&vec![crate::dict::PitchAccent {
+            reading: "みちご".to_string(),
+            pattern: crate::dict::PitchPattern::Downstep(0),
+            nasal: vec![],
+            devoice: vec![],
+            tags: vec![],
+        }])
+        .unwrap();
+        pitch_db
+            .conn
+            .execute(
+                "INSERT INTO pitches (term, reading, reading_hira, pitches_json) VALUES ('未知語', 'みちご', 'みちご', ?1)",
+                [pitches_json],
+            )
+            .unwrap();
+
+        assert!(
+            bank.pitches_for_entry(&mined_meta, Some(&pitch_db))
+                .is_empty(),
+            "pitchless cached entry must not re-query SQLite on subsequent frames"
+        );
+
+        // Once invalidated, the new pitch is picked up.
+        bank.invalidate_dict_entries_cache();
+        let refreshed = bank.pitches_for_entry(&mined_meta, Some(&pitch_db));
+        assert_eq!(refreshed.len(), 1);
+        assert_eq!(refreshed[0].pattern, crate::dict::PitchPattern::Downstep(0));
+    }
+
+    #[test]
+    fn test_backfill_pitches_skips_when_revision_matches_and_reruns_on_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let bank_db_path = dir.path().join("bank_rev.db");
+        let pitch_db_path = dir.path().join("pitch_rev.db");
+
+        let mut bank =
+            BankState::with_database(Some(BankDatabase::open(&bank_db_path).unwrap()), None);
+        let id1 = mine_and_wait(&mut bank, "橋", "橋を渡る。");
+
+        let pitch_db = crate::dict::PitchDatabase::open_or_create(&pitch_db_path).unwrap();
+        pitch_db
+            .conn
+            .execute(
+                "INSERT INTO metadata (key, value) VALUES ('title', 'Kanjium'), ('revision', 'v1')",
+                [],
+            )
+            .unwrap();
+        let bridge_pitch = serde_json::to_string(&vec![crate::dict::PitchAccent {
+            reading: "よみ".to_string(),
+            pattern: crate::dict::PitchPattern::Downstep(2),
+            nasal: vec![],
+            devoice: vec![],
+            tags: vec![],
+        }])
+        .unwrap();
+        pitch_db
+            .conn
+            .execute(
+                "INSERT INTO pitches (term, reading, reading_hira, pitches_json) VALUES ('橋', 'よみ', 'よみ', ?1)",
+                [&bridge_pitch],
+            )
+            .unwrap();
+
+        assert_eq!(bank.backfill_pitches(&pitch_db), 1);
+        // Immediate repeat call is a no-op via revision match.
+        assert_eq!(bank.backfill_pitches(&pitch_db), 0);
+
+        // Reload BankState from disk: `pitch_backfill_revision` was persisted in `bank_metadata`.
+        drop(bank);
+        let mut reloaded =
+            BankState::with_database(Some(BankDatabase::open(&bank_db_path).unwrap()), None);
+        // Strip pitches in memory only: if `backfill_pitches` short-circuits on the persisted
+        // revision, it won't touch `entries[0].definition_json` and will return 0.
+        reloaded.entries[0].definition_json =
+            r#"{"term":"橋","reading":"よみ","sequence":1,"pitches":[],"glossary":["meaning"]}"#
+                .to_string();
+        assert_eq!(reloaded.backfill_pitches(&pitch_db), 0);
+
+        // Mining a new word changes (entries.len(), max_id), triggering backfill again.
+        let _id2 = mine_and_wait(&mut reloaded, "雨", "雨が降る。");
+        let _ = id1;
+        assert_eq!(reloaded.backfill_pitches(&pitch_db), 1);
+
+        // Updating the pitch dictionary revision changes `pitch_db.fingerprint()`, triggering backfill.
+        pitch_db
+            .conn
+            .execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES ('revision', 'v2')",
+                [],
+            )
+            .unwrap();
+        reloaded
+            .entries
+            .iter_mut()
+            .find(|e| e.term == "橋")
+            .unwrap()
+            .definition_json =
+            r#"{"term":"橋","reading":"よみ","sequence":1,"pitches":[],"glossary":["meaning"]}"#
+                .to_string();
+        assert_eq!(reloaded.backfill_pitches(&pitch_db), 1);
+    }
+
+    #[test]
+    fn test_entry_sequences_backfilled_on_load_and_used_by_rebuild_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("seq_backfill.db");
+        {
+            let db = BankDatabase::open(&db_path).unwrap();
+            db.insert(&NewBankEntry {
+                request_id: Some(1),
+                created_at: 1_000,
+                term: "猫".into(),
+                reading: "ねこ".into(),
+                definition_text: "cat".into(),
+                definition_json: r#"{"sequence":777,"glossary":["cat"]}"#.into(),
+                sentence: "猫がいる。".into(),
+                word_range: (0, 1),
+                source_text: "猫がいる。".into(),
+                screenshot: None,
+                thumbnail: None,
+                tag: None,
+                twitch_clip_url: None,
+            })
+            .unwrap();
+            db.insert(&NewBankEntry {
+                request_id: Some(2),
+                created_at: 2_000,
+                term: "犬".into(),
+                reading: "いぬ".into(),
+                definition_text: "dog".into(),
+                definition_json: r#"{"sequence":888,"glossary":["dog"]}"#.into(),
+                sentence: "犬がいる。".into(),
+                word_range: (0, 1),
+                source_text: "犬がいる。".into(),
+                screenshot: None,
+                thumbnail: None,
+                tag: None,
+                twitch_clip_url: None,
+            })
+            .unwrap();
+        }
+        // Simulate legacy migrated rows where `sequence` was NULL.
+        {
+            let raw = rusqlite::Connection::open(&db_path).unwrap();
+            raw.execute("UPDATE mined_words SET sequence = NULL", [])
+                .unwrap();
+        }
+
+        let mut bank = BankState::with_database(Some(BankDatabase::open(&db_path).unwrap()), None);
+        assert!(bank.is_entry_mined("猫", "ねこ", 777));
+        assert!(bank.is_entry_mined("犬", "いぬ", 888));
+
+        // Verify `with_database` persisted the backfilled sequences back into SQLite.
+        let persisted_seqs = bank
+            .db
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .list_meta_with_sequences()
+            .unwrap();
+        for (meta, seq) in &persisted_seqs {
+            if meta.term == "猫" {
+                assert_eq!(*seq, Some(777));
+            } else if meta.term == "犬" {
+                assert_eq!(*seq, Some(888));
+            }
+        }
+
+        // Clobber in-memory `definition_json` on 猫, then delete 犬 (which calls `rebuild_keys()`):
+        // `rebuild_keys()` must rely on `entry_sequences` rather than re-parsing `definition_json`.
+        let neko_id = bank.entries.iter().find(|e| e.term == "猫").unwrap().id;
+        let inu_id = bank.entries.iter().find(|e| e.term == "犬").unwrap().id;
+        bank.entries
+            .iter_mut()
+            .find(|e| e.id == neko_id)
+            .unwrap()
+            .definition_json = "not valid json".into();
+
+        bank.delete(inu_id).unwrap();
+        assert!(!bank.is_entry_mined("犬", "いぬ", 888));
+        assert!(bank.is_entry_mined("猫", "ねこ", 777));
+    }
+
+    #[test]
+    fn test_visible_indices_cached_prelowercased_tags_and_date_cache() {
+        let mut bank =
+            BankState::with_database(Some(BankDatabase::open_in_memory().unwrap()), None);
+        bank.current_tag = "Xenogears".into();
+        let a = mine_and_wait(&mut bank, "機神", "機神だ。");
+        bank.current_tag = "Grandia".into();
+        let b = mine_and_wait(&mut bank, "冒険", "冒険だ。");
+
+        bank.filter_tag = "xeno".into();
+        let first = bank.visible_indices_cached();
+        assert_eq!(first.len(), 1);
+        assert_eq!(bank.entries[first[0]].id, a);
+        assert_eq!(bank.visible_cache_misses, 1);
+
+        // Repeated calls with unchanged revision & filter hit the cache without recomputing.
+        let second = bank.visible_indices_cached();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(bank.visible_cache_misses, 1);
+
+        // Updating a tag updates `entry_tags_lower`, invalidates `visible_cache`, and clears `card_heights`.
+        bank.prepare_card_heights(200);
+        bank.card_heights.insert(a, 180.0);
+        bank.card_heights.insert(b, 195.0);
+        bank.set_tag(b, "Xenoblade").unwrap();
+        assert!(!bank.card_heights.contains_key(&b));
+        let third = bank.visible_indices_cached();
+        assert_eq!(third.len(), 2);
+        assert_eq!(bank.visible_cache_misses, 2);
+
+        // Width bucket or compact_mode change invalidates `card_heights`.
+        bank.prepare_card_heights(200);
+        assert!(bank.card_heights.contains_key(&a));
+        bank.prepare_card_heights(240);
+        assert!(bank.card_heights.is_empty());
+
+        // Cached friendly date reuses the same Arc<str> within a calendar day and invalidates on day rollover.
+        let day1 = Some((126, 100));
+        let d1 = bank.formatted_friendly_date(a, 1_700_000_000_000, day1);
+        let d2 = bank.formatted_friendly_date(a, 1_700_000_000_000, day1);
+        assert!(Arc::ptr_eq(&d1, &d2));
+        let day2 = Some((126, 101));
+        let d3 = bank.formatted_friendly_date(a, 1_700_000_000_000, day2);
+        assert!(!Arc::ptr_eq(&d1, &d3));
+        assert_eq!(&*d1, &*d3);
     }
 }

@@ -6,6 +6,8 @@ pub mod steam;
 pub mod video;
 pub mod x11_cursor;
 
+pub const CURSOR_RETRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(2);
+
 pub struct GamescopeHookState {
     pub is_active: bool,
     pub passthrough_enabled: bool,
@@ -72,19 +74,14 @@ impl GamescopeHookState {
         }
         let now = std::time::Instant::now();
         if let Some(last) = self.last_cursor_retry {
-            if now.duration_since(last) < std::time::Duration::from_secs(1) {
+            if now.duration_since(last) < CURSOR_RETRY_COOLDOWN {
                 return;
             }
         }
         self.last_cursor_retry = Some(now);
 
         if self.x11_cursor_monitor.is_none() {
-            if let Some(disp) = x11_cursor::find_gamescope_x_display() {
-                if let Some(monitor) = x11_cursor::GamescopeX11CursorMonitor::start(&disp) {
-                    tracing::info!("Found Gamescope X11 display: {disp}, started cursor monitor");
-                    self.x11_cursor_monitor = Some(monitor);
-                }
-            }
+            self.x11_cursor_monitor = Some(x11_cursor::GamescopeX11CursorMonitor::start_auto());
         }
         if self.input_client.is_none() {
             if let Ok(client) = input::GamescopeInputClient::connect() {
@@ -162,5 +159,19 @@ mod tests {
         let toggled_back = state.toggle_passthrough();
         assert!(toggled_back);
         assert!(state.passthrough_enabled);
+    }
+
+    #[test]
+    fn test_poll_late_connections_enforces_two_second_cursor_retry_cooldown() {
+        let mut state = GamescopeHookState {
+            is_active: true,
+            last_cursor_retry: Some(std::time::Instant::now()),
+            ..Default::default()
+        };
+        assert_eq!(CURSOR_RETRY_COOLDOWN, std::time::Duration::from_secs(2));
+
+        // Within the 2-second cooldown, `poll_late_connections` must not spawn a new monitor.
+        state.poll_late_connections();
+        assert!(state.x11_cursor_monitor.is_none());
     }
 }

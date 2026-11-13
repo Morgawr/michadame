@@ -1,4 +1,112 @@
+use std::collections::VecDeque;
+use std::sync::{Mutex, OnceLock};
+
 use crate::{app::AppState, config::MichadameConfig};
+
+pub const MIN_POOLED_FRAME_BYTES: usize = 64 * 1024;
+pub const MAX_POOLED_FRAME_BYTES: usize = 64 * 1024 * 1024;
+const MAX_POOLED_FRAME_BUFFERS: usize = 24;
+const CAPACITY_SLACK_BYTES: usize = 4096;
+
+struct FrameBufferPool {
+    buffers: VecDeque<Vec<u8>>,
+}
+
+impl FrameBufferPool {
+    fn new() -> Self {
+        Self {
+            buffers: VecDeque::with_capacity(MAX_POOLED_FRAME_BUFFERS),
+        }
+    }
+
+    fn take_matching(&mut self, exact_len: usize) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+        if let Some(idx) = self
+            .buffers
+            .iter()
+            .rposition(|buf| buf.capacity() == exact_len)
+        {
+            return (self.buffers.remove(idx), None);
+        }
+
+        let max_cap = exact_len.saturating_add(CAPACITY_SLACK_BYTES);
+        if let Some(idx) = self
+            .buffers
+            .iter()
+            .rposition(|buf| buf.capacity() >= exact_len && buf.capacity() <= max_cap)
+        {
+            return (self.buffers.remove(idx), None);
+        }
+
+        let evicted = if self.buffers.len() >= MAX_POOLED_FRAME_BUFFERS {
+            self.buffers.pop_front()
+        } else {
+            None
+        };
+        (None, evicted)
+    }
+
+    fn put(&mut self, buf: Vec<u8>) -> Option<Vec<u8>> {
+        let evicted = if self.buffers.len() >= MAX_POOLED_FRAME_BUFFERS {
+            self.buffers.pop_front()
+        } else {
+            None
+        };
+        self.buffers.push_back(buf);
+        evicted
+    }
+}
+
+fn global_frame_buffer_pool() -> &'static Mutex<FrameBufferPool> {
+    static POOL: OnceLock<Mutex<FrameBufferPool>> = OnceLock::new();
+    POOL.get_or_init(|| Mutex::new(FrameBufferPool::new()))
+}
+
+/// Checks out a byte buffer of length `exact_len` from the bounded global frame pool,
+/// avoiding heap allocation and page-zeroing on steady-state cache hits.
+pub fn checkout_frame_buffer(exact_len: usize) -> Vec<u8> {
+    if exact_len == 0 {
+        return Vec::new();
+    }
+    if !(MIN_POOLED_FRAME_BYTES..=MAX_POOLED_FRAME_BYTES).contains(&exact_len) {
+        return vec![0u8; exact_len];
+    }
+
+    let (matched, evicted) = {
+        let mut guard = global_frame_buffer_pool()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.take_matching(exact_len)
+    };
+    drop(evicted);
+
+    if let Some(mut buf) = matched {
+        if buf.len() >= exact_len {
+            buf.truncate(exact_len);
+        } else {
+            buf.resize(exact_len, 0);
+        }
+        buf
+    } else {
+        vec![0u8; exact_len]
+    }
+}
+
+/// Returns a frame byte buffer to the bounded global frame pool if its capacity falls within
+/// `[MIN_POOLED_FRAME_BYTES, MAX_POOLED_FRAME_BYTES]`. Preserves `buf.len()` so subsequent
+/// checkouts of equal or smaller size require zero `memset` initialization.
+pub fn recycle_frame_buffer(buf: Vec<u8>) {
+    if !(MIN_POOLED_FRAME_BYTES..=MAX_POOLED_FRAME_BYTES).contains(&buf.capacity()) {
+        return;
+    }
+
+    let evicted = {
+        let mut guard = global_frame_buffer_pool()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.put(buf)
+    };
+    drop(evicted);
+}
 
 pub struct RawFrame {
     pub captured_at: i64,
@@ -8,6 +116,13 @@ pub struct RawFrame {
     pub data: Vec<u8>,
     pub format: ffmpeg_next::format::Pixel,
     pub color_range: ColorRange,
+}
+
+impl Drop for RawFrame {
+    fn drop(&mut self) {
+        let buf = std::mem::take(&mut self.data);
+        recycle_frame_buffer(buf);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -130,7 +245,9 @@ impl ScalerFilter {
             ScalerFilter::Lanczos => ffmpeg_next::software::scaling::flag::Flags::LANCZOS,
             ScalerFilter::Anime4kSmall
             | ScalerFilter::Anime4kMedium
-            | ScalerFilter::Anime4kLarge => ffmpeg_next::software::scaling::flag::Flags::LANCZOS,
+            | ScalerFilter::Anime4kLarge => {
+                ffmpeg_next::software::scaling::flag::Flags::FAST_BILINEAR
+            }
         }
     }
 }
@@ -228,15 +345,15 @@ mod tests {
         );
         assert_eq!(
             ScalerFilter::Anime4kSmall.into_ffmpeg_flag(),
-            ffmpeg_next::software::scaling::flag::Flags::LANCZOS
+            ffmpeg_next::software::scaling::flag::Flags::FAST_BILINEAR
         );
         assert_eq!(
             ScalerFilter::Anime4kMedium.into_ffmpeg_flag(),
-            ffmpeg_next::software::scaling::flag::Flags::LANCZOS
+            ffmpeg_next::software::scaling::flag::Flags::FAST_BILINEAR
         );
         assert_eq!(
             ScalerFilter::Anime4kLarge.into_ffmpeg_flag(),
-            ffmpeg_next::software::scaling::flag::Flags::LANCZOS
+            ffmpeg_next::software::scaling::flag::Flags::FAST_BILINEAR
         );
     }
 
@@ -245,5 +362,98 @@ mod tests {
         assert_eq!(ColorRange::from_u8(0), ColorRange::Full);
         assert_eq!(ColorRange::from_u8(1), ColorRange::Limited);
         assert_eq!(ColorRange::from_u8(2), ColorRange::Full); // Default
+    }
+
+    #[test]
+    fn test_checkout_and_raw_frame_drop_reuses_buffer_allocation() {
+        assert!(checkout_frame_buffer(0).is_empty());
+
+        let exact_len = 197_653;
+        let mut first_buf = checkout_frame_buffer(exact_len);
+        assert_eq!(first_buf.len(), exact_len);
+        first_buf.fill(0xA5);
+        let original_ptr = first_buf.as_ptr();
+        let original_cap = first_buf.capacity();
+
+        {
+            let _frame = RawFrame {
+                captured_at: 42,
+                rate: crate::replay::config::Rate { num: 60, den: 1 },
+                width: 320,
+                height: 240,
+                data: first_buf,
+                format: ffmpeg_next::format::Pixel::RGBA,
+                color_range: ColorRange::Full,
+            };
+        }
+
+        let reused_buf = checkout_frame_buffer(exact_len);
+        assert_eq!(reused_buf.len(), exact_len);
+        assert_eq!(reused_buf.capacity(), original_cap);
+        assert_eq!(reused_buf.as_ptr(), original_ptr);
+        // Existing initialized bytes were preserved without zero-filling.
+        assert_eq!(reused_buf[0], 0xA5);
+        assert_eq!(reused_buf[exact_len - 1], 0xA5);
+    }
+
+    #[test]
+    fn test_frame_buffer_pool_evicts_oldest_stale_sizes_when_full() {
+        let mut pool = FrameBufferPool::new();
+        let stale_len = 96 * 1024;
+        let mut stale_ptrs = Vec::with_capacity(MAX_POOLED_FRAME_BUFFERS);
+
+        for _ in 0..MAX_POOLED_FRAME_BUFFERS {
+            let buf = vec![1u8; stale_len];
+            stale_ptrs.push(buf.as_ptr());
+            assert!(pool.put(buf).is_none());
+        }
+        assert_eq!(pool.buffers.len(), MAX_POOLED_FRAME_BUFFERS);
+
+        // A miss at a new resolution while the pool is full must evict the oldest stale buffer.
+        let new_len = 256 * 1024;
+        let (matched, evicted) = pool.take_matching(new_len);
+        assert!(matched.is_none());
+        let evicted = evicted.expect("oldest stale buffer should be evicted on miss when full");
+        assert_eq!(evicted.as_ptr(), stale_ptrs[0]);
+        assert_eq!(pool.buffers.len(), MAX_POOLED_FRAME_BUFFERS - 1);
+
+        // Recycling the new-resolution buffer and filling again keeps the new buffer and evicts stale ones.
+        let new_buf = vec![2u8; new_len];
+        let new_ptr = new_buf.as_ptr();
+        assert!(pool.put(new_buf).is_none());
+        assert_eq!(pool.buffers.len(), MAX_POOLED_FRAME_BUFFERS);
+
+        let extra_buf = vec![3u8; new_len];
+        let evicted_on_put = pool
+            .put(extra_buf)
+            .expect("oldest remaining stale buffer should be evicted when full");
+        assert_eq!(evicted_on_put.as_ptr(), stale_ptrs[1]);
+
+        // Most recently recycled buffer of `new_len` is reused without reallocation.
+        let (hit1, ev1) = pool.take_matching(new_len);
+        assert!(ev1.is_none());
+        assert!(hit1.is_some());
+        let (hit2, ev2) = pool.take_matching(new_len);
+        assert!(ev2.is_none());
+        let hit2_buf = hit2.expect("second hit");
+        assert_eq!(hit2_buf.as_ptr(), new_ptr);
+    }
+
+    #[test]
+    fn test_checkout_slack_and_bounds_handling() {
+        let small = checkout_frame_buffer(1024);
+        assert_eq!(small.len(), 1024);
+
+        let base_len = 160 * 1024;
+        let buf = vec![0x5Au8; base_len + 2048];
+        let ptr = buf.as_ptr();
+        let cap = buf.capacity();
+        recycle_frame_buffer(buf);
+
+        // Within CAPACITY_SLACK_BYTES (4096) reuses the buffer and truncates in O(1).
+        let checked_out = checkout_frame_buffer(base_len);
+        assert_eq!(checked_out.len(), base_len);
+        assert_eq!(checked_out.capacity(), cap);
+        assert_eq!(checked_out.as_ptr(), ptr);
     }
 }

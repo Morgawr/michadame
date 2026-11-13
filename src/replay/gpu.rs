@@ -9,7 +9,14 @@ use std::{cell::Cell, collections::VecDeque, sync::atomic::Ordering};
 pub struct BroadcastSink {
     pub tx: crossbeam_channel::Sender<VideoFrame>,
     pub free_rx: crossbeam_channel::Receiver<Vec<u8>>,
+    pub free_tx: crossbeam_channel::Sender<Vec<u8>>,
     pub dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl BroadcastSink {
+    pub fn share_buffer(&self, rgba: Vec<u8>) -> super::SharedFrameBytes {
+        super::SharedFrameBytes::from_broadcast_pool(rgba, self.free_tx.clone())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -472,12 +479,16 @@ impl Readback {
             (4, capture_w as usize * capture_h as usize * 4, 0)
         };
 
+        let stop_before = running_replay.is_some_and(|r| r.shared.stop.load(Ordering::Relaxed));
+        let should_capture = !stop_before && self.should_capture(at);
+        if self.pending.is_empty() && !should_capture {
+            if let Some(r) = running_replay {
+                r.shared.gpu_pending.store(0, Ordering::Relaxed);
+            }
+            return;
+        }
+
         unsafe {
-            let old = gl.get_parameter_i32(glow::PIXEL_PACK_BUFFER_BINDING);
-            let alignment = gl.get_parameter_i32(glow::PACK_ALIGNMENT);
-            let row_length = gl.get_parameter_i32(glow::PACK_ROW_LENGTH);
-            let skip_rows = gl.get_parameter_i32(glow::PACK_SKIP_ROWS);
-            let skip_pixels = gl.get_parameter_i32(glow::PACK_SKIP_PIXELS);
             gl.pixel_store_i32(glow::PACK_ROW_LENGTH, 0);
             gl.pixel_store_i32(glow::PACK_SKIP_ROWS, 0);
             gl.pixel_store_i32(glow::PACK_SKIP_PIXELS, 0);
@@ -516,35 +527,28 @@ impl Readback {
                         debug_assert_eq!(rgba.len(), bytes);
                         gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(slot.buffer));
                         gl.get_buffer_sub_data(glow::PIXEL_PACK_BUFFER, 0, &mut rgba);
+                        let shared = runtime.queue.share_buffer(generation, rgba);
 
                         if !slot.broadcast_sent {
                             if let Some(bc) = broadcast {
-                                if let Ok(mut b_buf) = bc.free_rx.try_recv() {
-                                    if b_buf.len() != bytes {
-                                        b_buf.resize(bytes, 0);
-                                    }
-                                    b_buf.copy_from_slice(&rgba);
-                                    if bc
-                                        .tx
-                                        .try_send(VideoFrame {
-                                            rgba: b_buf,
-                                            width: capture_w,
-                                            height: capture_h,
-                                            at: slot.at,
-                                            generation: 0,
-                                        })
-                                        .is_err()
-                                    {
-                                        bc.dropped.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                } else {
+                                if bc
+                                    .tx
+                                    .try_send(VideoFrame {
+                                        rgba: shared.clone(),
+                                        width: capture_w,
+                                        height: capture_h,
+                                        at: slot.at,
+                                        generation: 0,
+                                    })
+                                    .is_err()
+                                {
                                     bc.dropped.fetch_add(1, Ordering::Relaxed);
                                 }
                             }
                         }
 
                         if let Err(error) = runtime.queue.submit(VideoFrame {
-                            rgba,
+                            rgba: shared,
                             width: capture_w,
                             height: capture_h,
                             at: slot.at,
@@ -585,7 +589,7 @@ impl Readback {
                                     if bc
                                         .tx
                                         .try_send(VideoFrame {
-                                            rgba: b_buf,
+                                            rgba: bc.share_buffer(b_buf),
                                             width: capture_w,
                                             height: capture_h,
                                             at: pending_slot.at,
@@ -618,7 +622,7 @@ impl Readback {
                             if bc
                                 .tx
                                 .try_send(VideoFrame {
-                                    rgba: b_buf,
+                                    rgba: bc.share_buffer(b_buf),
                                     width: capture_w,
                                     height: capture_h,
                                     at: slot.at,
@@ -641,8 +645,8 @@ impl Readback {
                 }
             }
 
-            let stop_flag = running_replay.map_or(false, |r| r.shared.stop.load(Ordering::Relaxed));
-            if !stop_flag && self.should_capture(at) {
+            let stop_flag = running_replay.is_some_and(|r| r.shared.stop.load(Ordering::Relaxed));
+            if !stop_flag && should_capture {
                 self.last_at = at;
                 if let Some(runtime) = running_replay {
                     runtime.shared.captured_at.store(at, Ordering::Relaxed);
@@ -840,14 +844,10 @@ impl Readback {
                     .gpu_pending
                     .store(self.pending.len(), Ordering::Relaxed);
             }
-            gl.bind_buffer(
-                glow::PIXEL_PACK_BUFFER,
-                std::num::NonZeroU32::new(old as u32).map(glow::NativeBuffer),
-            );
-            gl.pixel_store_i32(glow::PACK_ALIGNMENT, alignment);
-            gl.pixel_store_i32(glow::PACK_ROW_LENGTH, row_length);
-            gl.pixel_store_i32(glow::PACK_SKIP_ROWS, skip_rows);
-            gl.pixel_store_i32(glow::PACK_SKIP_PIXELS, skip_pixels);
+            // Restore canonical OpenGL pixel pack defaults without driver round-trip queries.
+            // PACK_ROW_LENGTH, PACK_SKIP_ROWS, and PACK_SKIP_PIXELS are already 0.
+            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+            gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
         }
     }
 }
@@ -1004,7 +1004,7 @@ mod tests {
                 if let Some(rgba) = queue.buffer(1) {
                     queue
                         .submit(VideoFrame {
-                            rgba,
+                            rgba: queue.share_buffer(1, rgba),
                             width: 2,
                             height: 2,
                             at,
@@ -1172,6 +1172,8 @@ mod tests {
         fbos: std::cell::RefCell<std::collections::HashSet<u32>>,
         fences: std::cell::RefCell<std::collections::HashMap<u64, u32>>,
         default_fence_state: Cell<u32>,
+        gl_calls: Cell<usize>,
+        get_param_calls: Cell<usize>,
     }
 
     impl Default for MockGl {
@@ -1199,6 +1201,8 @@ mod tests {
                 fbos: Default::default(),
                 fences: Default::default(),
                 default_fence_state: Cell::new(glow::ALREADY_SIGNALED),
+                gl_calls: Cell::new(0),
+                get_param_calls: Cell::new(0),
             }
         }
     }
@@ -1209,15 +1213,21 @@ mod tests {
             self.next_id.set(id + 1);
             std::num::NonZeroU32::new(id).unwrap()
         }
+
+        fn bump(&self) {
+            self.gl_calls.set(self.gl_calls.get() + 1);
+        }
     }
 
     unsafe impl GlBackend for MockGl {
         unsafe fn delete_sync(&self, fence: SlotFence) {
+            self.bump();
             if let SlotFence::Mock(id) = fence {
                 self.fences.borrow_mut().remove(&id);
             }
         }
         unsafe fn delete_buffer(&self, buffer: glow::Buffer) {
+            self.bump();
             let id = buffer.0.get();
             self.buffers.borrow_mut().remove(&id);
             if self.pack_buffer.get() == id {
@@ -1225,6 +1235,7 @@ mod tests {
             }
         }
         unsafe fn delete_framebuffer(&self, fbo: glow::Framebuffer) {
+            self.bump();
             let id = fbo.0.get();
             self.fbos.borrow_mut().remove(&id);
             if self.read_fbo.get() == id {
@@ -1235,6 +1246,7 @@ mod tests {
             }
         }
         unsafe fn delete_texture(&self, tex: glow::Texture) {
+            self.bump();
             let id = tex.0.get();
             self.textures.borrow_mut().remove(&id);
             if self.tex_2d.get() == id {
@@ -1242,6 +1254,8 @@ mod tests {
             }
         }
         unsafe fn get_parameter_i32(&self, parameter: u32) -> i32 {
+            self.bump();
+            self.get_param_calls.set(self.get_param_calls.get() + 1);
             match parameter {
                 glow::READ_FRAMEBUFFER_BINDING => self.read_fbo.get() as i32,
                 glow::DRAW_FRAMEBUFFER_BINDING => self.draw_fbo.get() as i32,
@@ -1255,6 +1269,7 @@ mod tests {
             }
         }
         unsafe fn pixel_store_i32(&self, parameter: u32, value: i32) {
+            self.bump();
             match parameter {
                 glow::PACK_ALIGNMENT => self.pack_alignment.set(value),
                 glow::PACK_ROW_LENGTH => self.pack_row_length.set(value),
@@ -1264,6 +1279,7 @@ mod tests {
             }
         }
         unsafe fn client_wait_sync(&self, fence: SlotFence, _flags: u32, _timeout: i32) -> u32 {
+            self.bump();
             match fence {
                 SlotFence::Mock(id) => self
                     .fences
@@ -1275,11 +1291,13 @@ mod tests {
             }
         }
         unsafe fn bind_buffer(&self, target: u32, buffer: Option<glow::Buffer>) {
+            self.bump();
             if target == glow::PIXEL_PACK_BUFFER {
                 self.pack_buffer.set(buffer.map_or(0, |b| b.0.get()));
             }
         }
         unsafe fn get_buffer_sub_data(&self, target: u32, offset: i32, dst: &mut [u8]) {
+            self.bump();
             if target == glow::PIXEL_PACK_BUFFER {
                 let bound = self.pack_buffer.get();
                 let buffers = self.buffers.borrow();
@@ -1290,11 +1308,13 @@ mod tests {
             }
         }
         unsafe fn create_buffer(&self) -> Result<glow::Buffer, String> {
+            self.bump();
             let id = self.alloc_id();
             self.buffers.borrow_mut().insert(id.get(), Vec::new());
             Ok(glow::NativeBuffer(id))
         }
         unsafe fn buffer_data_size(&self, target: u32, size: i32, _usage: u32) {
+            self.bump();
             if target == glow::PIXEL_PACK_BUFFER {
                 let bound = self.pack_buffer.get();
                 if let Some(buf) = self.buffers.borrow_mut().get_mut(&bound) {
@@ -1303,9 +1323,11 @@ mod tests {
             }
         }
         unsafe fn get_error(&self) -> u32 {
+            self.bump();
             glow::NO_ERROR
         }
         unsafe fn create_texture(&self) -> Result<glow::Texture, String> {
+            self.bump();
             if self.fail_create_tex.get() {
                 return Err("mock texture alloc failed".into());
             }
@@ -1314,13 +1336,19 @@ mod tests {
             Ok(glow::NativeTexture(id))
         }
         unsafe fn bind_texture(&self, target: u32, texture: Option<glow::Texture>) {
+            self.bump();
             if target == glow::TEXTURE_2D {
                 self.tex_2d.set(texture.map_or(0, |t| t.0.get()));
             }
         }
-        unsafe fn tex_image_2d_empty(&self, _width: i32, _height: i32) {}
-        unsafe fn tex_parameter_i32(&self, _target: u32, _parameter: u32, _value: i32) {}
+        unsafe fn tex_image_2d_empty(&self, _width: i32, _height: i32) {
+            self.bump();
+        }
+        unsafe fn tex_parameter_i32(&self, _target: u32, _parameter: u32, _value: i32) {
+            self.bump();
+        }
         unsafe fn create_framebuffer(&self) -> Result<glow::Framebuffer, String> {
+            self.bump();
             if self.fail_create_fbo.get() {
                 return Err("mock fbo alloc failed".into());
             }
@@ -1329,6 +1357,7 @@ mod tests {
             Ok(glow::NativeFramebuffer(id))
         }
         unsafe fn bind_framebuffer(&self, target: u32, framebuffer: Option<glow::Framebuffer>) {
+            self.bump();
             let id = framebuffer.map_or(0, |f| f.0.get());
             match target {
                 glow::FRAMEBUFFER => {
@@ -1348,19 +1377,24 @@ mod tests {
             _texture: Option<glow::Texture>,
             _level: i32,
         ) {
+            self.bump();
         }
         unsafe fn check_framebuffer_status(&self, _target: u32) -> u32 {
+            self.bump();
             self.fbo_status.get()
         }
         unsafe fn is_enabled(&self, parameter: u32) -> bool {
+            self.bump();
             parameter == glow::SCISSOR_TEST && self.scissor_enabled.get()
         }
         unsafe fn disable(&self, parameter: u32) {
+            self.bump();
             if parameter == glow::SCISSOR_TEST {
                 self.scissor_enabled.set(false);
             }
         }
         unsafe fn enable(&self, parameter: u32) {
+            self.bump();
             if parameter == glow::SCISSOR_TEST {
                 self.scissor_enabled.set(true);
             }
@@ -1378,9 +1412,11 @@ mod tests {
             _mask: u32,
             _filter: u32,
         ) {
+            self.bump();
             self.last_blit_src_fbo.set(self.read_fbo.get());
         }
         unsafe fn read_pixels_to_pbo(&self, _x: i32, _y: i32, _width: i32, _height: i32) {
+            self.bump();
             self.last_read_pixels_fbo.set(self.read_fbo.get());
             let bound = self.pack_buffer.get();
             let fill = self.next_pixel_byte.get();
@@ -1389,6 +1425,7 @@ mod tests {
             }
         }
         unsafe fn fence_sync(&self, _condition: u32, _flags: u32) -> Result<SlotFence, String> {
+            self.bump();
             let id = self.next_fence_id.get();
             self.next_fence_id.set(id + 1);
             self.fences
@@ -1419,6 +1456,7 @@ mod tests {
         let bc = BroadcastSink {
             tx: bc_tx,
             free_rx,
+            free_tx,
             dropped: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
 
@@ -1441,15 +1479,15 @@ mod tests {
             gl.last_read_pixels_fbo.get(),
             readback.downscale_fbo.unwrap().0.get()
         );
-        // Sentinel bindings and state must be restored after first downscale FBO init + blit
+        // FBO/texture/scissor bindings must be preserved; pack state resets to canonical GL defaults.
         assert_eq!(gl.read_fbo.get(), 11);
         assert_eq!(gl.draw_fbo.get(), 22);
         assert_eq!(gl.tex_2d.get(), 33);
-        assert_eq!(gl.pack_buffer.get(), 44);
-        assert_eq!(gl.pack_alignment.get(), 8);
-        assert_eq!(gl.pack_row_length.get(), 64);
-        assert_eq!(gl.pack_skip_rows.get(), 2);
-        assert_eq!(gl.pack_skip_pixels.get(), 4);
+        assert_eq!(gl.pack_buffer.get(), 0);
+        assert_eq!(gl.pack_alignment.get(), 4);
+        assert_eq!(gl.pack_row_length.get(), 0);
+        assert_eq!(gl.pack_skip_rows.get(), 0);
+        assert_eq!(gl.pack_skip_pixels.get(), 0);
         assert!(gl.scissor_enabled.get());
 
         // Resize to ultrawide 3440x1440 (downscales to 1920x804)
@@ -1469,7 +1507,7 @@ mod tests {
         assert_eq!(gl.read_fbo.get(), 11);
         assert_eq!(gl.draw_fbo.get(), 22);
         assert_eq!(gl.tex_2d.get(), 33);
-        assert_eq!(gl.pack_buffer.get(), 44);
+        assert_eq!(gl.pack_buffer.get(), 0);
 
         // Incomplete FBO path must also restore both READ and DRAW FBO bindings and clean up
         readback.downscale_size = (0, 0);
@@ -1484,7 +1522,7 @@ mod tests {
         assert_eq!(gl.read_fbo.get(), 11);
         assert_eq!(gl.draw_fbo.get(), 22);
         assert_eq!(gl.tex_2d.get(), 33);
-        assert_eq!(gl.pack_buffer.get(), 44);
+        assert_eq!(gl.pack_buffer.get(), 0);
 
         // FBO creation failure path must also restore bindings and delete the texture
         gl.fail_create_fbo.set(true);
@@ -1494,7 +1532,7 @@ mod tests {
         assert_eq!(gl.read_fbo.get(), 11);
         assert_eq!(gl.draw_fbo.get(), 22);
         assert_eq!(gl.tex_2d.get(), 33);
-        assert_eq!(gl.pack_buffer.get(), 44);
+        assert_eq!(gl.pack_buffer.get(), 0);
     }
 
     #[test]
@@ -1577,6 +1615,7 @@ mod tests {
         let bc = BroadcastSink {
             tx: bc_tx,
             free_rx: bc_free_rx,
+            free_tx: bc_free_tx,
             dropped: Arc::new(AtomicU64::new(0)),
         };
 
@@ -1619,8 +1658,8 @@ mod tests {
         assert_eq!(readback.pending.len(), 2);
 
         // Now release CPU buffers and verify the retained GPU slots drain in FIFO order
-        queue.recycle(0, held_cpu_0);
-        queue.recycle(0, held_cpu_1);
+        queue.recycle_raw(0, held_cpu_0);
+        queue.recycle_raw(0, held_cpu_1);
         readback.capture_with(&gl, Some(&runtime), Some(&bc), area, 10_032_000);
         assert_eq!(readback.pending.len(), 0);
         assert_eq!(shared.video_dropped.load(Ordering::Relaxed), 0);
@@ -1639,5 +1678,182 @@ mod tests {
         assert_eq!(replay_f1.rgba[0], 0xA1);
         assert_eq!(replay_f2.at, 10_020_000);
         assert_eq!(replay_f2.rgba[0], 0xB2);
+    }
+
+    #[test]
+    fn test_shared_frame_bytes_zero_copy_dual_consumer_recycles_on_last_drop() {
+        use crate::replay::{
+            clipboard::Clipboard,
+            config::{QueuePlan, ReplayConfig},
+            queue::{PoolRequest, WorkQueue},
+            Shared, Status,
+        };
+        use std::sync::{
+            atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize},
+            Arc, Mutex,
+        };
+        use std::time::Duration;
+
+        let gl = MockGl::default();
+        let queue = Arc::new(WorkQueue::new());
+        let config = Arc::new(ReplayConfig::default());
+        let shared = Arc::new(Shared {
+            clipboard: Arc::new(Clipboard::default()),
+            generation: AtomicU64::new(0),
+            stop: Arc::new(AtomicBool::new(false)),
+            audio_dropped: Arc::new(AtomicU64::new(0)),
+            video_dropped: AtomicU64::new(0),
+            gpu_pending: AtomicUsize::new(0),
+            queue_slots: AtomicUsize::new(0),
+            queue_bytes: AtomicUsize::new(0),
+            staging_bytes: AtomicUsize::new(0),
+            captured_at: Default::default(),
+            processed_at: Default::default(),
+            status: Mutex::new(Status::default()),
+            saving_bytes: AtomicUsize::new(0),
+            game_volume: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            scrub_snapshot: Mutex::new(None),
+        });
+        let runtime = RuntimeView {
+            queue: queue.clone(),
+            shared: shared.clone(),
+            config,
+        };
+
+        let area = RenderedArea {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 2,
+        };
+        let frame_bytes = 4 * 2 * 4;
+        let plan = QueuePlan {
+            slots: 2,
+            frame_bytes,
+            queue_bytes: frame_bytes * 4,
+            overhead: frame_bytes * 4,
+        };
+        assert!(queue
+            .prepare(
+                PoolRequest {
+                    generation: 0,
+                    plan,
+                },
+                &shared.generation,
+                &shared.stop,
+            )
+            .unwrap());
+
+        // Hold one of the 2 replay pool slots so exactly 1 slot remains for dual-consumer readback.
+        let held_extra = queue.buffer(0).unwrap();
+
+        let (bc_tx, bc_rx) = crossbeam_channel::bounded(4);
+        let (bc_free_tx, bc_free_rx) = crossbeam_channel::bounded(4);
+        for _ in 0..2 {
+            bc_free_tx.send(vec![0u8; frame_bytes]).unwrap();
+        }
+        let bc = BroadcastSink {
+            tx: bc_tx,
+            free_rx: bc_free_rx.clone(),
+            free_tx: bc_free_tx,
+            dropped: Arc::new(AtomicU64::new(0)),
+        };
+
+        let mut readback = Readback::default();
+        readback.active = Some(Arc::downgrade(&shared));
+        readback.surface.size = (4, 2);
+
+        // Issue capture at t = 10_000_000, then drain PBO at t = 10_005_000
+        gl.next_pixel_byte.set(0x5A);
+        readback.capture_with(&gl, Some(&runtime), Some(&bc), area, 10_000_000);
+        readback.capture_with(&gl, Some(&runtime), Some(&bc), area, 10_005_000);
+
+        let replay_frame = queue
+            .receive(Duration::ZERO)
+            .expect("Replay should receive captured frame");
+        let bc_frame = bc_rx
+            .try_recv()
+            .expect("Broadcast should receive captured frame");
+
+        // Zero-copy proof: exact same slice pointer and untouched broadcast pool!
+        let shared_ptr = replay_frame.rgba.as_ptr();
+        assert_eq!(shared_ptr, bc_frame.rgba.as_ptr());
+        assert_eq!(replay_frame.rgba.strong_count(), 2);
+        assert_eq!(&replay_frame.rgba[..], &vec![0x5A; frame_bytes][..]);
+        assert_eq!(
+            bc_free_rx.len(),
+            2,
+            "Dual-consumer zero-copy must not checkout or memcpy into broadcast pool buffers"
+        );
+        assert!(queue.buffer(0).is_none());
+
+        // Dropping the first consumer must NOT return the buffer to the pool yet.
+        queue.recycle(replay_frame.generation, replay_frame.rgba);
+        assert_eq!(bc_frame.rgba.strong_count(), 1);
+        assert!(
+            queue.buffer(0).is_none(),
+            "Backing Vec<u8> must stay pinned until the final consumer drops its VideoFrame"
+        );
+
+        // Dropping the second consumer returns the exact Vec<u8> allocation to Replay's pool.
+        drop(bc_frame);
+        let recycled = queue
+            .buffer(0)
+            .expect("Final drop must return the shared Vec<u8> to the replay pool");
+        assert_eq!(recycled.as_ptr(), shared_ptr);
+        queue.recycle_raw(0, recycled);
+        queue.recycle_raw(0, held_extra);
+
+        // Unpooled helper (`SharedFrameBytes::from_vec`) dereferences and drops cleanly.
+        let unpooled = crate::replay::SharedFrameBytes::from_vec(vec![1, 2, 3, 4]);
+        assert_eq!(unpooled.as_ref(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_idle_non_scheduled_frame_issues_zero_gl_calls_and_no_pack_queries() {
+        let gl = MockGl::default();
+        let (bc_tx, bc_rx) = crossbeam_channel::bounded(4);
+        let (free_tx, free_rx) = crossbeam_channel::bounded(4);
+        for _ in 0..4 {
+            free_tx.send(vec![0u8; 4 * 2 * 4]).unwrap();
+        }
+        let bc = BroadcastSink {
+            tx: bc_tx,
+            free_rx,
+            free_tx,
+            dropped: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        };
+
+        let mut readback = Readback::default();
+        readback.surface.size = (4, 2);
+        let area = RenderedArea {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 2,
+        };
+
+        // Scheduled native-size capture must issue zero gl.get_parameter_i32 pack round-trips.
+        readback.capture_with(&gl, None, Some(&bc), area, 10_000_000);
+        assert_eq!(
+            gl.get_param_calls.get(),
+            0,
+            "Native-size capture_with must not call gl.get_parameter_i32"
+        );
+        assert_eq!(readback.pending.len(), 1);
+
+        // Drain the pending PBO on a non-scheduled intermediate frame (+4ms).
+        readback.capture_with(&gl, None, Some(&bc), area, 10_004_000);
+        assert_eq!(readback.pending.len(), 0);
+        assert!(bc_rx.try_recv().is_ok());
+
+        // Subsequent non-scheduled frame (+8ms at 240Hz) with no pending PBOs must issue ZERO GL calls.
+        gl.gl_calls.set(0);
+        readback.capture_with(&gl, None, Some(&bc), area, 10_008_000);
+        assert_eq!(
+            gl.gl_calls.get(),
+            0,
+            "Idle non-scheduled frame must early-out before issuing any GL calls"
+        );
     }
 }

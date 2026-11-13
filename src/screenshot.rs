@@ -296,17 +296,16 @@ pub fn check_screenshot_hotkeys(ctx: &egui::Context) -> Option<ScreenshotMode> {
 /// Encodes raw RGBA pixels (top-left origin) into a good-quality JPEG image buffer.
 pub fn encode_normal_jpeg(pixels: &[u8], width: u32, height: u32) -> anyhow::Result<Vec<u8>> {
     anyhow::ensure!(width > 0 && height > 0, "Invalid screenshot dimensions");
+    let num_pixels = (width as usize) * (height as usize);
     anyhow::ensure!(
-        pixels.len() == (width as usize) * (height as usize) * 4,
+        pixels.len() == num_pixels * 4,
         "Unexpected RGBA pixel buffer length"
     );
-    let mut rgb = Vec::with_capacity((width as usize) * (height as usize) * 3);
-    for px in pixels.chunks_exact(4) {
-        rgb.push(px[0]);
-        rgb.push(px[1]);
-        rgb.push(px[2]);
+    let mut rgb = vec![0u8; num_pixels * 3];
+    for (src, dst) in pixels.chunks_exact(4).zip(rgb.chunks_exact_mut(3)) {
+        dst.copy_from_slice(&src[..3]);
     }
-    let mut out = Vec::with_capacity((width as usize) * (height as usize) / 2);
+    let mut out = Vec::with_capacity(num_pixels / 2);
     let mut encoder = JpegEncoder::new_with_quality(&mut out, NORMAL_SCREENSHOT_JPEG_QUALITY);
     encoder.encode(&rgb, width, height, ColorType::Rgb8.into())?;
     Ok(out)
@@ -668,18 +667,32 @@ fn sample_rgb_bilinear(pixels: &[u8], width: u32, height: u32, u: f32, v: f32) -
 /// Builds a compact blurred ambient/bloom mipmap (`gw x gh`) of the source screen so that
 /// phosphor halation, bezel bounce light, and room ambilight spill can be sampled in O(1) time.
 fn build_ambient_grid(pixels: &[u8], width: u32, height: u32, gw: u32, gh: u32) -> Vec<[f32; 3]> {
-    let mut grid = vec![[0.0f32; 3]; (gw * gh) as usize];
+    const TENT_WEIGHTS: [f32; 7] = [
+        1.0 / 16.0,
+        2.0 / 16.0,
+        3.0 / 16.0,
+        4.0 / 16.0,
+        3.0 / 16.0,
+        2.0 / 16.0,
+        1.0 / 16.0,
+    ];
+
+    let len = (gw * gh) as usize;
+    let mut grid = vec![[0.0f32; 3]; len];
+    let inv_gw = 1.0 / (gw.max(1) as f32);
+    let inv_gh = 1.0 / (gh.max(1) as f32);
     for gy in 0..gh {
-        let v0 = (gy as f32 + 0.25) / (gh as f32);
-        let v1 = (gy as f32 + 0.75) / (gh as f32);
+        let v0 = (gy as f32 + 0.25) * inv_gh;
+        let v1 = (gy as f32 + 0.75) * inv_gh;
+        let row_base = (gy * gw) as usize;
         for gx in 0..gw {
-            let u0 = (gx as f32 + 0.25) / (gw as f32);
-            let u1 = (gx as f32 + 0.75) / (gw as f32);
+            let u0 = (gx as f32 + 0.25) * inv_gw;
+            let u1 = (gx as f32 + 0.75) * inv_gw;
             let s00 = sample_rgb_bilinear(pixels, width, height, u0, v0);
             let s10 = sample_rgb_bilinear(pixels, width, height, u1, v0);
             let s01 = sample_rgb_bilinear(pixels, width, height, u0, v1);
             let s11 = sample_rgb_bilinear(pixels, width, height, u1, v1);
-            grid[(gy * gw + gx) as usize] = [
+            grid[row_base + gx as usize] = [
                 (s00[0] + s10[0] + s01[0] + s11[0]) * 0.25,
                 (s00[1] + s10[1] + s01[1] + s11[1]) * 0.25,
                 (s00[2] + s10[2] + s01[2] + s11[2]) * 0.25,
@@ -687,42 +700,40 @@ fn build_ambient_grid(pixels: &[u8], width: u32, height: u32, gw: u32, gh: u32) 
         }
     }
 
-    // Two-pass separable box/tent blur for silky diffuse phosphor bloom & bezel bounce
-    let mut temp = grid.clone();
-    let radius = 3i32;
+    // Two-pass separable tent blur with pre-normalized 7-tap weights (no inner-loop division).
+    let mut temp = vec![[0.0f32; 3]; len];
+    let max_x = gw as i32 - 1;
+    let max_y = gh as i32 - 1;
+    let gw_usize = gw as usize;
     for _pass in 0..2 {
-        for y in 0..gh as i32 {
+        for y in 0..gh as usize {
+            let row = y * gw_usize;
             for x in 0..gw as i32 {
                 let mut sum = [0.0f32; 3];
-                let mut w_sum = 0.0f32;
-                for dx in -radius..=radius {
-                    let wt = (radius + 1 - dx.abs()) as f32;
-                    let sx = (x + dx).clamp(0, gw as i32 - 1) as u32;
-                    let c = grid[(y as u32 * gw + sx) as usize];
+                for (k, &wt) in TENT_WEIGHTS.iter().enumerate() {
+                    let dx = k as i32 - 3;
+                    let sx = (x + dx).clamp(0, max_x) as usize;
+                    let c = grid[row + sx];
                     sum[0] += c[0] * wt;
                     sum[1] += c[1] * wt;
                     sum[2] += c[2] * wt;
-                    w_sum += wt;
                 }
-                temp[(y as u32 * gw + x as u32) as usize] =
-                    [sum[0] / w_sum, sum[1] / w_sum, sum[2] / w_sum];
+                temp[row + x as usize] = sum;
             }
         }
         for y in 0..gh as i32 {
-            for x in 0..gw as i32 {
+            let dst_row = (y as usize) * gw_usize;
+            for x in 0..gw_usize {
                 let mut sum = [0.0f32; 3];
-                let mut w_sum = 0.0f32;
-                for dy in -radius..=radius {
-                    let wt = (radius + 1 - dy.abs()) as f32;
-                    let sy = (y + dy).clamp(0, gh as i32 - 1) as u32;
-                    let c = temp[(sy * gw + x as u32) as usize];
+                for (k, &wt) in TENT_WEIGHTS.iter().enumerate() {
+                    let dy = k as i32 - 3;
+                    let sy = (y + dy).clamp(0, max_y) as usize;
+                    let c = temp[sy * gw_usize + x];
                     sum[0] += c[0] * wt;
                     sum[1] += c[1] * wt;
                     sum[2] += c[2] * wt;
-                    w_sum += wt;
                 }
-                grid[(y as u32 * gw + x as u32) as usize] =
-                    [sum[0] / w_sum, sum[1] / w_sum, sum[2] / w_sum];
+                grid[dst_row + x] = sum;
             }
         }
     }
@@ -1188,9 +1199,64 @@ fn eval_flat_lcd_bezel(
     final_rgb
 }
 
+#[derive(Clone, Copy)]
+struct PrecomputedCameraTrig {
+    inv_barrel_norm: f32,
+    cos_r: f32,
+    sin_r: f32,
+    inv_aspect: f32,
+    sin_yaw_persp: f32,
+    sin_pitch_persp: f32,
+    inv_cos_yaw: f32,
+    inv_cos_pitch: f32,
+    cos_m: f32,
+    sin_m: f32,
+    view_angle_mag: f32,
+}
+
+impl PrecomputedCameraTrig {
+    fn new(params: &PhotoCameraParams, aspect: f32) -> Self {
+        Self {
+            inv_barrel_norm: 1.0 / (aspect * aspect + 1.0).max(1.0),
+            cos_r: params.roll_rad.cos(),
+            sin_r: params.roll_rad.sin(),
+            inv_aspect: 1.0 / aspect.max(0.1),
+            sin_yaw_persp: params.yaw_rad.sin() * 0.58,
+            sin_pitch_persp: params.pitch_rad.sin() * 0.58,
+            inv_cos_yaw: 1.0 / params.yaw_rad.cos().max(0.5),
+            inv_cos_pitch: 1.0 / params.pitch_rad.cos().max(0.5),
+            cos_m: params.moire_angle_rad.cos(),
+            sin_m: params.moire_angle_rad.sin(),
+            view_angle_mag: (params.yaw_rad.hypot(params.pitch_rad) * 4.0).clamp(0.18, 0.75),
+        }
+    }
+
+    #[inline(always)]
+    fn project_uv(&self, params: &PhotoCameraParams, nx: f32, ny: f32, aspect: f32) -> (f32, f32) {
+        let sx = nx * aspect;
+        let r2 = (sx * sx + ny * ny) * self.inv_barrel_norm;
+        let radial = 1.0 + params.barrel_k1 * r2;
+        let dx = nx * radial;
+        let dy = ny * radial;
+
+        let rx_aspect = (dx * aspect * self.cos_r - dy * self.sin_r) * self.inv_aspect;
+        let ry_aspect = dx * aspect * self.sin_r + dy * self.cos_r;
+
+        let zx = rx_aspect * params.zoom + params.pan_x * 2.0;
+        let zy = ry_aspect * params.zoom + params.pan_y * 2.0;
+
+        let persp_denom = (1.0 + zx * self.sin_yaw_persp + zy * self.sin_pitch_persp).max(0.25);
+        let px = (zx / persp_denom) * self.inv_cos_yaw;
+        let py = (zy / persp_denom) * self.inv_cos_pitch;
+
+        (px * 0.5 + 0.5, py * 0.5 + 0.5)
+    }
+}
+
 /// Evaluates a single ray at monitor plane coordinate `(u, v)` (where `[0.0, 1.0]^2` is the
 /// active screen surface), combining screen pixels, CRT curvature/aperture or flat LCD panel,
 /// glass reflections, moiré interference, phosphor bloom, and surrounding physical monitor bezel.
+#[allow(clippy::too_many_arguments)]
 fn eval_monitor_plane_point(
     u: f32,
     v: f32,
@@ -1204,6 +1270,7 @@ fn eval_monitor_plane_point(
     gh: u32,
     scene: &PhotoSceneContext,
     params: &PhotoCameraParams,
+    trig: &PrecomputedCameraTrig,
     atlas: &RgbaImage,
     silhouette: &RgbaImage,
 ) -> [f32; 3] {
@@ -1456,8 +1523,8 @@ fn eval_monitor_plane_point(
         // Because the CRT scanlines follow curved tube coordinates `sv` while the smartphone CMOS sensor
         // rows follow straight tilted coordinates `ny_sensor`, their slight frequency difference creates
         // gentle curved horizontal/hyperbolic moiré wave bands across the screen.
-        let cos_m = params.moire_angle_rad.cos();
-        let sin_m = params.moire_angle_rad.sin();
+        let cos_m = trig.cos_m;
+        let sin_m = trig.sin_m;
         let mx = nx_sensor * cos_m - ny_sensor * sin_m;
         let my = nx_sensor * sin_m + ny_sensor * cos_m;
         let sensor_v = my * 0.5 + 0.5;
@@ -1590,7 +1657,7 @@ fn eval_monitor_plane_point(
         let corner_x = (u - 0.5).abs() * 2.0;
         let corner_y = (v - 0.5).abs() * 2.0;
         let ips_corner = (corner_x * corner_y).powf(1.6);
-        let view_angle_mag = (params.yaw_rad.hypot(params.pitch_rad) * 4.0).clamp(0.18, 0.75);
+        let view_angle_mag = trig.view_angle_mag;
         let backlight_floor = if dark_room { 0.018 } else { 0.024 };
         let ips_glow = backlight_floor + 0.032 * ips_corner * view_angle_mag;
         let lum = 0.2126 * col[0] + 0.7152 * col[1] + 0.0722 * col[2];
@@ -1602,8 +1669,8 @@ fn eval_monitor_plane_point(
         // 4. 2D Perspective-Grid LCD RGB Subpixel vs Camera Bayer Sensor Moiré Interference
         // The non-linear perspective foreshortening between monitor UV `(u, v)` and rotated
         // camera sensor coordinates `(mx, my)` creates authentic sweeping moiré fringes.
-        let cos_m = params.moire_angle_rad.cos();
-        let sin_m = params.moire_angle_rad.sin();
+        let cos_m = trig.cos_m;
+        let sin_m = trig.sin_m;
         let mx = nx_sensor * cos_m - ny_sensor * sin_m;
         let my = nx_sensor * sin_m + ny_sensor * cos_m;
         let persp_delta_x = (u - 0.5) * 2.0 - mx;
@@ -1645,13 +1712,13 @@ fn eval_monitor_plane_point(
     }
 }
 
-/// Renders the complete smartphone photo of the monitor into an RGBA8 buffer `(pixels, out_w, out_h)`.
-pub fn render_phone_photo_rgba(
+fn render_phone_photo_inner(
     pixels: &[u8],
     width: u32,
     height: u32,
     scene: &PhotoSceneContext,
     params: &PhotoCameraParams,
+    emit_alpha: bool,
 ) -> (Vec<u8>, u32, u32) {
     // For real window captures (longest side >= 320px), render at 2015-smartphone sensor
     // resolution (1920..=2400 on the longest side) so the photo is crisp and high-resolution.
@@ -1671,6 +1738,7 @@ pub fn render_phone_photo_rgba(
     };
 
     let aspect = (out_w as f32) / (out_h as f32);
+    let trig = PrecomputedCameraTrig::new(params, aspect);
     let gw = 64u32;
     let gh = 48u32;
     let ambient_grid = build_ambient_grid(pixels, width, height, gw, gh);
@@ -1678,13 +1746,18 @@ pub fn render_phone_photo_rgba(
     let silhouette = silhouette_mask();
 
     // Pass 1: Synthesize 3D perspective scene (monitor screen + glass + bezel/toolbar + room)
-    let mut scene_buf = vec![[0.0f32; 3]; (out_w * out_h) as usize];
+    let out_w_usize = out_w as usize;
+    let out_h_usize = out_h as usize;
+    let inv_out_w_2 = 2.0 / (out_w as f32);
+    let inv_out_h_2 = 2.0 / (out_h as f32);
+    let mut scene_buf = vec![[0.0f32; 3]; out_w_usize * out_h_usize];
     for y in 0..out_h {
-        let ny = (y as f32 + 0.5) / (out_h as f32) * 2.0 - 1.0;
+        let ny = (y as f32 + 0.5) * inv_out_h_2 - 1.0;
+        let row_base = (y as usize) * out_w_usize;
         for x in 0..out_w {
-            let nx = (x as f32 + 0.5) / (out_w as f32) * 2.0 - 1.0;
-            let (u, v) = params.project_photo_to_monitor_uv(nx, ny, aspect);
-            scene_buf[(y * out_w + x) as usize] = eval_monitor_plane_point(
+            let nx = (x as f32 + 0.5) * inv_out_w_2 - 1.0;
+            let (u, v) = trig.project_uv(params, nx, ny, aspect);
+            scene_buf[row_base + x as usize] = eval_monitor_plane_point(
                 u,
                 v,
                 nx,
@@ -1697,6 +1770,7 @@ pub fn render_phone_photo_rgba(
                 gh,
                 scene,
                 params,
+                &trig,
                 atlas,
                 silhouette,
             );
@@ -1710,72 +1784,84 @@ pub fn render_phone_photo_rgba(
     let shake_dy = params.shake_angle_rad.sin() * params.shake_px;
     let tap_offsets: [(f32, f32, f32); 3] =
         [(-0.55, -0.35, 0.10), (0.0, 0.0, 0.78), (0.65, 0.45, 0.12)];
+    let base_taps: [(f32, f32, f32); 3] = tap_offsets.map(|(t_par, t_perp, wt)| {
+        let perp_term = 0.15 * (t_perp * t_perp - 0.3);
+        (
+            shake_dx * t_par - shake_dy * perp_term,
+            shake_dy * t_par + shake_dx * perp_term,
+            wt,
+        )
+    });
 
-    let sample_scene_bilinear = |fx: f32, fy: f32| -> [f32; 3] {
-        let cx = fx.clamp(0.0, (out_w - 1) as f32);
-        let cy = fy.clamp(0.0, (out_h - 1) as f32);
-        let x0 = cx.floor() as u32;
-        let y0 = cy.floor() as u32;
-        let x1 = (x0 + 1).min(out_w - 1);
-        let y1 = (y0 + 1).min(out_h - 1);
+    let max_fx = (out_w - 1) as f32;
+    let max_fy = (out_h - 1) as f32;
+    let max_ix = out_w_usize - 1;
+    let max_iy = out_h_usize - 1;
+    let sample_scene_channel = |fx: f32, fy: f32, ch: usize| -> f32 {
+        let cx = fx.clamp(0.0, max_fx);
+        let cy = fy.clamp(0.0, max_fy);
+        let x0 = cx as usize;
+        let y0 = cy as usize;
+        let x1 = (x0 + 1).min(max_ix);
+        let y1 = (y0 + 1).min(max_iy);
         let tx = cx - x0 as f32;
         let ty = cy - y0 as f32;
-        let c00 = scene_buf[(y0 * out_w + x0) as usize];
-        let c10 = scene_buf[(y0 * out_w + x1) as usize];
-        let c01 = scene_buf[(y1 * out_w + x0) as usize];
-        let c11 = scene_buf[(y1 * out_w + x1) as usize];
-        [
-            (c00[0] + (c10[0] - c00[0]) * tx) * (1.0 - ty) + (c01[0] + (c11[0] - c01[0]) * tx) * ty,
-            (c00[1] + (c10[1] - c00[1]) * tx) * (1.0 - ty) + (c01[1] + (c11[1] - c01[1]) * tx) * ty,
-            (c00[2] + (c10[2] - c00[2]) * tx) * (1.0 - ty) + (c01[2] + (c11[2] - c01[2]) * tx) * ty,
-        ]
+        let row0 = y0 * out_w_usize;
+        let row1 = y1 * out_w_usize;
+        let c00 = scene_buf[row0 + x0][ch];
+        let c10 = scene_buf[row0 + x1][ch];
+        let c01 = scene_buf[row1 + x0][ch];
+        let c11 = scene_buf[row1 + x1][ch];
+        (c00 + (c10 - c00) * tx) * (1.0 - ty) + (c01 + (c11 - c01) * tx) * ty
     };
 
     let seed_offset = ((params.seed & 0xFFFF) as f32) * 0.137;
-    let mut out_rgba = vec![0u8; (out_w * out_h * 4) as usize];
+    let exp_wb_r = params.exposure_gain * params.wb_rgb[0];
+    let exp_wb_g = params.exposure_gain * params.wb_rgb[1];
+    let exp_wb_b = params.exposure_gain * params.wb_rgb[2];
+    let ca_scale = params.chromatic_aberration * (out_w as f32);
+    let stride = if emit_alpha { 4usize } else { 3usize };
+    let mut out_bytes = vec![0u8; out_w_usize * out_h_usize * stride];
+
+    let isp_curve = |v: f32| -> f32 {
+        let c = v.max(0.0);
+        let mapped = (c * (1.06 + 0.22 * c)) / (1.0 + 0.26 * c * c);
+        let s = mapped.clamp(0.0, 1.0);
+        s * s * (3.0 - 2.0 * s) * 0.22 + s * 0.78
+    };
 
     for y in 0..out_h {
-        let ny = (y as f32 + 0.5) / (out_h as f32) * 2.0 - 1.0;
+        let yf = y as f32;
+        let ny = (yf + 0.5) * inv_out_h_2 - 1.0;
+        let ny2 = ny * ny;
+        let row_pixel_base = (y as usize) * out_w_usize;
         for x in 0..out_w {
-            let nx = (x as f32 + 0.5) / (out_w as f32) * 2.0 - 1.0;
-            let r2 = nx * nx + ny * ny;
+            let xf = x as f32;
+            let nx = (xf + 0.5) * inv_out_w_2 - 1.0;
+            let r2 = nx * nx + ny2;
 
             // Subtle lateral chromatic aberration near frame corners
-            let ca_px = params.chromatic_aberration * r2 * (out_w as f32);
+            let ca_px = ca_scale * r2;
             let ca_x = nx * ca_px;
             let ca_y = ny * ca_px;
 
-            // Gentle handheld micro-tremor blur + slight corner softness
+            // Gentle handheld micro-tremor blur + slight corner softness (single-channel taps)
             let corner_blur = 1.0 + params.defocus_strength * r2 * 0.35;
             let mut acc = [0.0f32; 3];
-            for &(t_par, t_perp, wt) in &tap_offsets {
-                let ox =
-                    (shake_dx * t_par - shake_dy * 0.15 * (t_perp * t_perp - 0.3)) * corner_blur;
-                let oy =
-                    (shake_dy * t_par + shake_dx * 0.15 * (t_perp * t_perp - 0.3)) * corner_blur;
-                let sr = sample_scene_bilinear(x as f32 + ox + ca_x, y as f32 + oy + ca_y)[0];
-                let sg = sample_scene_bilinear(x as f32 + ox, y as f32 + oy)[1];
-                let sb = sample_scene_bilinear(x as f32 + ox - ca_x, y as f32 + oy - ca_y)[2];
-                acc[0] += sr * wt;
-                acc[1] += sg * wt;
-                acc[2] += sb * wt;
+            for &(bx, by, wt) in &base_taps {
+                let ox = bx * corner_blur;
+                let oy = by * corner_blur;
+                let gx = xf + ox;
+                let gy = yf + oy;
+                acc[0] += sample_scene_channel(gx + ca_x, gy + ca_y, 0) * wt;
+                acc[1] += sample_scene_channel(gx, gy, 1) * wt;
+                acc[2] += sample_scene_channel(gx - ca_x, gy - ca_y, 2) * wt;
             }
 
-            // Smartphone auto-exposure & white-balance shift
-            let mut r = acc[0] * params.exposure_gain * params.wb_rgb[0];
-            let mut g = acc[1] * params.exposure_gain * params.wb_rgb[1];
-            let mut b = acc[2] * params.exposure_gain * params.wb_rgb[2];
-
-            // 2015 Smartphone ISP tone curve (natural contrast with gentle highlight roll-off)
-            let isp_curve = |v: f32| -> f32 {
-                let c = v.max(0.0);
-                let mapped = (c * (1.06 + 0.22 * c)) / (1.0 + 0.26 * c * c);
-                let s = mapped.clamp(0.0, 1.0);
-                s * s * (3.0 - 2.0 * s) * 0.22 + s * 0.78
-            };
-            r = isp_curve(r);
-            g = isp_curve(g);
-            b = isp_curve(b);
+            // Smartphone auto-exposure, white-balance shift & 2015 Smartphone ISP tone curve
+            let mut r = isp_curve(acc[0] * exp_wb_r);
+            let mut g = isp_curve(acc[1] * exp_wb_g);
+            let mut b = isp_curve(acc[2] * exp_wb_b);
 
             // Subtle lens vignetting
             let vig = (1.0 - params.vignette_strength * r2 * 0.50).clamp(0.65, 1.0);
@@ -1786,16 +1872,15 @@ pub fn render_phone_photo_rgba(
             // Fine 2015-smartphone sensor grain (high spatial frequency, no big muddy blotches)
             let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
             let shadow_noise_boost = 1.25 - 0.55 * lum.clamp(0.0, 1.0);
-            let luma_grain = (hash21(x as f32 + seed_offset, y as f32 + seed_offset * 1.7) - 0.5)
+            let luma_grain = (hash21(xf + seed_offset, yf + seed_offset * 1.7) - 0.5)
                 * 2.0
                 * params.iso_noise_lum
                 * shadow_noise_boost;
-            let cb_grain = (value_noise(x as f32 * 0.75 + seed_offset, y as f32 * 0.75) - 0.5)
+            let cb_grain = (value_noise(xf * 0.75 + seed_offset, yf * 0.75) - 0.5)
                 * 2.0
                 * params.iso_noise_chroma
                 * shadow_noise_boost;
-            let cr_grain = (value_noise(x as f32 * 0.75 + 91.7, y as f32 * 0.75 + seed_offset)
-                - 0.5)
+            let cr_grain = (value_noise(xf * 0.75 + 91.7, yf * 0.75 + seed_offset) - 0.5)
                 * 2.0
                 * params.iso_noise_chroma
                 * shadow_noise_boost;
@@ -1804,15 +1889,40 @@ pub fn render_phone_photo_rgba(
             let gf = (g + luma_grain - 0.35 * cb_grain - 0.45 * cr_grain).clamp(0.0, 1.0);
             let bf = (b + luma_grain + cb_grain).clamp(0.0, 1.0);
 
-            let out_idx = ((y * out_w + x) as usize) * 4;
-            out_rgba[out_idx] = (rf * 255.0).round() as u8;
-            out_rgba[out_idx + 1] = (gf * 255.0).round() as u8;
-            out_rgba[out_idx + 2] = (bf * 255.0).round() as u8;
-            out_rgba[out_idx + 3] = 255;
+            let out_idx = (row_pixel_base + x as usize) * stride;
+            out_bytes[out_idx] = (rf * 255.0).round() as u8;
+            out_bytes[out_idx + 1] = (gf * 255.0).round() as u8;
+            out_bytes[out_idx + 2] = (bf * 255.0).round() as u8;
+            if emit_alpha {
+                out_bytes[out_idx + 3] = 255;
+            }
         }
     }
 
-    (out_rgba, out_w, out_h)
+    (out_bytes, out_w, out_h)
+}
+
+/// Renders the complete smartphone photo of the monitor into an RGBA8 buffer `(pixels, out_w, out_h)`.
+pub fn render_phone_photo_rgba(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    scene: &PhotoSceneContext,
+    params: &PhotoCameraParams,
+) -> (Vec<u8>, u32, u32) {
+    render_phone_photo_inner(pixels, width, height, scene, params, true)
+}
+
+/// Renders the complete smartphone photo of the monitor directly into a packed RGB8 buffer
+/// `(rgb_pixels, out_w, out_h)`, avoiding an intermediate RGBA8 allocation and alpha-strip copy.
+pub fn render_phone_photo_rgb(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    scene: &PhotoSceneContext,
+    params: &PhotoCameraParams,
+) -> (Vec<u8>, u32, u32) {
+    render_phone_photo_inner(pixels, width, height, scene, params, false)
 }
 
 /// Synthesizes a smartphone photo of the monitor (`Ctrl+S`) and encodes it as a JPEG image
@@ -1830,15 +1940,7 @@ pub fn encode_phone_photo_jpeg(
         "Unexpected RGBA pixel buffer length"
     );
 
-    let (rgba, out_w, out_h) = render_phone_photo_rgba(pixels, width, height, scene, params);
-
-    // Convert RGBA8 -> RGB8 for JPEG encoding
-    let mut rgb = Vec::with_capacity((out_w * out_h * 3) as usize);
-    for px in rgba.chunks_exact(4) {
-        rgb.push(px[0]);
-        rgb.push(px[1]);
-        rgb.push(px[2]);
-    }
+    let (rgb, out_w, out_h) = render_phone_photo_rgb(pixels, width, height, scene, params);
 
     let mut jpeg_bytes = Vec::with_capacity((out_w * out_h) as usize / 2);
     let mut encoder = JpegEncoder::new_with_quality(&mut jpeg_bytes, params.jpeg_quality);
@@ -2406,5 +2508,49 @@ mod tests {
             beam_dark_rgba[center_idx],
             halo_dark_rgba[center_idx]
         );
+    }
+
+    #[test]
+    fn test_render_phone_photo_rgb_matches_rgba_channels_and_trig_projection() {
+        let width = 96u32;
+        let height = 72u32;
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        for (i, px) in pixels.chunks_exact_mut(4).enumerate() {
+            px[0] = ((i * 5) % 251) as u8;
+            px[1] = ((i * 11) % 251) as u8;
+            px[2] = ((i * 17) % 251) as u8;
+            px[3] = 255;
+        }
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(2026);
+        let scene = PhotoSceneContext {
+            crt_filter: CrtFilter::Lottes,
+            dark_room: false,
+            ..Default::default()
+        };
+        let params = PhotoCameraParams::random(&mut rng, &scene);
+        let aspect = (width as f32) / (height as f32);
+        let trig = PrecomputedCameraTrig::new(&params, aspect);
+
+        for gy in 0..8 {
+            let ny = (gy as f32 + 0.5) / 8.0 * 2.0 - 1.0;
+            for gx in 0..8 {
+                let nx = (gx as f32 + 0.5) / 8.0 * 2.0 - 1.0;
+                let (u_ref, v_ref) = params.project_photo_to_monitor_uv(nx, ny, aspect);
+                let (u_fast, v_fast) = trig.project_uv(&params, nx, ny, aspect);
+                assert!((u_ref - u_fast).abs() < 1e-5);
+                assert!((v_ref - v_fast).abs() < 1e-5);
+            }
+        }
+
+        let (rgba, w_rgba, h_rgba) =
+            render_phone_photo_rgba(&pixels, width, height, &scene, &params);
+        let (rgb, w_rgb, h_rgb) = render_phone_photo_rgb(&pixels, width, height, &scene, &params);
+        assert_eq!((w_rgba, h_rgba), (w_rgb, h_rgb));
+        assert_eq!(rgb.len(), (w_rgb * h_rgb * 3) as usize);
+        for (px4, px3) in rgba.chunks_exact(4).zip(rgb.chunks_exact(3)) {
+            assert_eq!(&px4[..3], px3);
+            assert_eq!(px4[3], 255);
+        }
     }
 }

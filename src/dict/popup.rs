@@ -229,6 +229,9 @@ where
                 d.remove::<(u64, u64)>(popup_session_key(depth));
                 d.remove::<(u64, std::time::Instant, f64)>(popup_hover_dwell_key(depth));
             }
+            if from_depth == 0 {
+                d.remove::<CachedPopupTessellation>(popup_tess_cache_key());
+            }
         });
     };
 
@@ -698,8 +701,16 @@ where
         if all_clipped_shapes.is_empty() {
             Vec::new()
         } else {
-            ui.ctx()
-                .tessellate(all_clipped_shapes, ui.ctx().pixels_per_point())
+            tessellate_popup_shapes_cached(
+                ui.ctx(),
+                all_clipped_shapes,
+                ui.ctx().pixels_per_point(),
+                video_rect,
+                scale,
+                show_highlight,
+                can_clip,
+                rendered_layers.len(),
+            )
         }
     } else {
         Vec::new()
@@ -717,6 +728,210 @@ where
     }
 
     (popup_action, primitives)
+}
+
+#[derive(Clone)]
+struct CachedPopupTessellation {
+    signature: u64,
+    primitives: std::sync::Arc<[egui::ClippedPrimitive]>,
+}
+
+#[inline]
+fn popup_tess_cache_key() -> egui::Id {
+    egui::Id::new("dict_popup_crt_tess_cache")
+}
+
+#[cfg(test)]
+thread_local! {
+    static POPUP_TESS_MISS_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn hash_rect_bits(rect: egui::Rect, hasher: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    rect.min.x.to_bits().hash(hasher);
+    rect.min.y.to_bits().hash(hasher);
+    rect.max.x.to_bits().hash(hasher);
+    rect.max.y.to_bits().hash(hasher);
+}
+
+fn hash_shape_for_tessellation(
+    shape: &egui::Shape,
+    hasher: &mut impl std::hash::Hasher,
+    cacheable: &mut bool,
+) {
+    use std::hash::Hash;
+    match shape {
+        egui::Shape::Noop => {
+            0u8.hash(hasher);
+        }
+        egui::Shape::Vec(shapes) => {
+            1u8.hash(hasher);
+            shapes.len().hash(hasher);
+            for child in shapes {
+                hash_shape_for_tessellation(child, hasher, cacheable);
+                if !*cacheable {
+                    return;
+                }
+            }
+        }
+        egui::Shape::Circle(c) => {
+            2u8.hash(hasher);
+            c.center.x.to_bits().hash(hasher);
+            c.center.y.to_bits().hash(hasher);
+            c.radius.to_bits().hash(hasher);
+            c.fill.to_array().hash(hasher);
+            c.stroke.width.to_bits().hash(hasher);
+            c.stroke.color.to_array().hash(hasher);
+        }
+        egui::Shape::LineSegment { points, stroke } => {
+            3u8.hash(hasher);
+            points[0].x.to_bits().hash(hasher);
+            points[0].y.to_bits().hash(hasher);
+            points[1].x.to_bits().hash(hasher);
+            points[1].y.to_bits().hash(hasher);
+            stroke.width.to_bits().hash(hasher);
+            stroke.color.to_array().hash(hasher);
+        }
+        egui::Shape::Path(p) => {
+            4u8.hash(hasher);
+            p.points.len().hash(hasher);
+            for pt in &p.points {
+                pt.x.to_bits().hash(hasher);
+                pt.y.to_bits().hash(hasher);
+            }
+            p.closed.hash(hasher);
+            p.fill.to_array().hash(hasher);
+            p.stroke.width.to_bits().hash(hasher);
+        }
+        egui::Shape::Rect(r) => {
+            5u8.hash(hasher);
+            hash_rect_bits(r.rect, hasher);
+            r.rounding.nw.to_bits().hash(hasher);
+            r.rounding.ne.to_bits().hash(hasher);
+            r.rounding.sw.to_bits().hash(hasher);
+            r.rounding.se.to_bits().hash(hasher);
+            r.fill.to_array().hash(hasher);
+            r.stroke.width.to_bits().hash(hasher);
+            r.stroke.color.to_array().hash(hasher);
+            r.fill_texture_id.hash(hasher);
+        }
+        egui::Shape::Text(t) => {
+            6u8.hash(hasher);
+            t.pos.x.to_bits().hash(hasher);
+            t.pos.y.to_bits().hash(hasher);
+            t.fallback_color.to_array().hash(hasher);
+            t.override_text_color.map(|c| c.to_array()).hash(hasher);
+            t.underline.width.to_bits().hash(hasher);
+            t.underline.color.to_array().hash(hasher);
+            t.angle.to_bits().hash(hasher);
+            t.galley.job.text.hash(hasher);
+            hash_rect_bits(t.galley.mesh_bounds, hasher);
+            t.galley.rows.len().hash(hasher);
+            for row in &t.galley.rows {
+                let verts = &row.visuals.mesh.vertices;
+                verts.len().hash(hasher);
+                if let Some(first) = verts.first() {
+                    first.pos.x.to_bits().hash(hasher);
+                    first.pos.y.to_bits().hash(hasher);
+                    first.uv.x.to_bits().hash(hasher);
+                    first.uv.y.to_bits().hash(hasher);
+                    first.color.to_array().hash(hasher);
+                }
+                if let Some(last) = verts.last() {
+                    last.pos.x.to_bits().hash(hasher);
+                    last.pos.y.to_bits().hash(hasher);
+                    last.uv.x.to_bits().hash(hasher);
+                    last.uv.y.to_bits().hash(hasher);
+                    last.color.to_array().hash(hasher);
+                }
+            }
+        }
+        egui::Shape::Mesh(m) => {
+            7u8.hash(hasher);
+            m.texture_id.hash(hasher);
+            m.indices.len().hash(hasher);
+            m.vertices.len().hash(hasher);
+            if let Some(first) = m.vertices.first() {
+                first.pos.x.to_bits().hash(hasher);
+                first.pos.y.to_bits().hash(hasher);
+                first.uv.x.to_bits().hash(hasher);
+                first.uv.y.to_bits().hash(hasher);
+                first.color.to_array().hash(hasher);
+            }
+            if let Some(last) = m.vertices.last() {
+                last.pos.x.to_bits().hash(hasher);
+                last.pos.y.to_bits().hash(hasher);
+                last.uv.x.to_bits().hash(hasher);
+                last.uv.y.to_bits().hash(hasher);
+                last.color.to_array().hash(hasher);
+            }
+        }
+        _ => {
+            *cacheable = false;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tessellate_popup_shapes_cached(
+    ctx: &egui::Context,
+    clipped_shapes: Vec<egui::epaint::ClippedShape>,
+    ppp: f32,
+    video_rect: egui::Rect,
+    scale: f32,
+    show_highlight: bool,
+    can_clip: bool,
+    layer_count: usize,
+) -> Vec<egui::ClippedPrimitive> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    ppp.to_bits().hash(&mut hasher);
+    hash_rect_bits(video_rect, &mut hasher);
+    scale.to_bits().hash(&mut hasher);
+    show_highlight.hash(&mut hasher);
+    can_clip.hash(&mut hasher);
+    layer_count.hash(&mut hasher);
+    clipped_shapes.len().hash(&mut hasher);
+
+    let mut cacheable = true;
+    for cs in &clipped_shapes {
+        hash_rect_bits(cs.clip_rect, &mut hasher);
+        hash_shape_for_tessellation(&cs.shape, &mut hasher, &mut cacheable);
+        if !cacheable {
+            break;
+        }
+    }
+
+    if cacheable {
+        let signature = hasher.finish();
+        let cache_id = popup_tess_cache_key();
+        if let Some(hit) = ctx.data(|d| {
+            d.get_temp::<CachedPopupTessellation>(cache_id)
+                .filter(|entry| entry.signature == signature)
+        }) {
+            return hit.primitives.to_vec();
+        }
+
+        #[cfg(test)]
+        POPUP_TESS_MISS_COUNT.with(|c| c.set(c.get() + 1));
+
+        let primitives = ctx.tessellate(clipped_shapes, ppp);
+        let shared: std::sync::Arc<[egui::ClippedPrimitive]> = primitives.clone().into();
+        ctx.data_mut(|d| {
+            d.insert_temp(
+                cache_id,
+                CachedPopupTessellation {
+                    signature,
+                    primitives: shared,
+                },
+            );
+        });
+        primitives
+    } else {
+        #[cfg(test)]
+        POPUP_TESS_MISS_COUNT.with(|c| c.set(c.get() + 1));
+        ctx.tessellate(clipped_shapes, ppp)
+    }
 }
 
 /// Footer row of the popup: `━━━ 1 / 3 ━━━ ▼`. The page cursor blinks (gold while more
@@ -2624,5 +2839,140 @@ mod tests {
                 "Layer 0 ++ button must trigger PopupAction::MineAndClip(0)"
             );
         }
+    }
+
+    #[test]
+    fn test_popup_under_crt_caches_tessellation_and_preserves_noop_paintlist() {
+        let ctx = egui::Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        let family = fonts.families[&egui::FontFamily::Proportional].clone();
+        fonts
+            .families
+            .insert(egui::FontFamily::Name("GothicCJK".into()), family);
+        ctx.set_fonts(fonts);
+        let video_rect =
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
+        let word_rect =
+            egui::Rect::from_min_size(egui::pos2(400.0, 800.0), egui::vec2(120.0, 40.0));
+        let mut popup_state = Some(DictPopupState {
+            matched_term: "食べる".into(),
+            source_text: "食べる".into(),
+            char_range: (0, 3),
+            word_rect,
+            extra_word_rects: vec![],
+            box_rect: word_rect,
+            entries: vec![super::super::models::TermEntry {
+                term: "食べる".into(),
+                reading: "たべる".into(),
+                definition_tags: None,
+                rules: String::new(),
+                score: 0.0,
+                glossary: vec![super::super::models::GlossaryEntry::Text(
+                    "to eat; to consume".into(),
+                )],
+                sequence: 100,
+                term_tags: None,
+                inflection_reasons: vec![],
+                frequency: None,
+                pitches: vec![],
+                custom_name_id: None,
+                custom_tag: None,
+            }],
+            is_popup_hovered: false,
+            popup_rect: None,
+            last_hover_time: Instant::now(),
+            last_word_hover_time: Instant::now(),
+            child: None,
+        });
+
+        let run_crt_frame = |popup_state: &mut Option<DictPopupState>,
+                             mine_status: crate::bank::MineStatus,
+                             time: f64| {
+            let mut prims = Vec::new();
+            let layer_id = popup_layer_id(true, 0);
+            let mut paint_list_len = 0usize;
+            let mut all_noop = false;
+            let out = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(video_rect),
+                    time: Some(time),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let (_, p) = draw_dict_popup_with_lookup::<
+                            fn(
+                                &str,
+                                usize,
+                            )
+                                -> Option<(usize, usize, Vec<super::super::models::TermEntry>)>,
+                        >(
+                            ui,
+                            popup_state,
+                            video_rect,
+                            true,
+                            true,
+                            1.0,
+                            |_| mine_status,
+                            |_| mine_status != crate::bank::MineStatus::Available,
+                            true,
+                            None,
+                        );
+                        prims = p;
+                    });
+                    ctx.graphics_mut(|g| {
+                        if let Some(list) = g.get_mut(layer_id) {
+                            let entries: Vec<_> = list.all_entries().collect();
+                            paint_list_len = entries.len();
+                            all_noop = entries
+                                .iter()
+                                .all(|cs| matches!(cs.shape, egui::Shape::Noop));
+                        }
+                    });
+                },
+            );
+            let _ = out;
+            (prims, paint_list_len, all_noop)
+        };
+
+        // Frame 0 is egui::Area's invisible sizing pass; Frame 1+ paints visible shapes.
+        let _ = run_crt_frame(&mut popup_state, crate::bank::MineStatus::Available, 0.05);
+
+        let m0 = POPUP_TESS_MISS_COUNT.with(|c| c.get());
+        let (prims1, len1, noop1) =
+            run_crt_frame(&mut popup_state, crate::bank::MineStatus::Available, 0.1);
+        let m1 = POPUP_TESS_MISS_COUNT.with(|c| c.get());
+        assert!(!prims1.is_empty());
+        assert!(len1 > 0, "PaintList length must be preserved (not drained)");
+        assert!(
+            noop1,
+            "All popup layer shapes must be overwritten with Shape::Noop"
+        );
+        assert_eq!(m1, m0 + 1);
+
+        // Stationary frame within same blink/gem step: reuses cached tessellation (0 misses)
+        // while still overwriting PaintList entries with Shape::Noop!
+        let (prims2, len2, noop2) =
+            run_crt_frame(&mut popup_state, crate::bank::MineStatus::Available, 0.2);
+        let m2 = POPUP_TESS_MISS_COUNT.with(|c| c.get());
+        assert_eq!(prims2.len(), prims1.len());
+        assert_eq!(len2, len1);
+        assert!(noop2);
+        assert_eq!(
+            m2, m1,
+            "Unchanged popup frame must reuse cached CRT tessellation"
+        );
+
+        // Changing mining status immediately invalidates the signature and re-tessellates!
+        let (prims3, _, noop3) =
+            run_crt_frame(&mut popup_state, crate::bank::MineStatus::Mined, 0.2);
+        let m3 = POPUP_TESS_MISS_COUNT.with(|c| c.get());
+        assert!(!prims3.is_empty());
+        assert!(noop3);
+        assert_eq!(
+            m3,
+            m2 + 1,
+            "Mining status visual change must invalidate cached CRT tessellation"
+        );
     }
 }

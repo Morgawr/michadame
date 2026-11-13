@@ -48,158 +48,210 @@ pub fn lookup_word_at_pointer_with_pitch(
     current_tag: Option<&str>,
     custom_names_gen: u64,
 ) -> Option<DictPopupState> {
+    lookup_word_at_pointer_with_pitch_and_char(
+        pointer_pos,
+        ocr_boxes,
+        video_rect,
+        db,
+        freq_db,
+        pitch_db,
+        deinflector,
+        custom_names,
+        current_tag,
+        custom_names_gen,
+    )
+    .map(|(_, _, popup)| popup)
+}
+
+fn resolve_box_segments_and_char<'a>(
+    ocr_box: &'a OcrBox,
+    pointer_pos: egui::Pos2,
+    video_rect: egui::Rect,
+) -> Option<(Rect, Vec<LineSegment<'a>>, Vec<char>, usize, usize)> {
+    let min_x = video_rect.min.x + (ocr_box.center_x - ocr_box.width / 2.0) * video_rect.width();
+    let max_x = video_rect.min.x + (ocr_box.center_x + ocr_box.width / 2.0) * video_rect.width();
+    let is_box_vertical = ocr_box.writing_direction.is_vertical();
+    let min_y = video_rect.min.y + (ocr_box.center_y - ocr_box.height / 2.0) * video_rect.height();
+    let max_y = video_rect.min.y + (ocr_box.center_y + ocr_box.height / 2.0) * video_rect.height();
+
+    let box_rect = Rect::from_min_max(egui::pos2(min_x, min_y), egui::pos2(max_x, max_y));
+    if !box_rect.contains(pointer_pos) {
+        return None;
+    }
+
+    // Break the box into lines with their own geometry. Matching is done over the
+    // concatenation of ALL lines (in OCR reading order) so that words/expressions that
+    // wrap across a line break still match, e.g. "ちょーしが⏎わるかった".
+    let mut segments: Vec<LineSegment<'a>> = if ocr_box.lines.is_empty() {
+        vec![LineSegment {
+            text: ocr_box.text.as_str(),
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+            char_start: 0,
+            char_len: 0,
+            is_vertical: is_box_vertical,
+            char_spans_px: Vec::new(),
+        }]
+    } else {
+        ocr_box
+            .lines
+            .iter()
+            .map(|line| {
+                let is_vert = line.writing_direction.is_vertical();
+                let char_count = line.text.chars().count();
+                let char_spans_px = if line.char_spans.len() == char_count {
+                    line.char_spans
+                        .iter()
+                        .map(|&(s0, s1)| {
+                            if is_vert {
+                                (
+                                    video_rect.min.y + s0 * video_rect.height(),
+                                    video_rect.min.y + s1 * video_rect.height(),
+                                )
+                            } else {
+                                (
+                                    video_rect.min.x + s0 * video_rect.width(),
+                                    video_rect.min.x + s1 * video_rect.width(),
+                                )
+                            }
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                LineSegment {
+                    text: line.text.as_str(),
+                    min_x: video_rect.min.x
+                        + (line.center_x - line.width / 2.0) * video_rect.width(),
+                    max_x: video_rect.min.x
+                        + (line.center_x + line.width / 2.0) * video_rect.width(),
+                    min_y: video_rect.min.y
+                        + (line.center_y - line.height / 2.0) * video_rect.height(),
+                    max_y: video_rect.min.y
+                        + (line.center_y + line.height / 2.0) * video_rect.height(),
+                    char_start: 0,
+                    char_len: 0,
+                    is_vertical: is_vert,
+                    char_spans_px,
+                }
+            })
+            .collect()
+    };
+
+    let mut chars: Vec<char> = Vec::new();
+    for seg in &mut segments {
+        seg.char_start = chars.len();
+        chars.extend(seg.text.chars());
+        seg.char_len = chars.len() - seg.char_start;
+    }
+    if chars.is_empty() {
+        return None;
+    }
+
+    // Find the line/column closest to or containing pointer_pos
+    let mut target_idx = None;
+    if is_box_vertical {
+        let mut min_dist_x = f32::MAX;
+        for (i, seg) in segments.iter().enumerate() {
+            if seg.char_len == 0 {
+                continue;
+            }
+            if pointer_pos.x >= seg.min_x && pointer_pos.x <= seg.max_x {
+                target_idx = Some(i);
+                break;
+            }
+            let dist = if pointer_pos.x < seg.min_x {
+                seg.min_x - pointer_pos.x
+            } else {
+                pointer_pos.x - seg.max_x
+            };
+            if dist < min_dist_x {
+                min_dist_x = dist;
+                target_idx = Some(i);
+            }
+        }
+    } else {
+        let mut min_dist_y = f32::MAX;
+        for (i, seg) in segments.iter().enumerate() {
+            if seg.char_len == 0 {
+                continue;
+            }
+            if pointer_pos.y >= seg.min_y && pointer_pos.y <= seg.max_y {
+                target_idx = Some(i);
+                break;
+            }
+            let dist = if pointer_pos.y < seg.min_y {
+                seg.min_y - pointer_pos.y
+            } else {
+                pointer_pos.y - seg.max_y
+            };
+            if dist < min_dist_y {
+                min_dist_y = dist;
+                target_idx = Some(i);
+            }
+        }
+    }
+
+    let target_idx = target_idx?;
+    let target = &segments[target_idx];
+    let local_idx = target.char_index_at(
+        pointer_pos,
+        &chars[target.char_start..target.char_start + target.char_len],
+    );
+    let char_idx = target.char_start + local_idx;
+    Some((box_rect, segments, chars, target_idx, char_idx))
+}
+
+/// Resolves `pointer_pos` to the first hit `(box_idx, char_idx)` in `ocr_boxes` using exact
+/// line/column and `char_spans` geometry without touching SQLite or running substring scans.
+pub fn resolve_ocr_hover_char(
+    pointer_pos: egui::Pos2,
+    ocr_boxes: &[OcrBox],
+    video_rect: egui::Rect,
+) -> Option<(usize, usize)> {
+    if video_rect.width() <= 10.0 || video_rect.height() <= 10.0 || ocr_boxes.is_empty() {
+        return None;
+    }
+    for (box_idx, ocr_box) in ocr_boxes.iter().enumerate() {
+        if let Some((_, _, _, _, char_idx)) =
+            resolve_box_segments_and_char(ocr_box, pointer_pos, video_rect)
+        {
+            return Some((box_idx, char_idx));
+        }
+    }
+    None
+}
+
+/// Like [`lookup_word_at_pointer_with_pitch`], also returning `(box_idx, hovered_char_idx)` for
+/// stationary hover short-circuiting on subsequent frames.
+#[allow(clippy::too_many_arguments)]
+pub fn lookup_word_at_pointer_with_pitch_and_char(
+    pointer_pos: egui::Pos2,
+    ocr_boxes: &[OcrBox],
+    video_rect: egui::Rect,
+    db: Option<&DictDatabase>,
+    freq_db: Option<&super::frequency::FreqDatabase>,
+    pitch_db: Option<&super::pitch::PitchDatabase>,
+    deinflector: &Deinflector,
+    custom_names: &[CustomNameEntry],
+    current_tag: Option<&str>,
+    custom_names_gen: u64,
+) -> Option<(usize, usize, DictPopupState)> {
     if video_rect.width() <= 10.0 || video_rect.height() <= 10.0 || ocr_boxes.is_empty() {
         return None;
     }
 
-    for ocr_box in ocr_boxes {
-        let min_x =
-            video_rect.min.x + (ocr_box.center_x - ocr_box.width / 2.0) * video_rect.width();
-        let max_x =
-            video_rect.min.x + (ocr_box.center_x + ocr_box.width / 2.0) * video_rect.width();
-        let is_box_vertical = ocr_box.writing_direction.is_vertical();
-        let min_y =
-            video_rect.min.y + (ocr_box.center_y - ocr_box.height / 2.0) * video_rect.height();
-        let max_y =
-            video_rect.min.y + (ocr_box.center_y + ocr_box.height / 2.0) * video_rect.height();
-
-        let box_rect = Rect::from_min_max(egui::pos2(min_x, min_y), egui::pos2(max_x, max_y));
-
-        if !box_rect.contains(pointer_pos) {
-            continue;
-        }
-
-        // Break the box into lines with their own geometry. Matching is done over the
-        // concatenation of ALL lines (in OCR reading order) so that words/expressions that
-        // wrap across a line break still match, e.g. "ちょーしが⏎わるかった".
-        let segments: Vec<LineSegment> = if ocr_box.lines.is_empty() {
-            vec![LineSegment {
-                text: ocr_box.text.as_str(),
-                min_x,
-                max_x,
-                min_y,
-                max_y,
-                char_start: 0,
-                char_len: 0,
-                is_vertical: is_box_vertical,
-                char_spans_px: Vec::new(),
-            }]
-        } else {
-            ocr_box
-                .lines
-                .iter()
-                .map(|line| {
-                    let is_vert = line.writing_direction.is_vertical();
-                    let char_count = line.text.chars().count();
-                    let char_spans_px = if line.char_spans.len() == char_count {
-                        line.char_spans
-                            .iter()
-                            .map(|&(s0, s1)| {
-                                if is_vert {
-                                    (
-                                        video_rect.min.y + s0 * video_rect.height(),
-                                        video_rect.min.y + s1 * video_rect.height(),
-                                    )
-                                } else {
-                                    (
-                                        video_rect.min.x + s0 * video_rect.width(),
-                                        video_rect.min.x + s1 * video_rect.width(),
-                                    )
-                                }
-                            })
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                    LineSegment {
-                        text: line.text.as_str(),
-                        min_x: video_rect.min.x
-                            + (line.center_x - line.width / 2.0) * video_rect.width(),
-                        max_x: video_rect.min.x
-                            + (line.center_x + line.width / 2.0) * video_rect.width(),
-                        min_y: video_rect.min.y
-                            + (line.center_y - line.height / 2.0) * video_rect.height(),
-                        max_y: video_rect.min.y
-                            + (line.center_y + line.height / 2.0) * video_rect.height(),
-                        char_start: 0,
-                        char_len: 0,
-                        is_vertical: is_vert,
-                        char_spans_px,
-                    }
-                })
-                .collect()
-        };
-
-        let mut segments = segments;
-        let mut chars: Vec<char> = Vec::new();
-        for seg in &mut segments {
-            seg.char_start = chars.len();
-            chars.extend(seg.text.chars());
-            seg.char_len = chars.len() - seg.char_start;
-        }
-        if chars.is_empty() {
-            continue;
-        }
-
-        // Find the line/column closest to or containing pointer_pos
-        let mut target_idx = None;
-        if is_box_vertical {
-            let mut min_dist_x = f32::MAX;
-            for (i, seg) in segments.iter().enumerate() {
-                if seg.char_len == 0 {
-                    continue;
-                }
-                if pointer_pos.x >= seg.min_x && pointer_pos.x <= seg.max_x {
-                    target_idx = Some(i);
-                    break;
-                }
-                let dist = if pointer_pos.x < seg.min_x {
-                    seg.min_x - pointer_pos.x
-                } else {
-                    pointer_pos.x - seg.max_x
-                };
-                if dist < min_dist_x {
-                    min_dist_x = dist;
-                    target_idx = Some(i);
-                }
-            }
-        } else {
-            let mut min_dist_y = f32::MAX;
-            for (i, seg) in segments.iter().enumerate() {
-                if seg.char_len == 0 {
-                    continue;
-                }
-                if pointer_pos.y >= seg.min_y && pointer_pos.y <= seg.max_y {
-                    target_idx = Some(i);
-                    break;
-                }
-                let dist = if pointer_pos.y < seg.min_y {
-                    seg.min_y - pointer_pos.y
-                } else {
-                    pointer_pos.y - seg.max_y
-                };
-                if dist < min_dist_y {
-                    min_dist_y = dist;
-                    target_idx = Some(i);
-                }
-            }
-        }
-
-        let Some(target_idx) = target_idx else {
+    for (box_idx, ocr_box) in ocr_boxes.iter().enumerate() {
+        let Some((box_rect, segments, chars, target_idx, char_idx)) =
+            resolve_box_segments_and_char(ocr_box, pointer_pos, video_rect)
+        else {
             continue;
         };
-        let target = &segments[target_idx];
-
-        // Resolve pointer_pos along THIS specific line/column to an index into the
-        // concatenated character stream, using per-character spans when available.
-        let local_idx = target.char_index_at(
-            pointer_pos,
-            &chars[target.char_start..target.char_start + target.char_len],
-        );
-        let char_idx = target.char_start + local_idx;
         let full_text: String = chars.iter().collect();
 
-        let matched_entry = scan_chars_at_index(
+        let matched_entry = scan_chars_at_index_shared(
             &full_text,
             &chars,
             char_idx,
@@ -212,7 +264,7 @@ pub fn lookup_word_at_pointer_with_pitch(
             custom_names_gen,
         );
 
-        if let Some((start_offset, end_offset, entries)) = matched_entry {
+        if let Some((start_offset, end_offset, entries_arc)) = matched_entry {
             // Calculate precise per-line sub-bounding boxes for the recognized word.
             // The segment on the hovered line becomes `word_rect` (popup anchor); segments on
             // other lines (when the word wraps) are kept as extra highlight rects.
@@ -231,24 +283,62 @@ pub fn lookup_word_at_pointer_with_pitch(
                 continue;
             };
 
-            return Some(DictPopupState {
-                matched_term: entries[0].term.clone(),
-                source_text: full_text,
-                char_range: (start_offset, end_offset),
-                word_rect,
-                extra_word_rects,
-                box_rect,
-                entries,
-                is_popup_hovered: false,
-                popup_rect: None,
-                last_hover_time: std::time::Instant::now(),
-                last_word_hover_time: std::time::Instant::now(),
-                child: None,
-            });
+            let entries = entries_arc.to_vec();
+            return Some((
+                box_idx,
+                char_idx,
+                DictPopupState {
+                    matched_term: entries[0].term.clone(),
+                    source_text: full_text,
+                    char_range: (start_offset, end_offset),
+                    word_rect,
+                    extra_word_rects,
+                    box_rect,
+                    entries,
+                    is_popup_hovered: false,
+                    popup_rect: None,
+                    last_hover_time: std::time::Instant::now(),
+                    last_word_hover_time: std::time::Instant::now(),
+                    child: None,
+                },
+            ));
         }
     }
 
     None
+}
+
+/// Scans `text` at character index `char_idx` (Yomitan-style longest-prefix match with
+/// fallback lookbehind, deinflection, long-vowel/elongation normalization, particle swap,
+/// custom names, frequency sorting, and pitch accent enrichment), returning shared `Arc` entries.
+#[allow(clippy::too_many_arguments)]
+pub fn scan_text_at_char_shared(
+    text: &str,
+    char_idx: usize,
+    db: Option<&DictDatabase>,
+    freq_db: Option<&super::frequency::FreqDatabase>,
+    pitch_db: Option<&super::pitch::PitchDatabase>,
+    deinflector: &Deinflector,
+    custom_names: &[CustomNameEntry],
+    current_tag: Option<&str>,
+    custom_names_gen: u64,
+) -> Option<(usize, usize, std::sync::Arc<[super::models::TermEntry]>)> {
+    let chars: Vec<char> = text.chars().collect();
+    if char_idx >= chars.len() {
+        return None;
+    }
+    scan_chars_at_index_shared(
+        text,
+        &chars,
+        char_idx,
+        db,
+        freq_db,
+        pitch_db,
+        deinflector,
+        custom_names,
+        current_tag,
+        custom_names_gen,
+    )
 }
 
 /// Scans `text` at character index `char_idx` (Yomitan-style longest-prefix match with
@@ -268,13 +358,8 @@ pub fn scan_text_at_char(
     current_tag: Option<&str>,
     custom_names_gen: u64,
 ) -> Option<(usize, usize, Vec<super::models::TermEntry>)> {
-    let chars: Vec<char> = text.chars().collect();
-    if char_idx >= chars.len() {
-        return None;
-    }
-    scan_chars_at_index(
+    scan_text_at_char_shared(
         text,
-        &chars,
         char_idx,
         db,
         freq_db,
@@ -284,10 +369,11 @@ pub fn scan_text_at_char(
         current_tag,
         custom_names_gen,
     )
+    .map(|(s, e, arc)| (s, e, arc.to_vec()))
 }
 
 #[allow(clippy::too_many_arguments)]
-fn scan_chars_at_index(
+fn scan_chars_at_index_shared(
     full_text: &str,
     chars: &[char],
     char_idx: usize,
@@ -298,7 +384,7 @@ fn scan_chars_at_index(
     custom_names: &[CustomNameEntry],
     current_tag: Option<&str>,
     custom_names_gen: u64,
-) -> ScanResult {
+) -> SharedScanResult {
     // Scan for word matches Yomitan-style:
     //
     // Phase 1 (Direct hover match):
@@ -313,27 +399,44 @@ fn scan_chars_at_index(
         return None;
     }
     let particle_index = db.and_then(|d| d.particle_index());
-    let cache_key = ScanCacheKey {
-        db_generation: db.map_or(0, |d| d.generation),
-        particle_index_ready: particle_index.is_some(),
-        freq_db_generation: freq_db.map_or(0, |f| f.generation),
-        pitch_db_generation: pitch_db.map_or(0, |p| p.generation),
-        custom_names_gen,
-        current_tag: current_tag.map(str::to_string),
-        line_text: full_text.to_string(),
-        char_idx,
-    };
+    let db_generation = db.map_or(0, |d| d.generation);
+    let particle_index_ready = particle_index.is_some();
+    let freq_db_generation = freq_db.map_or(0, |f| f.generation);
+    let pitch_db_generation = pitch_db.map_or(0, |p| p.generation);
 
     let cached = SCAN_CACHE.with(|c| {
         c.borrow()
             .as_ref()
-            .filter(|(k, _)| *k == cache_key)
+            .filter(|(k, _)| {
+                k.char_idx == char_idx
+                    && k.db_generation == db_generation
+                    && k.particle_index_ready == particle_index_ready
+                    && k.freq_db_generation == freq_db_generation
+                    && k.pitch_db_generation == pitch_db_generation
+                    && k.custom_names_gen == custom_names_gen
+                    && k.current_tag.as_deref() == current_tag
+                    && k.line_text == full_text
+            })
             .map(|(_, v)| v.clone())
     });
 
     if let Some(hit) = cached {
         return hit;
     }
+
+    let cache_key = ScanCacheKey {
+        db_generation,
+        particle_index_ready,
+        freq_db_generation,
+        pitch_db_generation,
+        custom_names_gen,
+        current_tag: current_tag.map(str::to_string),
+        line_text: full_text.to_string(),
+        char_idx,
+    };
+
+    let custom_name_index = (!custom_names.is_empty())
+        .then(|| get_or_build_custom_name_index(custom_names, custom_names_gen));
 
     // All lookups feed one accumulator. Batches are prioritized by effective matched
     // character length (longest first), then by match tier (exact before normalized,
@@ -352,11 +455,13 @@ fn scan_chars_at_index(
         }
         let full = find_span_entries(
             &sub_str,
+            chars[start],
             (start, end),
             db,
             deinflector,
             particle_index.as_deref(),
             custom_names,
+            custom_name_index.as_deref(),
             current_tag,
             &mut acc,
         );
@@ -389,11 +494,13 @@ fn scan_chars_at_index(
                 }
                 let full = find_span_entries(
                     &sub_str,
+                    chars[start],
                     (start, end),
                     db,
                     deinflector,
                     particle_index.as_deref(),
                     custom_names,
+                    custom_name_index.as_deref(),
                     current_tag,
                     &mut acc,
                 );
@@ -412,8 +519,16 @@ fn scan_chars_at_index(
         // comes first (primary match, then longer before shorter spans, exact before
         // normalized); frequency only orders entries within the same group.
         if let Some(fdb) = freq_db {
-            for entry in &mut entries {
-                entry.frequency = fdb.get_frequency(&entry.term, &entry.reading);
+            for i in 0..entries.len() {
+                let prev_freq = entries[..i]
+                    .iter()
+                    .find(|prev| prev.term == entries[i].term && prev.reading == entries[i].reading)
+                    .map(|prev| prev.frequency.clone());
+                let freq = match prev_freq {
+                    Some(cached) => cached,
+                    None => fdb.get_frequency(&entries[i].term, &entries[i].reading),
+                };
+                entries[i].frequency = freq;
             }
             // Sort in order of frequency: lowest rank first, unranked last.
             // A kana-only reading frequency (marked with ㋕) on a kanji term represents the reading in kana,
@@ -449,11 +564,23 @@ fn scan_chars_at_index(
             entries = tagged.into_iter().map(|(_, e)| e).collect();
         }
         if let Some(pdb) = pitch_db {
-            for entry in &mut entries {
-                entry.pitches = pdb.get_pitches(&entry.term, &entry.reading);
+            for i in 0..entries.len() {
+                let prev_pitches = entries[..i]
+                    .iter()
+                    .find(|prev| prev.term == entries[i].term && prev.reading == entries[i].reading)
+                    .map(|prev| prev.pitches.clone());
+                let pitches = match prev_pitches {
+                    Some(cached) => cached,
+                    None => pdb.get_pitches(&entries[i].term, &entries[i].reading),
+                };
+                entries[i].pitches = pitches;
             }
         }
-        (start, end, entries)
+        (
+            start,
+            end,
+            std::sync::Arc::<[super::models::TermEntry]>::from(entries),
+        )
     });
     SCAN_CACHE.with(|c| *c.borrow_mut() = Some((cache_key, matched_entry.clone())));
     matched_entry
@@ -602,17 +729,111 @@ struct ScanCacheKey {
 }
 
 /// `(start, end, entries)`: the primary span and all collected entries, already enriched
-/// with frequency data and sorted by priority group and frequency.
-type ScanResult = Option<(usize, usize, Vec<super::models::TermEntry>)>;
+/// with frequency data and sorted by priority group and frequency, shared via `Arc`.
+type SharedScanResult = Option<(usize, usize, std::sync::Arc<[super::models::TermEntry]>)>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CustomNameCacheKey {
+    generation: u64,
+    len: usize,
+    first_id: i64,
+    last_id: i64,
+    first_kanji: String,
+    last_kanji: String,
+}
+
+/// Indexes `custom_names` by the first character (and character length) of every surface
+/// that can match a custom name (`kanji`, `furigana`, and alternate Hiragana/Katakana
+/// first character of `furigana`), turning per-offset matching into O(matches).
+#[derive(Default)]
+struct CustomNameIndex {
+    /// `first_char -> Vec<(char_len, slice_idx)>` in ascending `slice_idx` order.
+    by_first_char: std::collections::HashMap<char, Vec<(usize, usize)>>,
+}
+
+impl CustomNameIndex {
+    fn build(custom_names: &[CustomNameEntry]) -> Self {
+        let mut by_first_char: std::collections::HashMap<char, Vec<(usize, usize)>> =
+            std::collections::HashMap::new();
+
+        let mut register = |ch: char, char_len: usize, idx: usize| {
+            let bucket = by_first_char.entry(ch).or_default();
+            if !bucket.contains(&(char_len, idx)) {
+                bucket.push((char_len, idx));
+            }
+        };
+
+        for (idx, entry) in custom_names.iter().enumerate() {
+            if let Some(kc) = entry.kanji.chars().next() {
+                let klen = entry.kanji.chars().count();
+                register(kc, klen, idx);
+            }
+            if let Some(fc) = entry.furigana.chars().next() {
+                let flen = entry.furigana.chars().count();
+                register(fc, flen, idx);
+                let u = fc as u32;
+                if (0x3041..=0x3096).contains(&u) {
+                    if let Some(alt_c) = char::from_u32(u + 0x60) {
+                        register(alt_c, flen, idx);
+                    }
+                } else if (0x30A1..=0x30F6).contains(&u) {
+                    if let Some(alt_c) = char::from_u32(u - 0x60) {
+                        register(alt_c, flen, idx);
+                    }
+                }
+            }
+        }
+
+        Self { by_first_char }
+    }
+
+    #[inline]
+    fn candidates_for(&self, first_char: char) -> Option<&[(usize, usize)]> {
+        self.by_first_char.get(&first_char).map(Vec::as_slice)
+    }
+}
 
 thread_local! {
-    static SCAN_CACHE: std::cell::RefCell<Option<(ScanCacheKey, ScanResult)>> =
+    static SCAN_CACHE: std::cell::RefCell<Option<(ScanCacheKey, SharedScanResult)>> =
         const { std::cell::RefCell::new(None) };
+    static CUSTOM_NAME_INDEX_CACHE: std::cell::RefCell<
+        Option<(CustomNameCacheKey, std::rc::Rc<CustomNameIndex>)>,
+    > = const { std::cell::RefCell::new(None) };
+}
+
+fn get_or_build_custom_name_index(
+    custom_names: &[CustomNameEntry],
+    custom_names_gen: u64,
+) -> std::rc::Rc<CustomNameIndex> {
+    let first = &custom_names[0];
+    let last = &custom_names[custom_names.len() - 1];
+    let key = CustomNameCacheKey {
+        generation: custom_names_gen,
+        len: custom_names.len(),
+        first_id: first.id,
+        last_id: last.id,
+        first_kanji: first.kanji.clone(),
+        last_kanji: last.kanji.clone(),
+    };
+    CUSTOM_NAME_INDEX_CACHE.with(|cache| {
+        let hit = cache
+            .borrow()
+            .as_ref()
+            .filter(|(cached_key, _)| *cached_key == key)
+            .map(|(_, idx)| idx.clone());
+        if let Some(idx) = hit {
+            return idx;
+        }
+        let built = std::rc::Rc::new(CustomNameIndex::build(custom_names));
+        *cache.borrow_mut() = Some((key, built.clone()));
+        built
+    })
 }
 
 /// Clears the thread-local scan cache (e.g. after adding or deleting a custom name).
 pub fn invalidate_scan_cache() {
     SCAN_CACHE.with(|c| *c.borrow_mut() = None);
+    CUSTOM_NAME_INDEX_CACHE.with(|c| *c.borrow_mut() = None);
 }
 
 fn custom_name_to_term_entry(name: &CustomNameEntry) -> super::models::TermEntry {
@@ -652,60 +873,80 @@ fn custom_name_to_term_entry(name: &CustomNameEntry) -> super::models::TermEntry
 ///    `い〜っぱい` → `いっぱい`), combined with deinflection.
 /// 3. Particle-swapped forms of set expressions over the candidates of 1 and 2
 ///    (e.g. `突拍子がない` → `突拍子もない`). Only entries tagged as expressions are kept.
+#[allow(clippy::too_many_arguments)]
 fn find_span_entries(
     sub_str: &str,
+    first_char: char,
     span: (usize, usize),
     db: Option<&DictDatabase>,
     deinflector: &Deinflector,
     particle_index: Option<&ParticleIndex>,
     custom_names: &[CustomNameEntry],
+    custom_name_index: Option<&CustomNameIndex>,
     current_tag: Option<&str>,
     acc: &mut ScanAccumulator,
 ) -> bool {
     let span_len = span.1 - span.0;
-    let is_mixed_kana =
-        super::database::has_katakana(sub_str) && super::database::has_hiragana(sub_str);
 
-    // 0. Check custom names
-    let alt_kana = (!is_mixed_kana)
-        .then(|| crate::dict::database::to_alternate_kana(sub_str))
-        .flatten();
-    let matching_names: Vec<&CustomNameEntry> = custom_names
-        .iter()
-        .filter(|n| {
-            n.kanji == sub_str || n.furigana == sub_str || alt_kana.as_deref() == Some(&n.furigana)
-        })
-        .collect();
+    // 0. Check custom names via first-char + length index (O(matches) instead of O(N_names)).
+    if let Some(candidates_for_char) =
+        custom_name_index.and_then(|idx| idx.candidates_for(first_char))
+    {
+        if candidates_for_char
+            .iter()
+            .any(|&(clen, _)| clen == span_len)
+        {
+            let is_mixed_kana =
+                super::database::has_katakana(sub_str) && super::database::has_hiragana(sub_str);
+            let alt_kana = (!is_mixed_kana)
+                .then(|| crate::dict::database::to_alternate_kana(sub_str))
+                .flatten();
 
-    if !matching_names.is_empty() {
-        let matches_tag = |n: &&CustomNameEntry| -> bool {
-            match (current_tag, n.source_tag.as_deref()) {
-                (Some(curr), Some(tag)) => {
-                    !curr.trim().is_empty() && tag.trim().eq_ignore_ascii_case(curr.trim())
+            let mut matching_names: Vec<&CustomNameEntry> = Vec::new();
+            for &(clen, idx) in candidates_for_char {
+                if clen != span_len {
+                    continue;
                 }
-                _ => false,
+                let n = &custom_names[idx];
+                if n.kanji == sub_str
+                    || n.furigana == sub_str
+                    || alt_kana.as_deref() == Some(n.furigana.as_str())
+                {
+                    matching_names.push(n);
+                }
             }
-        };
 
-        // Separate entries matching current tag (top priority) from other custom names
-        let mut tagged_names = Vec::new();
-        let mut other_names = Vec::new();
-        for name in matching_names {
-            if matches_tag(&name) {
-                tagged_names.push(custom_name_to_term_entry(name));
-            } else {
-                other_names.push(custom_name_to_term_entry(name));
-            }
-        }
+            if !matching_names.is_empty() {
+                let matches_tag = |n: &&CustomNameEntry| -> bool {
+                    match (current_tag, n.source_tag.as_deref()) {
+                        (Some(curr), Some(tag)) => {
+                            !curr.trim().is_empty() && tag.trim().eq_ignore_ascii_case(curr.trim())
+                        }
+                        _ => false,
+                    }
+                };
 
-        if !tagged_names.is_empty() {
-            if acc.absorb(span, span_len, MatchTier::CustomTagged, tagged_names) {
-                return true;
-            }
-        }
-        if !other_names.is_empty() {
-            if acc.absorb(span, span_len, MatchTier::CustomOther, other_names) {
-                return true;
+                // Separate entries matching current tag (top priority) from other custom names
+                let mut tagged_names = Vec::new();
+                let mut other_names = Vec::new();
+                for name in matching_names {
+                    if matches_tag(&name) {
+                        tagged_names.push(custom_name_to_term_entry(name));
+                    } else {
+                        other_names.push(custom_name_to_term_entry(name));
+                    }
+                }
+
+                if !tagged_names.is_empty() {
+                    if acc.absorb(span, span_len, MatchTier::CustomTagged, tagged_names) {
+                        return true;
+                    }
+                }
+                if !other_names.is_empty() {
+                    if acc.absorb(span, span_len, MatchTier::CustomOther, other_names) {
+                        return true;
+                    }
+                }
             }
         }
     }
@@ -2625,5 +2866,206 @@ mod tests {
         let p = hover_first_char("おカネ", &db).unwrap();
         assert_eq!(p.matched_term, "お金");
         assert_eq!(p.char_range, (0, 3));
+    }
+
+    #[test]
+    fn test_custom_name_first_char_index_and_alt_kana_matching() {
+        let mut names: Vec<CustomNameEntry> = (0..250)
+            .map(|i| CustomNameEntry {
+                id: i + 1,
+                created_at: 1000 + i,
+                kanji: format!("モブ{i}"),
+                furigana: format!("もぶ{i}"),
+                source_tag: None,
+                notes: None,
+            })
+            .collect();
+        names.push(CustomNameEntry {
+            id: 1001,
+            created_at: 5000,
+            kanji: "東雲".into(),
+            furigana: "しののめ".into(),
+            source_tag: Some("RPG".into()),
+            notes: Some("Shinonome".into()),
+        });
+        names.push(CustomNameEntry {
+            id: 1002,
+            created_at: 5001,
+            kanji: "アルプス".into(),
+            furigana: "アルプス".into(),
+            source_tag: None,
+            notes: Some("Alps".into()),
+        });
+
+        let idx = CustomNameIndex::build(&names);
+        assert!(
+            idx.candidates_for('無').is_none(),
+            "unrelated characters must have zero candidate entries"
+        );
+        // 'シ' (Katakana) must index into `しののめ` (Hiragana furigana) via alternate-kana first char
+        assert_eq!(idx.candidates_for('シ'), Some(&[(4, 250)][..]));
+        // 'あ' (Hiragana) must index into `アルプス` (Katakana furigana) via alternate-kana first char
+        assert_eq!(idx.candidates_for('あ'), Some(&[(4, 251)][..]));
+
+        // End-to-end scan: Katakana text "シノノメだ" matches Hiragana furigana "しののめ"
+        let res1 = scan_text_at_char(
+            "シノノメだ",
+            0,
+            None,
+            None,
+            None,
+            global_deinflector(),
+            &names,
+            Some("RPG"),
+            42,
+        )
+        .unwrap();
+        assert_eq!((res1.0, res1.1), (0, 4));
+        assert_eq!(res1.2[0].term, "東雲");
+        assert_eq!(res1.2[0].custom_name_id, Some(1001));
+
+        // End-to-end scan: Hiragana text "あるぷす山" matches Katakana furigana "アルプス"
+        let res2 = scan_text_at_char(
+            "あるぷす山",
+            0,
+            None,
+            None,
+            None,
+            global_deinflector(),
+            &names,
+            None,
+            42,
+        )
+        .unwrap();
+        assert_eq!((res2.0, res2.1), (0, 4));
+        assert_eq!(res2.2[0].term, "アルプス");
+        assert_eq!(res2.2[0].custom_name_id, Some(1002));
+    }
+
+    #[test]
+    fn test_homograph_senses_reuse_deduplicated_frequency_and_pitch_queries() {
+        let dir = tempdir().unwrap();
+        let dict_path = dir.path().join("dedupe_dict.db");
+        let freq_path = dir.path().join("dedupe_freq.db");
+        let pitch_path = dir.path().join("dedupe_pitch.db");
+
+        let db = DictDatabase::open_or_create(&dict_path).unwrap();
+        for (seq, gloss) in [
+            (10i64, r#"["sense 1"]"#),
+            (11, r#"["sense 2"]"#),
+            (12, r#"["sense 3"]"#),
+        ] {
+            db.conn
+                .execute(
+                    "INSERT INTO terms VALUES ('見る', 'みる', 'v1', 'v1', 100.0, ?1, ?2, '')",
+                    rusqlite::params![gloss, seq],
+                )
+                .unwrap();
+        }
+
+        let freq_db = super::super::frequency::FreqDatabase::open_or_create(&freq_path).unwrap();
+        freq_db
+            .conn
+            .execute(
+                "INSERT INTO frequencies (term, reading, rank, display_value) VALUES ('見る', 'みる', 45, '45')",
+                [],
+            )
+            .unwrap();
+
+        let pitch_db = super::super::pitch::PitchDatabase::open_or_create(&pitch_path).unwrap();
+        let pitches_json = serde_json::to_string(&vec![super::super::models::PitchAccent {
+            reading: "みる".into(),
+            pattern: super::super::models::PitchPattern::Downstep(1),
+            nasal: vec![],
+            devoice: vec![],
+            tags: vec![],
+        }])
+        .unwrap();
+        pitch_db
+            .conn
+            .execute(
+                "INSERT INTO pitches (term, reading, reading_hira, pitches_json) VALUES ('見る', 'みる', 'みる', ?1)",
+                [pitches_json],
+            )
+            .unwrap();
+
+        let (_, _, entries) = scan_text_at_char(
+            "見る",
+            0,
+            Some(&db),
+            Some(&freq_db),
+            Some(&pitch_db),
+            global_deinflector(),
+            &[],
+            None,
+            0,
+        )
+        .unwrap();
+        assert_eq!(entries.len(), 3);
+        for e in &entries {
+            assert_eq!(e.frequency.as_ref().map(|f| f.rank), Some(45));
+            assert_eq!(e.pitches.len(), 1);
+            assert_eq!(
+                e.pitches[0].pattern,
+                super::super::models::PitchPattern::Downstep(1)
+            );
+        }
+    }
+
+    #[test]
+    fn test_scan_cache_shares_arc_and_resolve_ocr_hover_char() {
+        let dir = tempdir().unwrap();
+        let db = DictDatabase::open_or_create(&dir.path().join("arc_cache.db")).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO terms VALUES ('猫', 'ねこ', 'n', '', 100.0, '[\"cat\"]', 1, '')",
+                [],
+            )
+            .unwrap();
+
+        let (_, _, first_arc) = scan_text_at_char_shared(
+            "黒い猫がいる",
+            2,
+            Some(&db),
+            None,
+            None,
+            global_deinflector(),
+            &[],
+            None,
+            0,
+        )
+        .unwrap();
+        let (_, _, second_arc) = scan_text_at_char_shared(
+            "黒い猫がいる",
+            2,
+            Some(&db),
+            None,
+            None,
+            global_deinflector(),
+            &[],
+            None,
+            0,
+        )
+        .unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&first_arc, &second_arc),
+            "Repeated scan_text_at_char_shared hit must share the exact same Arc<[TermEntry]> allocation"
+        );
+
+        let ocr_box = OcrBox {
+            text: "黒い猫".to_string(),
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.3,
+            height: 0.1,
+            lines: Vec::new(),
+            writing_direction: WritingDirection::LeftToRight,
+        };
+        let video_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
+        // Box spans x: 350..650 (100px per char -> 0: 350..450, 1: 450..550, 2: 550..650)
+        assert_eq!(
+            resolve_ocr_hover_char(egui::pos2(600.0, 300.0), &[ocr_box], video_rect),
+            Some((0, 2))
+        );
     }
 }

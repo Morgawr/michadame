@@ -147,10 +147,8 @@ impl std::fmt::Display for AuthError {
     }
 }
 
-fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(15))
-        .build()
+fn agent() -> &'static ureq::Agent {
+    super::http_agent()
 }
 
 fn read_json(resp: ureq::Response) -> serde_json::Value {
@@ -162,7 +160,11 @@ fn read_json(resp: ureq::Response) -> serde_json::Value {
 
 /// Returns `(status, body)` for both success and HTTP error statuses.
 fn post_form(url: &str, form: &[(&str, &str)]) -> Result<(u16, serde_json::Value), AuthError> {
-    match agent().post(url).send_form(form) {
+    match agent()
+        .post(url)
+        .timeout(Duration::from_secs(15))
+        .send_form(form)
+    {
         Ok(resp) => Ok((resp.status(), read_json(resp))),
         Err(ureq::Error::Status(code, resp)) => Ok((code, read_json(resp))),
         Err(e) => Err(AuthError::Network(e.to_string())),
@@ -185,6 +187,7 @@ pub struct Validation {
 pub fn validate(access_token: &str) -> Result<Validation, AuthError> {
     let result = agent()
         .get(VALIDATE_URL)
+        .timeout(Duration::from_secs(15))
         .set("Authorization", &format!("OAuth {access_token}"))
         .call();
     match result {
@@ -969,6 +972,7 @@ pub fn revoke_in_background(token: StoredToken) {
 fn call_stream_key_api(token: &StoredToken) -> Result<ureq::Response, ureq::Error> {
     agent()
         .get(STREAM_KEY_URL)
+        .timeout(Duration::from_secs(15))
         .query("broadcaster_id", &token.user_id)
         .set("Client-Id", token.effective_client_id())
         .set("Authorization", &format!("Bearer {}", token.access_token))

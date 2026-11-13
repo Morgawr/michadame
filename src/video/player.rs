@@ -1,5 +1,6 @@
-use crate::video::decoder::{copy_frame_tightly, renderable_pixel_format};
-use crate::video::types::{RawFrame, ScalerFilter};
+use crate::video::decoder::normalize_decoded_video_frame;
+use crate::video::hwdec::VideoDecoderSession;
+use crate::video::types::RawFrame;
 use anyhow::{Context, Result};
 use rodio::{Sink, Source};
 use std::collections::VecDeque;
@@ -10,6 +11,19 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const AUDIO_OUTPUT_RATE: u32 = 48000;
+const AUDIO_REFILL_MAX_FRAMES: usize = 512;
+const AUDIO_GEN_CHECK_INTERVAL_SAMPLES: u32 = 64;
+const AUDIO_PTS_UPDATE_SAMPLES: u64 = 32;
+
+static DEFAULT_VIDEO_HWDEC: AtomicBool = AtomicBool::new(true);
+
+pub fn set_default_video_hwdec(enabled: bool) {
+    DEFAULT_VIDEO_HWDEC.store(enabled, Ordering::Relaxed);
+}
+
+pub fn default_video_hwdec() -> bool {
+    DEFAULT_VIDEO_HWDEC.load(Ordering::Relaxed)
+}
 
 pub(crate) fn create_audio_resampler(
     format: ffmpeg_next::format::Sample,
@@ -27,18 +41,14 @@ pub(crate) fn create_audio_resampler(
     .ok()
 }
 
-/// Resamples one decoded frame to 48 kHz packed stereo f32.
-///
-/// `Context::run` with an empty output frame allocates only `input.samples()` of
-/// capacity. When upsampling (e.g. 44.1 kHz -> 48 kHz) swr then can't emit everything
-/// it produced and silently buffers the rest, so the backlog grows by ~81 ms for every
-/// second of 44.1 kHz audio. That delays all audio relative to its PTS and carries stale
-/// audio across seeks. Allocating room for the pending delay plus the converted input
-/// lets swr drain completely on every call.
-pub(crate) fn resample_audio_frame(
+/// Resamples one decoded frame into a reusable 48 kHz packed stereo `f32` `Audio` buffer,
+/// reallocating only when the required output sample capacity grows.
+pub(crate) fn resample_audio_frame_into(
     rsm: &mut ffmpeg_next::software::resampling::context::Context,
     input: &ffmpeg_next::frame::Audio,
-) -> Option<ffmpeg_next::frame::Audio> {
+    output: &mut ffmpeg_next::frame::Audio,
+    output_capacity: &mut usize,
+) -> bool {
     let in_rate = i64::from(if input.rate() > 0 {
         input.rate()
     } else {
@@ -47,14 +57,49 @@ pub(crate) fn resample_audio_frame(
     .max(1);
     let pending = rsm.delay().map(|d| d.output).unwrap_or(0).max(0);
     let converted = (input.samples() as i64 * i64::from(AUDIO_OUTPUT_RATE) + in_rate - 1) / in_rate;
-    let capacity = (pending + converted + 256) as usize;
-    let mut output = ffmpeg_next::frame::Audio::new(
-        ffmpeg_next::format::Sample::F32(ffmpeg_next::format::sample::Type::Packed),
-        capacity,
-        ffmpeg_next::ChannelLayout::STEREO,
-    );
-    rsm.run(input, &mut output).ok()?;
-    Some(output)
+    let needed_capacity = (pending + converted + 256) as usize;
+
+    if unsafe { output.is_empty() } || *output_capacity < needed_capacity {
+        let alloc_capacity = needed_capacity.max(2048);
+        *output = ffmpeg_next::frame::Audio::new(
+            ffmpeg_next::format::Sample::F32(ffmpeg_next::format::sample::Type::Packed),
+            alloc_capacity,
+            ffmpeg_next::ChannelLayout::STEREO,
+        );
+        *output_capacity = alloc_capacity;
+    } else {
+        output.set_samples(*output_capacity);
+        unsafe {
+            (*output.as_mut_ptr()).linesize[0] = (*output_capacity
+                * usize::from(AUDIO_OUTPUT_CHANNELS)
+                * std::mem::size_of::<f32>())
+                as libc::c_int;
+        }
+    }
+
+    rsm.run(input, output).is_ok()
+}
+
+/// Resamples one decoded frame to 48 kHz packed stereo f32.
+///
+/// `Context::run` with an empty output frame allocates only `input.samples()` of
+/// capacity. When upsampling (e.g. 44.1 kHz -> 48 kHz) swr then can't emit everything
+/// it produced and silently buffers the rest, so the backlog grows by ~81 ms for every
+/// second of 44.1 kHz audio. That delays all audio relative to its PTS and carries stale
+/// audio across seeks. Allocating room for the pending delay plus the converted input
+/// lets swr drain completely on every call.
+#[cfg(test)]
+pub(crate) fn resample_audio_frame(
+    rsm: &mut ffmpeg_next::software::resampling::context::Context,
+    input: &ffmpeg_next::frame::Audio,
+) -> Option<ffmpeg_next::frame::Audio> {
+    let mut output = ffmpeg_next::frame::Audio::empty();
+    let mut cap = 0usize;
+    if resample_audio_frame_into(rsm, input, &mut output, &mut cap) {
+        Some(output)
+    } else {
+        None
+    }
 }
 
 /// Flushes any remaining delayed samples buffered inside the `SwrContext` at EOF.
@@ -272,32 +317,21 @@ impl SharedAudioQueue {
 fn pack_decoded_video_frame(
     frame: &ffmpeg_next::frame::Video,
     normalized: &mut ffmpeg_next::frame::Video,
-    scaler: &mut ffmpeg_next::software::scaling::context::Context,
-    output_format: ffmpeg_next::format::Pixel,
-    dec_width: u32,
-    dec_height: u32,
+    scaler: &mut Option<ffmpeg_next::software::scaling::context::Context>,
+    active_scaler_filter: &mut u8,
+    desired_scaler_filter: u8,
     color_range: &AtomicU8,
     replay_rate: crate::replay::config::Rate,
 ) -> Option<Arc<RawFrame>> {
-    let packed = if frame.format() == output_format
-        && frame.width() == dec_width
-        && frame.height() == dec_height
-    {
-        copy_frame_tightly(frame)
-            .ok()
-            .map(|data| (frame.width(), frame.height(), frame.format(), data))
-    } else if scaler.run(frame, normalized).is_ok() {
-        copy_frame_tightly(normalized).ok().map(|data| {
-            (
-                normalized.width(),
-                normalized.height(),
-                normalized.format(),
-                data,
-            )
-        })
-    } else {
-        None
-    };
+    let packed = normalize_decoded_video_frame(
+        frame,
+        normalized,
+        scaler,
+        active_scaler_filter,
+        desired_scaler_filter,
+    )
+    .ok()
+    .flatten();
 
     packed.map(|(w, h, fmt, data)| {
         let range_val = color_range.load(Ordering::Relaxed);
@@ -315,11 +349,12 @@ fn pack_decoded_video_frame(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn receive_and_enqueue_video_frames(
-    video_decoder: &mut ffmpeg_next::decoder::Video,
-    scaler: &mut ffmpeg_next::software::scaling::context::Context,
+    video_decoder: &mut VideoDecoderSession,
+    scaler: &mut Option<ffmpeg_next::software::scaling::context::Context>,
+    active_scaler_filter: &mut u8,
+    desired_scaler_filter: u8,
     decoded: &mut ffmpeg_next::frame::Video,
     normalized: &mut ffmpeg_next::frame::Video,
-    output_format: ffmpeg_next::format::Pixel,
     video_time_base: ffmpeg_next::Rational,
     video_frame_interval_us: i64,
     video_fallback_pts: &mut i64,
@@ -335,9 +370,7 @@ pub(crate) fn receive_and_enqueue_video_frames(
     if flush_eof {
         let _ = video_decoder.send_eof();
     }
-    let dec_w = video_decoder.width();
-    let dec_h = video_decoder.height();
-    while video_decoder.receive_frame(decoded).is_ok() {
+    while matches!(video_decoder.receive_decoded_frame(decoded), Ok(true)) {
         let frame_pts = decoded
             .pts()
             .map(|pts| unsafe {
@@ -355,8 +388,26 @@ pub(crate) fn receive_and_enqueue_video_frames(
 
         if let Some(target) = *pending_video_seek_target_us {
             if frame_pts < target {
-                // Preroll: skip scaling & memory allocation, keep candidate ref in case EOF
-                *last_video_frame = Some((frame_pts, decoded.clone()));
+                // Preroll: move frame buffer ref in O(1) without cloning/copying pixel planes
+                if let Some((prev_pts, ref mut prev_frame)) = last_video_frame {
+                    unsafe {
+                        ffmpeg_next::sys::av_frame_unref(prev_frame.as_mut_ptr());
+                        ffmpeg_next::sys::av_frame_move_ref(
+                            prev_frame.as_mut_ptr(),
+                            decoded.as_mut_ptr(),
+                        );
+                    }
+                    *prev_pts = frame_pts;
+                } else {
+                    let mut slot = ffmpeg_next::frame::Video::empty();
+                    unsafe {
+                        ffmpeg_next::sys::av_frame_move_ref(
+                            slot.as_mut_ptr(),
+                            decoded.as_mut_ptr(),
+                        );
+                    }
+                    *last_video_frame = Some((frame_pts, slot));
+                }
                 continue;
             } else {
                 // Reached seek target!
@@ -369,9 +420,8 @@ pub(crate) fn receive_and_enqueue_video_frames(
             decoded,
             normalized,
             scaler,
-            output_format,
-            dec_w,
-            dec_h,
+            active_scaler_filter,
+            desired_scaler_filter,
             color_range,
             replay_rate,
         ) {
@@ -389,9 +439,8 @@ pub(crate) fn receive_and_enqueue_video_frames(
                 &frame,
                 normalized,
                 scaler,
-                output_format,
-                dec_w,
-                dec_h,
+                active_scaler_filter,
+                desired_scaler_filter,
                 color_range,
                 replay_rate,
             ) {
@@ -465,6 +514,9 @@ fn enqueue_resampled_audio(
 pub(crate) fn receive_and_enqueue_audio_frames(
     dec: &mut ffmpeg_next::decoder::Audio,
     rsm: &mut ffmpeg_next::software::resampling::context::Context,
+    audio_frame: &mut ffmpeg_next::frame::Audio,
+    resampled_frame: &mut ffmpeg_next::frame::Audio,
+    resampled_capacity: &mut usize,
     audio_time_base: ffmpeg_next::Rational,
     resampler_needs_reset: &mut bool,
     audio_fallback_pts: &mut i64,
@@ -476,8 +528,7 @@ pub(crate) fn receive_and_enqueue_audio_frames(
     if flush_eof {
         let _ = dec.send_eof();
     }
-    let mut audio_frame = ffmpeg_next::frame::Audio::empty();
-    while dec.receive_frame(&mut audio_frame).is_ok() {
+    while dec.receive_frame(audio_frame).is_ok() {
         if *resampler_needs_reset {
             *resampler_needs_reset = false;
             let layout = if audio_frame.channel_layout().is_empty() {
@@ -494,7 +545,7 @@ pub(crate) fn receive_and_enqueue_audio_frames(
                 *rsm = fresh;
             }
         }
-        if let Some(resampled_frame) = resample_audio_frame(rsm, &audio_frame) {
+        if resample_audio_frame_into(rsm, audio_frame, resampled_frame, resampled_capacity) {
             let pts_us = audio_frame.pts().map(|pts| unsafe {
                 ffmpeg_next::sys::av_rescale_q(
                     pts,
@@ -503,7 +554,7 @@ pub(crate) fn receive_and_enqueue_audio_frames(
                 )
             });
             enqueue_resampled_audio(
-                &resampled_frame,
+                resampled_frame,
                 pts_us,
                 audio_fallback_pts,
                 pending_audio_seek_target_us,
@@ -536,6 +587,41 @@ struct VideoFileAudioSource {
     local_batch: Vec<f32>,
     read_buf: VecDeque<f32>,
     local_gen: u64,
+    gen_check_countdown: u32,
+    buf_head_pts_us: i64,
+    buf_base_consumed_samples: u64,
+    buf_samples_popped: u64,
+    buf_is_real_audio: bool,
+}
+
+impl VideoFileAudioSource {
+    fn new(
+        queue: Arc<Mutex<SharedAudioQueue>>,
+        current_pts_shared: Arc<AtomicI64>,
+        seek_generation: Arc<AtomicU64>,
+        peak_amplitude: Arc<AtomicU64>,
+        audio_latency_ms: Arc<AtomicU64>,
+        replay_audio: Arc<crate::replay::AudioTap>,
+    ) -> Self {
+        Self {
+            queue,
+            current_pts_shared,
+            seek_generation,
+            peak_amplitude,
+            audio_latency_ms,
+            replay_audio,
+            local_batch: Vec::with_capacity(512),
+            read_buf: VecDeque::with_capacity(
+                AUDIO_REFILL_MAX_FRAMES * AUDIO_OUTPUT_CHANNELS as usize,
+            ),
+            local_gen: 0,
+            gen_check_countdown: 0,
+            buf_head_pts_us: 0,
+            buf_base_consumed_samples: 0,
+            buf_samples_popped: 0,
+            buf_is_real_audio: false,
+        }
+    }
 }
 
 impl Iterator for VideoFileAudioSource {
@@ -543,29 +629,40 @@ impl Iterator for VideoFileAudioSource {
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut report_batch = false;
-        let current_gen = self.seek_generation.load(Ordering::SeqCst);
-        if self.local_gen != current_gen {
-            self.read_buf.clear();
-            self.local_gen = current_gen;
+        if self.read_buf.is_empty() || self.gen_check_countdown == 0 {
+            self.gen_check_countdown = AUDIO_GEN_CHECK_INTERVAL_SAMPLES;
+            let current_gen = self.seek_generation.load(Ordering::Acquire);
+            if self.local_gen != current_gen {
+                self.read_buf.clear();
+                self.buf_samples_popped = 0;
+                self.buf_is_real_audio = false;
+                self.local_gen = current_gen;
+            }
         }
+        self.gen_check_countdown = self.gen_check_countdown.saturating_sub(1);
 
         if self.read_buf.is_empty() {
             let channels = AUDIO_OUTPUT_CHANNELS as usize;
+            self.buf_samples_popped = 0;
+            self.buf_is_real_audio = false;
+
             if let Ok(mut q) = self.queue.try_lock() {
-                if q.generation < current_gen {
+                if q.generation < self.local_gen {
                     q.samples.clear();
-                    q.generation = current_gen;
-                } else {
-                    let count = (q.samples.len() / channels).min(16) * channels;
+                    q.generation = self.local_gen;
+                } else if q.generation > self.local_gen {
+                    self.local_gen = q.generation;
+                }
+
+                if q.generation == self.local_gen {
+                    let count =
+                        (q.samples.len() / channels).min(AUDIO_REFILL_MAX_FRAMES) * channels;
                     if count > 0 {
+                        self.buf_head_pts_us = q.head_pts_us;
+                        self.buf_base_consumed_samples = q.samples_consumed;
                         self.read_buf.extend(q.samples.drain(..count));
                         q.samples_consumed += count as u64;
-                        let played_frames = q.samples_consumed / channels as u64;
-                        let elapsed_us =
-                            (played_frames as f64 / AUDIO_OUTPUT_RATE as f64 * 1_000_000.0) as i64;
-                        let current_pts = q.head_pts_us + elapsed_us;
-                        self.current_pts_shared
-                            .store(current_pts, Ordering::Relaxed);
+                        self.buf_is_real_audio = true;
                     }
                 }
             }
@@ -578,6 +675,21 @@ impl Iterator for VideoFileAudioSource {
         }
 
         let sample = self.read_buf.pop_front().unwrap_or(0.0);
+        if self.buf_is_real_audio
+            && (self.buf_samples_popped.wrapping_add(1) % AUDIO_PTS_UPDATE_SAMPLES == 0
+                || self.read_buf.is_empty())
+        {
+            self.buf_samples_popped += 1;
+            let played_samples = self.buf_base_consumed_samples + self.buf_samples_popped;
+            let played_frames = played_samples / AUDIO_OUTPUT_CHANNELS as u64;
+            let elapsed_us = (played_frames as f64 / AUDIO_OUTPUT_RATE as f64 * 1_000_000.0) as i64;
+            let current_pts = self.buf_head_pts_us + elapsed_us;
+            self.current_pts_shared
+                .store(current_pts, Ordering::Relaxed);
+        } else if self.buf_is_real_audio {
+            self.buf_samples_popped += 1;
+        }
+
         self.local_batch.push(sample);
 
         // Batch report to audio meter and replay tap
@@ -678,6 +790,7 @@ impl MonotonicClock {
 
 /// Metadata extracted from a video file without starting full playback.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct VideoFileInfo {
     pub width: u32,
     pub height: u32,
@@ -745,6 +858,29 @@ pub fn video_file_thread_main(
     is_eof_shared: Arc<AtomicBool>,
     config: VideoFileConfig,
 ) -> Result<()> {
+    video_file_thread_main_with_hwdec(
+        frame_sender,
+        status_sender,
+        command_receiver,
+        position_us,
+        is_paused_shared,
+        is_eof_shared,
+        config,
+        default_video_hwdec(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn video_file_thread_main_with_hwdec(
+    frame_sender: crossbeam_channel::Sender<Arc<RawFrame>>,
+    status_sender: crossbeam_channel::Sender<PlayerEvent>,
+    command_receiver: crossbeam_channel::Receiver<PlayerCommand>,
+    position_us: Arc<AtomicI64>,
+    is_paused_shared: Arc<AtomicBool>,
+    is_eof_shared: Arc<AtomicBool>,
+    config: VideoFileConfig,
+    allow_hwdec: bool,
+) -> Result<()> {
     ffmpeg_next::init().context("Failed to initialize FFmpeg")?;
 
     let VideoFileConfig {
@@ -794,12 +930,8 @@ pub fn video_file_thread_main(
     };
     let duration_secs = file_duration_us as f64 / 1_000_000.0;
 
-    let mut video_decoder =
-        ffmpeg_next::codec::context::Context::from_parameters(video_stream.parameters())?
-            .decoder()
-            .video()
-            .context("Failed to create video decoder")?;
-    video_decoder.set_threading(ffmpeg_next::codec::threading::Config::default());
+    let mut video_decoder = VideoDecoderSession::open(video_stream.parameters(), allow_hwdec)
+        .context("Failed to create video decoder")?;
 
     let width = video_decoder.width();
     let height = video_decoder.height();
@@ -846,17 +978,14 @@ pub fn video_file_thread_main(
         match crate::devices::audio::initialize_rodio_playback() {
             Ok((guard, stream_handle)) => match Sink::try_new(&stream_handle) {
                 Ok(sink) => {
-                    let audio_source = VideoFileAudioSource {
-                        queue: audio_queue.clone(),
-                        current_pts_shared: audio_clock_pts_us.clone(),
-                        seek_generation: seek_generation.clone(),
-                        peak_amplitude: peak_amplitude.clone(),
-                        audio_latency_ms: audio_latency_ms.clone(),
-                        replay_audio: replay_audio.clone(),
-                        local_batch: Vec::with_capacity(512),
-                        read_buf: VecDeque::with_capacity(512),
-                        local_gen: 0,
-                    };
+                    let audio_source = VideoFileAudioSource::new(
+                        audio_queue.clone(),
+                        audio_clock_pts_us.clone(),
+                        seek_generation.clone(),
+                        peak_amplitude.clone(),
+                        audio_latency_ms.clone(),
+                        replay_audio.clone(),
+                    );
                     sink.append(audio_source);
                     sink.set_volume(master_volume);
                     sink.play();
@@ -899,22 +1028,7 @@ pub fn video_file_thread_main(
 
         thread::spawn(move || {
             let mut current_scaler_val = scaler_filter.load(Ordering::Relaxed);
-            let output_format = renderable_pixel_format(video_decoder.format());
-            let mut scaler = match ffmpeg_next::software::scaling::context::Context::get(
-                video_decoder.format(),
-                video_decoder.width(),
-                video_decoder.height(),
-                output_format,
-                video_decoder.width(),
-                video_decoder.height(),
-                ScalerFilter::from_u8(current_scaler_val).into_ffmpeg_flag(),
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!("Failed to create software scaler: {}", e);
-                    return;
-                }
-            };
+            let mut scaler: Option<ffmpeg_next::software::scaling::context::Context> = None;
             let mut demux_eof = false;
             let mut consecutive_read_errors = 0u32;
             let mut audio_fallback_pts = 0i64;
@@ -925,6 +1039,9 @@ pub fn video_file_thread_main(
             let mut last_video_frame: Option<(i64, ffmpeg_next::frame::Video)> = None;
             let mut decoded = ffmpeg_next::frame::Video::empty();
             let mut normalized = ffmpeg_next::frame::Video::empty();
+            let mut decoded_audio = ffmpeg_next::frame::Audio::empty();
+            let mut resampled_audio = ffmpeg_next::frame::Audio::empty();
+            let mut resampled_audio_cap = 0usize;
 
             loop {
                 if demux_stop_flag.load(Ordering::Relaxed) {
@@ -1073,22 +1190,7 @@ pub fn video_file_thread_main(
                     break;
                 }
 
-                // Check scaler changes
-                let new_scaler_val = scaler_filter.load(Ordering::Relaxed);
-                if new_scaler_val != current_scaler_val {
-                    current_scaler_val = new_scaler_val;
-                    if let Ok(s) = ffmpeg_next::software::scaling::context::Context::get(
-                        video_decoder.format(),
-                        video_decoder.width(),
-                        video_decoder.height(),
-                        output_format,
-                        video_decoder.width(),
-                        video_decoder.height(),
-                        ScalerFilter::from_u8(current_scaler_val).into_ffmpeg_flag(),
-                    ) {
-                        scaler = s;
-                    }
-                }
+                let desired_scaler_val = scaler_filter.load(Ordering::Relaxed);
 
                 // Throttle check: sleep only when both queues are adequately filled
                 let (v_len, a_len) = {
@@ -1131,9 +1233,10 @@ pub fn video_file_thread_main(
                                 receive_and_enqueue_video_frames(
                                     &mut video_decoder,
                                     &mut scaler,
+                                    &mut current_scaler_val,
+                                    desired_scaler_val,
                                     &mut decoded,
                                     &mut normalized,
-                                    output_format,
                                     video_time_base,
                                     video_frame_interval_us,
                                     &mut video_fallback_pts,
@@ -1152,6 +1255,9 @@ pub fn video_file_thread_main(
                                     receive_and_enqueue_audio_frames(
                                         dec,
                                         rsm,
+                                        &mut decoded_audio,
+                                        &mut resampled_audio,
+                                        &mut resampled_audio_cap,
                                         tb,
                                         &mut resampler_needs_reset,
                                         &mut audio_fallback_pts,
@@ -1170,9 +1276,10 @@ pub fn video_file_thread_main(
                                 receive_and_enqueue_video_frames(
                                     &mut video_decoder,
                                     &mut scaler,
+                                    &mut current_scaler_val,
+                                    desired_scaler_val,
                                     &mut decoded,
                                     &mut normalized,
-                                    output_format,
                                     video_time_base,
                                     video_frame_interval_us,
                                     &mut video_fallback_pts,
@@ -1191,6 +1298,9 @@ pub fn video_file_thread_main(
                                     receive_and_enqueue_audio_frames(
                                         dec,
                                         rsm,
+                                        &mut decoded_audio,
+                                        &mut resampled_audio,
+                                        &mut resampled_audio_cap,
                                         tb,
                                         &mut resampler_needs_reset,
                                         &mut audio_fallback_pts,
@@ -1216,9 +1326,10 @@ pub fn video_file_thread_main(
                         receive_and_enqueue_video_frames(
                             &mut video_decoder,
                             &mut scaler,
+                            &mut current_scaler_val,
+                            desired_scaler_val,
                             &mut decoded,
                             &mut normalized,
-                            output_format,
                             video_time_base,
                             video_frame_interval_us,
                             &mut video_fallback_pts,
@@ -1243,6 +1354,9 @@ pub fn video_file_thread_main(
                             receive_and_enqueue_audio_frames(
                                 dec,
                                 rsm,
+                                &mut decoded_audio,
+                                &mut resampled_audio,
+                                &mut resampled_audio_cap,
                                 tb,
                                 &mut resampler_needs_reset,
                                 &mut audio_fallback_pts,
@@ -1673,17 +1787,14 @@ mod tests {
         let audio_latency_ms = Arc::new(AtomicU64::new(0));
         let replay_audio = Arc::new(crate::replay::AudioTap::default());
 
-        let mut source = VideoFileAudioSource {
-            queue: Arc::clone(&queue),
-            current_pts_shared: Arc::clone(&pts_shared),
+        let mut source = VideoFileAudioSource::new(
+            Arc::clone(&queue),
+            Arc::clone(&pts_shared),
             seek_generation,
             peak_amplitude,
             audio_latency_ms,
             replay_audio,
-            local_batch: Vec::with_capacity(512),
-            read_buf: VecDeque::with_capacity(512),
-            local_gen: 0,
-        };
+        );
 
         // Initialize queue to 10.0s at generation 0 (as on a seek)
         queue.lock().unwrap().clear(10_000_000, 0);
@@ -1727,17 +1838,14 @@ mod tests {
         let audio_latency_ms = Arc::new(AtomicU64::new(0));
         let replay_audio = Arc::new(crate::replay::AudioTap::default());
 
-        let mut source = VideoFileAudioSource {
-            queue: Arc::clone(&queue),
-            current_pts_shared: Arc::clone(&pts_shared),
-            seek_generation: Arc::clone(&seek_generation),
+        let mut source = VideoFileAudioSource::new(
+            Arc::clone(&queue),
+            Arc::clone(&pts_shared),
+            Arc::clone(&seek_generation),
             peak_amplitude,
             audio_latency_ms,
             replay_audio,
-            local_batch: Vec::with_capacity(512),
-            read_buf: VecDeque::with_capacity(512),
-            local_gen: 0,
-        };
+        );
 
         // Queue contains samples from generation 0
         {
@@ -1848,23 +1956,10 @@ mod tests {
             packets.push(pkt.clone());
         }
 
-        let params = ffmpeg_next::codec::Parameters::from(&encoder);
-        let mut decoder = ffmpeg_next::codec::context::Context::from_parameters(params)
-            .unwrap()
-            .decoder()
-            .video()
-            .unwrap();
-        let output_format = renderable_pixel_format(decoder.format());
-        let mut scaler = ffmpeg_next::software::scaling::context::Context::get(
-            decoder.format(),
-            64,
-            64,
-            output_format,
-            64,
-            64,
-            ScalerFilter::Bilinear.into_ffmpeg_flag(),
-        )
-        .unwrap();
+        let params = ffmpeg_next::codec::Parameters::from(encoder);
+        let mut decoder = VideoDecoderSession::open(params, false).unwrap();
+        let mut scaler = None;
+        let mut active_scaler_filter = 1u8;
 
         let mut decoded = ffmpeg_next::frame::Video::empty();
         let mut normalized = ffmpeg_next::frame::Video::empty();
@@ -1881,9 +1976,10 @@ mod tests {
             receive_and_enqueue_video_frames(
                 &mut decoder,
                 &mut scaler,
+                &mut active_scaler_filter,
+                1,
                 &mut decoded,
                 &mut normalized,
-                output_format,
                 time_base,
                 33_333,
                 &mut video_fallback_pts,
@@ -1908,9 +2004,10 @@ mod tests {
         receive_and_enqueue_video_frames(
             &mut decoder,
             &mut scaler,
+            &mut active_scaler_filter,
+            1,
             &mut decoded,
             &mut normalized,
-            output_format,
             time_base,
             33_333,
             &mut video_fallback_pts,
@@ -1929,6 +2026,35 @@ mod tests {
             total_input_frames as usize,
             "EOF drain must recover all delayed B-frames"
         );
+    }
+
+    #[test]
+    fn test_resample_audio_frame_into_reuses_single_buffer_without_reallocation() {
+        let mut rsm = make_test_resampler_44k();
+        let mut reusable = ffmpeg_next::frame::Audio::empty();
+        let mut cap = 0usize;
+
+        assert!(resample_audio_frame_into(
+            &mut rsm,
+            &make_test_aac_like_frame(0),
+            &mut reusable,
+            &mut cap
+        ));
+        let first_ptr = unsafe { (*reusable.as_ptr()).data[0] };
+        let first_cap = cap;
+        assert!(!first_ptr.is_null());
+
+        for i in 1..64 {
+            assert!(resample_audio_frame_into(
+                &mut rsm,
+                &make_test_aac_like_frame(i),
+                &mut reusable,
+                &mut cap
+            ));
+            assert_eq!(unsafe { (*reusable.as_ptr()).data[0] }, first_ptr);
+            assert_eq!(cap, first_cap);
+            assert!(reusable.samples() > 0);
+        }
     }
 
     #[test]

@@ -85,6 +85,7 @@ pub struct SteamDeckState {
     pub game_display: Option<String>,
     pub launch_started: Option<std::time::Instant>,
     pub forwarded_keys: HashSet<egui::Key>,
+    pub forwarded_modifiers_mask: u8,
     pub mouse_buttons: [bool; 3],
     pub ui_touch: bool,
     pub gamepad: Option<gamepad::Gamepad>,
@@ -95,6 +96,7 @@ pub struct SteamDeckState {
     pub focus_display: Option<String>,
     pub focus_handoff_pending: bool,
     pub menu_focus_override: u32,
+    pub focus_worker: Option<launch::DeckFocusWorker>,
     pub capture_scan: Option<crossbeam_channel::Receiver<Option<String>>>,
     pub video_capture: Option<capture::Capture>,
     pub capture_error: Option<String>,
@@ -240,7 +242,8 @@ pub fn shortcuts(state: &mut AppState, ctx: &egui::Context) {
                 deck.step_tab(action == 1);
                 state.dict.popup = None;
                 deck.pinned_dictionary = false;
-                ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+                state.ui.reset_cursor_state_cache();
+                state.ui.set_cursor_grab(ctx, egui::CursorGrab::None);
                 ctx.memory_mut(|m| {
                     if let Some(id) = m.focused() {
                         m.surrender_focus(id);
@@ -275,13 +278,67 @@ pub fn toggle_cursor(state: &mut AppState, ctx: &egui::Context) {
             renderer.lock().unwrap().popup_primitives.clear();
         }
     }
-    ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+    state.ui.reset_cursor_state_cache();
+    state.ui.set_cursor_grab(ctx, egui::CursorGrab::None);
     ctx.memory_mut(|m| {
         m.stop_text_input();
         if let Some(id) = m.focused() {
             m.surrender_focus(id);
         }
     });
+}
+
+const MOD_BIT_CTRL: u8 = 1 << 0;
+const MOD_BIT_SHIFT: u8 = 1 << 1;
+const MOD_BIT_ALT: u8 = 1 << 2;
+const MOD_BIT_LOGO: u8 = 1 << 3;
+
+const EIS_MODIFIER_KEYS: [(u8, u32); 4] = [
+    (MOD_BIT_CTRL, 29),
+    (MOD_BIT_SHIFT, 42),
+    (MOD_BIT_ALT, 56),
+    (MOD_BIT_LOGO, 125),
+];
+
+fn modifiers_to_eis_mask(modifiers: egui::Modifiers) -> u8 {
+    let mut mask = 0u8;
+    if modifiers.ctrl {
+        mask |= MOD_BIT_CTRL;
+    }
+    if modifiers.shift {
+        mask |= MOD_BIT_SHIFT;
+    }
+    if modifiers.alt {
+        mask |= MOD_BIT_ALT;
+    }
+    if modifiers.mac_cmd {
+        mask |= MOD_BIT_LOGO;
+    }
+    mask
+}
+
+pub(crate) fn sync_forwarded_modifiers(
+    client: &mut crate::gamescope::input::GamescopeInputClient,
+    current_mask: &mut u8,
+    target_mask: u8,
+) {
+    let diff = *current_mask ^ target_mask;
+    if diff == 0 {
+        return;
+    }
+    for (bit, code) in EIS_MODIFIER_KEYS {
+        if (diff & bit) != 0 {
+            client.send_key(code, (target_mask & bit) != 0);
+        }
+    }
+    *current_mask = target_mask;
+}
+
+pub(crate) fn release_forwarded_modifiers(
+    client: &mut crate::gamescope::input::GamescopeInputClient,
+    current_mask: &mut u8,
+) {
+    sync_forwarded_modifiers(client, current_mask, 0);
 }
 
 /// The Deck's gamepad remains owned by Steam/the game. This path forwards only
@@ -341,16 +398,21 @@ pub fn forward_inputs(state: &mut AppState, ctx: &egui::Context, video: egui::Re
             .is_some_and(|h| h.is_cursor_hidden());
     let lock_cursor =
         mouse_enabled && !touch && (relative || state.pc88.is_active || state.pc98.is_active);
-    ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(if lock_cursor {
+    let desired_grab = if lock_cursor {
         // Deck mode uses Xwayland, where Winit cannot lock the cursor. A
         // confined grab still supplies raw relative motion for hooked games.
         egui::CursorGrab::Confined
     } else {
         egui::CursorGrab::None
-    }));
+    };
+    state.ui.set_cursor_grab(ctx, desired_grab);
 
+    let deck = state.steam_deck.as_mut().unwrap();
     if let Some(hook) = &mut state.gamescope_hook {
         if let Some(client) = &mut hook.input_client {
+            if client.is_disconnected() {
+                deck.forwarded_modifiers_mask = 0;
+            }
             client.dispatch();
             if !focused {
                 for key in deck.forwarded_keys.drain() {
@@ -358,9 +420,7 @@ pub fn forward_inputs(state: &mut AppState, ctx: &egui::Context, video: egui::Re
                         client.send_key(code, false);
                     }
                 }
-                for code in [29, 42, 56, 125] {
-                    client.send_key(code, false);
-                }
+                release_forwarded_modifiers(client, &mut deck.forwarded_modifiers_mask);
             }
             for event in &events {
                 if let egui::Event::Key {
@@ -382,14 +442,11 @@ pub fn forward_inputs(state: &mut AppState, ctx: &egui::Context, video: egui::Re
                         continue;
                     }
                     if let Some(code) = crate::gamescope::input::egui_key_to_evdev(*key) {
-                        for (code, down) in [
-                            (29, modifiers.ctrl),
-                            (42, modifiers.shift),
-                            (56, modifiers.alt),
-                            (125, modifiers.mac_cmd),
-                        ] {
-                            client.send_key(code, down);
-                        }
+                        sync_forwarded_modifiers(
+                            client,
+                            &mut deck.forwarded_modifiers_mask,
+                            modifiers_to_eis_mask(*modifiers),
+                        );
                         client.send_key(code, *pressed);
                         if *pressed {
                             deck.forwarded_keys.insert(*key);
@@ -400,9 +457,7 @@ pub fn forward_inputs(state: &mut AppState, ctx: &egui::Context, video: egui::Re
                 }
             }
             if deck.forwarded_keys.is_empty() {
-                for code in [29, 42, 56, 125] {
-                    client.send_key(code, false);
-                }
+                release_forwarded_modifiers(client, &mut deck.forwarded_modifiers_mask);
             }
             if mouse_enabled {
                 if relative {
@@ -456,6 +511,8 @@ pub fn forward_inputs(state: &mut AppState, ctx: &egui::Context, video: egui::Re
                 }
             }
             client.dispatch();
+        } else {
+            deck.forwarded_modifiers_mask = 0;
         }
     } else {
         if deck.gamepad.is_none() && deck.gamepad_error.is_none() {

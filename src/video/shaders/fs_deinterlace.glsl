@@ -25,48 +25,44 @@ vec3 vertical_median(vec3 a, vec3 b, vec3 c) {
 }
 
 void main() {
+    vec4 c_curr = texture(current_frame, v_tc);
+
+    if (mode == 1) {
+        // Pure Bob Dejitter / Field Weave: only needs current + t-1 center samples
+        vec4 c_prev = texture(prev_frame, v_tc);
+        out_color = vec4(mix(c_curr.rgb, c_prev.rgb, blend_amount), c_curr.a);
+        return;
+    }
+
     vec2 tex_size = vec2(textureSize(current_frame, 0));
     // For 480i upscaled to 1080p, nominal scanline spacing is tex_size.y / 480.0 (~2.25 px).
     // Automatically normalize line_spacing so 1.0 always targets exactly 1 field scanline.
     float nominal_spacing = max(tex_size.y / 480.0, 1.0);
     vec2 dy = vec2(0.0, (line_spacing * nominal_spacing) / max(tex_size.y, 1.0));
 
-    vec4 c_curr = texture(current_frame, v_tc);
-    vec4 c_curr_top = texture(current_frame, v_tc - dy);
-    vec4 c_curr_bot = texture(current_frame, v_tc + dy);
-
-    // 3-tap vertical low-pass FIR [0.25, 0.5, 0.25] on current frame
-    vec3 fir_color = 0.25 * c_curr_top.rgb + 0.5 * c_curr.rgb + 0.25 * c_curr_bot.rgb;
-    vec3 spatial_fir = mix(c_curr.rgb, fir_color, spatial_mix);
-
-    // Vertical median 3x1 on current frame
-    vec3 median_color = vertical_median(c_curr_top.rgb, c_curr.rgb, c_curr_bot.rgb);
-    vec3 spatial_med = mix(c_curr.rgb, median_color, spatial_mix);
-
-    // Previous field (t-1) samples
-    vec4 c_prev = texture(prev_frame, v_tc);
-    vec4 c_prev_top = texture(prev_frame, v_tc - dy);
-    vec4 c_prev_bot = texture(prev_frame, v_tc + dy);
-
-    // Temporal blend (Field weave / Bob dejitter)
-    vec3 temporal_blend = mix(c_curr.rgb, c_prev.rgb, blend_amount);
-
-    if (mode == 1) {
-        // Pure Bob Dejitter / Field Weave
-        out_color = vec4(temporal_blend, c_curr.a);
+    if (mode == 2) {
+        // Pure Vertical FIR: only needs current frame 3-tap vertical samples
+        vec4 c_curr_top = texture(current_frame, v_tc - dy);
+        vec4 c_curr_bot = texture(current_frame, v_tc + dy);
+        vec3 fir_color = 0.25 * c_curr_top.rgb + 0.5 * c_curr.rgb + 0.25 * c_curr_bot.rgb;
+        out_color = vec4(mix(c_curr.rgb, fir_color, spatial_mix), c_curr.a);
         return;
-    } else if (mode == 2) {
-        // Pure Vertical FIR
-        out_color = vec4(spatial_fir, c_curr.a);
-        return;
-    } else if (mode == 3) {
-        // Pure Vertical Median
-        out_color = vec4(spatial_med, c_curr.a);
+    }
+
+    if (mode == 3) {
+        // Pure Vertical Median: only needs current frame 3-tap vertical samples
+        vec4 c_curr_top = texture(current_frame, v_tc - dy);
+        vec4 c_curr_bot = texture(current_frame, v_tc + dy);
+        vec3 median_color = vertical_median(c_curr_top.rgb, c_curr.rgb, c_curr_bot.rgb);
+        out_color = vec4(mix(c_curr.rgb, median_color, spatial_mix), c_curr.a);
         return;
     }
 
     // --- Mode 0 & 4: Motion Adaptive ---
     float true_motion = 0.0;
+    vec4 c_curr_top;
+    vec4 c_curr_bot;
+    vec4 c_prev;
 
     if (has_prev2 == 1) {
         // Same-parity comparison (frame t vs frame t-2):
@@ -76,8 +72,20 @@ void main() {
         vec4 c_prev2 = texture(prev_frame_2, v_tc);
         vec3 parity_diff = abs(c_curr.rgb - c_prev2.rgb);
         true_motion = max(max(parity_diff.r, parity_diff.g), parity_diff.b);
+
+        if (mode != 4) {
+            c_curr_top = texture(current_frame, v_tc - dy);
+            c_curr_bot = texture(current_frame, v_tc + dy);
+            c_prev = texture(prev_frame, v_tc);
+        }
     } else {
         // Single-history fallback: cross-field interval check
+        c_curr_top = texture(current_frame, v_tc - dy);
+        c_curr_bot = texture(current_frame, v_tc + dy);
+        c_prev = texture(prev_frame, v_tc);
+        vec4 c_prev_top = texture(prev_frame, v_tc - dy);
+        vec4 c_prev_bot = texture(prev_frame, v_tc + dy);
+
         vec3 prev_min = min(c_prev_top.rgb, c_prev_bot.rgb);
         vec3 prev_max = max(c_prev_top.rgb, c_prev_bot.rgb);
         vec3 clamped_curr = clamp(c_curr.rgb, prev_min, prev_max);
@@ -104,6 +112,10 @@ void main() {
         out_color = vec4(mix(c_curr.rgb, debug_color, 0.65), c_curr.a);
         return;
     }
+
+    vec3 temporal_blend = mix(c_curr.rgb, c_prev.rgb, blend_amount);
+    vec3 fir_color = 0.25 * c_curr_top.rgb + 0.5 * c_curr.rgb + 0.25 * c_curr_bot.rgb;
+    vec3 spatial_fir = mix(c_curr.rgb, fir_color, spatial_mix);
 
     // In static areas (motion_factor ~ 0): apply temporal weave to eliminate bob flicker!
     // In moving areas (motion_factor ~ 1): blend to spatial FIR to eliminate comb/ghosting!

@@ -5,7 +5,7 @@
 use crate::app::AppState;
 use crate::replay::ScrubSnapshot;
 use crate::video::player::{PlayerCommand, PlayerEvent, VideoFileConfig};
-use crate::video::types::RawFrame;
+use crate::video::types::{checkout_frame_buffer, ColorRange, RawFrame, ScalerFilter};
 use crossbeam_channel::Receiver;
 use eframe::egui::{self, Color32, RichText};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
@@ -18,26 +18,42 @@ const SCRUB_WINDOW_SIZE: egui::Vec2 = egui::vec2(960.0, 680.0);
 /// Skip step in seconds for the Skip Back / Skip Forward buttons and Left/Right arrow keys.
 const SKIP_STEP_SECS: f64 = 5.0;
 
+/// Maximum preview texture dimensions uploaded for the scrub player.
+const MAX_PREVIEW_WIDTH: u32 = 1280;
+const MAX_PREVIEW_HEIGHT: u32 = 720;
+
+/// Extra trailing buffer bytes reserved so `libswscale` SIMD horizontal filter routines
+/// never read or write past allocation bounds on tight scanlines.
+const SWS_SIMD_PADDING_BYTES: usize = 64;
+
 pub struct ScrubPlayerHandle {
     pub command_sender: crossbeam_channel::Sender<PlayerCommand>,
-    pub frame_rx: Receiver<Arc<RawFrame>>,
+    pub rgba_rx: Receiver<egui::ColorImage>,
     pub event_rx: Receiver<PlayerEvent>,
     pub position_us: Arc<AtomicI64>,
     pub is_paused_shared: Arc<AtomicBool>,
     pub is_eof_shared: Arc<AtomicBool>,
     pub stop_requested: Arc<AtomicBool>,
     pub player_thread: Option<JoinHandle<()>>,
+    pub converter_thread: Option<JoinHandle<()>>,
 }
 
 impl Drop for ScrubPlayerHandle {
     fn drop(&mut self) {
         self.stop_requested.store(true, Ordering::Release);
         let _ = self.command_sender.send(PlayerCommand::Stop);
-        if let Some(handle) = self.player_thread.take() {
+        let player_handle = self.player_thread.take();
+        let converter_handle = self.converter_thread.take();
+        if player_handle.is_some() || converter_handle.is_some() {
             let _ = std::thread::Builder::new()
                 .name("scrub-player-cleanup".into())
                 .spawn(move || {
-                    let _ = handle.join();
+                    if let Some(handle) = player_handle {
+                        let _ = handle.join();
+                    }
+                    if let Some(handle) = converter_handle {
+                        let _ = handle.join();
+                    }
                 });
         }
     }
@@ -127,7 +143,8 @@ impl ReplayScrubState {
         let preview_path = snapshot.preview_file.path().to_path_buf();
         self.snapshot = Some(snapshot);
 
-        let (frame_tx, frame_rx) = crossbeam_channel::bounded::<Arc<RawFrame>>(32);
+        let (raw_frame_tx, raw_frame_rx) = crossbeam_channel::bounded::<Arc<RawFrame>>(16);
+        let (rgba_tx, rgba_rx) = crossbeam_channel::bounded::<egui::ColorImage>(2);
         let (event_tx, event_rx) = crossbeam_channel::unbounded::<PlayerEvent>();
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<PlayerCommand>();
 
@@ -148,6 +165,41 @@ impl ReplayScrubState {
             repaint_ctx.request_repaint_of(egui::ViewportId::ROOT);
         });
         let notify_event = Arc::clone(&request_repaint);
+        let convert_repaint = Arc::clone(&request_repaint);
+        let convert_stop = Arc::clone(&stop_requested);
+        let convert_scaler_filter = Arc::clone(&scaler_filter);
+        let rgba_rx_evict = rgba_rx.clone();
+
+        let converter_thread = thread::Builder::new()
+            .name("replay-scrub-rgba".into())
+            .spawn(move || {
+                let mut converter = ScrubFrameConverter::default();
+                while let Ok(mut frame) = raw_frame_rx.recv() {
+                    if convert_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    // Coalesce burst decode/seek backlog so only the freshest frame is scaled.
+                    while let Ok(newer) = raw_frame_rx.try_recv() {
+                        frame = newer;
+                    }
+                    if convert_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let filter =
+                        ScalerFilter::from_u8(convert_scaler_filter.load(Ordering::Relaxed));
+                    if let Some(color_image) =
+                        raw_frame_to_color_image(&frame, &mut converter, filter)
+                    {
+                        if rgba_tx.is_full() {
+                            let _ = rgba_rx_evict.try_recv();
+                        }
+                        if rgba_tx.try_send(color_image).is_ok() {
+                            convert_repaint();
+                        }
+                    }
+                }
+            })
+            .ok();
 
         // Use an isolated, disabled AudioTap so the scrub player's audio plays only to the
         // local speakers and never leaks into the background replay buffer or Twitch broadcast.
@@ -174,7 +226,7 @@ impl ReplayScrubState {
             .name("replay-scrub-player".into())
             .spawn(move || {
                 let result = crate::video::player::video_file_thread_main(
-                    frame_tx,
+                    raw_frame_tx,
                     event_tx_clone.clone(),
                     cmd_rx,
                     pos_clone,
@@ -196,13 +248,14 @@ impl ReplayScrubState {
 
         self.player = Some(ScrubPlayerHandle {
             command_sender: cmd_tx,
-            frame_rx,
+            rgba_rx,
             event_rx,
             position_us,
             is_paused_shared: is_paused,
             is_eof_shared: is_eof,
             stop_requested,
             player_thread: handle,
+            converter_thread,
         });
     }
 
@@ -322,90 +375,312 @@ pub fn format_time_tenths(seconds: f64) -> String {
     format!("{:02}:{:02}.{}", minutes, secs, tenths)
 }
 
-fn raw_frame_to_color_image(frame: &RawFrame) -> Option<egui::ColorImage> {
-    use ffmpeg_next::format::Pixel;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScrubScalerKey {
+    src_format: ffmpeg_next::format::Pixel,
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+    color_range: ColorRange,
+    flags_bits: libc::c_int,
+}
 
-    if frame.width == 0 || frame.height == 0 {
-        return None;
-    }
+/// Persistent YUV/NV12/RGBA -> preview RGBA converter that caches `swscale::Context`
+/// across frames and writes directly into pooled `RawFrame` byte buffers.
+#[derive(Default)]
+pub struct ScrubFrameConverter {
+    scaler: Option<ffmpeg_next::software::scaling::context::Context>,
+    key: Option<ScrubScalerKey>,
+    scratch_src: Vec<u8>,
+    #[cfg(test)]
+    reinit_count: usize,
+}
 
-    if frame.format == Pixel::RGBA {
-        let needed = (frame.width as usize)
-            .checked_mul(frame.height as usize)?
-            .checked_mul(4)?;
-        if frame.data.len() < needed {
-            return None;
-        }
-        return Some(egui::ColorImage::from_rgba_unmultiplied(
-            [frame.width as usize, frame.height as usize],
-            &frame.data[..needed],
-        ));
-    }
-
-    let mut src = ffmpeg_next::frame::Video::new(frame.format, frame.width, frame.height);
-    let planes = src.planes();
-    let mut offset = 0usize;
-    for plane in 0..planes {
-        let row_bytes = match frame.format {
-            Pixel::YUYV422 if plane == 0 => frame.width as usize * 2,
-            Pixel::YUV422P | Pixel::YUV420P | Pixel::YUVJ422P | Pixel::YUVJ420P => {
-                src.plane_width(plane) as usize
-            }
-            _ => return None,
-        };
-        let row_count = src.plane_height(plane) as usize;
-        let stride = src.stride(plane);
-        let plane_dst = src.data_mut(plane);
-        for row in 0..row_count {
-            let src_end = offset.checked_add(row_bytes)?;
-            let src_slice = frame.data.get(offset..src_end)?;
-            let dst_start = row.checked_mul(stride)?;
-            let dst_end = dst_start.checked_add(row_bytes)?;
-            plane_dst
-                .get_mut(dst_start..dst_end)?
-                .copy_from_slice(src_slice);
-            offset = src_end;
-        }
-    }
-
-    // Scale preview texture to at most 1280x720 for low-overhead UI texture uploads.
-    let (dst_w, dst_h) = if frame.width > 1280 || frame.height > 720 {
-        let scale = (1280.0 / frame.width as f32).min(720.0 / frame.height as f32);
-        let w = ((frame.width as f32 * scale).round() as u32).max(2) & !1;
-        let h = ((frame.height as f32 * scale).round() as u32).max(2) & !1;
+#[inline]
+fn preview_scaled_dimensions(src_w: u32, src_h: u32) -> (u32, u32) {
+    if src_w > MAX_PREVIEW_WIDTH || src_h > MAX_PREVIEW_HEIGHT {
+        let scale =
+            (MAX_PREVIEW_WIDTH as f32 / src_w as f32).min(MAX_PREVIEW_HEIGHT as f32 / src_h as f32);
+        let w = ((src_w as f32 * scale).round() as u32).max(2) & !1;
+        let h = ((src_h as f32 * scale).round() as u32).max(2) & !1;
         (w, h)
     } else {
-        (frame.width, frame.height)
-    };
+        (src_w, src_h)
+    }
+}
 
-    let mut scaler = ffmpeg_next::software::scaling::context::Context::get(
-        frame.format,
-        frame.width,
-        frame.height,
-        Pixel::RGBA,
-        dst_w,
-        dst_h,
-        ffmpeg_next::software::scaling::flag::Flags::FAST_BILINEAR,
-    )
-    .ok()?;
+/// Computes tight `(plane_offsets, plane_strides, total_bytes)` for supported `RawFrame` formats.
+fn raw_frame_plane_layout(
+    format: ffmpeg_next::format::Pixel,
+    width: u32,
+    height: u32,
+) -> Option<([usize; 3], [libc::c_int; 4], usize)> {
+    use ffmpeg_next::format::Pixel;
 
-    let mut dst = ffmpeg_next::frame::Video::new(Pixel::RGBA, dst_w, dst_h);
-    scaler.run(&src, &mut dst).ok()?;
+    let w = width as usize;
+    let h = height as usize;
+    match format {
+        Pixel::RGBA => {
+            let row0 = w.checked_mul(4)?;
+            let total = row0.checked_mul(h)?;
+            Some(([0, 0, 0], [row0 as libc::c_int, 0, 0, 0], total))
+        }
+        Pixel::YUYV422 => {
+            let row0 = w.checked_mul(2)?;
+            let total = row0.checked_mul(h)?;
+            Some(([0, 0, 0], [row0 as libc::c_int, 0, 0, 0], total))
+        }
+        Pixel::NV12 => {
+            let y_bytes = w.checked_mul(h)?;
+            let cw = w.div_ceil(2);
+            let ch = h.div_ceil(2);
+            let uv_row = cw.checked_mul(2)?;
+            let uv_bytes = uv_row.checked_mul(ch)?;
+            let total = y_bytes.checked_add(uv_bytes)?;
+            Some((
+                [0, y_bytes, 0],
+                [w as libc::c_int, uv_row as libc::c_int, 0, 0],
+                total,
+            ))
+        }
+        Pixel::YUV420P | Pixel::YUVJ420P => {
+            let y_bytes = w.checked_mul(h)?;
+            let cw = w.div_ceil(2);
+            let ch = h.div_ceil(2);
+            let c_bytes = cw.checked_mul(ch)?;
+            let u_end = y_bytes.checked_add(c_bytes)?;
+            let total = u_end.checked_add(c_bytes)?;
+            Some((
+                [0, y_bytes, u_end],
+                [w as libc::c_int, cw as libc::c_int, cw as libc::c_int, 0],
+                total,
+            ))
+        }
+        Pixel::YUV422P | Pixel::YUVJ422P => {
+            let y_bytes = w.checked_mul(h)?;
+            let cw = w.div_ceil(2);
+            let c_bytes = cw.checked_mul(h)?;
+            let u_end = y_bytes.checked_add(c_bytes)?;
+            let total = u_end.checked_add(c_bytes)?;
+            Some((
+                [0, y_bytes, u_end],
+                [w as libc::c_int, cw as libc::c_int, cw as libc::c_int, 0],
+                total,
+            ))
+        }
+        _ => None,
+    }
+}
 
-    let row_bytes = dst_w as usize * 4;
-    let stride = dst.stride(0);
-    let dst_data = dst.data(0);
-    let mut rgba = Vec::with_capacity(row_bytes * dst_h as usize);
-    for row in 0..dst_h as usize {
-        let start = row * stride;
-        let end = start + row_bytes;
-        rgba.extend_from_slice(dst_data.get(start..end)?);
+impl ScrubFrameConverter {
+    #[cfg(test)]
+    pub fn reinit_count(&self) -> usize {
+        self.reinit_count
     }
 
-    Some(egui::ColorImage::from_rgba_unmultiplied(
-        [dst_w as usize, dst_h as usize],
-        &rgba,
-    ))
+    /// Converts `frame` into a pooled `Pixel::RGBA` `RawFrame` (scaled to at most `1280x720`),
+    /// reusing the cached `swscale::Context` whenever format, dimensions, range, and filter match.
+    pub fn convert_to_rgba_frame(
+        &mut self,
+        frame: &RawFrame,
+        scaler_filter: ScalerFilter,
+    ) -> Option<RawFrame> {
+        use ffmpeg_next::format::Pixel;
+
+        if frame.width == 0 || frame.height == 0 {
+            return None;
+        }
+
+        let (dst_w, dst_h) = preview_scaled_dimensions(frame.width, frame.height);
+
+        if frame.format == Pixel::RGBA && frame.width == dst_w && frame.height == dst_h {
+            let needed = (dst_w as usize)
+                .checked_mul(dst_h as usize)?
+                .checked_mul(4)?;
+            if frame.data.len() < needed {
+                return None;
+            }
+            let mut out = checkout_frame_buffer(needed);
+            out.copy_from_slice(&frame.data[..needed]);
+            return Some(RawFrame {
+                captured_at: frame.captured_at,
+                rate: frame.rate,
+                width: dst_w,
+                height: dst_h,
+                data: out,
+                format: Pixel::RGBA,
+                color_range: ColorRange::Full,
+            });
+        }
+
+        let (offsets, src_strides, total_src_bytes) =
+            raw_frame_plane_layout(frame.format, frame.width, frame.height)?;
+        if frame.data.len() < total_src_bytes {
+            return None;
+        }
+
+        let (sws_src_format, effective_color_range) = match frame.format {
+            Pixel::YUVJ420P => (Pixel::YUV420P, ColorRange::Full),
+            Pixel::YUVJ422P => (Pixel::YUV422P, ColorRange::Full),
+            other => (other, frame.color_range),
+        };
+        let flags = scaler_filter.into_ffmpeg_flag();
+        let desired_key = ScrubScalerKey {
+            src_format: sws_src_format,
+            src_w: frame.width,
+            src_h: frame.height,
+            dst_w,
+            dst_h,
+            color_range: effective_color_range,
+            flags_bits: flags.bits(),
+        };
+
+        if self.key != Some(desired_key) || self.scaler.is_none() {
+            let mut new_scaler = ffmpeg_next::software::scaling::context::Context::get(
+                sws_src_format,
+                frame.width,
+                frame.height,
+                Pixel::RGBA,
+                dst_w,
+                dst_h,
+                flags,
+            )
+            .ok()?;
+
+            if sws_src_format != Pixel::RGBA {
+                unsafe {
+                    let cs = if frame.width >= 1280 || frame.height >= 720 {
+                        ffmpeg_next::sys::SWS_CS_ITU709
+                    } else {
+                        ffmpeg_next::sys::SWS_CS_ITU601
+                    };
+                    let coeff = ffmpeg_next::sys::sws_getCoefficients(cs);
+                    let src_range = match effective_color_range {
+                        ColorRange::Full => 1,
+                        ColorRange::Limited => 0,
+                    };
+                    let _ = ffmpeg_next::sys::sws_setColorspaceDetails(
+                        new_scaler.as_mut_ptr(),
+                        coeff,
+                        src_range,
+                        coeff,
+                        1,
+                        0,
+                        1 << 16,
+                        1 << 16,
+                    );
+                }
+            }
+
+            self.scaler = Some(new_scaler);
+            self.key = Some(desired_key);
+            #[cfg(test)]
+            {
+                self.reinit_count += 1;
+            }
+        }
+
+        let min_padded_src = total_src_bytes.checked_add(SWS_SIMD_PADDING_BYTES)?;
+        let base_src_ptr = if frame.data.capacity() >= min_padded_src {
+            frame.data.as_ptr()
+        } else {
+            if self.scratch_src.len() < min_padded_src {
+                self.scratch_src.resize(min_padded_src, 0);
+            }
+            self.scratch_src[..total_src_bytes].copy_from_slice(&frame.data[..total_src_bytes]);
+            self.scratch_src.as_ptr()
+        };
+
+        let mut src_ptrs = [std::ptr::null::<u8>(); 4];
+        for i in 0..3 {
+            if src_strides[i] > 0 {
+                src_ptrs[i] = unsafe { base_src_ptr.add(offsets[i]) };
+            }
+        }
+
+        let dst_row_bytes = (dst_w as usize).checked_mul(4)?;
+        let dst_bytes = dst_row_bytes.checked_mul(dst_h as usize)?;
+        let mut rgba = checkout_frame_buffer(dst_bytes.checked_add(SWS_SIMD_PADDING_BYTES)?);
+        let dst_ptrs: [*mut u8; 4] = [
+            rgba.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        ];
+        let dst_strides: [libc::c_int; 4] = [dst_row_bytes as libc::c_int, 0, 0, 0];
+
+        let scaler = self.scaler.as_mut()?;
+        let scaled_rows = unsafe {
+            ffmpeg_next::sys::sws_scale(
+                scaler.as_mut_ptr(),
+                src_ptrs.as_ptr(),
+                src_strides.as_ptr(),
+                0,
+                frame.height as libc::c_int,
+                dst_ptrs.as_ptr(),
+                dst_strides.as_ptr(),
+            )
+        };
+        if scaled_rows <= 0 {
+            return None;
+        }
+        rgba.truncate(dst_bytes);
+
+        Some(RawFrame {
+            captured_at: frame.captured_at,
+            rate: frame.rate,
+            width: dst_w,
+            height: dst_h,
+            data: rgba,
+            format: Pixel::RGBA,
+            color_range: ColorRange::Full,
+        })
+    }
+
+    /// Converts `frame` into an `egui::ColorImage` ready for GPU texture upload,
+    /// reusing the cached `swscale::Context` and recycling intermediate pooled buffers.
+    pub fn convert_to_color_image(
+        &mut self,
+        frame: &RawFrame,
+        scaler_filter: ScalerFilter,
+    ) -> Option<egui::ColorImage> {
+        use ffmpeg_next::format::Pixel;
+
+        if frame.width == 0 || frame.height == 0 {
+            return None;
+        }
+
+        if frame.format == Pixel::RGBA
+            && frame.width <= MAX_PREVIEW_WIDTH
+            && frame.height <= MAX_PREVIEW_HEIGHT
+        {
+            let needed = (frame.width as usize)
+                .checked_mul(frame.height as usize)?
+                .checked_mul(4)?;
+            if frame.data.len() < needed {
+                return None;
+            }
+            return Some(egui::ColorImage::from_rgba_unmultiplied(
+                [frame.width as usize, frame.height as usize],
+                &frame.data[..needed],
+            ));
+        }
+
+        let rgba_frame = self.convert_to_rgba_frame(frame, scaler_filter)?;
+        Some(egui::ColorImage::from_rgba_unmultiplied(
+            [rgba_frame.width as usize, rgba_frame.height as usize],
+            &rgba_frame.data,
+        ))
+    }
+}
+
+pub(crate) fn raw_frame_to_color_image(
+    frame: &RawFrame,
+    converter: &mut ScrubFrameConverter,
+    scaler_filter: ScalerFilter,
+) -> Option<egui::ColorImage> {
+    converter.convert_to_color_image(frame, scaler_filter)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -469,14 +744,14 @@ pub fn draw_replay_scrub_window(state: &mut AppState, ctx: &egui::Context) -> bo
         return repaint;
     }
 
-    // Poll scrub player frames and events
-    let mut latest_frame = None;
+    // Poll pre-converted RGBA scrub frames and player events
+    let mut latest_image = None;
     let mut failed_error = None;
     let mut hit_eof = false;
     let mut raw_pos_secs = state.replay_scrub.current_position_secs;
     if let Some(ref mut player) = state.replay_scrub.player {
-        while let Ok(frame) = player.frame_rx.try_recv() {
-            latest_frame = Some(frame);
+        while let Ok(image) = player.rgba_rx.try_recv() {
+            latest_image = Some(image);
         }
         while let Ok(event) = player.event_rx.try_recv() {
             match event {
@@ -544,20 +819,18 @@ pub fn draw_replay_scrub_window(state: &mut AppState, ctx: &egui::Context) -> bo
         return true;
     }
 
-    if let Some(frame) = latest_frame {
-        if let Some(color_image) = raw_frame_to_color_image(&frame) {
-            match &mut state.replay_scrub.texture {
-                Some(tex) => tex.set(color_image, egui::TextureOptions::LINEAR),
-                None => {
-                    state.replay_scrub.texture = Some(ctx.load_texture(
-                        "replay_scrub_preview",
-                        color_image,
-                        egui::TextureOptions::LINEAR,
-                    ));
-                }
+    if let Some(color_image) = latest_image {
+        match &mut state.replay_scrub.texture {
+            Some(tex) => tex.set(color_image, egui::TextureOptions::LINEAR),
+            None => {
+                state.replay_scrub.texture = Some(ctx.load_texture(
+                    "replay_scrub_preview",
+                    color_image,
+                    egui::TextureOptions::LINEAR,
+                ));
             }
-            repaint = true;
         }
+        repaint = true;
     }
 
     let size = crate::ui::scaling::fit_window(
@@ -1243,5 +1516,91 @@ mod tests {
         );
 
         state.replay_scrub.close();
+    }
+
+    #[test]
+    fn scrub_frame_converter_caches_swscale_context_and_supports_yuv_and_nv12() {
+        use ffmpeg_next::format::Pixel;
+
+        let mut converter = ScrubFrameConverter::default();
+        let rate = crate::replay::config::Rate::new(60, 1);
+
+        // 1. Repeated 640x360 YUV420P frames reuse the exact same swscale::Context (reinit_count == 1)
+        let w = 640u32;
+        let h = 360u32;
+        let y_len = (w * h) as usize;
+        let c_len = ((w / 2) * (h / 2)) as usize;
+        let mut yuv_bytes = vec![128u8; y_len + 2 * c_len];
+        yuv_bytes[..y_len].fill(180);
+
+        let yuv_frame = RawFrame {
+            captured_at: 0,
+            rate,
+            width: w,
+            height: h,
+            data: yuv_bytes,
+            format: Pixel::YUV420P,
+            color_range: ColorRange::Limited,
+        };
+
+        for _ in 0..8 {
+            let img =
+                raw_frame_to_color_image(&yuv_frame, &mut converter, ScalerFilter::FastBilinear)
+                    .expect("YUV420P conversion should succeed");
+            assert_eq!(img.size, [640, 360]);
+        }
+        assert_eq!(converter.reinit_count(), 1);
+
+        // 2. Changing ColorRange or ScalerFilter reinitializes once and caches again
+        let mut yuv_full = RawFrame {
+            captured_at: 16_667,
+            rate,
+            width: w,
+            height: h,
+            data: yuv_frame.data.clone(),
+            format: Pixel::YUV420P,
+            color_range: ColorRange::Full,
+        };
+        let rgba_raw = converter
+            .convert_to_rgba_frame(&yuv_full, ScalerFilter::Bilinear)
+            .expect("pooled RGBA RawFrame conversion should succeed");
+        assert_eq!(rgba_raw.format, Pixel::RGBA);
+        assert_eq!((rgba_raw.width, rgba_raw.height), (640, 360));
+        assert_eq!(rgba_raw.data.len(), 640 * 360 * 4);
+        assert_eq!(converter.reinit_count(), 2);
+
+        yuv_full.captured_at = 33_333;
+        let _ = converter
+            .convert_to_rgba_frame(&yuv_full, ScalerFilter::Bilinear)
+            .unwrap();
+        assert_eq!(converter.reinit_count(), 2);
+
+        // 3. 1920x1080 NV12 downscales to 1280x720 and reuses context across frames
+        let hd_w = 1920u32;
+        let hd_h = 1080u32;
+        let nv12_len = (hd_w * hd_h + hd_w * (hd_h / 2)) as usize;
+        let mut nv12_data = checkout_frame_buffer(nv12_len + SWS_SIMD_PADDING_BYTES);
+        nv12_data.truncate(nv12_len);
+        nv12_data[..(hd_w * hd_h) as usize].fill(200);
+        nv12_data[(hd_w * hd_h) as usize..].fill(128);
+        let nv12_frame = RawFrame {
+            captured_at: 50_000,
+            rate,
+            width: hd_w,
+            height: hd_h,
+            data: nv12_data,
+            format: Pixel::NV12,
+            color_range: ColorRange::Limited,
+        };
+
+        let hd_img_1 =
+            raw_frame_to_color_image(&nv12_frame, &mut converter, ScalerFilter::FastBilinear)
+                .expect("NV12 conversion should succeed");
+        let hd_img_2 =
+            raw_frame_to_color_image(&nv12_frame, &mut converter, ScalerFilter::FastBilinear)
+                .expect("second NV12 conversion should reuse cached context");
+        assert_eq!(hd_img_1.size, [1280, 720]);
+        assert_eq!(hd_img_2.size, [1280, 720]);
+        assert_eq!(converter.reinit_count(), 3);
     }
 }

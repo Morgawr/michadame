@@ -1,9 +1,9 @@
-use crate::video::types::{RawFrame, VideoFormat};
+use crate::video::types::{checkout_frame_buffer, RawFrame, VideoFormat};
 use anyhow::{anyhow, Context, Result};
 use std::ffi::{c_void, CString};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
-    Arc, Mutex,
+    Arc, OnceLock,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -14,6 +14,14 @@ const VIDEO_RECONNECT_DELAY: Duration = Duration::from_millis(100);
 const VIDEO_READ_RETRY_DELAY: Duration = Duration::from_millis(1);
 const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(2);
 const VIDEO_RECOVERY_TIMEOUT: Duration = Duration::from_secs(6);
+const MONOTONIC_BASE_OFFSET_NS: u64 = 3_600 * 1_000_000_000;
+
+pub(crate) fn monotonic_nanos() -> u64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    let epoch = EPOCH.get_or_init(Instant::now);
+    let elapsed_ns = epoch.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+    MONOTONIC_BASE_OFFSET_NS.saturating_add(elapsed_ns)
+}
 
 #[derive(Debug)]
 pub enum VideoThreadEvent {
@@ -30,13 +38,14 @@ pub struct VideoThreadConfig {
     pub framerate: u32,
     pub scaler_filter: Arc<AtomicU8>,
     pub color_range: Arc<AtomicU8>,
+    pub allow_hwdec: bool,
     pub stop_requested: Arc<AtomicBool>,
     pub request_repaint: Arc<dyn Fn() + Send + Sync>,
 }
 
 struct VideoInterruptState {
     stop_requested: Arc<AtomicBool>,
-    last_progress: Mutex<Instant>,
+    last_progress_ns: AtomicU64,
 }
 
 struct VideoFrameProgress {
@@ -63,21 +72,18 @@ impl VideoInterruptState {
     fn new(stop_requested: Arc<AtomicBool>) -> Self {
         Self {
             stop_requested,
-            last_progress: Mutex::new(Instant::now()),
+            last_progress_ns: AtomicU64::new(monotonic_nanos()),
         }
     }
 
     fn mark_progress(&self) {
-        if let Ok(mut last_progress) = self.last_progress.lock() {
-            *last_progress = Instant::now();
-        }
+        self.last_progress_ns
+            .store(monotonic_nanos(), Ordering::Relaxed);
     }
 
     fn timed_out(&self) -> bool {
-        self.last_progress
-            .lock()
-            .map(|last_progress| last_progress.elapsed() >= VIDEO_STALL_TIMEOUT)
-            .unwrap_or(true)
+        let last_ns = self.last_progress_ns.load(Ordering::Relaxed);
+        monotonic_nanos().saturating_sub(last_ns) >= VIDEO_STALL_TIMEOUT.as_nanos() as u64
     }
 }
 
@@ -120,10 +126,15 @@ pub(crate) fn copy_frame_tightly(frame: &ffmpeg_next::frame::Video) -> Result<Ve
         total_bytes += row_bytes * row_count;
     }
 
-    let mut data = Vec::with_capacity(total_bytes);
+    let mut data = checkout_frame_buffer(total_bytes);
+    let mut write_offset = 0usize;
     for plane in 0..planes {
         let row_bytes = plane_tight_row_bytes(frame, plane)?;
         let row_count = frame.plane_height(plane) as usize;
+        let plane_bytes = row_bytes * row_count;
+        if plane_bytes == 0 {
+            continue;
+        }
         let stride = frame.stride(plane);
         let plane_data = frame.data(plane);
 
@@ -134,6 +145,20 @@ pub(crate) fn copy_frame_tightly(frame: &ffmpeg_next::frame::Video) -> Result<Ve
                 row_bytes,
                 stride
             ));
+        }
+
+        if stride == row_bytes {
+            let src = plane_data.get(..plane_bytes).ok_or_else(|| {
+                anyhow!(
+                    "Plane {} tight slice is out of bounds: 0..{} of {}",
+                    plane,
+                    plane_bytes,
+                    plane_data.len()
+                )
+            })?;
+            data[write_offset..write_offset + plane_bytes].copy_from_slice(src);
+            write_offset += plane_bytes;
+            continue;
         }
 
         for row in 0..row_count {
@@ -149,9 +174,113 @@ pub(crate) fn copy_frame_tightly(frame: &ffmpeg_next::frame::Video) -> Result<Ve
                     plane_data.len()
                 )
             })?;
-            data.extend_from_slice(row_data);
+            data[write_offset..write_offset + row_bytes].copy_from_slice(row_data);
+            write_offset += row_bytes;
         }
     }
+    Ok(data)
+}
+
+#[inline]
+fn deinterleave_uv_slice(uv_src: &[u8], u_dst: &mut [u8], v_dst: &mut [u8]) {
+    let (uv_chunks, uv_rem) = uv_src.as_chunks::<32>();
+    let (u_chunks, u_rem) = u_dst.as_chunks_mut::<16>();
+    let (v_chunks, v_rem) = v_dst.as_chunks_mut::<16>();
+
+    for ((uv, u_out), v_out) in uv_chunks.iter().zip(u_chunks).zip(v_chunks) {
+        for i in 0..16 {
+            u_out[i] = uv[i * 2];
+            v_out[i] = uv[i * 2 + 1];
+        }
+    }
+
+    for (i, pair) in uv_rem.chunks_exact(2).enumerate() {
+        u_rem[i] = pair[0];
+        v_rem[i] = pair[1];
+    }
+}
+
+/// Converts a hardware-transferred `NV12` video frame (`Y` + interleaved `UV`) directly into a
+/// pooled contiguous `YUV420P` byte buffer without invoking `libswscale`.
+pub(crate) fn copy_nv12_to_yuv420p_tightly(frame: &ffmpeg_next::frame::Video) -> Result<Vec<u8>> {
+    if frame.format() != ffmpeg_next::format::Pixel::NV12 {
+        return Err(anyhow!("Expected NV12 frame, got {:?}", frame.format()));
+    }
+
+    let y_width = frame.width() as usize;
+    let y_height = frame.height() as usize;
+    let c_width = frame.plane_width(1) as usize;
+    let c_height = frame.plane_height(1) as usize;
+
+    let y_bytes = y_width * y_height;
+    let c_bytes = c_width * c_height;
+    let uv_row_bytes = c_width * 2;
+    let total_bytes = y_bytes + 2 * c_bytes;
+
+    let y_stride = frame.stride(0);
+    let uv_stride = frame.stride(1);
+    if y_width > y_stride {
+        return Err(anyhow!(
+            "NV12 Y row width {} exceeds stride {}",
+            y_width,
+            y_stride
+        ));
+    }
+    if uv_row_bytes > uv_stride {
+        return Err(anyhow!(
+            "NV12 UV row bytes {} exceeds stride {}",
+            uv_row_bytes,
+            uv_stride
+        ));
+    }
+
+    let y_plane = frame.data(0);
+    let uv_plane = frame.data(1);
+
+    let mut data = checkout_frame_buffer(total_bytes);
+    let (y_dst, uv_dst) = data.split_at_mut(y_bytes);
+    let (u_dst, v_dst) = uv_dst.split_at_mut(c_bytes);
+
+    if y_bytes > 0 {
+        if y_stride == y_width {
+            let src = y_plane
+                .get(..y_bytes)
+                .ok_or_else(|| anyhow!("NV12 Y plane out of bounds"))?;
+            y_dst.copy_from_slice(src);
+        } else {
+            for row in 0..y_height {
+                let start = row * y_stride;
+                let src = y_plane
+                    .get(start..start + y_width)
+                    .ok_or_else(|| anyhow!("NV12 Y row {} out of bounds", row))?;
+                let dst_start = row * y_width;
+                y_dst[dst_start..dst_start + y_width].copy_from_slice(src);
+            }
+        }
+    }
+
+    if c_bytes > 0 {
+        if uv_stride == uv_row_bytes {
+            let src = uv_plane
+                .get(..c_bytes * 2)
+                .ok_or_else(|| anyhow!("NV12 UV plane out of bounds"))?;
+            deinterleave_uv_slice(src, u_dst, v_dst);
+        } else {
+            for row in 0..c_height {
+                let start = row * uv_stride;
+                let src = uv_plane
+                    .get(start..start + uv_row_bytes)
+                    .ok_or_else(|| anyhow!("NV12 UV row {} out of bounds", row))?;
+                let dst_start = row * c_width;
+                deinterleave_uv_slice(
+                    src,
+                    &mut u_dst[dst_start..dst_start + c_width],
+                    &mut v_dst[dst_start..dst_start + c_width],
+                );
+            }
+        }
+    }
+
     Ok(data)
 }
 
@@ -283,6 +412,16 @@ pub(crate) fn normalize_decoded_video_frame(
         return Ok(None);
     }
 
+    if decoded.format() == ffmpeg_next::format::Pixel::NV12 {
+        let data = copy_nv12_to_yuv420p_tightly(decoded)?;
+        return Ok(Some((
+            decoded.width(),
+            decoded.height(),
+            ffmpeg_next::format::Pixel::YUV420P,
+            data,
+        )));
+    }
+
     let output_format = renderable_pixel_format(decoded.format());
     if decoded.format() == output_format {
         let data = copy_frame_tightly(decoded)?;
@@ -397,6 +536,7 @@ pub fn video_thread_main(
         framerate,
         scaler_filter,
         color_range,
+        allow_hwdec,
         stop_requested,
         request_repaint,
     } = config;
@@ -416,6 +556,7 @@ pub fn video_thread_main(
             framerate,
             &scaler_filter,
             &color_range,
+            allow_hwdec,
             &stop_requested,
             &request_repaint,
             &mut started,
@@ -458,6 +599,7 @@ fn run_video_capture_session(
     framerate: u32,
     scaler_filter: &Arc<AtomicU8>,
     color_range: &Arc<AtomicU8>,
+    allow_hwdec: bool,
     stop_requested: &Arc<AtomicBool>,
     request_repaint: &Arc<dyn Fn() + Send + Sync>,
     started: &mut bool,
@@ -520,11 +662,10 @@ fn run_video_capture_session(
         crate::replay::config::Rate::new(framerate, 1)
     };
 
-    let mut decoder = ffmpeg_next::codec::context::Context::from_parameters(input.parameters())
-        .and_then(|c| c.decoder().video())
-        .context("Failed to create software video decoder")?;
+    let mut decoder =
+        crate::video::hwdec::VideoDecoderSession::open(input.parameters(), allow_hwdec)
+            .context("Failed to create video decoder")?;
 
-    decoder.set_threading(ffmpeg_next::codec::threading::Config::default());
     let mut current_scaler_val = scaler_filter.load(Ordering::Relaxed);
     let mut scaler: Option<ffmpeg_next::software::scaling::context::Context> = None;
     let mut decoded = ffmpeg_next::frame::Video::empty();
@@ -576,7 +717,15 @@ fn run_video_capture_session(
             }
             continue;
         }
-        while decoder.receive_frame(&mut decoded).is_ok() {
+        loop {
+            match decoder.receive_decoded_frame(&mut decoded) {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(error) => {
+                    tracing::warn!(error = %error, "Error receiving decoded video frame");
+                    break;
+                }
+            }
             let desired_scaler_val = scaler_filter.load(Ordering::Relaxed);
             let Some((width, height, format, data)) = normalize_decoded_video_frame(
                 &decoded,
@@ -666,10 +815,14 @@ mod tests {
             0
         );
 
-        *state.last_progress.lock().unwrap() = Instant::now() - VIDEO_STALL_TIMEOUT;
+        state.last_progress_ns.store(
+            monotonic_nanos() - VIDEO_STALL_TIMEOUT.as_nanos() as u64,
+            Ordering::Relaxed,
+        );
         assert!(state.timed_out());
 
         state.mark_progress();
+        assert!(!state.timed_out());
         stop_requested.store(true, Ordering::Relaxed);
         assert_eq!(
             unsafe {
@@ -963,5 +1116,68 @@ mod tests {
         assert_eq!(fmt, ffmpeg_next::format::Pixel::YUV420P);
         assert_eq!(data.len(), 64 * 64 * 3 / 2);
         assert!(scaler.is_some());
+    }
+
+    #[test]
+    fn test_nv12_normalization_bypasses_swscale_and_deinterleaves_uv() {
+        ffmpeg_next::init().unwrap();
+        let mut nv12_frame =
+            ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::NV12, 36, 20);
+        let y_stride = nv12_frame.stride(0);
+        let uv_stride = nv12_frame.stride(1);
+
+        {
+            let y_plane = nv12_frame.data_mut(0);
+            for row in 0..20usize {
+                for col in 0..36usize {
+                    y_plane[row * y_stride + col] = ((row * 3 + col) & 0xFF) as u8;
+                }
+            }
+        }
+        {
+            let uv_plane = nv12_frame.data_mut(1);
+            for row in 0..10usize {
+                for col in 0..18usize {
+                    uv_plane[row * uv_stride + col * 2] = (10 + row * 5 + col) as u8;
+                    uv_plane[row * uv_stride + col * 2 + 1] = (200 - row * 3 - col) as u8;
+                }
+            }
+        }
+
+        let mut scaler = None;
+        let mut active_filter = 0u8;
+        let mut normalized = ffmpeg_next::frame::Video::empty();
+        let (w, h, fmt, data) = normalize_decoded_video_frame(
+            &nv12_frame,
+            &mut normalized,
+            &mut scaler,
+            &mut active_filter,
+            0,
+        )
+        .unwrap()
+        .expect("NV12 frame must normalize directly to YUV420P");
+
+        assert!(
+            scaler.is_none(),
+            "NV12 hardware transfer must bypass SwsContext initialization"
+        );
+        assert_eq!((w, h), (36, 20));
+        assert_eq!(fmt, ffmpeg_next::format::Pixel::YUV420P);
+        assert_eq!(data.len(), 36 * 20 + 2 * (18 * 10));
+
+        let y_out = &data[..36 * 20];
+        let u_out = &data[36 * 20..36 * 20 + 18 * 10];
+        let v_out = &data[36 * 20 + 18 * 10..];
+        for row in 0..20usize {
+            for col in 0..36usize {
+                assert_eq!(y_out[row * 36 + col], ((row * 3 + col) & 0xFF) as u8);
+            }
+        }
+        for row in 0..10usize {
+            for col in 0..18usize {
+                assert_eq!(u_out[row * 18 + col], (10 + row * 5 + col) as u8);
+                assert_eq!(v_out[row * 18 + col], (200 - row * 3 - col) as u8);
+            }
+        }
     }
 }

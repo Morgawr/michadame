@@ -4,7 +4,6 @@ use crate::devices::filter_type::CrtFilter;
 use crate::video;
 use eframe::egui;
 use eframe::egui_glow;
-use std::os::unix::io::AsRawFd;
 use std::sync::atomic::Ordering;
 
 fn capture_frame_pixels_raw(
@@ -92,6 +91,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         if toggle_passthrough {
             if let Some(hook) = &mut state.gamescope_hook {
                 let _now_enabled = hook.toggle_passthrough();
+                state.ui.reset_cursor_state_cache();
                 ctx.memory_mut(|m| {
                     m.stop_text_input();
                     if let Some(id) = m.focused() {
@@ -106,6 +106,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
         if toggle_passthrough {
             let _now_enabled = state.pc98.toggle_passthrough();
+            state.ui.reset_cursor_state_cache();
             ctx.memory_mut(|m| {
                 m.stop_text_input();
                 if let Some(id) = m.focused() {
@@ -143,6 +144,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
         if toggle_passthrough {
             let _now_enabled = state.pc88.toggle_passthrough();
+            state.ui.reset_cursor_state_cache();
             ctx.memory_mut(|m| {
                 m.stop_text_input();
                 if let Some(id) = m.focused() {
@@ -191,7 +193,10 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
     let mut new_dma_frame_received = false;
     state.poll_gamescope_dma_retry(ctx);
     let is_window_focused = crate::app::is_root_viewport_focused(ctx);
-    state.ui.is_window_focused = is_window_focused;
+    if state.ui.is_window_focused != is_window_focused {
+        state.ui.is_window_focused = is_window_focused;
+        state.ui.reset_cursor_state_cache();
+    }
     let active_filter_top = CrtFilter::from_u8(state.crt_filter.load(Ordering::Relaxed));
     let beam_lockstep_active = state.ui.video_window_open
         && !deck_mode
@@ -400,10 +405,10 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 .as_ref()
                 .map_or(false, |h| h.is_cursor_hidden());
             if is_window_focused && is_cursor_hidden {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::Locked));
+                state.ui.set_cursor_grab(ctx, egui::CursorGrab::Locked);
                 ui.ctx().set_cursor_icon(egui::CursorIcon::None);
             } else {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+                state.ui.set_cursor_grab(ctx, egui::CursorGrab::None);
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
             }
 
@@ -422,7 +427,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     .retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
             });
         } else if is_gamescope {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+            state.ui.set_cursor_grab(ctx, egui::CursorGrab::None);
             ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
         } else if is_pc98 && passthrough_active {
             let has_system_dialog = state.ui.show_quit_dialog
@@ -433,7 +438,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 || state.ui.debug_open;
 
             if is_window_focused && !has_system_dialog {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::Locked));
+                state.ui.set_cursor_grab(ctx, egui::CursorGrab::Locked);
                 ui.ctx().set_cursor_icon(egui::CursorIcon::None);
                 let target_res = state.pc98.resolution;
                 crate::pc98::input::forward_pc98_inputs(
@@ -443,7 +448,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     target_res,
                 );
             } else {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+                state.ui.set_cursor_grab(ctx, egui::CursorGrab::None);
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
                 state.pc98.release_all_inputs();
             }
@@ -452,7 +457,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     .retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
             });
         } else if is_pc98 {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+            state.ui.set_cursor_grab(ctx, egui::CursorGrab::None);
             ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
         } else if is_pc88 && passthrough_active {
             let has_system_dialog = state.ui.show_quit_dialog
@@ -463,7 +468,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 || state.ui.debug_open;
 
             if is_window_focused && !has_system_dialog {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::Locked));
+                state.ui.set_cursor_grab(ctx, egui::CursorGrab::Locked);
                 ui.ctx().set_cursor_icon(egui::CursorIcon::None);
                 let target_res = state.pc88.resolution;
                 crate::pc98::input::forward_pc88_inputs(
@@ -473,7 +478,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     target_res,
                 );
             } else {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+                state.ui.set_cursor_grab(ctx, egui::CursorGrab::None);
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
                 state.pc88.release_all_inputs();
             }
@@ -482,7 +487,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     .retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
             });
         } else if is_pc88 {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+            state.ui.set_cursor_grab(ctx, egui::CursorGrab::None);
             ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
         }
 
@@ -608,9 +613,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             ui.ctx().request_repaint();
         } else if (!is_showing_roll && filter == CrtFilter::Beam)
             || state.cathode_interference.enabled
-            || state.audio_reactive.enabled
-            || retro_pc_frame
-            || (night_mode_glow_intensity > 0.001)
+            || state.should_repaint_audio_reactive()
             || light_switch_flicker_active
             || is_roll_active
         {
@@ -626,8 +629,8 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         {
             if let Some(renderer_arc) = &state.crt_renderer {
                 let renderer_clone = renderer_arc.clone();
-                let params = video::gpu::ShaderParams::from_state(state);
-                let halo_params = video::gpu::HaloShaderParams::from_state(state);
+                let mut params = video::gpu::ShaderParams::from_state(state);
+                let mut halo_params = video::gpu::HaloShaderParams::from_state(state);
                 let beam_params = video::gpu::BeamShaderParams::from_state(state);
                 let cathode_params_cb = cathode_params.clone();
                 let pixelate = state.video.pixelate_filter_enabled;
@@ -665,6 +668,13 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
 
                 let latest_dmabuf_frame_cb = latest_dmabuf_frame.clone();
                 let egl_importer_cb = egl_importer_cb.clone();
+                params.fallback_captured_at =
+                    latest_dmabuf_frame_cb.as_ref().map(|f| f.captured_at);
+                params.render_fft_spectrum = state.video.fft_mask_window_open;
+                halo_params.source_captured_at = latest_frame
+                    .as_ref()
+                    .map(|f| f.captured_at)
+                    .or_else(|| latest_dmabuf_frame_cb.as_ref().map(|f| f.captured_at));
 
                 let capture_overlays = state.replay.config.capture_overlays && !deck_background;
                 let webcam_enabled = state.webcam.config.enabled;
@@ -696,17 +706,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                             {
                                 if let Ok(mut importer) = importer_arc.lock() {
                                     unsafe {
-                                        if let Some(imported_tex) = importer.import_dmabuf(
-                                            painter.gl(),
-                                            dma_frame.buffer_id,
-                                            dma_frame.fd.as_raw_fd(),
-                                            dma_frame.width,
-                                            dma_frame.height,
-                                            dma_frame.stride,
-                                            dma_frame.drm_fourcc,
-                                            dma_frame.modifier,
-                                            dma_frame.captured_at,
-                                        ) {
+                                        if let Some(imported_tex) =
+                                            importer.import_or_update(painter.gl(), dma_frame)
+                                        {
                                             fallback_tex = Some(imported_tex);
                                         }
                                     }
@@ -1007,6 +1009,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             } else {
                 state.fft_black_threshold
             };
+            let render_fft_spectrum = !is_showing_roll && state.video.fft_mask_window_open;
             let glass_params = if is_showing_roll {
                 None
             } else {
@@ -1058,17 +1061,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     {
                         if let Ok(mut importer) = importer_arc.lock() {
                             unsafe {
-                                if let Some(imported_tex) = importer.import_dmabuf(
-                                    painter.gl(),
-                                    dma_frame.buffer_id,
-                                    dma_frame.fd.as_raw_fd(),
-                                    dma_frame.width,
-                                    dma_frame.height,
-                                    dma_frame.stride,
-                                    dma_frame.drm_fourcc,
-                                    dma_frame.modifier,
-                                    dma_frame.captured_at,
-                                ) {
+                                if let Some(imported_tex) =
+                                    importer.import_or_update(painter.gl(), dma_frame)
+                                {
                                     fallback_tex = Some(imported_tex);
                                 }
                             }
@@ -1104,6 +1099,9 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     };
                     let (rendered_area, ocr_captured) = {
                         let mut renderer = renderer_clone.lock().unwrap();
+                        renderer.fallback_captured_at_next_paint =
+                            latest_dmabuf_frame_cb.as_ref().map(|f| f.captured_at);
+                        renderer.render_fft_spectrum_next_paint = render_fft_spectrum;
                         renderer.capture_ocr_async_next_paint =
                             ocr_dispatch_cb.take_capture_requested();
                         if renderer.ocr_recycled_buffer.is_none()
@@ -1416,6 +1414,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                     .map(|b| crate::replay::gpu::BroadcastSink {
                         tx: b.video_tx.clone(),
                         free_rx: b.video_free_rx.clone(),
+                        free_tx: b.video_free_tx.clone(),
                         dropped: b.metrics.video_dropped.clone(),
                     });
             let at = active_frame

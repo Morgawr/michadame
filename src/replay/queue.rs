@@ -2,11 +2,14 @@
 //! image storage; the GL callback borrows a ready buffer or keeps its GPU copy.
 use super::{
     config::{QueuePlan, MAX_WORK_FRAMES},
-    VideoFrame,
+    SharedFrameBytes, VideoFrame,
 };
 use crossbeam_channel::{bounded, Receiver, Sender};
 use std::{
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -23,7 +26,7 @@ pub struct WorkQueue {
     free: Receiver<Vec<u8>>,
     requests_tx: Sender<PoolRequest>,
     requests: Receiver<PoolRequest>,
-    generation: AtomicU64,
+    generation: Arc<AtomicU64>,
 }
 impl WorkQueue {
     pub fn new() -> Self {
@@ -37,7 +40,7 @@ impl WorkQueue {
             free,
             requests_tx,
             requests,
-            generation: AtomicU64::new(u64::MAX),
+            generation: Arc::new(AtomicU64::new(u64::MAX)),
         }
     }
     pub fn request(&self, request: PoolRequest) -> bool {
@@ -90,6 +93,14 @@ impl WorkQueue {
         }
         self.free.try_recv().ok()
     }
+    pub fn share_buffer(&self, generation: u64, rgba: Vec<u8>) -> SharedFrameBytes {
+        SharedFrameBytes::from_replay_pool(
+            rgba,
+            self.free_tx.clone(),
+            self.generation.clone(),
+            generation,
+        )
+    }
     #[allow(dead_code)]
     pub fn has_buffer(&self, generation: u64) -> bool {
         self.generation.load(Ordering::Acquire) == generation && !self.free.is_empty()
@@ -103,7 +114,11 @@ impl WorkQueue {
     pub fn receive(&self, timeout: Duration) -> Option<VideoFrame> {
         self.ready.recv_timeout(timeout).ok()
     }
-    pub fn recycle(&self, generation: u64, rgba: Vec<u8>) {
+    pub fn recycle(&self, _generation: u64, rgba: SharedFrameBytes) {
+        drop(rgba);
+    }
+    #[allow(dead_code)]
+    pub fn recycle_raw(&self, generation: u64, rgba: Vec<u8>) {
         if self.generation.load(Ordering::Acquire) == generation {
             let _ = self.free_tx.try_send(rgba);
         }
@@ -147,7 +162,7 @@ mod tests {
         rgba.fill(tick);
         let rate = Rate::new(60, 1);
         VideoFrame {
-            rgba,
+            rgba: queue.share_buffer(generation, rgba),
             width: 2,
             height: 2,
             at: 10_000_000 + rate.us(tick as i64),

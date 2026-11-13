@@ -138,6 +138,12 @@ void main() {
 
     // 4. Optical Drop Shadow onto CRT Glass (Deeply Embedded CRT Tube)
     float shadow_w = clamp(min_vid_dim * 0.024, 22.0, 46.0);
+
+    // Early exit for transparent interior video area (alpha = 0 under alpha blending)
+    if (d_ap < -shadow_w || (dark_mode == 1 && d_ap <= -0.75)) {
+        discard;
+    }
+
     float shadow_falloff = clamp((d_ap + shadow_w) / shadow_w, 0.0, 1.0);
     // Overhead room light casts stronger shadow from top (-ny) and left (-nx) overhang
     float top_bias = clamp(-n_ap.y * 0.5 + 0.5, 0.0, 1.0);
@@ -147,12 +153,6 @@ void main() {
     float shadow_alpha = (dark_mode == 1)
         ? 0.0
         : pow(shadow_falloff, 1.6) * 0.65 * dir_shadow_factor;
-
-    // Early exit for deep interior video area
-    if (d_ap < -shadow_w) {
-        out_color = vec4(0.0);
-        return;
-    }
 
     // 5. Dark Rubber Gasket Sealing CRT Tube
     float gasket_w = clamp(min_vid_dim * 0.0045, 3.0, 5.5);

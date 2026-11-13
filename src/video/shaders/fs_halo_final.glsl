@@ -3,6 +3,7 @@ in vec2 v_tc;
 out vec4 out_color;
 
 uniform sampler2D DeconvPass;
+uniform sampler2D BorderHPass;
 uniform vec2 outputResolution;
 uniform vec2 SourceSize;
 uniform float horizontal_stretch;
@@ -10,6 +11,9 @@ uniform float halo_zoom;
 uniform float halo_intensity;
 uniform vec3 background_color;
 uniform vec4 border_crop; // left, right, top, bottom
+
+// Precomputed exp(-(y * y) / 8.0) for |y| = 0..4
+const float W[5] = float[5](1.0, 0.88249690, 0.60653066, 0.32465247, 0.13533528);
 
 float ToSrgb1(float c) {
     return (c < 0.0031308 ? c * 12.92 : 1.055 * pow(c, 0.41666) - 0.055);
@@ -50,19 +54,15 @@ void main() {
         if (edge_factor > 0.0001) {
             vec3 light = vec3(0.0);
             float weights = 0.0;
-            vec2 stepSize = vec2(outputResolution.y / outputResolution.x, 1.0) * 0.009;
+            const float step_y = 0.009;
             for (int y = -4; y <= 4; ++y) {
-                for (int x = -4; x <= 4; ++x) {
-                    vec2 offset = vec2(float(x), float(y));
-                    float weight = exp(-dot(offset, offset) / 8.0);
-                    vec2 sample_pos = v_tc + offset * stepSize;
-                    vec2 sample_corrected = vec2(sample_pos.x, 1.0 - sample_pos.y);
-                    vec2 sample_centered = (sample_corrected - 0.5) / scale + 0.5;
-                    if (sample_centered.x >= 0.0 && sample_centered.x <= 1.0 && sample_centered.y >= 0.0 && sample_centered.y <= 1.0) {
-                        vec3 sampleColor = texture(DeconvPass, sample_pos).rgb;
-                        light += sampleColor * sampleColor * weight;
-                        weights += weight;
-                    }
+                float sample_y = v_tc.y + float(y) * step_y;
+                float sample_centered_y = ((1.0 - sample_y) - 0.5) / scale.y + 0.5;
+                if (sample_centered_y >= 0.0 && sample_centered_y <= 1.0) {
+                    float wy = W[abs(y)];
+                    vec4 h = texture(BorderHPass, vec2(v_tc.x, sample_y));
+                    light += h.rgb * wy;
+                    weights += h.a * wy;
                 }
             }
             if (weights > 0.0) {

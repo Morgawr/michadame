@@ -1,4 +1,4 @@
-use crate::video::types::{ColorRange, RawFrame};
+use crate::video::types::{checkout_frame_buffer, recycle_frame_buffer, ColorRange, RawFrame};
 use anyhow::{Context, Result};
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
@@ -334,37 +334,27 @@ pub fn start_gamescope_video(
                 }
 
                 backoff = Duration::from_millis(200);
-                let mut frame_buffer = vec![0u8; frame_size];
-                let mut last_res_check = Instant::now();
-                let mut resolution_changed = false;
+                let pipe_stop = Arc::new(AtomicBool::new(false));
+                let resolution_changed = Arc::new(AtomicBool::new(false));
 
-                while !stop_clone.load(Ordering::Relaxed) {
-                    match stdout.read_exact(&mut frame_buffer) {
-                        Ok(()) => {
-                            let raw_frame = Arc::new(RawFrame {
-                                captured_at: crate::replay::now_us(),
-                                rate: crate::replay::config::Rate {
-                                    num: GAMESCOPE_FPS,
-                                    den: 1,
-                                },
-                                width,
-                                height,
-                                data: frame_buffer.clone(),
-                                format: ffmpeg_next::format::Pixel::RGBA,
-                                color_range: ColorRange::from_u8(
-                                    color_range.load(Ordering::Relaxed),
-                                ),
-                            });
-
-                            if frame_sender.send(raw_frame).is_err() {
-                                break;
-                            }
-                            request_repaint();
-
-                            if last_res_check.elapsed() >= Duration::from_secs(2) {
-                                last_res_check = Instant::now();
+                let watcher_handle = {
+                    let stop_global = Arc::clone(&stop_clone);
+                    let pipe_stop_bg = Arc::clone(&pipe_stop);
+                    let res_changed_bg = Arc::clone(&resolution_changed);
+                    let child_bg = Arc::clone(&child_process_clone);
+                    thread::Builder::new()
+                        .name("gamescope-res-check".to_string())
+                        .spawn(move || {
+                            while !stop_global.load(Ordering::Relaxed)
+                                && !pipe_stop_bg.load(Ordering::Relaxed)
+                            {
+                                if !sleep_cancelable(&pipe_stop_bg, Duration::from_secs(2))
+                                    || stop_global.load(Ordering::Relaxed)
+                                {
+                                    break;
+                                }
                                 if let Some(new_info) = get_gamescope_node_info_with_timeout(
-                                    Some(&stop_clone),
+                                    Some(&pipe_stop_bg),
                                     Duration::from_millis(250),
                                 ) {
                                     if (new_info.width, new_info.height) != (width, height) {
@@ -375,30 +365,74 @@ pub fn start_gamescope_video(
                                             new_info.width,
                                             new_info.height
                                         );
-                                        resolution_changed = true;
+                                        res_changed_bg.store(true, Ordering::Release);
+                                        if let Ok(mut lock) = child_bg.lock() {
+                                            if let Some(ref mut c) = *lock {
+                                                let _ = c.kill();
+                                            }
+                                        }
                                         break;
                                     }
                                 }
                             }
+                        })
+                        .ok()
+                };
+
+                while !stop_clone.load(Ordering::Relaxed)
+                    && !resolution_changed.load(Ordering::Acquire)
+                {
+                    let mut frame_data = checkout_frame_buffer(frame_size);
+                    match stdout.read_exact(&mut frame_data) {
+                        Ok(()) => {
+                            if resolution_changed.load(Ordering::Acquire) {
+                                recycle_frame_buffer(frame_data);
+                                break;
+                            }
+                            let raw_frame = Arc::new(RawFrame {
+                                captured_at: crate::replay::now_us(),
+                                rate: crate::replay::config::Rate {
+                                    num: GAMESCOPE_FPS,
+                                    den: 1,
+                                },
+                                width,
+                                height,
+                                data: frame_data,
+                                format: ffmpeg_next::format::Pixel::RGBA,
+                                color_range: ColorRange::from_u8(
+                                    color_range.load(Ordering::Relaxed),
+                                ),
+                            });
+
+                            if frame_sender.send(raw_frame).is_err() {
+                                break;
+                            }
+                            request_repaint();
                         }
                         Err(e) => {
+                            recycle_frame_buffer(frame_data);
                             tracing::debug!("Gamescope video stream ended or read failed: {e}");
                             break;
                         }
                     }
                 }
 
+                pipe_stop.store(true, Ordering::Relaxed);
                 if let Ok(mut lock) = child_process_clone.lock() {
                     if let Some(mut c) = lock.take() {
                         let _ = c.kill();
                         let _ = c.wait();
                     }
                 }
+                if let Some(handle) = watcher_handle {
+                    let _ = handle.join();
+                }
 
                 if stop_clone.load(Ordering::Relaxed) {
                     break;
                 }
-                if !resolution_changed && !sleep_cancelable(&stop_clone, Duration::from_millis(300))
+                if !resolution_changed.load(Ordering::Acquire)
+                    && !sleep_cancelable(&stop_clone, Duration::from_millis(300))
                 {
                     break;
                 }

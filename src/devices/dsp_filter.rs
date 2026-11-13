@@ -97,6 +97,15 @@ impl Biquad {
         self.s1 = [0.0; 2];
         self.s2 = [0.0; 2];
     }
+
+    #[inline]
+    fn update_coeffs_from(&mut self, other: &Self) {
+        self.b0 = other.b0;
+        self.b1 = other.b1;
+        self.b2 = other.b2;
+        self.a1 = other.a1;
+        self.a2 = other.a2;
+    }
 }
 
 /// 4th-Order Linkwitz-Riley (LR4) Crossover Filter
@@ -122,6 +131,16 @@ impl Lr4Crossover {
             hp1: Biquad::highpass(fc, q, fs),
             hp2: Biquad::highpass(fc, q, fs),
         }
+    }
+
+    pub fn update_crossover(&mut self, fc: f32, fs: f32) {
+        let q = 1.0 / std::f32::consts::SQRT_2;
+        let lp = Biquad::lowpass(fc, q, fs);
+        let hp = Biquad::highpass(fc, q, fs);
+        self.lp1.update_coeffs_from(&lp);
+        self.lp2.update_coeffs_from(&lp);
+        self.hp1.update_coeffs_from(&hp);
+        self.hp2.update_coeffs_from(&hp);
     }
 
     #[inline(always)]
@@ -166,6 +185,11 @@ impl DownwardExpander {
         }
     }
 
+    #[inline]
+    pub fn set_threshold_db(&mut self, threshold_db: f32) {
+        self.threshold_linear = 10.0f32.powf(threshold_db.clamp(-80.0, -10.0) / 20.0);
+    }
+
     #[inline(always)]
     pub fn tick(&mut self, ch: usize, x: f32) -> f32 {
         let c = ch.min(1);
@@ -179,9 +203,14 @@ impl DownwardExpander {
 
         let env_safe = self.env[c].max(1e-6);
         let gain = if env_safe < self.threshold_linear {
-            (env_safe / self.threshold_linear)
-                .powf(self.ratio - 1.0)
-                .clamp(1e-3, 1.0)
+            let t = env_safe / self.threshold_linear;
+            let raw = if (self.ratio - 6.0).abs() <= 1e-5 {
+                let t2 = t * t;
+                t2 * t2 * t
+            } else {
+                t.powf(self.ratio - 1.0)
+            };
+            raw.clamp(1e-3, 1.0)
         } else {
             1.0
         };
@@ -192,6 +221,32 @@ impl DownwardExpander {
     pub fn reset(&mut self) {
         self.env = [0.0; 2];
     }
+}
+
+const DEFAULT_DSP_BUFFER_FRAMES: usize = 2048;
+const DEFAULT_DSP_CHANNELS: usize = 2;
+
+#[inline]
+fn dsp_fifo_capacity(buffer_size: usize, channels: usize) -> usize {
+    buffer_size.max(DEFAULT_DSP_BUFFER_FRAMES) * channels.max(DEFAULT_DSP_CHANNELS) * 4
+}
+
+#[inline]
+fn pop_deque_slice(deque: &mut VecDeque<f32>, dst: &mut [f32]) {
+    let n = dst.len();
+    let (first, second) = deque.as_slices();
+    let first_copy = first.len().min(n);
+    dst[..first_copy].copy_from_slice(&first[..first_copy]);
+    if first_copy < n {
+        let rem = n - first_copy;
+        let second_copy = second.len().min(rem);
+        dst[first_copy..first_copy + second_copy].copy_from_slice(&second[..second_copy]);
+        if first_copy + second_copy < n {
+            dst[first_copy + second_copy..].fill(0.0);
+        }
+    }
+    let drain_len = n.min(deque.len());
+    let _ = deque.drain(..drain_len);
 }
 
 pub struct RnnoiseStream {
@@ -207,14 +262,20 @@ impl RnnoiseStream {
     pub const FRAME_SIZE: usize = nnnoiseless::DenoiseState::FRAME_SIZE;
     pub const DELAY_SAMPLES: usize = Self::FRAME_SIZE * 2;
 
+    #[cfg(test)]
     pub fn new() -> Self {
+        Self::with_buffer_size(DEFAULT_DSP_BUFFER_FRAMES)
+    }
+
+    pub fn with_buffer_size(buffer_size: usize) -> Self {
+        let cap = dsp_fifo_capacity(buffer_size, DEFAULT_DSP_CHANNELS).max(Self::FRAME_SIZE * 4);
         let mut stream = Self {
             left: nnnoiseless::DenoiseState::new(),
             right: nnnoiseless::DenoiseState::new(),
-            in_l: VecDeque::with_capacity(Self::FRAME_SIZE * 4),
-            in_r: VecDeque::with_capacity(Self::FRAME_SIZE * 4),
-            out_l: VecDeque::with_capacity(Self::FRAME_SIZE * 4),
-            out_r: VecDeque::with_capacity(Self::FRAME_SIZE * 4),
+            in_l: VecDeque::with_capacity(cap),
+            in_r: VecDeque::with_capacity(cap),
+            out_l: VecDeque::with_capacity(cap),
+            out_r: VecDeque::with_capacity(cap),
         };
         stream.prime();
         stream
@@ -260,23 +321,17 @@ impl RnnoiseStream {
         let mut block_out_r = [0.0f32; Self::FRAME_SIZE];
 
         while self.in_l.len() >= Self::FRAME_SIZE {
-            for i in 0..Self::FRAME_SIZE {
-                block_in_l[i] = self.in_l.pop_front().unwrap_or(0.0);
-                if channels > 1 {
-                    block_in_r[i] = self.in_r.pop_front().unwrap_or(0.0);
-                }
+            pop_deque_slice(&mut self.in_l, &mut block_in_l);
+            if channels > 1 {
+                pop_deque_slice(&mut self.in_r, &mut block_in_r);
             }
 
             self.left.process_frame(&mut block_out_l, &block_in_l);
-            for &val in &block_out_l {
-                self.out_l.push_back(val);
-            }
+            self.out_l.extend(&block_out_l);
 
             if channels > 1 {
                 self.right.process_frame(&mut block_out_r, &block_in_r);
-                for &val in &block_out_r {
-                    self.out_r.push_back(val);
-                }
+                self.out_r.extend(&block_out_r);
             }
         }
 
@@ -298,6 +353,10 @@ impl RnnoiseStream {
 
 pub struct FfmpegAfftdnStream {
     graph: ff::filter::Graph,
+    in_ctx: *mut ff::sys::AVFilterContext,
+    out_ctx: *mut ff::sys::AVFilterContext,
+    in_frame: frame::Audio,
+    out_frame: frame::Audio,
     sample_rate: u32,
     nr_db: f32,
     nf_db: f32,
@@ -305,11 +364,19 @@ pub struct FfmpegAfftdnStream {
     gain_smooth: u32,
     pts: i64,
     frame_size: usize,
+    buffer_size: usize,
     in_l: VecDeque<f32>,
     in_r: VecDeque<f32>,
     out_l: VecDeque<f32>,
     out_r: VecDeque<f32>,
 }
+
+// SAFETY: `in_ctx` and `out_ctx` point to filter nodes owned exclusively by `self.graph`,
+// and `FfmpegAfftdnStream` is accessed only via `&mut self` on a single worker thread at a time.
+unsafe impl Send for FfmpegAfftdnStream {}
+
+#[cfg(test)]
+pub type FfmpegFilterPipeline = FfmpegAfftdnStream;
 
 impl FfmpegAfftdnStream {
     pub fn frame_size_for(sample_rate: u32) -> usize {
@@ -321,6 +388,7 @@ impl FfmpegAfftdnStream {
         Self::frame_size_for(sample_rate) * 3
     }
 
+    #[cfg(test)]
     pub fn new(
         sample_rate: u32,
         nr_db: f32,
@@ -328,42 +396,75 @@ impl FfmpegAfftdnStream {
         track_noise: bool,
         gain_smooth: u32,
     ) -> Result<Self> {
+        Self::with_buffer_size(
+            sample_rate,
+            nr_db,
+            nf_db,
+            track_noise,
+            gain_smooth,
+            DEFAULT_DSP_BUFFER_FRAMES,
+        )
+    }
+
+    pub fn with_buffer_size(
+        sample_rate: u32,
+        nr_db: f32,
+        nf_db: f32,
+        track_noise: bool,
+        gain_smooth: u32,
+        buffer_size: usize,
+    ) -> Result<Self> {
         let _ = ff::init();
         let mut graph = ff::filter::Graph::new();
         let abuffer = ff::filter::find("abuffer").context("abuffer filter not found")?;
         let abuffersink =
             ff::filter::find("abuffersink").context("abuffersink filter not found")?;
+        let afftdn_filter = ff::filter::find("afftdn").context("afftdn filter not found")?;
 
         let args = format!(
             "time_base=1/{}:sample_rate={}:sample_fmt=fltp:channel_layout=stereo",
             sample_rate, sample_rate
         );
-        graph
+        let mut in_filter = graph
             .add(&abuffer, "in", &args)
             .context("Failed to add abuffer source")?;
-        graph
+
+        let nr = nr_db.clamp(1.0, 60.0);
+        let nf = nf_db.clamp(-80.0, -20.0);
+        let tn = if track_noise { 1 } else { 0 };
+        let gs = gain_smooth.min(50);
+        let afftdn_args = format!("nr={:.1}:nf={:.1}:tn={}:tr=0:gs={}", nr, nf, tn, gs);
+        let mut afftdn_ctx = graph
+            .add(&afftdn_filter, "afftdn", &afftdn_args)
+            .context("Failed to add afftdn filter")?;
+
+        let mut out_filter = graph
             .add(&abuffersink, "out", "")
             .context("Failed to add abuffersink sink")?;
 
-        let nr = nr_db.clamp(1.0, 60.0);
-        let nf = nf_db.clamp(-90.0, -20.0);
-        let tn = if track_noise { 1 } else { 0 };
-        let gs = gain_smooth.min(50);
-        let spec = format!("afftdn=nr={:.1}:nf={:.1}:tn={}:tr=0:gs={}", nr, nf, tn, gs);
-
-        graph
-            .output("in", 0)
-            .context("output in")?
-            .input("out", 0)
-            .context("input out")?
-            .parse(&spec)
-            .context("parse afftdn")?;
-
+        in_filter.link(0, &mut afftdn_ctx, 0);
+        afftdn_ctx.link(0, &mut out_filter, 0);
         graph.validate().context("validate graph")?;
 
+        let in_ctx = unsafe { in_filter.as_mut_ptr() };
+        let out_ctx = unsafe { out_filter.as_mut_ptr() };
+
         let frame_size = Self::frame_size_for(sample_rate);
+        let mut in_frame = frame::Audio::new(
+            format::Sample::F32(format::sample::Type::Planar),
+            frame_size,
+            ff::ChannelLayout::STEREO,
+        );
+        in_frame.set_rate(sample_rate);
+        let out_frame = frame::Audio::empty();
+
+        let cap = dsp_fifo_capacity(buffer_size, DEFAULT_DSP_CHANNELS).max(frame_size * 4);
         let mut stream = Self {
             graph,
+            in_ctx,
+            out_ctx,
+            in_frame,
+            out_frame,
             sample_rate,
             nr_db,
             nf_db,
@@ -371,23 +472,92 @@ impl FfmpegAfftdnStream {
             gain_smooth,
             pts: 0,
             frame_size,
-            in_l: VecDeque::with_capacity(frame_size * 4),
-            in_r: VecDeque::with_capacity(frame_size * 4),
-            out_l: VecDeque::with_capacity(frame_size * 4),
-            out_r: VecDeque::with_capacity(frame_size * 4),
+            buffer_size,
+            in_l: VecDeque::with_capacity(cap),
+            in_r: VecDeque::with_capacity(cap),
+            out_l: VecDeque::with_capacity(cap),
+            out_r: VecDeque::with_capacity(cap),
         };
 
         stream.prime();
         Ok(stream)
     }
 
+    fn send_filter_command(&mut self, cmd: &[u8], arg: &str) -> bool {
+        let Ok(arg_c) = std::ffi::CString::new(arg) else {
+            return false;
+        };
+        debug_assert!(cmd.last() == Some(&0));
+        let rc = unsafe {
+            ff::sys::avfilter_graph_send_command(
+                self.graph.as_mut_ptr(),
+                b"afftdn\0".as_ptr() as *const libc::c_char,
+                cmd.as_ptr() as *const libc::c_char,
+                arg_c.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+                0,
+            )
+        };
+        rc >= 0
+    }
+
+    /// Updates `afftdn` parameters live via `avfilter_graph_send_command` without tearing down
+    /// the FFT filter graph. Returns `false` if the sample rate changed or FFmpeg rejected a command.
+    pub fn try_update_params(
+        &mut self,
+        sample_rate: u32,
+        nr_db: f32,
+        nf_db: f32,
+        track_noise: bool,
+        gain_smooth: u32,
+    ) -> bool {
+        if self.sample_rate != sample_rate {
+            return false;
+        }
+        let nr = nr_db.clamp(1.0, 60.0);
+        let nf = nf_db.clamp(-80.0, -20.0);
+        let gs = gain_smooth.min(50);
+
+        if (self.nr_db.clamp(1.0, 60.0) - nr).abs() > 1e-4 {
+            let arg = format!("{:.1}", nr);
+            if !self.send_filter_command(b"nr\0", &arg) {
+                return false;
+            }
+            self.nr_db = nr_db;
+        }
+        if (self.nf_db.clamp(-80.0, -20.0) - nf).abs() > 1e-4 {
+            let arg = format!("{:.1}", nf);
+            if !self.send_filter_command(b"nf\0", &arg) {
+                return false;
+            }
+            self.nf_db = nf_db;
+        }
+        if self.track_noise != track_noise {
+            let arg = if track_noise { "1" } else { "0" };
+            if !self.send_filter_command(b"tn\0", arg) {
+                return false;
+            }
+            self.track_noise = track_noise;
+        }
+        if self.gain_smooth.min(50) != gs {
+            let arg = format!("{}", gs);
+            if !self.send_filter_command(b"gs\0", &arg) {
+                return false;
+            }
+            self.gain_smooth = gain_smooth;
+        }
+        true
+    }
+
     pub fn reset(&mut self) {
-        if let Ok(fresh) = Self::new(
+        if let Ok(fresh) = Self::with_buffer_size(
             self.sample_rate,
             self.nr_db,
             self.nf_db,
             self.track_noise,
             self.gain_smooth,
+            self.buffer_size,
         ) {
             *self = fresh;
         } else {
@@ -409,24 +579,26 @@ impl FfmpegAfftdnStream {
     }
 
     fn drain_into_buffers(&mut self) {
-        if let Some(mut out_ctx) = self.graph.get("out") {
-            let mut sink = out_ctx.sink();
-            loop {
-                let mut out_frame = frame::Audio::empty();
-                match sink.frame(&mut out_frame) {
-                    Ok(()) => {
-                        let plane_l = out_frame.plane::<f32>(0);
-                        let plane_r = if out_frame.channels() > 1 {
-                            out_frame.plane::<f32>(1)
-                        } else {
-                            plane_l
-                        };
-                        self.out_l.extend(plane_l);
-                        self.out_r.extend(plane_r);
-                    }
-                    Err(_) => break,
-                }
+        loop {
+            let ret = unsafe {
+                ff::sys::av_frame_unref(self.out_frame.as_mut_ptr());
+                ff::sys::av_buffersink_get_frame(self.out_ctx, self.out_frame.as_mut_ptr())
+            };
+            if ret < 0 {
+                break;
             }
+            let n_samples = self.out_frame.samples();
+            let plane_l = self.out_frame.plane::<f32>(0);
+            let plane_r = if self.out_frame.channels() > 1 {
+                self.out_frame.plane::<f32>(1)
+            } else {
+                plane_l
+            };
+            self.out_l.extend(&plane_l[..n_samples.min(plane_l.len())]);
+            self.out_r.extend(&plane_r[..n_samples.min(plane_r.len())]);
+        }
+        unsafe {
+            ff::sys::av_frame_unref(self.out_frame.as_mut_ptr());
         }
     }
 
@@ -447,27 +619,31 @@ impl FfmpegAfftdnStream {
             }
         }
 
-        while self.in_l.len() >= self.frame_size {
-            let mut input_frame = frame::Audio::new(
-                format::Sample::F32(format::sample::Type::Planar),
-                self.frame_size,
-                ff::ChannelLayout::STEREO,
-            );
-            input_frame.set_rate(self.sample_rate);
-            input_frame.set_pts(Some(self.pts));
-            self.pts += self.frame_size as i64;
+        let frame_size = self.frame_size;
+        while self.in_l.len() >= frame_size {
+            let writable_rc =
+                unsafe { ff::sys::av_frame_make_writable(self.in_frame.as_mut_ptr()) };
+            if writable_rc < 0 {
+                break;
+            }
+            self.in_frame.set_samples(frame_size);
+            self.in_frame.set_rate(self.sample_rate);
+            self.in_frame.set_pts(Some(self.pts));
+            self.pts += frame_size as i64;
 
-            for i in 0..self.frame_size {
-                let l = self.in_l.pop_front().unwrap_or(0.0);
-                let r = self.in_r.pop_front().unwrap_or(0.0);
-                input_frame.plane_mut::<f32>(0)[i] = l;
-                input_frame.plane_mut::<f32>(1)[i] = r;
+            {
+                let plane_l = &mut self.in_frame.plane_mut::<f32>(0)[..frame_size];
+                pop_deque_slice(&mut self.in_l, plane_l);
+            }
+            {
+                let plane_r = &mut self.in_frame.plane_mut::<f32>(1)[..frame_size];
+                pop_deque_slice(&mut self.in_r, plane_r);
             }
 
-            if let Some(mut in_ctx) = self.graph.get("in") {
-                if in_ctx.source().add(&input_frame).is_ok() {
-                    self.drain_into_buffers();
-                }
+            let write_rc =
+                unsafe { ff::sys::av_buffersrc_write_frame(self.in_ctx, self.in_frame.as_ptr()) };
+            if write_rc >= 0 {
+                self.drain_into_buffers();
             }
         }
 
@@ -499,69 +675,46 @@ pub struct LiveAudioDsp {
     afftdn: Option<FfmpegAfftdnStream>,
     expander: Option<DownwardExpander>,
     sample_rate: u32,
+    buffer_size: usize,
     current_config: crate::replay::config::AudioFilterConfig,
 }
 
 impl LiveAudioDsp {
     pub fn new(config: &crate::replay::config::AudioFilterConfig, sample_rate: u32) -> Self {
+        Self::with_buffer_size(config, sample_rate, DEFAULT_DSP_BUFFER_FRAMES)
+    }
+
+    pub fn with_buffer_size(
+        config: &crate::replay::config::AudioFilterConfig,
+        sample_rate: u32,
+        buffer_size: usize,
+    ) -> Self {
+        let cap = dsp_fifo_capacity(buffer_size, DEFAULT_DSP_CHANNELS);
         let mut dsp = Self {
             enabled: false,
             rumble_filter: None,
             hum_notches: Vec::new(),
             crossover: None,
-            high_delay_l: VecDeque::new(),
-            high_delay_r: VecDeque::new(),
+            high_delay_l: VecDeque::with_capacity(cap),
+            high_delay_r: VecDeque::with_capacity(cap),
             crt_notch: None,
             rnnoise: None,
             afftdn: None,
             expander: None,
             sample_rate: 0,
+            buffer_size: buffer_size.max(DEFAULT_DSP_BUFFER_FRAMES),
             current_config: crate::replay::config::AudioFilterConfig::default(),
         };
         dsp.reconfigure(config, sample_rate);
         dsp
     }
 
-    pub fn reconfigure(
-        &mut self,
-        config: &crate::replay::config::AudioFilterConfig,
-        sample_rate: u32,
-    ) {
-        if self.enabled == config.enabled
-            && self.sample_rate == sample_rate
-            && &self.current_config == config
-        {
-            return;
-        }
-
-        self.enabled = config.enabled;
-        self.sample_rate = sample_rate;
-        self.current_config = config.clone();
-
-        if !self.enabled {
-            self.rumble_filter = None;
-            self.hum_notches.clear();
-            self.crossover = None;
-            self.high_delay_l.clear();
-            self.high_delay_r.clear();
-            self.crt_notch = None;
-            self.rnnoise = None;
-            self.afftdn = None;
-            self.expander = None;
-            return;
-        }
-
-        let fs = sample_rate as f32;
-
-        // 40 Hz Subsonic Rumble Filter
-        self.rumble_filter = if config.rumble_filter {
-            Some(Biquad::highpass(40.0, 0.707, fs))
-        } else {
-            None
-        };
-
-        // Hum & Video Ground Return Buzz Notches (high-Q biquad notches, Q=35)
-        self.hum_notches = match config.hum_filter {
+    fn build_hum_notches(
+        mode: crate::replay::config::HumFilterMode,
+        hum_freq: f32,
+        fs: f32,
+    ) -> Vec<Biquad> {
+        match mode {
             crate::replay::config::HumFilterMode::SingleNotch60Hz => {
                 vec![Biquad::notch(60.0, 35.0, fs)]
             }
@@ -591,10 +744,121 @@ impl LiveAudioDsp {
                     .collect()
             }
             crate::replay::config::HumFilterMode::Custom => {
-                let freq = config.hum_freq.clamp(20.0, 1000.0);
+                let freq = hum_freq.clamp(20.0, 1000.0);
                 vec![Biquad::notch(freq, 35.0, fs)]
             }
             crate::replay::config::HumFilterMode::Disabled => Vec::new(),
+        }
+    }
+
+    pub fn reconfigure(
+        &mut self,
+        config: &crate::replay::config::AudioFilterConfig,
+        sample_rate: u32,
+    ) {
+        if self.enabled == config.enabled
+            && self.sample_rate == sample_rate
+            && &self.current_config == config
+        {
+            return;
+        }
+
+        let same_rate_live = self.enabled && config.enabled && self.sample_rate == sample_rate;
+        let prev = self.current_config.clone();
+
+        self.enabled = config.enabled;
+        self.sample_rate = sample_rate;
+        self.current_config = config.clone();
+
+        if !self.enabled {
+            self.rumble_filter = None;
+            self.hum_notches.clear();
+            self.crossover = None;
+            self.high_delay_l.clear();
+            self.high_delay_r.clear();
+            self.crt_notch = None;
+            self.rnnoise = None;
+            self.afftdn = None;
+            self.expander = None;
+            return;
+        }
+
+        let fs = sample_rate as f32;
+
+        // 40 Hz Subsonic Rumble Filter
+        if !same_rate_live || prev.rumble_filter != config.rumble_filter {
+            self.rumble_filter = if config.rumble_filter {
+                Some(Biquad::highpass(40.0, 0.707, fs))
+            } else {
+                None
+            };
+        }
+
+        // Hum & Video Ground Return Buzz Notches (high-Q biquad notches, Q=35)
+        if !same_rate_live || prev.hum_filter != config.hum_filter {
+            self.hum_notches = Self::build_hum_notches(config.hum_filter, config.hum_freq, fs);
+        } else if config.hum_filter == crate::replay::config::HumFilterMode::Custom
+            && (prev.hum_freq - config.hum_freq).abs() > 1e-4
+        {
+            let freq = config.hum_freq.clamp(20.0, 1000.0);
+            let fresh = Biquad::notch(freq, 35.0, fs);
+            if let Some(existing) = self.hum_notches.first_mut() {
+                existing.update_coeffs_from(&fresh);
+            } else {
+                self.hum_notches = vec![fresh];
+            }
+        }
+
+        // Realtime Denoising Library (update live via avfilter_graph_send_command when possible)
+        let denoiser_kept_running = match config.denoise_backend {
+            crate::replay::config::DenoiseBackend::Afftdn => {
+                self.rnnoise = None;
+                let updated_live = if same_rate_live
+                    && prev.denoise_backend == crate::replay::config::DenoiseBackend::Afftdn
+                {
+                    if let Some(ref mut stream) = self.afftdn {
+                        stream.try_update_params(
+                            sample_rate,
+                            config.denoise_reduction_db,
+                            config.denoise_noise_floor_db,
+                            config.denoise_track_noise,
+                            config.denoise_gain_smooth,
+                        )
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if !updated_live {
+                    self.afftdn = FfmpegAfftdnStream::with_buffer_size(
+                        sample_rate,
+                        config.denoise_reduction_db,
+                        config.denoise_noise_floor_db,
+                        config.denoise_track_noise,
+                        config.denoise_gain_smooth,
+                        self.buffer_size,
+                    )
+                    .map_err(|e| tracing::warn!("Failed to init afftdn: {}", e))
+                    .ok();
+                }
+                updated_live
+            }
+            crate::replay::config::DenoiseBackend::Rnnoise => {
+                self.afftdn = None;
+                if same_rate_live && self.rnnoise.is_some() {
+                    true
+                } else {
+                    self.rnnoise = Some(RnnoiseStream::with_buffer_size(self.buffer_size));
+                    false
+                }
+            }
+            crate::replay::config::DenoiseBackend::Disabled => {
+                self.afftdn = None;
+                self.rnnoise = None;
+                false
+            }
         };
 
         // Crossover for Treble Bypass / High-Frequency Retention
@@ -602,18 +866,38 @@ impl LiveAudioDsp {
             config.denoise_backend != crate::replay::config::DenoiseBackend::Disabled;
         if config.treble_bypass && has_denoiser {
             let fc = config.treble_crossover_hz.clamp(1000.0, 16000.0);
-            self.crossover = Some(Lr4Crossover::new(fc, fs));
-            let delay_frames = match config.denoise_backend {
-                crate::replay::config::DenoiseBackend::Rnnoise => RnnoiseStream::DELAY_SAMPLES,
-                crate::replay::config::DenoiseBackend::Afftdn => {
-                    FfmpegAfftdnStream::delay_samples_for(sample_rate)
+            if same_rate_live && denoiser_kept_running && prev.treble_bypass {
+                if let Some(ref mut xo) = self.crossover {
+                    if (prev.treble_crossover_hz - config.treble_crossover_hz).abs() > 1e-4 {
+                        xo.update_crossover(fc, fs);
+                    }
+                } else {
+                    self.crossover = Some(Lr4Crossover::new(fc, fs));
                 }
-                crate::replay::config::DenoiseBackend::Disabled => 0,
-            };
-            self.high_delay_l.clear();
-            self.high_delay_r.clear();
-            self.high_delay_l.resize(delay_frames, 0.0);
-            self.high_delay_r.resize(delay_frames, 0.0);
+            } else {
+                self.crossover = Some(Lr4Crossover::new(fc, fs));
+                let delay_frames = match config.denoise_backend {
+                    crate::replay::config::DenoiseBackend::Rnnoise => RnnoiseStream::DELAY_SAMPLES,
+                    crate::replay::config::DenoiseBackend::Afftdn => {
+                        FfmpegAfftdnStream::delay_samples_for(sample_rate)
+                    }
+                    crate::replay::config::DenoiseBackend::Disabled => 0,
+                };
+                let needed_cap =
+                    dsp_fifo_capacity(self.buffer_size, DEFAULT_DSP_CHANNELS) + delay_frames;
+                if self.high_delay_l.capacity() < needed_cap {
+                    self.high_delay_l
+                        .reserve(needed_cap - self.high_delay_l.capacity());
+                }
+                if self.high_delay_r.capacity() < needed_cap {
+                    self.high_delay_r
+                        .reserve(needed_cap - self.high_delay_r.capacity());
+                }
+                self.high_delay_l.clear();
+                self.high_delay_r.clear();
+                self.high_delay_l.resize(delay_frames, 0.0);
+                self.high_delay_r.resize(delay_frames, 0.0);
+            }
         } else {
             self.crossover = None;
             self.high_delay_l.clear();
@@ -621,51 +905,52 @@ impl LiveAudioDsp {
         }
 
         // 15.734 kHz CRT line whine notch
-        self.crt_notch = if config.crt_notch {
+        if config.crt_notch {
             let freq = config.crt_freq.clamp(10000.0, fs * 0.49);
-            Some(Biquad::notch(freq, 50.0, fs))
-        } else {
-            None
-        };
-
-        // Realtime Denoising Library
-        match config.denoise_backend {
-            crate::replay::config::DenoiseBackend::Afftdn => {
-                self.rnnoise = None;
-                self.afftdn = FfmpegAfftdnStream::new(
-                    sample_rate,
-                    config.denoise_reduction_db,
-                    config.denoise_noise_floor_db,
-                    config.denoise_track_noise,
-                    config.denoise_gain_smooth,
-                )
-                .map_err(|e| tracing::warn!("Failed to init afftdn: {}", e))
-                .ok();
-            }
-            crate::replay::config::DenoiseBackend::Rnnoise => {
-                self.afftdn = None;
-                if self.rnnoise.is_none() {
-                    self.rnnoise = Some(RnnoiseStream::new());
+            if same_rate_live && prev.crt_notch {
+                if (prev.crt_freq - config.crt_freq).abs() > 1e-4 {
+                    let fresh = Biquad::notch(freq, 50.0, fs);
+                    if let Some(ref mut cn) = self.crt_notch {
+                        cn.update_coeffs_from(&fresh);
+                    } else {
+                        self.crt_notch = Some(fresh);
+                    }
                 }
+            } else {
+                self.crt_notch = Some(Biquad::notch(freq, 50.0, fs));
             }
-            crate::replay::config::DenoiseBackend::Disabled => {
-                self.afftdn = None;
-                self.rnnoise = None;
-            }
+        } else {
+            self.crt_notch = None;
         }
 
         // Noise gate / downward expander
-        self.expander = if config.gate {
-            Some(DownwardExpander::new(
-                config.gate_threshold_db,
-                6.0,
-                5.0,
-                80.0,
-                fs,
-            ))
+        if config.gate {
+            if same_rate_live && prev.gate {
+                if let Some(ref mut exp) = self.expander {
+                    if (prev.gate_threshold_db - config.gate_threshold_db).abs() > 1e-4 {
+                        exp.set_threshold_db(config.gate_threshold_db);
+                    }
+                } else {
+                    self.expander = Some(DownwardExpander::new(
+                        config.gate_threshold_db,
+                        6.0,
+                        5.0,
+                        80.0,
+                        fs,
+                    ));
+                }
+            } else {
+                self.expander = Some(DownwardExpander::new(
+                    config.gate_threshold_db,
+                    6.0,
+                    5.0,
+                    80.0,
+                    fs,
+                ));
+            }
         } else {
-            None
-        };
+            self.expander = None;
+        }
     }
 
     #[inline]
@@ -1173,6 +1458,84 @@ mod tests {
             &out_afftdn,
             2,
             48000,
+        );
+    }
+
+    #[test]
+    fn test_ffmpeg_filter_pipeline_reusable_frames_and_live_param_updates() {
+        let mut pipeline = FfmpegFilterPipeline::new(48000, 12.0, -50.0, true, 10)
+            .expect("afftdn pipeline should initialize");
+        let in_frame_ptr_before = unsafe { pipeline.in_frame.as_ptr() };
+        let graph_ptr_before = unsafe { pipeline.graph.as_ptr() };
+
+        // Generate 16 hops (~200 ms) of 440 Hz tone + small broadband hiss at 48 kHz stereo
+        let hop_frames = FfmpegFilterPipeline::frame_size_for(48000);
+        assert_eq!(hop_frames, 600);
+        assert_eq!(FfmpegFilterPipeline::delay_samples_for(48000), 1800);
+
+        let mut rng = 0x1234_5678u32;
+        let mut make_hop = |start_frame: usize| -> Vec<f32> {
+            let mut buf = Vec::with_capacity(hop_frames * 2);
+            for k in 0..hop_frames {
+                let t = (start_frame + k) as f32 / 48000.0;
+                rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
+                let hiss = (((rng >> 16) as f32 / 32768.0) - 1.0) * 0.02;
+                let tone = (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.35;
+                buf.push(tone + hiss);
+                buf.push(tone - hiss);
+            }
+            buf
+        };
+
+        let mut energy_after_priming = 0.0f32;
+        for hop in 0..8 {
+            let mut block = make_hop(hop * hop_frames);
+            pipeline.process_interleaved(&mut block, 2);
+            assert!(block.iter().all(|s| s.is_finite() && s.abs() <= 1.0));
+            if hop >= 4 {
+                energy_after_priming += block.iter().map(|s| s * s).sum::<f32>();
+            }
+        }
+        assert!(
+            energy_after_priming > 1.0,
+            "Multi-hop reusable-frame pipeline must output audible denoised signal"
+        );
+        assert_eq!(unsafe { pipeline.in_frame.as_ptr() }, in_frame_ptr_before);
+
+        // Live parameter update via avfilter_graph_send_command must succeed in-place
+        assert!(pipeline.try_update_params(48000, 28.0, -42.0, false, 20));
+        assert_eq!(unsafe { pipeline.graph.as_ptr() }, graph_ptr_before);
+        assert!(pipeline.in_l.capacity() >= 2048 * 2 * 4);
+
+        let mut post_update_energy = 0.0f32;
+        for hop in 8..16 {
+            let mut block = make_hop(hop * hop_frames);
+            pipeline.process_interleaved(&mut block, 2);
+            assert!(block.iter().all(|s| s.is_finite() && s.abs() <= 1.0));
+            post_update_energy += block.iter().map(|s| s * s).sum::<f32>();
+        }
+        assert!(post_update_energy > 1.0);
+
+        // Changing sample rate requires rebuild (try_update_params returns false)
+        assert!(!pipeline.try_update_params(44100, 28.0, -42.0, false, 20));
+
+        // Verify LiveAudioDsp::reconfigure keeps the same afftdn graph across slider updates
+        let mut cfg = AudioFilterConfig::default();
+        cfg.enabled = true;
+        cfg.denoise_backend = DenoiseBackend::Afftdn;
+        cfg.denoise_reduction_db = 14.0;
+        let mut dsp = LiveAudioDsp::new(&cfg, 48000);
+        let dsp_graph_before = unsafe { dsp.afftdn.as_ref().unwrap().graph.as_ptr() };
+
+        cfg.denoise_reduction_db = 24.0;
+        cfg.denoise_noise_floor_db = -45.0;
+        cfg.treble_crossover_hz = 5000.0;
+        cfg.gate_threshold_db = -48.0;
+        dsp.reconfigure(&cfg, 48000);
+        let dsp_graph_after = unsafe { dsp.afftdn.as_ref().unwrap().graph.as_ptr() };
+        assert_eq!(
+            dsp_graph_before, dsp_graph_after,
+            "Slider parameter updates must update afftdn live without rebuilding the graph"
         );
     }
 }

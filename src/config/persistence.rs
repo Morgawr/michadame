@@ -2,7 +2,81 @@ use super::models::{MichadameConfig, Profile};
 use crate::app::models::AppState;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{mpsc, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const CONFIG_SAVE_DEBOUNCE: Duration = Duration::from_millis(250);
+
+enum PersistCommand {
+    Save(PathBuf, Box<MichadameConfig>),
+    Flush(mpsc::SyncSender<()>),
+}
+
+static CONFIG_WORKER: OnceLock<mpsc::Sender<PersistCommand>> = OnceLock::new();
+
+fn config_worker_sender() -> &'static mpsc::Sender<PersistCommand> {
+    CONFIG_WORKER.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<PersistCommand>();
+        let spawn_res = std::thread::Builder::new()
+            .name("config-persistence".to_string())
+            .spawn(move || {
+                run_persistence_worker_loop(rx, |path, cfg| {
+                    if let Err(e) = store_config_atomic_at(path, cfg) {
+                        tracing::error!("Failed to save configuration: {}", e);
+                    }
+                });
+            });
+        if let Err(e) = spawn_res {
+            tracing::error!("Failed to spawn config-persistence thread: {}", e);
+        }
+        tx
+    })
+}
+
+fn run_persistence_worker_loop<F>(rx: mpsc::Receiver<PersistCommand>, mut writer: F)
+where
+    F: FnMut(&Path, &MichadameConfig),
+{
+    while let Ok(first) = rx.recv() {
+        let mut pending_saves: Vec<(PathBuf, Box<MichadameConfig>)> = Vec::new();
+        let mut flush_waiters: Vec<mpsc::SyncSender<()>> = Vec::new();
+
+        let mut push_cmd = |cmd: PersistCommand| match cmd {
+            PersistCommand::Save(path, cfg) => {
+                if let Some(existing) = pending_saves.iter_mut().find(|(p, _)| *p == path) {
+                    existing.1 = cfg;
+                } else {
+                    pending_saves.push((path, cfg));
+                }
+            }
+            PersistCommand::Flush(ack) => {
+                flush_waiters.push(ack);
+            }
+        };
+
+        push_cmd(first);
+        while let Ok(newer) = rx.try_recv() {
+            push_cmd(newer);
+        }
+
+        for (path, cfg) in &pending_saves {
+            writer(path, cfg);
+        }
+
+        for ack in flush_waiters {
+            let _ = ack.send(());
+        }
+    }
+}
+
+pub fn shutdown_flush_config_worker() {
+    if let Some(tx) = CONFIG_WORKER.get() {
+        let (ack_tx, ack_rx) = mpsc::sync_channel(0);
+        if tx.send(PersistCommand::Flush(ack_tx)).is_ok() {
+            let _ = ack_rx.recv();
+        }
+    }
+}
 
 pub fn configuration_path(state: &AppState) -> Result<PathBuf, confy::ConfyError> {
     confy::get_configuration_file_path(
@@ -150,6 +224,7 @@ pub fn store_config_atomic_at(path: &Path, cfg: &MichadameConfig) -> Result<(), 
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn save_replay_config(
     replay: &crate::replay::config::ReplayConfig,
 ) -> Result<(), confy::ConfyError> {
@@ -160,6 +235,7 @@ pub fn save_replay_config(
     save_replay_config_at(&path, replay)
 }
 
+#[allow(dead_code)]
 fn save_replay_config_at(
     path: &std::path::Path,
     replay: &crate::replay::config::ReplayConfig,
@@ -337,6 +413,7 @@ pub fn save_config(state: &mut AppState) {
     sync_active_profile_in_state(state);
     if state.ui.in_egui_frame {
         state.ui.config_save_pending = true;
+        state.ui.config_save_deadline = Some(Instant::now() + CONFIG_SAVE_DEBOUNCE);
         return;
     }
     flush_pending_config(state);
@@ -344,18 +421,43 @@ pub fn save_config(state: &mut AppState) {
 
 pub fn flush_pending_config(state: &mut AppState) {
     state.ui.config_save_pending = false;
+    state.ui.config_save_deadline = None;
     if cfg!(test) {
+        return;
+    }
+    if let Some(err) = &state.config_load_error {
+        tracing::error!(
+            "ABORTING save_config: Configuration loading failed at startup ({}). Overwriting is blocked to protect existing data.",
+            err
+        );
         return;
     }
     let Ok(path) = configuration_path(state) else {
         tracing::error!("Failed to get configuration file path for save_config");
         return;
     };
-    if let Err(e) = save_config_at(&path, state) {
-        tracing::error!("Failed to save configuration: {}", e);
+
+    sync_active_profile_in_state(state);
+
+    let mut cfg = match &state.loaded_config_base {
+        Some(base) => base.clone(),
+        None => match confy::load_path::<MichadameConfig>(&path) {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                tracing::error!("Failed to load existing configuration before save: {}", e);
+                return;
+            }
+        },
+    };
+    populate_config_from_state(&mut cfg, state);
+    state.loaded_config_base = Some(cfg.clone());
+
+    if let Err(e) = config_worker_sender().send(PersistCommand::Save(path, Box::new(cfg))) {
+        tracing::error!("Failed to enqueue configuration save: {}", e);
     }
 }
 
+#[cfg(test)]
 pub fn save_config_at(path: &Path, state: &mut AppState) -> Result<(), confy::ConfyError> {
     if let Some(err) = &state.config_load_error {
         tracing::error!(
@@ -375,22 +477,7 @@ pub fn save_global_hardware_config(state: &mut AppState) {
     save_config(state);
 }
 
-pub fn save_global_hardware_config_at(
-    path: &Path,
-    state: &AppState,
-) -> Result<(), confy::ConfyError> {
-    if let Some(err) = &state.config_load_error {
-        tracing::error!(
-            "ABORTING save_global_hardware_config: Configuration loading failed at startup ({}). Overwriting is blocked to protect existing data.",
-            err
-        );
-        return Err(confy::ConfyError::GeneralLoadError(std::io::Error::other(
-            format!("Configuration loading failed at startup: {}", err),
-        )));
-    }
-
-    let mut cfg = confy::load_path::<MichadameConfig>(path)?;
-
+fn populate_config_from_state(cfg: &mut MichadameConfig, state: &AppState) {
     cfg.replay = state.replay.config.clone();
     cfg.video_device = Some(state.hardware.selected_video_device.clone());
     cfg.usb_device = state.hardware.selected_usb_device.clone();
@@ -410,6 +497,7 @@ pub fn save_global_hardware_config_at(
             None
         };
     }
+    cfg.video_hwdec = Some(state.hardware.video_hwdec);
     cfg.reset_usb_on_startup = Some(state.ui.reset_usb_on_startup);
     cfg.has_shown_first_run_warning = Some(!state.ui.show_first_run_dialog);
     cfg.audio_source = state.hardware.selected_audio_source_name.clone();
@@ -500,6 +588,25 @@ pub fn save_global_hardware_config_at(
             crate::steam_deck::Source::Pc98 => cfg.pc98_profile = Some(current_profile_data),
         }
     }
+}
+
+#[cfg(test)]
+pub fn save_global_hardware_config_at(
+    path: &Path,
+    state: &AppState,
+) -> Result<(), confy::ConfyError> {
+    if let Some(err) = &state.config_load_error {
+        tracing::error!(
+            "ABORTING save_global_hardware_config: Configuration loading failed at startup ({}). Overwriting is blocked to protect existing data.",
+            err
+        );
+        return Err(confy::ConfyError::GeneralLoadError(std::io::Error::other(
+            format!("Configuration loading failed at startup: {}", err),
+        )));
+    }
+
+    let mut cfg = confy::load_path::<MichadameConfig>(path)?;
+    populate_config_from_state(&mut cfg, state);
     store_config_atomic_at(path, &cfg)
 }
 
@@ -842,18 +949,16 @@ pub fn apply_hardware_devices_from_config(state: &mut AppState, cfg: &MichadameC
     }
 
     if !state.hardware.selected_video_device.is_empty() {
-        crate::video::types::apply_saved_format_config(state, cfg);
+        if cfg!(test) {
+            crate::video::types::apply_saved_format_config(state, cfg);
+        } else {
+            state.request_capture_formats_probe_with_cfg(cfg, None, false);
+        }
     }
     state.ui.reset_usb_on_startup = cfg.reset_usb_on_startup.unwrap_or(false);
-    if state.ui.reset_usb_on_startup {
-        if let Some(device_to_reset) = &state.hardware.selected_usb_device {
-            let msg = match crate::devices::usb::reset_usb_device(device_to_reset) {
-                Ok(_) => "Auto-reset USB device successfully.".to_string(),
-                Err(e) => format!("Failed to auto-reset USB: {}", e),
-            };
-            state.info(msg);
-            tracing::info!("USB device reset on startup as requested.");
-        }
+    if state.ui.reset_usb_on_startup && state.hardware.selected_usb_device.is_some() && !cfg!(test)
+    {
+        state.start_async_usb_reset(None, true);
     }
 
     if let Some(saved_mic) = &cfg.mic.device_name {
@@ -867,27 +972,18 @@ pub fn apply_hardware_devices_from_config(state: &mut AppState, cfg: &MichadameC
         }
     }
 
-    if let Some(dev) = &state.webcam.config.device {
-        if state.hardware.video_devices.contains(dev) {
-            state.webcam.formats_probed_for_device = Some(dev.clone());
-            if let Ok(formats) = crate::devices::video::find_video_formats(dev) {
-                state.webcam.supported_formats = formats;
-                if let Some(saved_fourcc) = &state.webcam.config.format_fourcc {
-                    if let Some(idx) = state
-                        .webcam
-                        .supported_formats
-                        .iter()
-                        .position(|f| f.fourcc == *saved_fourcc)
-                    {
-                        state.webcam.selected_format_index = idx;
-                    }
-                }
-            }
+    if let Some(dev) = state.webcam.config.device.clone() {
+        if state.hardware.video_devices.contains(&dev) && !cfg!(test) {
+            state.request_webcam_formats_probe(None, false, false);
         }
     }
 }
 
 pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
+    if state.config_load_error.is_none() {
+        state.loaded_config_base = Some(cfg.clone());
+    }
+    state.hardware.video_hwdec = cfg.video_hwdec.unwrap_or(true);
     state.replay.config = cfg.replay.clone();
     state.replay.sync_audio_filter();
     state.profiles = cfg.profiles.clone();
@@ -911,11 +1007,19 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
     state.selected_steam_game = cfg.selected_steam_game.clone();
     state.pc98.config = cfg.pc98.clone();
     if !state.pc98.config.games_dir.trim().is_empty() {
-        let _ = state.pc98.refresh_games_list();
+        if cfg!(test) {
+            let _ = state.pc98.refresh_games_list();
+        } else {
+            let _ = state.pc98.start_background_library_scan(None);
+        }
     }
     state.pc88.config = cfg.pc88.clone();
     if !state.pc88.config.games_dir.trim().is_empty() {
-        let _ = state.pc88.refresh_games_list();
+        if cfg!(test) {
+            let _ = state.pc88.refresh_games_list();
+        } else {
+            let _ = state.pc88.start_background_library_scan(None);
+        }
     }
 
     state.hardware.audio_buffer_size = cfg.audio_buffer_size.unwrap_or(1024);
@@ -2692,5 +2796,78 @@ crt_brightboost = 1.6
         );
         assert_eq!(state.beam.frames_per_hz, 4.0);
         assert_eq!(state.beam.target_hz, 240);
+    }
+
+    #[test]
+    fn test_video_hwdec_default_and_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let mut state = AppState::default();
+        assert!(state.hardware.video_hwdec);
+
+        apply_config(&mut state, &MichadameConfig::default());
+        assert!(state.hardware.video_hwdec);
+
+        state.hardware.video_hwdec = false;
+        save_config_at(&path, &mut state).unwrap();
+
+        let loaded_cfg: MichadameConfig = confy::load_path(&path).unwrap();
+        assert_eq!(loaded_cfg.video_hwdec, Some(false));
+
+        let mut restored = AppState::default();
+        apply_config(&mut restored, &loaded_cfg);
+        assert!(!restored.hardware.video_hwdec);
+    }
+
+    #[test]
+    fn test_persistence_worker_coalesces_queued_saves_and_flushes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("coalesced.toml");
+        let (tx, rx) = mpsc::channel::<PersistCommand>();
+        let (first_started_tx, first_started_rx) = mpsc::sync_channel::<()>(1);
+        let (release_first_tx, release_first_rx) = mpsc::sync_channel::<()>(1);
+        let write_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let write_count_worker = write_count.clone();
+
+        let handle = std::thread::spawn(move || {
+            run_persistence_worker_loop(rx, |p, cfg| {
+                let idx = write_count_worker.fetch_add(1, Ordering::SeqCst);
+                if idx == 0 {
+                    let _ = first_started_tx.send(());
+                    let _ = release_first_rx.recv();
+                }
+                store_config_atomic_at(p, cfg).expect("worker store_config_atomic_at failed");
+            });
+        });
+
+        let mut cfg0 = MichadameConfig::default();
+        cfg0.master_volume = Some(0.10);
+        tx.send(PersistCommand::Save(path.clone(), Box::new(cfg0)))
+            .unwrap();
+
+        first_started_rx.recv().unwrap();
+
+        for step in 1..=5 {
+            let mut cfg = MichadameConfig::default();
+            cfg.master_volume = Some(step as f32 * 0.15);
+            cfg.video_hwdec = Some(step % 2 == 0);
+            tx.send(PersistCommand::Save(path.clone(), Box::new(cfg)))
+                .unwrap();
+        }
+        let (ack_tx, ack_rx) = mpsc::sync_channel(0);
+        tx.send(PersistCommand::Flush(ack_tx)).unwrap();
+
+        release_first_tx.send(()).unwrap();
+        ack_rx.recv().unwrap();
+
+        // First write ran while blocked; the 5 queued updates coalesced into 1 write.
+        assert_eq!(write_count.load(Ordering::SeqCst), 2);
+        let loaded: MichadameConfig = confy::load_path(&path).unwrap();
+        assert_eq!(loaded.master_volume, Some(0.75));
+        assert_eq!(loaded.video_hwdec, Some(false));
+
+        drop(tx);
+        handle.join().unwrap();
     }
 }

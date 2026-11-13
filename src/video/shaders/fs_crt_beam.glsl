@@ -49,42 +49,27 @@ uniform float brightboost;
 
 #define clampPixel(a) clamp(a, vec3(0.0), vec3(1.0))
 
-// Selection Function: Returns 'b' if 'p' is true, else 'a'.
-float SelF1(float a, float b, bool p) { return p ? b : a; }
-
 #define IS_INTEGER(x) (floor(x) == (x))
 #define IS_EVEN_INTEGER(x) (IS_INTEGER(x) && IS_INTEGER((x) / 2.0))
 
-// Standard 2.4 sRGB encoding for recovering sRGB from michadame's linear-RGB pass textures
-// and for background_color outside the active CRT tube.
-float ToSrgb1(float c) {
-    return (c < 0.0031308 ? c * 12.92 : 1.055 * pow(max(c, 0.0), 0.41666) - 0.055);
-}
-vec3 ToSrgb(vec3 c) {
-    return vec3(ToSrgb1(c.r), ToSrgb1(c.g), ToSrgb1(c.b));
-}
-
 //-------------------------------------------------------------------------------------------------
-// sRGB Encoding and Decoding Functions, to gamma correct/uncorrect (Blur Busters specification)
+// Exact Collapse of srgb2linear(ToSrgb(linear_c)) (Blur Busters specification):
+// `frame_curr/prev1/prev2` store linear RGB in [0, 1]. Encoding with standard 2.4 sRGB (`ToSrgb`)
+// and immediately decoding with Blur Busters `srgb2linear(gamma)` simplifies algebraically:
+// - When gamma == 2.4: exact identity `c` across both the linear toe and power curve (0 `pow()`).
+// - When gamma != 2.4:
+//   * c <= 0.0031308 -> (12.92 * c) / 12.92 == c
+//   * c >  0.0031308 -> (((1.055 * c^(1/2.4) - 0.055) + 0.055) / 1.055)^gamma == c^(gamma / 2.4)
+float applyBeamGamma1(float c) {
+    return c <= 0.0031308 ? c : pow(c, max(gamma, 0.01) * (1.0 / 2.4));
+}
 
-// Encode linear color to sRGB. (applies gamma curve)
-float linear2srgb(float c) {
-    vec3 j = vec3(0.0031308 * 12.92, 12.92, 1.0 / max(gamma, 0.01));
-    vec2 k = vec2(1.055, -0.055);
-    return clamp(j.x, c * j.y, pow(max(c, 0.0), j.z) * k.x + k.y);
-}
-vec3 linear2srgb(vec3 c) {
-    return vec3(linear2srgb(c.r), linear2srgb(c.g), linear2srgb(c.b));
-}
-
-// Decode sRGB color to linear. (undoes gamma curve)
-float srgb2linear(float c) {
-    vec3 j = vec3(0.04045, 1.0 / 12.92, max(gamma, 0.01));
-    vec2 k = vec2(1.0 / 1.055, 0.055 / 1.055);
-    return SelF1(c * j.y, pow(max(c * k.x + k.y, 0.0), j.z), c > j.x);
-}
-vec3 srgb2linear(vec3 c) {
-    return vec3(srgb2linear(c.r), srgb2linear(c.g), srgb2linear(c.b));
+vec3 applyBeamGamma(vec3 linear_c) {
+    vec3 c = clampPixel(linear_c);
+    if (abs(gamma - 2.4) < 0.001) {
+        return c;
+    }
+    return vec3(applyBeamGamma1(c.r), applyBeamGamma1(c.g), applyBeamGamma1(c.b));
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -140,19 +125,29 @@ vec3 SampleLanczos(sampler2D tex, vec2 uv, vec2 texSize) {
     vec2 baseTc = floor(tc);
     vec2 f = tc - baseTc;
 
+    float wx0 = lanczosWeight(-1.0 - f.x);
+    float wx1 = lanczosWeight(-f.x);
+    float wx2 = lanczosWeight(1.0 - f.x);
+    float wx3 = lanczosWeight(2.0 - f.x);
+    float wxSum = wx0 + wx1 + wx2 + wx3;
+
+    float xTc0 = (baseTc.x - 0.5) * invTexSize.x;
+    float xTc1 = (baseTc.x + 0.5) * invTexSize.x;
+    float xTc2 = (baseTc.x + 1.5) * invTexSize.x;
+    float xTc3 = (baseTc.x + 2.5) * invTexSize.x;
+
     vec3 color = vec3(0.0);
     float totalWeight = 0.0;
 
     for (int y = -1; y <= 2; y++) {
         float wy = lanczosWeight(float(y) - f.y);
-        for (int x = -1; x <= 2; x++) {
-            float wx = lanczosWeight(float(x) - f.x);
-            float weight = wx * wy;
+        float yTc = (baseTc.y + float(y) + 0.5) * invTexSize.y;
 
-            vec2 sampleTc = (baseTc + vec2(x, y) + 0.5) * invTexSize;
-            color += texture(tex, clamp(sampleTc, 0.0, 1.0)).rgb * weight;
-            totalWeight += weight;
-        }
+        color += texture(tex, clamp(vec2(xTc0, yTc), 0.0, 1.0)).rgb * (wx0 * wy);
+        color += texture(tex, clamp(vec2(xTc1, yTc), 0.0, 1.0)).rgb * (wx1 * wy);
+        color += texture(tex, clamp(vec2(xTc2, yTc), 0.0, 1.0)).rgb * (wx2 * wy);
+        color += texture(tex, clamp(vec2(xTc3, yTc), 0.0, 1.0)).rgb * (wx3 * wy);
+        totalWeight += wxSum * wy;
     }
     return color / totalWeight;
 }
@@ -202,7 +197,7 @@ vec3 SampleVideo(sampler2D tex, vec2 uv, vec2 texSize, int shader_filter) {
 //-------------------------------------------------------------------------------------------------
 // Gets pixel from the 3 trailing unprocessed CRT refresh cycle framebuffers.
 
-vec3 getPixelFromOrigFrame(vec2 uv, float getFromHzNumber, float currentHzCounter) {
+vec3 getPixelFromOrigFrameLinear(vec2 uv, float getFromHzNumber, float currentHzCounter) {
     if ((getFromHzNumber > currentHzCounter) ||
         (getFromHzNumber < currentHzCounter - 2.0)) {
         return vec3(0.0, 0.0, 0.0);
@@ -220,8 +215,7 @@ vec3 getPixelFromOrigFrame(vec2 uv, float getFromHzNumber, float currentHzCounte
     }
 
     float luminance = dot(linear_sampled, vec3(0.2126, 0.7152, 0.0722));
-    vec3 vibrance_linear = clamp(mix(vec3(luminance), linear_sampled, vibrance), 0.0, 1.0);
-    return clampPixel(ToSrgb(vibrance_linear));
+    return clamp(mix(vec3(luminance), linear_sampled, vibrance), 0.0, 1.0);
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -263,13 +257,13 @@ vec4 getPixelFromSimulatedCRT(vec2 uv, float crtRasterPos, float crtHzCounter, f
     bool needCurr  = (startCurr  < fEnd && startCurr  + brightnessScale > fStart);
 
     vec3 basePrev2 = needPrev2
-        ? srgb2linear(getPixelFromOrigFrame(uv, crtHzCounter - 2.0, crtHzCounter))
+        ? applyBeamGamma(getPixelFromOrigFrameLinear(uv, crtHzCounter - 2.0, crtHzCounter))
         : vec3(0.0);
     vec3 basePrev1 = needPrev1
-        ? srgb2linear(getPixelFromOrigFrame(uv, crtHzCounter - 1.0, crtHzCounter))
+        ? applyBeamGamma(getPixelFromOrigFrameLinear(uv, crtHzCounter - 1.0, crtHzCounter))
         : vec3(0.0);
     vec3 baseCurr  = needCurr
-        ? srgb2linear(getPixelFromOrigFrame(uv, crtHzCounter,       crtHzCounter))
+        ? applyBeamGamma(getPixelFromOrigFrameLinear(uv, crtHzCounter,       crtHzCounter))
         : vec3(0.0);
 
     vec3 colorPrev2 = basePrev2 * brightnessScale;
@@ -359,7 +353,7 @@ void main() {
         } else if (inBorder) {
             fragColor = vec4(1.0, 1.0, 1.0, 2.0);
         } else {
-            vec3 origLinear = srgb2linear(getPixelFromOrigFrame(uv, crtHzCounter, crtHzCounter));
+            vec3 origLinear = applyBeamGamma(getPixelFromOrigFrameLinear(uv, crtHzCounter, crtHzCounter));
             float steadyLuma = clamp(max(max(origLinear.r, origLinear.g), origLinear.b), 0.0, 1.0);
             if (splitscreen_match_brightness != 0) {
                 float effectiveGain = clamp(gain_vs_blur * max(brightboost, 0.5), 0.01, 1.0);

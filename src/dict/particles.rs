@@ -34,6 +34,24 @@ fn is_swappable(c: char) -> bool {
     SWAPPABLE_PARTICLES.contains(&c)
 }
 
+/// Zero-allocation check equivalent to `particle_mask(s).is_some()` / SQLite `GLOB '?*[はがもの]?*'`.
+pub(crate) fn has_interior_swappable_particle(s: &str) -> bool {
+    let mut it = s.chars();
+    let Some(_first) = it.next() else {
+        return false;
+    };
+    let Some(mut prev) = it.next() else {
+        return false;
+    };
+    for ch in it {
+        if is_swappable(prev) {
+            return true;
+        }
+        prev = ch;
+    }
+    false
+}
+
 /// Masks every *interior* swappable particle (never the first or last character).
 /// Returns `None` if the string has no interior swappable particle, so callers can
 /// cheaply skip candidates that can't possibly benefit from a swap.
@@ -98,16 +116,55 @@ impl ParticleIndex {
         index
     }
 
+    fn has_ready_particle_expressions_table(conn: &rusqlite::Connection) -> bool {
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'particle_expressions'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if !table_exists {
+            return false;
+        }
+        let ready: Option<String> = conn
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'particle_expressions_ready'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        ready.as_deref() == Some("1")
+    }
+
     /// Builds the index from the dictionary. Only entries tagged as expressions (`exp`)
     /// with an interior swappable particle in their headword or reading are included.
+    ///
+    /// Uses the persisted `particle_expressions` table when ready; on legacy databases,
+    /// runs the `GLOB` + `instr(glossary, '"code":"exp"')` scan once and persists the result.
     pub fn build(db: &DictDatabase) -> anyhow::Result<Self> {
-        let mut stmt = db.conn.prepare(
-            "SELECT term, reading FROM terms
-             WHERE (term GLOB '?*[はがもの]?*' OR reading GLOB '?*[はがもの]?*')
-               AND instr(glossary, '\"code\":\"exp\"') > 0",
-        )?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-        let pairs: Vec<(String, String)> = rows.filter_map(|r| r.ok()).collect();
+        if Self::has_ready_particle_expressions_table(&db.conn) {
+            let mut stmt = db
+                .conn
+                .prepare("SELECT term, reading FROM particle_expressions")?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            let pairs: Vec<(String, String)> = rows.filter_map(|r| r.ok()).collect();
+            return Ok(Self::from_pairs(pairs));
+        }
+
+        let pairs: Vec<(String, String)> = {
+            let mut stmt = db.conn.prepare(
+                "SELECT DISTINCT term, reading FROM terms
+                 WHERE (term GLOB '?*[はがもの]?*' OR reading GLOB '?*[はがもの]?*')
+                   AND instr(glossary, '\"code\":\"exp\"') > 0",
+            )?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        db.persist_particle_expressions(&pairs);
         Ok(Self::from_pairs(pairs))
     }
 
@@ -247,5 +304,112 @@ mod tests {
         let out = index.swapped_candidates(&[c]);
         assert_eq!(out[0].rules, crate::dict::deinflect::RULE_ADJ_I);
         assert_eq!(out[0].reasons, vec!["past", "が→も"]);
+    }
+
+    #[test]
+    fn test_particle_expressions_table_used_directly_on_reopen_and_legacy_backfill() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("particles_import.zip");
+        let db_path = dir.path().join("particles_import.db");
+
+        // 1. Import a dictionary zip containing one swappable `exp` and one non-`exp`.
+        {
+            let file = std::fs::File::create(&zip_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+
+            zip.start_file("index.json", options).unwrap();
+            zip.write_all(br#"{"title":"Particle Test","revision":"2026.11.01","format":3}"#)
+                .unwrap();
+
+            zip.start_file("term_bank_1.json", options).unwrap();
+            let bank = serde_json::json!([
+                [
+                    "突拍子もない",
+                    "とっぴょうしもない",
+                    "adj-i",
+                    "adj-i",
+                    100.0,
+                    [{"content": "exp", "data": {"class": "tag", "code": "exp"}}, "outrageous"],
+                    1,
+                    ""
+                ],
+                [
+                    "花の木",
+                    "はなのき",
+                    "n",
+                    "",
+                    50.0,
+                    ["flowering tree"],
+                    2,
+                    ""
+                ]
+            ]);
+            zip.write_all(bank.to_string().as_bytes()).unwrap();
+            zip.finish().unwrap();
+        }
+
+        DictDatabase::build_database_from_zip(&zip_path, &db_path, |_, _| {}).unwrap();
+
+        // Wipe `terms` to prove `ParticleIndex::build` reads directly from `particle_expressions`!
+        rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .execute("DELETE FROM terms", [])
+            .unwrap();
+
+        {
+            let reopened = DictDatabase::open(&db_path).unwrap();
+            let idx = ParticleIndex::build(&reopened).unwrap();
+            assert_eq!(idx.len(), 1);
+            assert!(idx.is_allowed("突拍子もない", "とっぴょうしもない"));
+            assert!(!idx.is_allowed("花の木", "はなのき"));
+        }
+
+        // 2. Legacy DB without `particle_expressions`: first `build` scans `terms` once and
+        // persists `particle_expressions` + `particle_expressions_ready = '1'`, so subsequent
+        // reopens read directly from `particle_expressions`.
+        let legacy_path = dir.path().join("legacy_particles.db");
+        {
+            let conn = rusqlite::Connection::open(&legacy_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
+                 CREATE TABLE terms (
+                     term TEXT, reading TEXT, definition_tags TEXT, rules TEXT,
+                     score REAL, glossary TEXT, sequence INT, term_tags TEXT
+                 );",
+            )
+            .unwrap();
+            let exp = r#"[{"content":"exp","data":{"class":"tag","code":"exp"}},"blindly"]"#;
+            conn.execute(
+                "INSERT INTO terms VALUES ('目の無い', 'めのない', '', 'adj-i', 100.0, ?1, 1, '')",
+                [exp],
+            )
+            .unwrap();
+        }
+
+        {
+            let ro_legacy = DictDatabase::open(&legacy_path).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while ro_legacy.particle_index().is_none() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let idx = ro_legacy.particle_index().unwrap();
+            assert_eq!(idx.len(), 1);
+            assert!(idx.is_allowed("目の無い", "めのない"));
+        }
+
+        // Delete `terms` on the backfilled legacy DB and reopen: still loads from `particle_expressions`!
+        {
+            let c = rusqlite::Connection::open(&legacy_path).unwrap();
+            let _ = c.busy_timeout(std::time::Duration::from_secs(5));
+            c.execute("DELETE FROM terms", []).unwrap();
+        }
+
+        let reopened_legacy = DictDatabase::open(&legacy_path).unwrap();
+        let idx2 = ParticleIndex::build(&reopened_legacy).unwrap();
+        assert_eq!(idx2.len(), 1);
+        assert!(idx2.is_allowed("目の無い", "めのない"));
     }
 }

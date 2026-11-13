@@ -625,26 +625,37 @@ fn draw_game_library_section(ui: &mut egui::Ui, state: &mut AppState, changed: &
             *changed = true;
         }
 
-        if ui.button("Browse...").clicked() {
+        let dialog_busy = state.steam_deck.is_none() && state.ui.is_file_dialog_open();
+        if ui
+            .add_enabled(!dialog_busy, egui::Button::new("Browse..."))
+            .clicked()
+        {
             state.open_pc98_media_dialog(Pc98MediaSlot::GamesDir, ui.ctx());
         }
 
-        let can_refresh = !state.pc98.config.games_dir.trim().is_empty();
+        let is_scanning = state.pc98.is_scanning_library;
+        let can_refresh = !state.pc98.config.games_dir.trim().is_empty() && !is_scanning;
+        let refresh_label = if is_scanning {
+            "⏳ Scanning..."
+        } else {
+            "🔄 Refresh"
+        };
         if ui
-            .add_enabled(can_refresh, egui::Button::new("🔄 Refresh"))
+            .add_enabled(can_refresh, egui::Button::new(refresh_label))
             .on_hover_text("Scan the root games directory and all subdirectories for PC-98 games")
             .clicked()
         {
-            match state.pc98.refresh_games_list() {
-                Ok(count) => {
-                    state.info(format!("Scanned PC-98 games folder: found {count} games."));
-                }
-                Err(e) => {
-                    state.error(format!("Failed to scan PC-98 games folder: {e}"));
-                }
+            if let Err(e) = state
+                .pc98
+                .start_background_library_scan(Some(ui.ctx().clone()))
+            {
+                state.error(format!("Failed to scan PC-98 games folder: {e}"));
             }
             config::save_config(state);
             *changed = true;
+        }
+        if is_scanning {
+            ui.spinner();
         }
     });
 
@@ -710,10 +721,10 @@ fn draw_game_library_section(ui: &mut egui::Ui, state: &mut AppState, changed: &
     // 3. Game selection dropdown + search filter + quick launch button
     let total_games = state.pc98.games_list.len();
     let has_active_filter = !state.pc98.game_filter.trim().is_empty();
-    let filtered_indices = if total_games > 0 {
-        crate::pc98::search::filter_and_rank_games(&state.pc98.games_list, &state.pc98.game_filter)
+    let filtered_indices: std::sync::Arc<[usize]> = if total_games > 0 {
+        state.pc98.filtered_game_indices()
     } else {
-        Vec::new()
+        std::sync::Arc::from([])
     };
 
     let selected_idx = state
@@ -745,13 +756,16 @@ fn draw_game_library_section(ui: &mut egui::Ui, state: &mut AppState, changed: &
         );
 
         if total_games == 0 {
+            let empty_msg = if state.pc98.is_scanning_library {
+                "⏳ Scanning PC-98 games directory in background..."
+            } else {
+                "No games scanned yet — set Games Root Folder above and click 🔄 Refresh."
+            };
             ui.label(
-                egui::RichText::new(
-                    "No games scanned yet — set Games Root Folder above and click 🔄 Refresh.",
-                )
-                .monospace()
-                .size(11.0)
-                .color(egui::Color32::from_rgb(136, 136, 136)),
+                egui::RichText::new(empty_msg)
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(136, 136, 136)),
             );
         } else {
             let filter_resp = ui
@@ -792,7 +806,7 @@ fn draw_game_library_section(ui: &mut egui::Ui, state: &mut AppState, changed: &
                                 .color(egui::Color32::from_rgb(180, 120, 120)),
                         );
                     } else {
-                        for &idx in &filtered_indices {
+                        for &idx in filtered_indices.iter() {
                             let game = &state.pc98.games_list[idx];
                             let is_selected = selected_idx == Some(idx);
                             if ui
@@ -1084,23 +1098,49 @@ fn draw_media_row(
             ],
             egui::TextEdit::singleline(path_ref).hint_text(hint),
         );
+        let dirty_id = text_resp.id.with("pending_mount");
+        let mut mount_dirty = ui.data_mut(|d| d.get_temp::<bool>(dirty_id).unwrap_or(false));
         if text_resp.changed() {
+            mount_dirty = true;
+            ui.data_mut(|d| d.insert_temp(dirty_id, true));
+            config::save_config(state);
+            *changed = true;
+        }
+        let commit_mount = mount_dirty
+            && (text_resp.lost_focus()
+                || (text_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))));
+        if commit_mount {
+            ui.data_mut(|d| d.insert_temp(dirty_id, false));
             if live_swappable && state.pc98.is_active {
-                let drive = if slot == Pc98MediaSlot::Fdd1 { 0 } else { 1 };
-                let p = if path_ref.trim().is_empty() {
-                    None
+                let (drive, p) = if slot == Pc98MediaSlot::Fdd1 {
+                    let s = state.pc98.config.fdd1_path.trim();
+                    (
+                        0,
+                        if s.is_empty() {
+                            None
+                        } else {
+                            Some(std::path::PathBuf::from(s))
+                        },
+                    )
                 } else {
-                    Some(std::path::PathBuf::from(path_ref.trim()))
+                    let s = state.pc98.config.fdd2_path.trim();
+                    (
+                        1,
+                        if s.is_empty() {
+                            None
+                        } else {
+                            Some(std::path::PathBuf::from(s))
+                        },
+                    )
                 };
                 state
                     .pc98
                     .send_command(Pc98Command::MountFdd { drive, path: p });
             }
-            config::save_config(state);
-            *changed = true;
         }
 
         if ui.button("Browse...").clicked() {
+            ui.data_mut(|d| d.insert_temp(dirty_id, false));
             state.open_pc98_media_dialog(slot, ui.ctx());
         }
 
@@ -1118,6 +1158,7 @@ fn draw_media_row(
             .add_enabled(has_media, egui::Button::new("Eject"))
             .clicked()
         {
+            ui.data_mut(|d| d.insert_temp(dirty_id, false));
             match slot {
                 Pc98MediaSlot::Fdd1 => {
                     state.pc98.config.fdd1_path.clear();
@@ -1635,26 +1676,37 @@ fn draw_pc88_game_library_section(ui: &mut egui::Ui, state: &mut AppState, chang
             *changed = true;
         }
 
-        if ui.button("Browse...").clicked() {
+        let dialog_busy = state.steam_deck.is_none() && state.ui.is_file_dialog_open();
+        if ui
+            .add_enabled(!dialog_busy, egui::Button::new("Browse..."))
+            .clicked()
+        {
             state.open_pc88_media_dialog(Pc88MediaSlot::GamesDir, ui.ctx());
         }
 
-        let can_refresh = !state.pc88.config.games_dir.trim().is_empty();
+        let is_scanning = state.pc88.is_scanning_library;
+        let can_refresh = !state.pc88.config.games_dir.trim().is_empty() && !is_scanning;
+        let refresh_label = if is_scanning {
+            "⏳ Scanning..."
+        } else {
+            "🔄 Refresh"
+        };
         if ui
-            .add_enabled(can_refresh, egui::Button::new("🔄 Refresh"))
+            .add_enabled(can_refresh, egui::Button::new(refresh_label))
             .on_hover_text("Scan the root games directory and all subdirectories for PC-88 games")
             .clicked()
         {
-            match state.pc88.refresh_games_list() {
-                Ok(count) => {
-                    state.info(format!("Scanned PC-88 games folder: found {count} games."));
-                }
-                Err(e) => {
-                    state.error(format!("Failed to scan PC-88 games folder: {e}"));
-                }
+            if let Err(e) = state
+                .pc88
+                .start_background_library_scan(Some(ui.ctx().clone()))
+            {
+                state.error(format!("Failed to scan PC-88 games folder: {e}"));
             }
             config::save_config(state);
             *changed = true;
+        }
+        if is_scanning {
+            ui.spinner();
         }
     });
 
@@ -1663,10 +1715,10 @@ fn draw_pc88_game_library_section(ui: &mut egui::Ui, state: &mut AppState, chang
     // 2. Game selection dropdown + search filter + quick launch button
     let total_games = state.pc88.games_list.len();
     let has_active_filter = !state.pc88.game_filter.trim().is_empty();
-    let filtered_indices = if total_games > 0 {
-        crate::pc88::library::filter_and_rank_games(&state.pc88.games_list, &state.pc88.game_filter)
+    let filtered_indices: std::sync::Arc<[usize]> = if total_games > 0 {
+        state.pc88.filtered_game_indices()
     } else {
-        Vec::new()
+        std::sync::Arc::from([])
     };
 
     let selected_idx = state
@@ -1698,13 +1750,16 @@ fn draw_pc88_game_library_section(ui: &mut egui::Ui, state: &mut AppState, chang
         );
 
         if total_games == 0 {
+            let empty_msg = if state.pc88.is_scanning_library {
+                "⏳ Scanning PC-88 games directory in background..."
+            } else {
+                "No games scanned yet — set Games Root Folder above and click 🔄 Refresh."
+            };
             ui.label(
-                egui::RichText::new(
-                    "No games scanned yet — set Games Root Folder above and click 🔄 Refresh.",
-                )
-                .monospace()
-                .size(11.0)
-                .color(egui::Color32::from_rgb(136, 136, 136)),
+                egui::RichText::new(empty_msg)
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(136, 136, 136)),
             );
         } else {
             let filter_resp = ui
@@ -1745,7 +1800,7 @@ fn draw_pc88_game_library_section(ui: &mut egui::Ui, state: &mut AppState, chang
                                 .color(egui::Color32::from_rgb(180, 120, 120)),
                         );
                     } else {
-                        for &idx in &filtered_indices {
+                        for &idx in filtered_indices.iter() {
                             let game = &state.pc88.games_list[idx];
                             let is_selected = selected_idx == Some(idx);
                             if ui
@@ -2047,23 +2102,49 @@ fn draw_pc88_media_row(
             ],
             egui::TextEdit::singleline(path_ref).hint_text(hint),
         );
+        let dirty_id = text_resp.id.with("pending_mount");
+        let mut mount_dirty = ui.data_mut(|d| d.get_temp::<bool>(dirty_id).unwrap_or(false));
         if text_resp.changed() {
+            mount_dirty = true;
+            ui.data_mut(|d| d.insert_temp(dirty_id, true));
+            config::save_config(state);
+            *changed = true;
+        }
+        let commit_mount = mount_dirty
+            && (text_resp.lost_focus()
+                || (text_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))));
+        if commit_mount {
+            ui.data_mut(|d| d.insert_temp(dirty_id, false));
             if live_swappable && state.pc88.is_active {
-                let drive = if slot == Pc88MediaSlot::Fdd1 { 0 } else { 1 };
-                let p = if path_ref.trim().is_empty() {
-                    None
+                let (drive, p) = if slot == Pc88MediaSlot::Fdd1 {
+                    let s = state.pc88.config.fdd1_path.trim();
+                    (
+                        0,
+                        if s.is_empty() {
+                            None
+                        } else {
+                            Some(std::path::PathBuf::from(s))
+                        },
+                    )
                 } else {
-                    Some(std::path::PathBuf::from(path_ref.trim()))
+                    let s = state.pc88.config.fdd2_path.trim();
+                    (
+                        1,
+                        if s.is_empty() {
+                            None
+                        } else {
+                            Some(std::path::PathBuf::from(s))
+                        },
+                    )
                 };
                 state
                     .pc88
                     .send_command(Pc88Command::MountFdd { drive, path: p });
             }
-            config::save_config(state);
-            *changed = true;
         }
 
         if ui.button("Browse...").clicked() {
+            ui.data_mut(|d| d.insert_temp(dirty_id, false));
             state.open_pc88_media_dialog(slot, ui.ctx());
         }
 
@@ -2078,6 +2159,7 @@ fn draw_pc88_media_row(
             .add_enabled(has_media, egui::Button::new("Eject"))
             .clicked()
         {
+            ui.data_mut(|d| d.insert_temp(dirty_id, false));
             match slot {
                 Pc88MediaSlot::Fdd1 => {
                     state.pc88.config.fdd1_path.clear();
@@ -2177,25 +2259,24 @@ fn draw_save_states_section(
                     RetroPcSystem::Pc88 => state.pc88.slot_textures.contains_key(&cache_key),
                 };
                 if !already_loaded {
-                    if let Some((w, h, rgba)) =
-                        savestate::load_slot_thumbnail_rgba(&states_root, &game_key, slot)
-                    {
-                        let color_img = egui::ColorImage::from_rgba_unmultiplied(
-                            [w as usize, h as usize],
-                            &rgba,
-                        );
-                        let tex = ui.ctx().load_texture(
-                            format!("savestate_thumb_{:?}_{}_{}", system, game_key, slot),
-                            color_img,
-                            egui::TextureOptions::LINEAR,
-                        );
-                        match system {
-                            RetroPcSystem::Pc98 => {
-                                state.pc98.slot_textures.insert(cache_key, tex);
-                            }
-                            RetroPcSystem::Pc88 => {
-                                state.pc88.slot_textures.insert(cache_key, tex);
-                            }
+                    let loaded_tex = savestate::load_slot_thumbnail_rgba(&states_root, &game_key, slot)
+                        .map(|(w, h, rgba)| {
+                            let color_img = egui::ColorImage::from_rgba_unmultiplied(
+                                [w as usize, h as usize],
+                                &rgba,
+                            );
+                            ui.ctx().load_texture(
+                                format!("savestate_thumb_{:?}_{}_{}", system, game_key, slot),
+                                color_img,
+                                egui::TextureOptions::LINEAR,
+                            )
+                        });
+                    match system {
+                        RetroPcSystem::Pc98 => {
+                            state.pc98.slot_textures.insert(cache_key, loaded_tex);
+                        }
+                        RetroPcSystem::Pc88 => {
+                            state.pc88.slot_textures.insert(cache_key, loaded_tex);
                         }
                     }
                 }
@@ -2224,12 +2305,18 @@ fn draw_save_states_section(
                     let tex_id = {
                         let key_pair = (game_key.clone(), slot);
                         match system {
-                            RetroPcSystem::Pc98 => {
-                                state.pc98.slot_textures.get(&key_pair).map(|t| t.id())
-                            }
-                            RetroPcSystem::Pc88 => {
-                                state.pc88.slot_textures.get(&key_pair).map(|t| t.id())
-                            }
+                            RetroPcSystem::Pc98 => state
+                                .pc98
+                                .slot_textures
+                                .get(&key_pair)
+                                .and_then(|t| t.as_ref())
+                                .map(|t| t.id()),
+                            RetroPcSystem::Pc88 => state
+                                .pc88
+                                .slot_textures
+                                .get(&key_pair)
+                                .and_then(|t| t.as_ref())
+                                .map(|t| t.id()),
                         }
                     };
 

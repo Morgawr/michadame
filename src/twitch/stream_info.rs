@@ -142,7 +142,8 @@ fn fetch_image(url: &str) -> Result<egui::ColorImage, String> {
     } else {
         url.to_string()
     };
-    let resp = ureq::get(&formatted_url)
+    let resp = super::http_agent()
+        .get(&formatted_url)
         .set("User-Agent", "Michadame/1.0 (Linux; x86_64)")
         .timeout(Duration::from_secs(10))
         .call()
@@ -366,7 +367,8 @@ pub fn search_categories_gql(query: &str) -> Result<Vec<StreamCategory>, String>
     }]);
 
     let body_str = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
-    let resp = ureq::post(GQL_URL)
+    let resp = super::http_agent()
+        .post(GQL_URL)
         .timeout(Duration::from_secs(10))
         .set("Client-Id", GQL_CLIENT_ID)
         .set("Content-Type", "application/json")
@@ -454,7 +456,8 @@ pub fn fetch_category_by_id_gql(id: &str) -> Result<StreamCategory, String> {
     }]);
 
     let body_str = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
-    let resp = ureq::post(GQL_URL)
+    let resp = super::http_agent()
+        .post(GQL_URL)
         .timeout(Duration::from_secs(10))
         .set("Client-Id", GQL_CLIENT_ID)
         .set("Content-Type", "application/json")
@@ -503,7 +506,8 @@ pub fn fetch_category_by_id_gql(id: &str) -> Result<StreamCategory, String> {
 }
 
 fn call_get_channels(token: &StoredToken) -> Result<ureq::Response, ureq::Error> {
-    ureq::get(CHANNELS_URL)
+    super::http_agent()
+        .get(CHANNELS_URL)
         .query("broadcaster_id", &token.user_id)
         .set("Client-Id", token.effective_client_id())
         .set("Authorization", &format!("Bearer {}", token.access_token))
@@ -512,7 +516,8 @@ fn call_get_channels(token: &StoredToken) -> Result<ureq::Response, ureq::Error>
 }
 
 fn call_patch_channels(token: &StoredToken, body_str: &str) -> Result<ureq::Response, ureq::Error> {
-    ureq::patch(CHANNELS_URL)
+    super::http_agent()
+        .request("PATCH", CHANNELS_URL)
         .query("broadcaster_id", &token.user_id)
         .set("Client-Id", token.effective_client_id())
         .set("Authorization", &format!("Bearer {}", token.access_token))

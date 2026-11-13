@@ -50,10 +50,17 @@ struct CursorMonitorShared {
     cursor_image: Mutex<Option<Arc<GameCursorImage>>>,
 }
 
-pub struct GamescopeX11CursorMonitor {
+struct CursorMonitorControl {
     monitor: *mut CGamescopeX11CursorMonitor,
+    callback_raw: *mut Arc<CursorMonitorShared>,
+    stopped: bool,
+}
+
+unsafe impl Send for CursorMonitorControl {}
+
+pub struct GamescopeX11CursorMonitor {
+    control: Arc<Mutex<CursorMonitorControl>>,
     shared: Arc<CursorMonitorShared>,
-    _callback_data: Box<Arc<CursorMonitorShared>>,
 }
 
 unsafe impl Send for GamescopeX11CursorMonitor {}
@@ -113,11 +120,27 @@ unsafe extern "C" fn on_cursor_changed(
 
 impl Drop for GamescopeX11CursorMonitor {
     fn drop(&mut self) {
-        if !self.monitor.is_null() {
+        let (monitor, callback_raw) = {
+            let mut guard = self
+                .control
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.stopped = true;
+            let mon = guard.monitor;
+            let cb_raw = guard.callback_raw;
+            guard.monitor = std::ptr::null_mut();
+            guard.callback_raw = std::ptr::null_mut();
+            (mon, cb_raw)
+        };
+        if !monitor.is_null() {
             unsafe {
-                gamescope_x11_cursor_monitor_stop(self.monitor);
+                gamescope_x11_cursor_monitor_stop(monitor);
             }
-            self.monitor = std::ptr::null_mut();
+        }
+        if !callback_raw.is_null() {
+            unsafe {
+                drop(Box::from_raw(callback_raw));
+            }
         }
     }
 }
@@ -129,26 +152,118 @@ impl GamescopeX11CursorMonitor {
             is_disconnected: AtomicBool::new(false),
             cursor_image: Mutex::new(None),
         });
-        let callback_data = Box::new(shared.clone());
-
         let c_display = CString::new(display_name).ok()?;
+        let callback_raw = Box::into_raw(Box::new(Arc::clone(&shared)));
         let monitor = unsafe {
             gamescope_x11_cursor_monitor_start(
                 c_display.as_ptr(),
                 on_cursor_changed,
-                &*callback_data as *const Arc<CursorMonitorShared> as *mut c_void,
+                callback_raw as *mut c_void,
             )
         };
 
         if monitor.is_null() {
+            unsafe {
+                drop(Box::from_raw(callback_raw));
+            }
             None
         } else {
             Some(Self {
-                monitor,
+                control: Arc::new(Mutex::new(CursorMonitorControl {
+                    monitor,
+                    callback_raw,
+                    stopped: false,
+                })),
                 shared,
-                _callback_data: callback_data,
             })
         }
+    }
+
+    /// Returns immediately on the UI thread and runs `/proc` Gamescope Xwayland discovery +
+    /// `gamescope_x11_cursor_monitor_start` on a background thread.
+    pub fn start_auto() -> Self {
+        let shared = Arc::new(CursorMonitorShared {
+            is_cursor_hidden: AtomicBool::new(false),
+            is_disconnected: AtomicBool::new(false),
+            cursor_image: Mutex::new(None),
+        });
+        let control = Arc::new(Mutex::new(CursorMonitorControl {
+            monitor: std::ptr::null_mut(),
+            callback_raw: std::ptr::null_mut(),
+            stopped: false,
+        }));
+
+        let shared_bg = Arc::clone(&shared);
+        let control_bg = Arc::clone(&control);
+        let spawn_res = std::thread::Builder::new()
+            .name("gamescope-x11-cursor-auto".to_string())
+            .spawn(move || {
+                let is_stopped = || {
+                    control_bg
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .stopped
+                };
+
+                if is_stopped() {
+                    return;
+                }
+
+                if let Some(disp) = find_gamescope_x_display() {
+                    if is_stopped() {
+                        return;
+                    }
+                    if let Ok(c_display) = CString::new(disp.as_str()) {
+                        let callback_raw = Box::into_raw(Box::new(Arc::clone(&shared_bg)));
+                        let monitor = unsafe {
+                            gamescope_x11_cursor_monitor_start(
+                                c_display.as_ptr(),
+                                on_cursor_changed,
+                                callback_raw as *mut c_void,
+                            )
+                        };
+                        if !monitor.is_null() {
+                            let mut guard = control_bg
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            if guard.stopped {
+                                drop(guard);
+                                unsafe {
+                                    gamescope_x11_cursor_monitor_stop(monitor);
+                                    drop(Box::from_raw(callback_raw));
+                                }
+                            } else {
+                                tracing::info!(
+                                    "Found Gamescope X11 display: {disp}, started cursor monitor"
+                                );
+                                guard.monitor = monitor;
+                                guard.callback_raw = callback_raw;
+                            }
+                            return;
+                        }
+                        unsafe {
+                            drop(Box::from_raw(callback_raw));
+                        }
+                    }
+                }
+
+                // Back off briefly before marking disconnected so callers never spin-spawn threads.
+                for _ in 0..4 {
+                    if is_stopped() {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                if !is_stopped() {
+                    shared_bg.is_disconnected.store(true, Ordering::Release);
+                }
+            });
+
+        if spawn_res.is_err() {
+            shared.is_disconnected.store(true, Ordering::Release);
+        }
+
+        Self { control, shared }
     }
 
     pub fn is_cursor_hidden(&self) -> bool {
@@ -171,9 +286,12 @@ impl GamescopeX11CursorMonitor {
             cursor_image: Mutex::new(image.map(Arc::new)),
         });
         Self {
-            monitor: std::ptr::null_mut(),
-            shared: shared.clone(),
-            _callback_data: Box::new(shared),
+            control: Arc::new(Mutex::new(CursorMonitorControl {
+                monitor: std::ptr::null_mut(),
+                callback_raw: std::ptr::null_mut(),
+                stopped: false,
+            })),
+            shared,
         }
     }
 
@@ -505,5 +623,16 @@ mod tests {
         assert!(monitor.cursor_image().is_none());
 
         drop(monitor);
+    }
+
+    #[test]
+    fn test_start_auto_immediate_drop_and_disconnect_backoff() {
+        // Immediate drop while background discovery is in flight must be race-free.
+        let m_fast = GamescopeX11CursorMonitor::start_auto();
+        drop(m_fast);
+
+        let m_wait = GamescopeX11CursorMonitor::start_auto();
+        assert!(!m_wait.is_cursor_hidden());
+        drop(m_wait);
     }
 }

@@ -189,13 +189,21 @@ impl AudioClock {
         self.append(block, epoch)?;
         Ok(true)
     }
-    pub(crate) fn take(&mut self) -> Option<(i64, Vec<[f32; 2]>)> {
+    pub(crate) fn take_into(&mut self, out: &mut Vec<[f32; 2]>) -> Option<i64> {
         if self.pending.len() < config::AUDIO_FRAME_SIZE {
             return None;
         }
         let at = self.frame_start;
         self.frame_start += config::AUDIO_FRAME_SIZE as i64;
-        Some((at, self.pending.drain(..config::AUDIO_FRAME_SIZE).collect()))
+        out.clear();
+        out.extend(self.pending.drain(..config::AUDIO_FRAME_SIZE));
+        Some(at)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn take(&mut self) -> Option<(i64, Vec<[f32; 2]>)> {
+        let mut out = Vec::with_capacity(config::AUDIO_FRAME_SIZE);
+        self.take_into(&mut out).map(|at| (at, out))
     }
 }
 
@@ -304,7 +312,7 @@ impl TimelineMixer {
             .min()
     }
 
-    pub(crate) fn take(&mut self) -> Option<(i64, Vec<[f32; 2]>)> {
+    pub(crate) fn take_into(&mut self, out: &mut Vec<[f32; 2]>) -> Option<i64> {
         let frame = config::AUDIO_FRAME_SIZE;
         if self.pending.len() < frame || self.next_out + frame as i64 > self.ready_end()? {
             return None;
@@ -312,13 +320,19 @@ impl TimelineMixer {
         let at = self.next_out;
         self.next_out += frame as i64;
         self.emitted = true;
-        Some((
-            at,
+        out.clear();
+        out.extend(
             self.pending
                 .drain(..frame)
-                .map(|[l, r]| [soft_limit(l), soft_limit(r)])
-                .collect(),
-        ))
+                .map(|[l, r]| [soft_limit(l), soft_limit(r)]),
+        );
+        Some(at)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn take(&mut self) -> Option<(i64, Vec<[f32; 2]>)> {
+        let mut out = Vec::with_capacity(config::AUDIO_FRAME_SIZE);
+        self.take_into(&mut out).map(|at| (at, out))
     }
 }
 
@@ -364,6 +378,7 @@ pub(super) fn run(
     let mut waiting_for_video = false;
     let mut pending_audio: Option<AudioBlock> = None;
     let mut pending_mic: Option<AudioBlock> = None;
+    let mut audio_scratch: Vec<[f32; 2]> = Vec::with_capacity(config::AUDIO_FRAME_SIZE);
     let mut prepared_generation = None;
     let mut previous_drops = 0;
     while !shared.stop.load(Ordering::Acquire) {
@@ -481,9 +496,9 @@ pub(super) fn run(
                             "Audio capture gap; continuing with earlier history preserved",
                         );
                     }
-                    while let Some((at, samples)) = s.audio_clock.take() {
+                    while let Some(at) = s.audio_clock.take_into(&mut audio_scratch) {
                         let vol = f32::from_bits(shared.game_volume.load(Ordering::Relaxed));
-                        s.mixer.push(MixSource::Game, at, &samples, vol);
+                        s.mixer.push(MixSource::Game, at, &audio_scratch, vol);
                     }
                 }
             }
@@ -506,8 +521,8 @@ pub(super) fn run(
             if let Some(s) = session.as_mut() {
                 if block.at >= s.epoch - 200_000 && block.at <= now_us() {
                     let _ = s.mic_clock.append_recovering(&block, s.epoch)?;
-                    while let Some((at, samples)) = s.mic_clock.take() {
-                        s.mixer.push(MixSource::Mic, at, &samples, 1.0);
+                    while let Some(at) = s.mic_clock.take_into(&mut audio_scratch) {
+                        s.mixer.push(MixSource::Mic, at, &audio_scratch, 1.0);
                     }
                 }
             }
@@ -516,8 +531,8 @@ pub(super) fn run(
 
         // Encode mixed frames from TimelineMixer
         if let Some(s) = session.as_mut() {
-            while let Some((at, samples)) = s.mixer.take() {
-                for mut packet in s.audio.encode(&samples, at)? {
+            while let Some(at) = s.mixer.take_into(&mut audio_scratch) {
+                for mut packet in s.audio.encode(&audio_scratch, at)? {
                     // Preserve the encoder's AAC priming offset.
                     packet
                         .packet
@@ -617,11 +632,12 @@ pub(super) fn run(
                                             .prefix("michadame-replay-scrub-")
                                             .suffix(".mp4")
                                             .tempfile()?;
-                                        encoder::export(
+                                        encoder::remux_mp4(
                                             preview_file.path(),
                                             video_preview,
                                             audio_preview,
                                             packets.clone(),
+                                            false,
                                         )?;
                                         Ok::<_, anyhow::Error>(super::ScrubSnapshot {
                                             packets,
@@ -1567,5 +1583,33 @@ mod tests {
 
         assert_eq!(std::fs::read(&dst).unwrap(), b"linked-mp4-payload");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn audio_clock_and_timeline_mixer_take_into_reuse_scratch_capacity() {
+        let n = config::AUDIO_FRAME_SIZE;
+        let mut clock = AudioClock::new();
+        let mut mixer = TimelineMixer::new();
+        let mut scratch = Vec::with_capacity(n);
+        let initial_ptr = scratch.as_ptr();
+        let initial_cap = scratch.capacity();
+
+        for i in 0..6 {
+            let mut input = block(i * 40_000, 48000, 1920);
+            input.continuous = i > 0;
+            clock.append(&input, 0).unwrap();
+            while let Some(at) = clock.take_into(&mut scratch) {
+                assert_eq!(scratch.len(), n);
+                assert_eq!(scratch.as_ptr(), initial_ptr);
+                assert_eq!(scratch.capacity(), initial_cap);
+                mixer.push(MixSource::Game, at, &scratch, 0.8);
+            }
+            while let Some(_at) = mixer.take_into(&mut scratch) {
+                assert_eq!(scratch.len(), n);
+                assert_eq!(scratch.as_ptr(), initial_ptr);
+                assert_eq!(scratch.capacity(), initial_cap);
+                assert!((scratch[0][0] - 0.4).abs() < 1e-6);
+            }
+        }
     }
 }

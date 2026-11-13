@@ -8,6 +8,7 @@
 
 use crate::app::AppState;
 use eframe::egui::{self, Color32, Pos2, Rect, Rounding, Sense, Stroke, TextureOptions, Vec2};
+use std::collections::VecDeque;
 
 /// Default pen/eraser brush diameter in pixels.
 pub const DEFAULT_BRUSH_SIZE: u32 = 4;
@@ -84,6 +85,33 @@ impl WhiteboardColor {
     }
 }
 
+/// Compact bounding-box diff patch stored in the `Ctrl+Z` / `Ctrl+Y` history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UndoPatch {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+    pub before_rgba: Vec<u8>,
+    pub after_rgba: Vec<u8>,
+}
+
+/// Result of synchronizing `canvas_rgba` with the GPU texture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WhiteboardTextureUpload {
+    /// No upload required this frame.
+    None,
+    /// Initial texture allocation or full-canvas upload (`load_texture` / `set`).
+    Full { width: usize, height: usize },
+    /// Sub-region upload via `TextureHandle::set_partial`.
+    Partial {
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+    },
+}
+
 /// Runtime state of the transparent drawing whiteboard.
 pub struct WhiteboardState {
     /// Whether the transparent whiteboard layer is currently active/visible (toggled with `H`).
@@ -102,6 +130,10 @@ pub struct WhiteboardState {
     pub texture: Option<egui::TextureHandle>,
     /// Whether `canvas_rgba` has been modified since the last texture upload.
     pub texture_dirty: bool,
+    /// Whether the entire `canvas_rgba` must be uploaded (initial create or canvas resize).
+    pub texture_full_upload_needed: bool,
+    /// Inclusive pixel bounding box `[min_x, min_y, max_x, max_y]` modified since last upload.
+    pub dirty_rect: Option<[usize; 4]>,
     /// Whether the user is currently holding the primary mouse button for a `Pen`/`Eraser` stroke.
     pub is_drawing: bool,
     /// Previous integer canvas pixel position during an active stroke, for Bresenham interpolation.
@@ -110,10 +142,12 @@ pub struct WhiteboardState {
     pub square_start: Option<(i32, i32)>,
     /// Current drag pixel `(x, y)` when dragging a filled `Square` shape.
     pub square_current: Option<(i32, i32)>,
-    /// Undo history stack (`Ctrl+Z`) storing prior `canvas_rgba` buffers.
-    pub undo_stack: Vec<Vec<u8>>,
-    /// Redo history stack (`Ctrl+Y`) storing undone `canvas_rgba` buffers.
-    pub redo_stack: Vec<Vec<u8>>,
+    /// Undo history queue (`Ctrl+Z`) storing compact bounding-box diff patches.
+    pub undo_stack: VecDeque<UndoPatch>,
+    /// Redo history queue (`Ctrl+Y`) storing undone compact bounding-box diff patches.
+    pub redo_stack: VecDeque<UndoPatch>,
+    /// Whether the back entry of `undo_stack` is still accumulating modifications for an active stroke.
+    active_patch_open: bool,
     /// Height of the top toolbar from the most recent frame.
     pub last_toolbar_height: f32,
 }
@@ -129,12 +163,15 @@ impl Default for WhiteboardState {
             canvas_size: (0, 0),
             texture: None,
             texture_dirty: true,
+            texture_full_upload_needed: true,
+            dirty_rect: None,
             is_drawing: false,
             last_draw_pos: None,
             square_start: None,
             square_current: None,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
+            undo_stack: VecDeque::new(),
+            redo_stack: VecDeque::new(),
+            active_patch_open: false,
             last_toolbar_height: 36.0,
         }
     }
@@ -149,12 +186,13 @@ impl WhiteboardState {
         }
     }
 
-    /// Cancels any in-progress stroke or square drag without modifying the committed canvas.
+    /// Cancels any in-progress stroke or square drag, sealing any already-drawn stroke patch.
     pub fn cancel_active_interaction(&mut self) {
         self.is_drawing = false;
         self.last_draw_pos = None;
         self.square_start = None;
         self.square_current = None;
+        self.seal_active_patch();
     }
 
     /// Returns true if the whiteboard layer is currently active on screen.
@@ -175,45 +213,215 @@ impl WhiteboardState {
         self.open && pos.is_some_and(|p| screen_rect.contains(p))
     }
 
-    /// Saves a snapshot of the current `canvas_rgba` onto the `Ctrl+Z` undo stack and clears
-    /// the `Ctrl+Y` redo stack.
-    pub fn save_undo_snapshot(&mut self) {
-        if self.canvas_rgba.is_empty() {
+    /// Expands `dirty_rect` to cover inclusive `[min_x, min_y, max_x, max_y]` and marks texture dirty.
+    #[inline]
+    fn mark_dirty_rect(&mut self, min_x: usize, min_y: usize, max_x: usize, max_y: usize) {
+        let (cw, ch) = (self.canvas_size.0 as usize, self.canvas_size.1 as usize);
+        if cw == 0 || ch == 0 || min_x > max_x || min_y > max_y || min_x >= cw || min_y >= ch {
             return;
         }
-        if self.undo_stack.len() >= MAX_UNDO_STEPS {
-            self.undo_stack.remove(0);
+        let max_x = max_x.min(cw - 1);
+        let max_y = max_y.min(ch - 1);
+        self.dirty_rect = Some(match self.dirty_rect {
+            Some([ox0, oy0, ox1, oy1]) => [
+                ox0.min(min_x),
+                oy0.min(min_y),
+                ox1.max(max_x),
+                oy1.max(max_y),
+            ],
+            None => [min_x, min_y, max_x, max_y],
+        });
+        self.texture_dirty = true;
+    }
+
+    /// Copies a `(x, y, w, h)` sub-rectangle out of `self.canvas_rgba`.
+    fn extract_rect_rgba(&self, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
+        let (cw, ch) = (self.canvas_size.0 as usize, self.canvas_size.1 as usize);
+        let (x, y, w, h) = (x as usize, y as usize, w as usize, h as usize);
+        if cw == 0 || ch == 0 || w == 0 || h == 0 || x >= cw || y >= ch {
+            return Vec::new();
         }
-        self.undo_stack.push(self.canvas_rgba.clone());
+        let copy_w = w.min(cw - x);
+        let copy_h = h.min(ch - y);
+        let mut out = vec![0u8; w * h * 4];
+        let src_row_bytes = cw * 4;
+        let dst_row_bytes = w * 4;
+        let copy_bytes = copy_w * 4;
+        for row in 0..copy_h {
+            let src_start = (y + row) * src_row_bytes + x * 4;
+            let dst_start = row * dst_row_bytes;
+            out[dst_start..dst_start + copy_bytes]
+                .copy_from_slice(&self.canvas_rgba[src_start..src_start + copy_bytes]);
+        }
+        out
+    }
+
+    /// Writes `patch_rgba` (`w * h * 4` bytes) back into `self.canvas_rgba` at `(x, y)` and marks dirty.
+    fn apply_rect_rgba(&mut self, x: u32, y: u32, w: u32, h: u32, patch_rgba: &[u8]) {
+        let (cw, ch) = (self.canvas_size.0 as usize, self.canvas_size.1 as usize);
+        let (x, y, w, h) = (x as usize, y as usize, w as usize, h as usize);
+        if cw == 0
+            || ch == 0
+            || w == 0
+            || h == 0
+            || x >= cw
+            || y >= ch
+            || patch_rgba.len() < w * h * 4
+        {
+            return;
+        }
+        let copy_w = w.min(cw - x);
+        let copy_h = h.min(ch - y);
+        let dst_row_bytes = cw * 4;
+        let src_row_bytes = w * 4;
+        let copy_bytes = copy_w * 4;
+        for row in 0..copy_h {
+            let src_start = row * src_row_bytes;
+            let dst_start = (y + row) * dst_row_bytes + x * 4;
+            self.canvas_rgba[dst_start..dst_start + copy_bytes]
+                .copy_from_slice(&patch_rgba[src_start..src_start + copy_bytes]);
+        }
+        self.mark_dirty_rect(x, y, x + copy_w - 1, y + copy_h - 1);
+    }
+
+    /// Ensures the active open `UndoPatch` covers inclusive `[min_x..=max_x, min_y..=max_y]`
+    /// BEFORE pixels inside that region are mutated.
+    fn prepare_undo_region(&mut self, min_x: u32, min_y: u32, max_x: u32, max_y: u32) {
+        if !self.active_patch_open {
+            return;
+        }
+        let (cw, ch) = self.canvas_size;
+        if cw == 0 || ch == 0 || min_x > max_x || min_y > max_y || min_x >= cw || min_y >= ch {
+            return;
+        }
+        let rx0 = min_x;
+        let ry0 = min_y;
+        let rx1 = max_x.min(cw - 1);
+        let ry1 = max_y.min(ch - 1);
+
+        let Some((old_x, old_y, old_w, old_h)) =
+            self.undo_stack.back().map(|p| (p.x, p.y, p.w, p.h))
+        else {
+            self.active_patch_open = false;
+            return;
+        };
+
+        if old_w == 0 || old_h == 0 {
+            let w = rx1 - rx0 + 1;
+            let h = ry1 - ry0 + 1;
+            let before = self.extract_rect_rgba(rx0, ry0, w, h);
+            if let Some(patch) = self.undo_stack.back_mut() {
+                patch.x = rx0;
+                patch.y = ry0;
+                patch.w = w;
+                patch.h = h;
+                patch.before_rgba = before;
+            }
+            return;
+        }
+
+        let old_x1 = old_x + old_w - 1;
+        let old_y1 = old_y + old_h - 1;
+        if rx0 >= old_x && ry0 >= old_y && rx1 <= old_x1 && ry1 <= old_y1 {
+            return;
+        }
+
+        let ux0 = old_x.min(rx0);
+        let uy0 = old_y.min(ry0);
+        let ux1 = old_x1.max(rx1);
+        let uy1 = old_y1.max(ry1);
+        let uw = ux1 - ux0 + 1;
+        let uh = uy1 - uy0 + 1;
+
+        // Every pixel outside `[old_x..=old_x1, old_y..=old_y1]` is untouched since stroke start,
+        // so extract the union from `canvas_rgba` first and restore the prior sub-rect on top.
+        let mut new_before = self.extract_rect_rgba(ux0, uy0, uw, uh);
+        if let Some(patch) = self.undo_stack.back_mut() {
+            let dst_row_bytes = (uw as usize) * 4;
+            let src_row_bytes = (old_w as usize) * 4;
+            let off_x = (old_x - ux0) as usize;
+            let off_y = (old_y - uy0) as usize;
+            for row in 0..old_h as usize {
+                let src_start = row * src_row_bytes;
+                let dst_start = (off_y + row) * dst_row_bytes + off_x * 4;
+                new_before[dst_start..dst_start + src_row_bytes]
+                    .copy_from_slice(&patch.before_rgba[src_start..src_start + src_row_bytes]);
+            }
+            patch.x = ux0;
+            patch.y = uy0;
+            patch.w = uw;
+            patch.h = uh;
+            patch.before_rgba = new_before;
+        }
+    }
+
+    /// Finalizes `after_rgba` for the currently open `UndoPatch` on the back of `undo_stack`.
+    pub fn seal_active_patch(&mut self) {
+        if !self.active_patch_open {
+            return;
+        }
+        self.active_patch_open = false;
+        let Some((x, y, w, h)) = self.undo_stack.back().map(|p| (p.x, p.y, p.w, p.h)) else {
+            return;
+        };
+        if w == 0 || h == 0 {
+            self.undo_stack.pop_back();
+            return;
+        }
+        let after = self.extract_rect_rgba(x, y, w, h);
+        if let Some(patch) = self.undo_stack.back_mut() {
+            patch.after_rgba = after;
+        }
+    }
+
+    /// Begins recording a compact `UndoPatch` on the `Ctrl+Z` undo stack and clears `redo_stack`.
+    pub fn save_undo_snapshot(&mut self) {
+        if self.canvas_rgba.is_empty() || self.canvas_size.0 == 0 || self.canvas_size.1 == 0 {
+            return;
+        }
+        self.seal_active_patch();
+        if self.undo_stack.len() >= MAX_UNDO_STEPS {
+            self.undo_stack.pop_front();
+        }
+        self.undo_stack.push_back(UndoPatch {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+            before_rgba: Vec::new(),
+            after_rgba: Vec::new(),
+        });
+        self.active_patch_open = true;
         self.redo_stack.clear();
     }
 
-    /// Undoes the most recent drawing operation (`Ctrl+Z`), moving the current state to `redo_stack`.
-    /// Returns `true` if an undo state was restored.
+    /// Undoes the most recent drawing operation (`Ctrl+Z`), moving the patch to `redo_stack`.
+    /// Returns `true` if an undo patch was restored.
     pub fn undo(&mut self) -> bool {
         self.cancel_active_interaction();
-        let Some(prev) = self.undo_stack.pop() else {
+        let Some(patch) = self.undo_stack.pop_back() else {
             return false;
         };
-        let current = std::mem::replace(&mut self.canvas_rgba, prev);
-        self.redo_stack.push(current);
-        self.texture_dirty = true;
+        self.apply_rect_rgba(patch.x, patch.y, patch.w, patch.h, &patch.before_rgba);
+        if self.redo_stack.len() >= MAX_UNDO_STEPS {
+            self.redo_stack.pop_front();
+        }
+        self.redo_stack.push_back(patch);
         true
     }
 
     /// Repeats/redoes the most recently undone drawing operation (`Ctrl+Y`).
-    /// Returns `true` if a redo state was restored.
+    /// Returns `true` if a redo patch was restored.
     pub fn redo(&mut self) -> bool {
         self.cancel_active_interaction();
-        let Some(next) = self.redo_stack.pop() else {
+        let Some(patch) = self.redo_stack.pop_back() else {
             return false;
         };
-        let current = std::mem::replace(&mut self.canvas_rgba, next);
+        self.apply_rect_rgba(patch.x, patch.y, patch.w, patch.h, &patch.after_rgba);
         if self.undo_stack.len() >= MAX_UNDO_STEPS {
-            self.undo_stack.remove(0);
+            self.undo_stack.pop_front();
         }
-        self.undo_stack.push(current);
-        self.texture_dirty = true;
+        self.undo_stack.push_back(patch);
         true
     }
 
@@ -234,42 +442,77 @@ impl WhiteboardState {
         new_rgba
     }
 
-    /// Ensures the backing RGBA pixel buffer is at least `(min_w, min_h)`, preserving any
-    /// existing drawing and undo/redo snapshots in the top-left corner when expanding.
+    /// Ensures the backing RGBA pixel buffer is at least `(min_w, min_h)`, ignoring 0-sized
+    /// transient resize frames and preserving existing pixels and compact undo/redo patches.
     pub fn ensure_canvas_size(&mut self, min_w: u32, min_h: u32) {
-        let req_w = min_w.max(1);
-        let req_h = min_h.max(1);
-        if self.canvas_size.0 >= req_w
-            && self.canvas_size.1 >= req_h
+        if min_w == 0 || min_h == 0 {
+            return;
+        }
+        if self.canvas_size.0 >= min_w
+            && self.canvas_size.1 >= min_h
             && self.canvas_rgba.len() == (self.canvas_size.0 * self.canvas_size.1 * 4) as usize
         {
             return;
         }
 
+        if !self.is_drawing {
+            self.seal_active_patch();
+        }
+
         let (old_w, old_h) = self.canvas_size;
-        let new_w = old_w.max(req_w);
-        let new_h = old_h.max(req_h);
+        let new_w = old_w.max(min_w);
+        let new_h = old_h.max(min_h);
 
         self.canvas_rgba = Self::resize_rgba_buffer(&self.canvas_rgba, old_w, old_h, new_w, new_h);
-        for snap in &mut self.undo_stack {
-            *snap = Self::resize_rgba_buffer(snap, old_w, old_h, new_w, new_h);
-        }
-        for snap in &mut self.redo_stack {
-            *snap = Self::resize_rgba_buffer(snap, old_w, old_h, new_w, new_h);
-        }
-
         self.canvas_size = (new_w, new_h);
+        self.texture_full_upload_needed = true;
+        self.dirty_rect = None;
         self.texture_dirty = true;
     }
 
     /// Clears all drawn pixels on the canvas back to transparent (`[0, 0, 0, 0]`), recording
-    /// an undo snapshot first if the canvas had any non-zero pixels.
+    /// a compact bounding-box undo patch only for the painted region.
     pub fn clear_canvas(&mut self) {
-        if self.canvas_rgba.iter().any(|&b| b != 0) {
-            self.save_undo_snapshot();
+        let (cw, ch) = (self.canvas_size.0 as usize, self.canvas_size.1 as usize);
+        if cw == 0 || ch == 0 || self.canvas_rgba.len() != cw * ch * 4 {
+            self.seal_active_patch();
+            return;
         }
-        self.canvas_rgba.fill(0);
-        self.texture_dirty = true;
+
+        let mut min_x = cw;
+        let mut min_y = ch;
+        let mut max_x = 0usize;
+        let mut max_y = 0usize;
+        let row_bytes = cw * 4;
+        for y in 0..ch {
+            let row = &self.canvas_rgba[y * row_bytes..(y + 1) * row_bytes];
+            if !row.iter().any(|&b| b != 0) {
+                continue;
+            }
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+            for (x, px) in row.chunks_exact(4).enumerate() {
+                if px != [0, 0, 0, 0] {
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                }
+            }
+        }
+
+        if min_x > max_x || min_y > max_y {
+            self.seal_active_patch();
+            return;
+        }
+
+        self.save_undo_snapshot();
+        self.prepare_undo_region(min_x as u32, min_y as u32, max_x as u32, max_y as u32);
+        let clear_span = (max_x - min_x + 1) * 4;
+        for y in min_y..=max_y {
+            let start = y * row_bytes + min_x * 4;
+            self.canvas_rgba[start..start + clear_span].fill(0);
+        }
+        self.seal_active_patch();
+        self.mark_dirty_rect(min_x, min_y, max_x, max_y);
     }
 
     /// Stamps a hard, un-aliased brush footprint centered at `(cx, cy)` using the current tool.
@@ -287,9 +530,10 @@ impl WhiteboardState {
         let size = self.brush_size.clamp(MIN_BRUSH_SIZE, MAX_BRUSH_SIZE) as i32;
         if size <= 1 {
             if cx >= 0 && cx < w && cy >= 0 && cy < h {
+                self.prepare_undo_region(cx as u32, cy as u32, cx as u32, cy as u32);
                 let idx = ((cy * w + cx) * 4) as usize;
                 self.canvas_rgba[idx..idx + 4].copy_from_slice(&rgba);
-                self.texture_dirty = true;
+                self.mark_dirty_rect(cx as usize, cy as usize, cx as usize, cy as usize);
             }
             return;
         }
@@ -301,6 +545,16 @@ impl WhiteboardState {
         let min_offset = -(size / 2);
         let max_offset = min_offset + size - 1;
         let center_shift = if size % 2 == 0 { 1 } else { 0 };
+
+        let bx0 = (cx + min_offset).max(0);
+        let by0 = (cy + min_offset).max(0);
+        let bx1 = (cx + max_offset).min(w - 1);
+        let by1 = (cy + max_offset).min(h - 1);
+        if bx0 > bx1 || by0 > by1 {
+            return;
+        }
+
+        self.prepare_undo_region(bx0 as u32, by0 as u32, bx1 as u32, by1 as u32);
 
         for dy in min_offset..=max_offset {
             let py = cy + dy;
@@ -320,13 +574,32 @@ impl WhiteboardState {
                 }
             }
         }
-        self.texture_dirty = true;
+        self.mark_dirty_rect(bx0 as usize, by0 as usize, bx1 as usize, by1 as usize);
     }
 
     /// Rasterizes a continuous, un-smoothed integer Bresenham line from `from` to `to`.
     pub fn draw_stroke_line(&mut self, from: (i32, i32), to: (i32, i32)) {
+        let (w, h) = (self.canvas_size.0 as i32, self.canvas_size.1 as i32);
+        if w <= 0 || h <= 0 {
+            return;
+        }
+
         let (mut x0, mut y0) = from;
         let (x1, y1) = to;
+
+        // Pre-reserve the full line segment bounds once so per-step `stamp_brush` calls never reallocate.
+        if self.active_patch_open {
+            let size = self.brush_size.clamp(MIN_BRUSH_SIZE, MAX_BRUSH_SIZE) as i32;
+            let min_offset = -(size / 2);
+            let max_offset = min_offset + size - 1;
+            let sx0 = (x0.min(x1) + min_offset).max(0);
+            let sy0 = (y0.min(y1) + min_offset).max(0);
+            let sx1 = (x0.max(x1) + max_offset).min(w - 1);
+            let sy1 = (y0.max(y1) + max_offset).min(h - 1);
+            if sx0 <= sx1 && sy0 <= sy1 {
+                self.prepare_undo_region(sx0 as u32, sy0 as u32, sx1 as u32, sy1 as u32);
+            }
+        }
 
         let dx = (x1 - x0).abs();
         let sx = if x0 < x1 { 1 } else { -1 };
@@ -370,6 +643,8 @@ impl WhiteboardState {
         let y0 = from.1.min(to.1).clamp(0, h - 1);
         let y1 = from.1.max(to.1).clamp(0, h - 1);
 
+        self.prepare_undo_region(x0 as u32, y0 as u32, x1 as u32, y1 as u32);
+
         let rgba = self.color.to_rgba();
         for y in y0..=y1 {
             let row_offset = (y * w) as usize;
@@ -378,7 +653,7 @@ impl WhiteboardState {
                 self.canvas_rgba[idx..idx + 4].copy_from_slice(&rgba);
             }
         }
-        self.texture_dirty = true;
+        self.mark_dirty_rect(x0 as usize, y0 as usize, x1 as usize, y1 as usize);
     }
 
     /// Apply a pointer sample at `(px, py)` in canvas coordinates, connecting from `last_draw_pos`
@@ -390,6 +665,91 @@ impl WhiteboardState {
             self.stamp_brush(px, py);
         }
         self.last_draw_pos = Some((px, py));
+    }
+
+    /// Synchronizes modified pixels in `canvas_rgba` to the nearest-neighbor GPU texture,
+    /// using `TextureHandle::set_partial` whenever only a sub-rectangle changed.
+    pub fn sync_texture(&mut self, ctx: &egui::Context) -> WhiteboardTextureUpload {
+        let (cw, ch) = (self.canvas_size.0 as usize, self.canvas_size.1 as usize);
+        if cw == 0 || ch == 0 || self.canvas_rgba.len() != cw * ch * 4 {
+            return WhiteboardTextureUpload::None;
+        }
+
+        let needs_full = self.texture_full_upload_needed
+            || self
+                .texture
+                .as_ref()
+                .map_or(true, |tex| tex.size() != [cw, ch]);
+
+        if needs_full {
+            let image = egui::ColorImage::from_rgba_unmultiplied([cw, ch], &self.canvas_rgba);
+            if let Some(tex) = &mut self.texture {
+                tex.set(image, TextureOptions::NEAREST);
+            } else {
+                self.texture = Some(ctx.load_texture(
+                    "whiteboard_canvas_texture",
+                    image,
+                    TextureOptions::NEAREST,
+                ));
+            }
+            self.texture_dirty = false;
+            self.texture_full_upload_needed = false;
+            self.dirty_rect = None;
+            return WhiteboardTextureUpload::Full {
+                width: cw,
+                height: ch,
+            };
+        }
+
+        if !self.texture_dirty {
+            return WhiteboardTextureUpload::None;
+        }
+
+        if let Some([min_x, min_y, max_x, max_y]) = self.dirty_rect.take() {
+            let max_x = max_x.min(cw - 1);
+            let max_y = max_y.min(ch - 1);
+            if min_x <= max_x && min_y <= max_y {
+                let sub_w = max_x - min_x + 1;
+                let sub_h = max_y - min_y + 1;
+                let row_stride = cw * 4;
+                let sub_image = if min_x == 0 && sub_w == cw {
+                    let slice = &self.canvas_rgba[min_y * row_stride..(max_y + 1) * row_stride];
+                    egui::ColorImage::from_rgba_unmultiplied([sub_w, sub_h], slice)
+                } else {
+                    let sub_row_bytes = sub_w * 4;
+                    let mut sub_rgba = vec![0u8; sub_w * sub_h * 4];
+                    for row in 0..sub_h {
+                        let src_start = (min_y + row) * row_stride + min_x * 4;
+                        let dst_start = row * sub_row_bytes;
+                        sub_rgba[dst_start..dst_start + sub_row_bytes].copy_from_slice(
+                            &self.canvas_rgba[src_start..src_start + sub_row_bytes],
+                        );
+                    }
+                    egui::ColorImage::from_rgba_unmultiplied([sub_w, sub_h], &sub_rgba)
+                };
+                if let Some(tex) = &mut self.texture {
+                    tex.set_partial([min_x, min_y], sub_image, TextureOptions::NEAREST);
+                }
+                self.texture_dirty = false;
+                return WhiteboardTextureUpload::Partial {
+                    x: min_x,
+                    y: min_y,
+                    width: sub_w,
+                    height: sub_h,
+                };
+            }
+        }
+
+        // Fallback if `texture_dirty` was set externally without `dirty_rect`.
+        let image = egui::ColorImage::from_rgba_unmultiplied([cw, ch], &self.canvas_rgba);
+        if let Some(tex) = &mut self.texture {
+            tex.set(image, TextureOptions::NEAREST);
+        }
+        self.texture_dirty = false;
+        WhiteboardTextureUpload::Full {
+            width: cw,
+            height: ch,
+        }
     }
 }
 
@@ -845,12 +1205,14 @@ pub fn draw_whiteboard(state: &mut AppState, ctx: &egui::Context, screen_rect: R
                         } else {
                             state.whiteboard.is_drawing = false;
                             state.whiteboard.last_draw_pos = None;
+                            state.whiteboard.seal_active_patch();
                         }
                     }
                 }
                 WhiteboardTool::Square => {
                     state.whiteboard.is_drawing = false;
                     state.whiteboard.last_draw_pos = None;
+                    state.whiteboard.seal_active_patch();
 
                     if primary_pressed && can_draw_in_canvas {
                         if let Some(pos) = pointer_pos {
@@ -878,31 +1240,14 @@ pub fn draw_whiteboard(state: &mut AppState, ctx: &egui::Context, screen_rect: R
                         ) {
                             state.whiteboard.save_undo_snapshot();
                             state.whiteboard.fill_rect(start, end);
+                            state.whiteboard.seal_active_patch();
                         }
                     }
                 }
             }
 
-            // Upload pixel buffer to nearest-neighbor GPU texture when modified
-            if state.whiteboard.texture_dirty || state.whiteboard.texture.is_none() {
-                let (cw, ch) = state.whiteboard.canvas_size;
-                if cw > 0 && ch > 0 {
-                    let image = egui::ColorImage::from_rgba_unmultiplied(
-                        [cw as usize, ch as usize],
-                        &state.whiteboard.canvas_rgba,
-                    );
-                    if let Some(tex) = &mut state.whiteboard.texture {
-                        tex.set(image, TextureOptions::NEAREST);
-                    } else {
-                        state.whiteboard.texture = Some(ctx.load_texture(
-                            "whiteboard_canvas_texture",
-                            image,
-                            TextureOptions::NEAREST,
-                        ));
-                    }
-                    state.whiteboard.texture_dirty = false;
-                }
-            }
+            // Upload modified dirty-rect (or full canvas on create/resize) to nearest-neighbor GPU texture
+            let _ = state.whiteboard.sync_texture(ctx);
 
             // --- Paint Transparent Canvas Texture and Previews ---
             let painter = ui.painter().with_clip_rect(panel_rect);
@@ -1105,15 +1450,198 @@ mod tests {
         wb.save_undo_snapshot();
         wb.stamp_brush(12, 34);
 
+        // Transient 0x0 resize frames must be ignored without wiping pixels or history
+        wb.ensure_canvas_size(0, 0);
+        assert_eq!(wb.canvas_size, (64, 64));
+
         // Expand canvas to 128x128
         wb.ensure_canvas_size(128, 128);
         assert_eq!(wb.canvas_size, (128, 128));
+        assert!(wb.texture_full_upload_needed);
         let idx = ((34 * 128 + 12) * 4) as usize;
         assert_eq!(
             &wb.canvas_rgba[idx..idx + 4],
             &WhiteboardColor::Green.to_rgba()
         );
-        assert_eq!(wb.undo_stack[0].len(), 128 * 128 * 4);
+        assert_eq!(wb.undo_stack.len(), 1);
+        assert_eq!(
+            (
+                wb.undo_stack[0].x,
+                wb.undo_stack[0].y,
+                wb.undo_stack[0].w,
+                wb.undo_stack[0].h,
+            ),
+            (12, 34, 1, 1)
+        );
+        assert!(wb.undo());
+        assert_eq!(&wb.canvas_rgba[idx..idx + 4], &[0, 0, 0, 0]);
+        assert!(wb.redo());
+        assert_eq!(
+            &wb.canvas_rgba[idx..idx + 4],
+            &WhiteboardColor::Green.to_rgba()
+        );
+    }
+
+    #[test]
+    fn test_whiteboard_dirty_rect_and_patch_undo_redo_roundtrip() {
+        let ctx = egui::Context::default();
+        let mut wb = WhiteboardState::default();
+
+        // 0-sized transient frame before first allocation must not allocate a 1x1 buffer
+        wb.ensure_canvas_size(0, 0);
+        assert_eq!(wb.canvas_size, (0, 0));
+        assert!(wb.canvas_rgba.is_empty());
+
+        wb.ensure_canvas_size(120, 90);
+        let full_bytes = 120 * 90 * 4;
+        let state_0 = wb.canvas_rgba.clone();
+
+        // Initial texture sync uploads the full canvas; an immediate second sync is a no-op.
+        assert_eq!(
+            wb.sync_texture(&ctx),
+            WhiteboardTextureUpload::Full {
+                width: 120,
+                height: 90
+            }
+        );
+        assert_eq!(wb.sync_texture(&ctx), WhiteboardTextureUpload::None);
+
+        // 1. Pen multi-segment stroke
+        wb.tool = WhiteboardTool::Pen;
+        wb.color = WhiteboardColor::Red;
+        wb.brush_size = 5;
+        wb.save_undo_snapshot();
+        wb.apply_pointer_sample(20, 25);
+        wb.apply_pointer_sample(45, 35);
+        wb.apply_pointer_sample(50, 20);
+        wb.last_draw_pos = None;
+        wb.seal_active_patch();
+        let state_1_pen = wb.canvas_rgba.clone();
+        assert_ne!(state_1_pen, state_0);
+        assert_eq!(wb.undo_stack.len(), 1);
+        assert!(wb.undo_stack[0].before_rgba.len() < full_bytes / 4);
+        assert_eq!(
+            wb.sync_texture(&ctx),
+            WhiteboardTextureUpload::Partial {
+                x: 18,
+                y: 18,
+                width: 35,
+                height: 20,
+            }
+        );
+
+        // 2. Filled Square overlapping part of the Pen stroke
+        wb.tool = WhiteboardTool::Square;
+        wb.color = WhiteboardColor::Blue;
+        wb.save_undo_snapshot();
+        wb.fill_rect((30, 22), (60, 48));
+        wb.seal_active_patch();
+        let state_2_square = wb.canvas_rgba.clone();
+        assert_ne!(state_2_square, state_1_pen);
+        assert_eq!(
+            wb.sync_texture(&ctx),
+            WhiteboardTextureUpload::Partial {
+                x: 30,
+                y: 22,
+                width: 31,
+                height: 27,
+            }
+        );
+
+        // 3. Eraser stroke cutting across both the Pen stroke and Square
+        wb.tool = WhiteboardTool::Eraser;
+        wb.brush_size = 4;
+        wb.save_undo_snapshot();
+        wb.draw_stroke_line((18, 26), (62, 40));
+        wb.seal_active_patch();
+        let state_3_eraser = wb.canvas_rgba.clone();
+        assert_ne!(state_3_eraser, state_2_square);
+        assert!(matches!(
+            wb.sync_texture(&ctx),
+            WhiteboardTextureUpload::Partial { .. }
+        ));
+
+        // 4. Clear canvas -> captures only tight non-zero bounding box, zeroes canvas
+        wb.clear_canvas();
+        let state_4_clear = wb.canvas_rgba.clone();
+        assert_eq!(state_4_clear, state_0);
+        assert_eq!(wb.undo_stack.len(), 4);
+        assert!(wb.undo_stack[3].before_rgba.len() < full_bytes / 2);
+        assert!(matches!(
+            wb.sync_texture(&ctx),
+            WhiteboardTextureUpload::Partial { .. }
+        ));
+
+        // Undo all 4 operations in reverse and assert exact pixel-for-pixel equivalence
+        assert!(wb.undo());
+        assert_eq!(wb.canvas_rgba, state_3_eraser);
+        assert!(matches!(
+            wb.sync_texture(&ctx),
+            WhiteboardTextureUpload::Partial { .. }
+        ));
+
+        assert!(wb.undo());
+        assert_eq!(wb.canvas_rgba, state_2_square);
+        assert!(matches!(
+            wb.sync_texture(&ctx),
+            WhiteboardTextureUpload::Partial { .. }
+        ));
+
+        assert!(wb.undo());
+        assert_eq!(wb.canvas_rgba, state_1_pen);
+        assert!(matches!(
+            wb.sync_texture(&ctx),
+            WhiteboardTextureUpload::Partial { .. }
+        ));
+
+        assert!(wb.undo());
+        assert_eq!(wb.canvas_rgba, state_0);
+        assert!(matches!(
+            wb.sync_texture(&ctx),
+            WhiteboardTextureUpload::Partial { .. }
+        ));
+        assert!(!wb.undo());
+
+        // Redo all 4 operations forward and assert exact pixel-for-pixel equivalence
+        assert!(wb.redo());
+        assert_eq!(wb.canvas_rgba, state_1_pen);
+        assert!(matches!(
+            wb.sync_texture(&ctx),
+            WhiteboardTextureUpload::Partial { .. }
+        ));
+
+        assert!(wb.redo());
+        assert_eq!(wb.canvas_rgba, state_2_square);
+        assert!(matches!(
+            wb.sync_texture(&ctx),
+            WhiteboardTextureUpload::Partial { .. }
+        ));
+
+        assert!(wb.redo());
+        assert_eq!(wb.canvas_rgba, state_3_eraser);
+        assert!(matches!(
+            wb.sync_texture(&ctx),
+            WhiteboardTextureUpload::Partial { .. }
+        ));
+
+        assert!(wb.redo());
+        assert_eq!(wb.canvas_rgba, state_4_clear);
+        assert!(matches!(
+            wb.sync_texture(&ctx),
+            WhiteboardTextureUpload::Partial { .. }
+        ));
+        assert!(!wb.redo());
+
+        // Verify MAX_UNDO_STEPS VecDeque eviction bound
+        wb.tool = WhiteboardTool::Pen;
+        wb.color = WhiteboardColor::Yellow;
+        wb.brush_size = 1;
+        for x in 0..(MAX_UNDO_STEPS + 8) as i32 {
+            wb.save_undo_snapshot();
+            wb.stamp_brush(x, 10);
+            wb.seal_active_patch();
+        }
+        assert_eq!(wb.undo_stack.len(), MAX_UNDO_STEPS);
     }
 
     #[test]

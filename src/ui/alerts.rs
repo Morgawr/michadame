@@ -5,20 +5,61 @@
 use crate::app::AppState;
 use crate::twitch::alerts::{ActiveAlert, AlertKind};
 use eframe::egui::{self, epaint, Color32, FontId, Pos2, Rect, Rounding, Shape, Stroke, Vec2};
+use std::sync::Arc;
 use std::time::Instant;
 
 const TRANSITION_DURATION: f32 = 0.45;
+const HAD_PRIMITIVES_KEY: &str = "alerts_had_primitives";
+
+#[inline]
+fn had_primitives_id() -> egui::Id {
+    egui::Id::new(HAD_PRIMITIVES_KEY)
+}
+
+/// Synchronizes `primitives` into the renderer only when `primitives` is non-empty
+/// or on the transition from non-empty -> empty, avoiding idle `crt_renderer.lock()` contention.
+fn sync_alert_primitives_if_needed<F>(
+    ctx: &egui::Context,
+    renderer_token: Option<usize>,
+    primitives: Vec<epaint::ClippedPrimitive>,
+    write_fn: F,
+) -> bool
+where
+    F: FnOnce(Vec<epaint::ClippedPrimitive>),
+{
+    let gate_id = had_primitives_id();
+    let Some(token) = renderer_token else {
+        let had_state = ctx.data(|d| d.get_temp::<(usize, bool)>(gate_id).is_some());
+        if had_state {
+            ctx.data_mut(|d| d.remove::<(usize, bool)>(gate_id));
+        }
+        return false;
+    };
+
+    let prev = ctx.data(|d| d.get_temp::<(usize, bool)>(gate_id));
+    if primitives.is_empty() {
+        if prev != Some((token, true)) {
+            if prev != Some((token, false)) {
+                ctx.data_mut(|d| d.insert_temp(gate_id, (token, false)));
+            }
+            return false;
+        }
+        write_fn(Vec::new());
+        ctx.data_mut(|d| d.insert_temp(gate_id, (token, false)));
+        true
+    } else {
+        write_fn(primitives);
+        if prev != Some((token, true)) {
+            ctx.data_mut(|d| d.insert_temp(gate_id, (token, true)));
+        }
+        true
+    }
+}
 
 /// Updates and lays out the active video alert notice, tessellating it and handing
 /// primitives to `CrtFilterRenderer` to be drawn on the video image.
 pub fn update(state: &mut AppState, ctx: &egui::Context, video_rect: Rect) {
-    if state.twitch.is_roll_active() {
-        if let Some(r) = &state.crt_renderer {
-            r.lock().unwrap().alert_primitives = Vec::new();
-        }
-        return;
-    }
-    let primitives = if state.twitch.config.alerts_enabled {
+    let primitives = if !state.twitch.is_roll_active() && state.twitch.config.alerts_enabled {
         if let Some(active) = &state.twitch.alerts.active {
             let now = Instant::now();
             let shapes = build_alert_shapes(active, ctx, video_rect, now);
@@ -35,9 +76,13 @@ pub fn update(state: &mut AppState, ctx: &egui::Context, video_rect: Rect) {
         Vec::new()
     };
 
-    if let Some(r) = &state.crt_renderer {
-        r.lock().unwrap().alert_primitives = primitives;
-    }
+    let renderer_token = state.crt_renderer.as_ref().map(|r| Arc::as_ptr(r) as usize);
+    let crt_renderer = &state.crt_renderer;
+    sync_alert_primitives_if_needed(ctx, renderer_token, primitives, |prims| {
+        if let Some(r) = crt_renderer {
+            r.lock().unwrap().alert_primitives = prims;
+        }
+    });
 }
 
 fn ease_out_cubic(x: f32) -> f32 {
@@ -347,5 +392,86 @@ fn format_alert_text(kind: &AlertKind) -> (String, String, Option<String>, Optio
             Some(format!("RAIDING WITH {viewers} VIEWERS")),
             None,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::twitch::alerts::AlertEvent;
+    use std::time::Duration;
+
+    #[test]
+    fn skips_idle_renderer_lock_and_clears_once_after_alert_expires() {
+        let ctx = egui::Context::default();
+        let token = Some(0xCAFE_BABEusize);
+        let video_rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
+        let mut lock_count = 0usize;
+        let mut stored_len = 0usize;
+
+        // Idle frames never lock crt_renderer.
+        for _ in 0..4 {
+            assert!(!sync_alert_primitives_if_needed(
+                &ctx,
+                token,
+                Vec::new(),
+                |_| {
+                    lock_count += 1;
+                }
+            ));
+        }
+        assert_eq!(lock_count, 0);
+
+        // Active alert frame tessellates shapes and locks crt_renderer.
+        let started = Instant::now();
+        let active = ActiveAlert {
+            event: AlertEvent {
+                id: "alert-1".to_string(),
+                kind: AlertKind::Follow {
+                    user: "morg".to_string(),
+                },
+            },
+            started,
+            duration: Duration::from_secs(5),
+        };
+        let mut prims = Vec::new();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let shapes =
+                build_alert_shapes(&active, ctx, video_rect, started + Duration::from_secs(1));
+            prims = ctx.tessellate(shapes, 1.0);
+        });
+        assert!(!prims.is_empty());
+        assert!(sync_alert_primitives_if_needed(&ctx, token, prims, |p| {
+            lock_count += 1;
+            stored_len = p.len();
+        }));
+        assert_eq!(lock_count, 1);
+        assert!(stored_len > 0);
+
+        // Transition back to empty locks ONCE to clear `alert_primitives`.
+        assert!(sync_alert_primitives_if_needed(
+            &ctx,
+            token,
+            Vec::new(),
+            |p| {
+                lock_count += 1;
+                stored_len = p.len();
+            }
+        ));
+        assert_eq!(lock_count, 2);
+        assert_eq!(stored_len, 0);
+
+        // Subsequent empty frames skip locking again.
+        for _ in 0..4 {
+            assert!(!sync_alert_primitives_if_needed(
+                &ctx,
+                token,
+                Vec::new(),
+                |_| {
+                    lock_count += 1;
+                }
+            ));
+        }
+        assert_eq!(lock_count, 2);
     }
 }

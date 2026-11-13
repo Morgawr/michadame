@@ -1,9 +1,120 @@
 use super::Pc98Config;
 use anyhow::Result;
-use std::collections::BTreeMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
+
+const PC98_LIBRARY_CACHE_VERSION: u32 = 1;
+const MAX_CACHED_DISK_ENTRIES: usize = 32_768;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachedDiskClassification {
+    pub len: u64,
+    pub mtime_secs: u64,
+    pub mtime_nanos: u32,
+    pub is_self_bootable: bool,
+    pub has_autoexec: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Pc98DiskMetadataCache {
+    pub version: u32,
+    pub entries: HashMap<String, CachedDiskClassification>,
+    #[serde(skip)]
+    pub dirty: bool,
+}
+
+impl Pc98DiskMetadataCache {
+    pub fn new() -> Self {
+        Self {
+            version: PC98_LIBRARY_CACHE_VERSION,
+            entries: HashMap::new(),
+            dirty: false,
+        }
+    }
+
+    pub fn load_from_file(path: &Path) -> Self {
+        let Ok(bytes) = fs::read(path) else {
+            return Self::new();
+        };
+        match serde_json::from_slice::<Self>(&bytes) {
+            Ok(mut parsed) if parsed.version == PC98_LIBRARY_CACHE_VERSION => {
+                parsed.dirty = false;
+                parsed
+            }
+            _ => Self::new(),
+        }
+    }
+
+    pub fn save_to_file(&mut self, path: &Path) -> Result<()> {
+        if !self.dirty {
+            return Ok(());
+        }
+        if self.entries.len() > MAX_CACHED_DISK_ENTRIES {
+            self.entries.retain(|p, _| Path::new(p).exists());
+        }
+        self.version = PC98_LIBRARY_CACHE_VERSION;
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let tmp_path = path.with_extension("json.tmp");
+        let payload = serde_json::to_vec(self)?;
+        fs::write(&tmp_path, payload)?;
+        fs::rename(&tmp_path, path)?;
+        self.dirty = false;
+        Ok(())
+    }
+
+    fn get_or_compute(
+        &mut self,
+        path: &Path,
+        compute: impl FnOnce(&Path) -> (bool, bool),
+    ) -> (bool, bool) {
+        let Some((len, mtime_secs, mtime_nanos)) = file_mtime_and_size(path) else {
+            return compute(path);
+        };
+        let key = path.to_string_lossy();
+        if let Some(hit) = self.entries.get(key.as_ref()) {
+            if hit.len == len && hit.mtime_secs == mtime_secs && hit.mtime_nanos == mtime_nanos {
+                return (hit.is_self_bootable, hit.has_autoexec);
+            }
+        }
+        let (is_self_bootable, has_autoexec) = compute(path);
+        self.entries.insert(
+            key.into_owned(),
+            CachedDiskClassification {
+                len,
+                mtime_secs,
+                mtime_nanos,
+                is_self_bootable,
+                has_autoexec,
+            },
+        );
+        self.dirty = true;
+        (is_self_bootable, has_autoexec)
+    }
+}
+
+pub fn default_pc98_library_cache_path() -> PathBuf {
+    confy::get_configuration_file_path("michadame", None)
+        .unwrap_or_else(|_| PathBuf::from("michadame.toml"))
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("pc98_library_cache.json")
+}
+
+pub(crate) fn file_mtime_and_size(path: &Path) -> Option<(u64, u64, u32)> {
+    let meta = fs::metadata(path).ok()?;
+    let dur = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .unwrap_or_default();
+    Some((meta.len(), dur.as_secs(), dur.subsec_nanos()))
+}
 
 pub const FDD_EXTS: &[&str] = &[
     "d88", "88d", "d98", "98d", "fdi", "xdf", "hdm", "dup", "2hd", "tfd", "nfd", "hd4", "hd5",
@@ -243,15 +354,7 @@ fn extract_floppy_payload(ext: &str, data: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-/// Inspects a PC-98 floppy image's boot sector (Track 0, Sector 1) and FAT root directory
-/// to determine whether the disk is self-bootable or requires a separate MS-DOS boot drive.
-pub fn is_floppy_self_bootable(path: &Path) -> bool {
-    let Some((ext, raw)) = read_prefix_from_file(path, 196_608) else {
-        return false;
-    };
-    let Some(payload) = extract_floppy_payload(&ext, &raw) else {
-        return false;
-    };
+fn is_floppy_payload_self_bootable(payload: &[u8]) -> bool {
     if payload.len() < 2048 {
         return false;
     }
@@ -302,18 +405,38 @@ pub fn is_floppy_self_bootable(path: &Path) -> bool {
     true
 }
 
-/// Checks whether a floppy disk image contains an `AUTOEXEC.BAT` entry in its directory area.
-pub fn floppy_has_autoexec(path: &Path) -> bool {
+fn floppy_payload_has_autoexec(payload: &[u8]) -> bool {
+    payload.len() >= 2048 && contains_bytes(&payload[1024..], b"AUTOEXECBAT")
+}
+
+/// Reads a PC-98 floppy image header/boot-sector prefix once and returns
+/// `(is_self_bootable, has_autoexec_bat)`.
+pub fn inspect_floppy_image(path: &Path) -> (bool, bool) {
     let Some((ext, raw)) = read_prefix_from_file(path, 196_608) else {
-        return false;
+        return (false, false);
     };
     let Some(payload) = extract_floppy_payload(&ext, &raw) else {
-        return false;
+        return (false, false);
     };
-    if payload.len() < 2048 {
-        return false;
-    }
-    contains_bytes(&payload[1024..], b"AUTOEXECBAT")
+    (
+        is_floppy_payload_self_bootable(&payload),
+        floppy_payload_has_autoexec(&payload),
+    )
+}
+
+fn inspect_floppy_image_cached(path: &Path, cache: &mut Pc98DiskMetadataCache) -> (bool, bool) {
+    cache.get_or_compute(path, inspect_floppy_image)
+}
+
+/// Inspects a PC-98 floppy image's boot sector (Track 0, Sector 1) and FAT root directory
+/// to determine whether the disk is self-bootable or requires a separate MS-DOS boot drive.
+pub fn is_floppy_self_bootable(path: &Path) -> bool {
+    inspect_floppy_image(path).0
+}
+
+/// Checks whether a floppy disk image contains an `AUTOEXEC.BAT` entry in its directory area.
+pub fn floppy_has_autoexec(path: &Path) -> bool {
+    inspect_floppy_image(path).1
 }
 
 /// Inspects a PC-98 hard disk image (`.hdi`, `.nhd`, etc.) and returns
@@ -332,6 +455,10 @@ pub fn inspect_hdd_image(path: &Path) -> (bool, bool) {
 
     let is_self_bootable = if has_io_dir { true } else { !has_dos_boot_stub };
     (is_self_bootable, has_autoexec)
+}
+
+fn inspect_hdd_image_cached(path: &Path, cache: &mut Pc98DiskMetadataCache) -> (bool, bool) {
+    cache.get_or_compute(path, inspect_hdd_image)
 }
 
 pub fn has_boot_floppy_keyword(filename: &str) -> bool {
@@ -376,16 +503,16 @@ pub fn should_defer_fdd_boot(config: &Pc98Config) -> bool {
         return true;
     }
 
-    // If FDD 1 is not self-bootable, defer it so it never hijacks the boot from HDD 1.
-    if !is_floppy_self_bootable(fdd1_path) {
+    // Read FDD 1 prefix once to determine both self-bootability and AUTOEXEC presence.
+    let (fdd_bootable, fdd_has_autoexec) = inspect_floppy_image(fdd1_path);
+    if !fdd_bootable {
         return true;
     }
 
     // FDD 1 is self-bootable; check whether HDD 1 needs FDD 1 as its boot disk.
     let fdd1_name = fdd1_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let (hdd_bootable, hdd_has_autoexec) = inspect_hdd_image(hdd1_path);
-    let fdd_is_dedicated_boot =
-        has_boot_floppy_keyword(fdd1_name) && floppy_has_autoexec(fdd1_path);
+    let fdd_is_dedicated_boot = has_boot_floppy_keyword(fdd1_name) && fdd_has_autoexec;
     if !hdd_bootable || !hdd_has_autoexec || fdd_is_dedicated_boot {
         // Boot from FDD 1 (A:) with HDD 1 mounted at power-on (C:).
         return false;
@@ -866,6 +993,14 @@ pub fn floppy_role_tier(filename: &str) -> u8 {
 /// and the second disk (`Disk 2` / `Disk B` / `Game` / `Data`) is at index 1 (`FDD 2`).
 /// Also returns whether at least one floppy in the set is self-bootable.
 pub fn order_floppies_and_check_bootable(floppies: &mut Vec<PathBuf>) -> bool {
+    let mut cache = Pc98DiskMetadataCache::new();
+    order_floppies_and_check_bootable_with_cache(floppies, &mut cache)
+}
+
+fn order_floppies_and_check_bootable_with_cache(
+    floppies: &mut Vec<PathBuf>,
+    cache: &mut Pc98DiskMetadataCache,
+) -> bool {
     floppies.sort_by(|a, b| {
         let name_a = a.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let name_b = b.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -880,7 +1015,7 @@ pub fn order_floppies_and_check_bootable(floppies: &mut Vec<PathBuf>) -> bool {
         return false;
     }
 
-    if is_floppy_self_bootable(&floppies[0]) {
+    if inspect_floppy_image_cached(&floppies[0], cache).0 {
         return true;
     }
 
@@ -899,7 +1034,7 @@ pub fn order_floppies_and_check_bootable(floppies: &mut Vec<PathBuf>) -> bool {
         if is_numbered_continuation_disk(name) {
             continue;
         }
-        if is_floppy_self_bootable(&floppies[idx]) {
+        if inspect_floppy_image_cached(&floppies[idx], cache).0 {
             let boot_disk = floppies.remove(idx);
             floppies.insert(0, boot_disk);
             return true;
@@ -1013,7 +1148,30 @@ fn is_master_dos_file(path: &Path, dos_hdd_path: Option<&Path>) -> bool {
 }
 
 /// Recursively scans `root_dir` and returns all discovered PC-98 games, sorted by title.
+/// In non-test builds, persists `(mtime, size)` disk boot-sector classifications in
+/// `pc98_library_cache.json` so unchanged disk images skip 64-256 KB header reads on rescan.
 pub fn scan_games_directory(root_dir: &Path, dos_hdd_path: &str) -> Result<Vec<Pc98GameEntry>> {
+    if cfg!(test) {
+        let mut cache = Pc98DiskMetadataCache::new();
+        return scan_games_directory_with_cache(root_dir, dos_hdd_path, &mut cache);
+    }
+
+    let cache_path = default_pc98_library_cache_path();
+    let mut cache = Pc98DiskMetadataCache::load_from_file(&cache_path);
+    let games = scan_games_directory_with_cache(root_dir, dos_hdd_path, &mut cache)?;
+    if cache.dirty {
+        if let Err(e) = cache.save_to_file(&cache_path) {
+            tracing::debug!("Failed to save PC-98 library metadata cache: {e}");
+        }
+    }
+    Ok(games)
+}
+
+pub fn scan_games_directory_with_cache(
+    root_dir: &Path,
+    dos_hdd_path: &str,
+    cache: &mut Pc98DiskMetadataCache,
+) -> Result<Vec<Pc98GameEntry>> {
     if !root_dir.exists() {
         anyhow::bail!("Directory does not exist: {}", root_dir.display());
     }
@@ -1119,15 +1277,15 @@ pub fn scan_games_directory(root_dir: &Path, dos_hdd_path: &str) -> Result<Vec<P
                 b.file_name().and_then(|n| n.to_str()).unwrap_or(""),
             )
         });
-        let any_fdd_bootable = order_floppies_and_check_bootable(&mut floppies);
+        let any_fdd_bootable = order_floppies_and_check_bootable_with_cache(&mut floppies, cache);
 
         let boot_mode = if !hdds.is_empty() {
-            let (hdd_bootable, hdd_has_autoexec) = inspect_hdd_image(&hdds[0]);
+            let (hdd_bootable, hdd_has_autoexec) = inspect_hdd_image_cached(&hdds[0], cache);
             let fdd_has_boot_kw = floppies.iter().any(|f| {
                 f.file_name()
                     .and_then(|n| n.to_str())
                     .is_some_and(has_boot_floppy_keyword)
-                    && floppy_has_autoexec(f)
+                    && inspect_floppy_image_cached(f, cache).1
             });
             if any_fdd_bootable && (!hdd_bootable || !hdd_has_autoexec || fdd_has_boot_kw) {
                 Pc98BootMode::FloppyBootWithGameHdd
@@ -1543,5 +1701,58 @@ mod tests {
         assert!(cfg.hdd1_path.ends_with("EVE.hdi"));
         assert!(cfg.fdd1_path.is_empty());
         assert_eq!(detect_startup_command(&cfg).as_deref(), Some("eve\n"));
+    }
+
+    #[test]
+    fn test_inspect_floppy_image_and_metadata_cache_persistence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let cache_file = root.join("pc98_library_cache.json");
+        let game_dir = root.join("TestGame");
+        fs::create_dir_all(&game_dir).unwrap();
+
+        let mut bs_boot = vec![0xEBu8, 0x1C, 0x90];
+        bs_boot.resize(1024, 0x90);
+        let disk_path = game_dir.join("boot_disk.fdi");
+        fs::write(
+            &disk_path,
+            make_fdi_image(&bs_boot, b"IO      SYS\x07\x00\x00\x00\x00AUTOEXECBAT\x20"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            inspect_floppy_image(&disk_path),
+            (
+                is_floppy_self_bootable(&disk_path),
+                floppy_has_autoexec(&disk_path)
+            )
+        );
+        assert_eq!(inspect_floppy_image(&disk_path), (true, true));
+
+        let mut cache = Pc98DiskMetadataCache::new();
+        let games1 = scan_games_directory_with_cache(root, "", &mut cache).unwrap();
+        assert_eq!(games1.len(), 1);
+        assert_eq!(games1[0].boot_mode, Pc98BootMode::SelfBootFloppy);
+        assert!(cache.dirty);
+        cache.save_to_file(&cache_file).unwrap();
+        assert!(!cache.dirty);
+
+        // Reload cache from disk and rescan unchanged files: zero cache misses (dirty stays false)
+        let mut reloaded = Pc98DiskMetadataCache::load_from_file(&cache_file);
+        assert!(!reloaded.dirty);
+        let games2 = scan_games_directory_with_cache(root, "", &mut reloaded).unwrap();
+        assert_eq!(games2, games1);
+        assert!(!reloaded.dirty);
+
+        // Mutate file size + contents to a non-bootable stub -> cache entry invalidates and re-reads
+        let mut bs_nonboot = vec![0xEBu8, 0xFE];
+        bs_nonboot.resize(1024, 0);
+        let mut mutated = make_fdi_image(&bs_nonboot, b"GAME    EXE\x20");
+        mutated.extend_from_slice(&[0u8; 512]);
+        fs::write(&disk_path, mutated).unwrap();
+
+        let games3 = scan_games_directory_with_cache(root, "", &mut reloaded).unwrap();
+        assert_eq!(games3[0].boot_mode, Pc98BootMode::DosHddWithFloppy);
+        assert!(reloaded.dirty);
     }
 }

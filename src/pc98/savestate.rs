@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static SLOT_GENERATION_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -63,6 +63,8 @@ pub struct SaveStateMeta {
     pub tape_path: String,
     pub resolution: (u32, u32),
     pub size_bytes: usize,
+    #[serde(default)]
+    pub state_len: Option<u64>,
 }
 
 impl SaveStateMeta {
@@ -384,6 +386,7 @@ pub fn migrate_legacy_slots_if_needed(
         };
         meta.game_key = game_key.to_string();
         meta.size_bytes = state_bytes.len();
+        meta.state_len = Some(state_bytes.len() as u64);
         let _ = write_slot_files(states_root, game_key, &meta, &state_bytes, None);
         if leg_thumb.is_file() {
             if let Ok(thumb_bytes) = fs::read(&leg_thumb) {
@@ -556,6 +559,118 @@ pub fn write_slot_files_with_options(
     )
 }
 
+/// Asynchronous save-state disk commit payload offloaded from the real-time emulator thread.
+pub struct SaveStateCommitRequest {
+    pub states_root: PathBuf,
+    pub game_key: String,
+    pub meta: SaveStateMeta,
+    pub state_bytes: Vec<u8>,
+    pub frame: Option<Arc<RawFrame>>,
+    pub core_id: Option<String>,
+    pub on_complete: Box<dyn FnOnce(Result<SaveStateMeta>) + Send + 'static>,
+}
+
+enum CommitWorkerCmd {
+    Commit(SaveStateCommitRequest),
+    Flush(crossbeam_channel::Sender<()>),
+}
+
+/// Per-session ordered background worker that performs thumbnail JPEG encoding, FNV-1a hashing,
+/// atomic tempfile writes, and `sync_all()` off the real-time emulation thread while preserving
+/// strict FIFO commit ordering and `LoadState` / shutdown flush barriers.
+pub struct SaveStateCommitWorker {
+    cmd_tx: Option<crossbeam_channel::Sender<CommitWorkerCmd>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SaveStateCommitWorker {
+    pub fn new(thread_name: &str) -> Self {
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<CommitWorkerCmd>();
+        let handle = std::thread::Builder::new()
+            .name(thread_name.to_string())
+            .spawn(move || {
+                while let Ok(cmd) = cmd_rx.recv() {
+                    match cmd {
+                        CommitWorkerCmd::Commit(req) => {
+                            Self::execute_commit(req);
+                        }
+                        CommitWorkerCmd::Flush(ack_tx) => {
+                            let _ = ack_tx.send(());
+                        }
+                    }
+                }
+            })
+            .ok();
+
+        if handle.is_some() {
+            Self {
+                cmd_tx: Some(cmd_tx),
+                handle,
+            }
+        } else {
+            Self {
+                cmd_tx: None,
+                handle: None,
+            }
+        }
+    }
+
+    fn execute_commit(req: SaveStateCommitRequest) {
+        let mut committed_meta = req.meta;
+        committed_meta.slot = committed_meta.slot.clamp(1, SAVE_SLOT_COUNT as u8);
+        committed_meta.size_bytes = req.state_bytes.len();
+        committed_meta.state_len = Some(req.state_bytes.len() as u64);
+        let res = write_slot_files_with_options(
+            &req.states_root,
+            &req.game_key,
+            &committed_meta,
+            &req.state_bytes,
+            req.frame.as_deref(),
+            req.core_id.as_deref(),
+            None,
+        )
+        .map(|()| committed_meta);
+        (req.on_complete)(res);
+    }
+
+    /// Enqueues a save-state commit in strict FIFO order (falling back synchronously only if
+    /// spawning the worker thread failed).
+    pub fn submit(&self, req: SaveStateCommitRequest) {
+        if let Some(ref tx) = self.cmd_tx {
+            match tx.send(CommitWorkerCmd::Commit(req)) {
+                Ok(()) => {}
+                Err(err) => {
+                    if let CommitWorkerCmd::Commit(req) = err.0 {
+                        Self::execute_commit(req);
+                    }
+                }
+            }
+        } else {
+            Self::execute_commit(req);
+        }
+    }
+
+    /// Blocks until all previously submitted save-state commits on this session have finished
+    /// flushing to disk and sending their completion events.
+    pub fn flush(&self) {
+        if let Some(ref tx) = self.cmd_tx {
+            let (ack_tx, ack_rx) = crossbeam_channel::bounded(1);
+            if tx.send(CommitWorkerCmd::Flush(ack_tx)).is_ok() {
+                let _ = ack_rx.recv();
+            }
+        }
+    }
+}
+
+impl Drop for SaveStateCommitWorker {
+    fn drop(&mut self) {
+        drop(self.cmd_tx.take());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 fn write_slot_files_raw_thumbnail(
     states_root: &Path,
     game_key: &str,
@@ -648,6 +763,7 @@ fn write_slot_files_raw_thumbnail(
     let mut normalized_meta = meta.clone();
     normalized_meta.slot = slot;
     normalized_meta.size_bytes = state_bytes.len();
+    normalized_meta.state_len = Some(state_bytes.len() as u64);
 
     let manifest = SlotManifest {
         schema_version: SLOT_MANIFEST_SCHEMA_VERSION,
@@ -774,6 +890,16 @@ fn read_and_validate_manifest_slot(
     if state_bytes.is_empty() {
         anyhow::bail!("Slot {} state file is empty", slot);
     }
+    if let Some(expected_len) = manifest.meta.state_len {
+        if state_bytes.len() as u64 != expected_len {
+            anyhow::bail!(
+                "Slot {} state length mismatch: metadata declared {} bytes, got {} bytes",
+                slot,
+                expected_len,
+                state_bytes.len()
+            );
+        }
+    }
     if state_bytes.len() != manifest.meta.size_bytes {
         anyhow::bail!(
             "Slot {} state size mismatch: metadata declared {} bytes, got {} bytes",
@@ -842,6 +968,7 @@ pub fn recover_legacy_orphan_slot(
         tape_path: String::new(),
         resolution: (640, 400),
         size_bytes: state_bytes.len(),
+        state_len: Some(state_bytes.len() as u64),
     };
     Ok((meta, state_bytes))
 }
@@ -999,6 +1126,105 @@ where
     Ok(())
 }
 
+/// Fast O(1) metadata + `stat()` summary reader for UI slot listing (`list_game_slots`).
+/// Verifies active generation / legacy slot resolution and checks `.state` file existence,
+/// regular-file status, non-zero size, and exact byte length (`meta.state_len`) via
+/// `std::fs::metadata` without reading or FNV-1a hashing multi-MB `.state` payloads.
+/// Falls back to full byte hashing ONLY for legacy manifests where `meta.state_len` is `None`.
+pub fn read_slot_summary_fast(
+    states_root: &Path,
+    game_key: &str,
+    slot: u8,
+) -> Result<SaveStateMeta> {
+    let slot = slot.clamp(1, SAVE_SLOT_COUNT as u8);
+    let dir = game_states_dir(states_root, game_key);
+    let meta_path = slot_meta_path(states_root, game_key, slot);
+
+    if !meta_path.is_file() {
+        let legacy_state = dir.join(format!("slot_{slot}.state"));
+        if legacy_state.is_file() {
+            anyhow::bail!(
+                "Slot {} is missing its metadata manifest (use explicit legacy recovery)",
+                slot
+            );
+        }
+        anyhow::bail!("Slot {} is empty (no save state found)", slot);
+    }
+
+    let manifest = read_slot_manifest(states_root, game_key, slot)?;
+    let state_path =
+        if manifest.schema_version >= SLOT_MANIFEST_SCHEMA_VERSION && manifest.generation > 0 {
+            slot_gen_state_path(&dir, slot, manifest.generation)
+        } else {
+            dir.join(format!("slot_{slot}.state"))
+        };
+
+    let md = fs::metadata(&state_path).with_context(|| {
+        format!(
+            "Slot {} state payload {:?} is missing",
+            slot,
+            state_path.file_name().unwrap_or_default()
+        )
+    })?;
+    if !md.is_file() {
+        anyhow::bail!(
+            "Slot {} state payload {:?} is not a regular file",
+            slot,
+            state_path.file_name().unwrap_or_default()
+        );
+    }
+
+    let actual_len = md.len();
+    if actual_len == 0 {
+        anyhow::bail!("Slot {} state file is empty", slot);
+    }
+
+    if let Some(expected_len) = manifest.meta.state_len {
+        if actual_len != expected_len {
+            anyhow::bail!(
+                "Slot {} state length mismatch: metadata declared {} bytes, got {} bytes",
+                slot,
+                expected_len,
+                actual_len
+            );
+        }
+        if manifest.meta.size_bytes > 0 && actual_len != manifest.meta.size_bytes as u64 {
+            anyhow::bail!(
+                "Slot {} state size mismatch: metadata declared {} bytes, got {} bytes",
+                slot,
+                manifest.meta.size_bytes,
+                actual_len
+            );
+        }
+    } else {
+        if actual_len != manifest.meta.size_bytes as u64 {
+            anyhow::bail!(
+                "Slot {} state size mismatch: metadata declared {} bytes, got {} bytes",
+                slot,
+                manifest.meta.size_bytes,
+                actual_len
+            );
+        }
+        if manifest.schema_version >= SLOT_MANIFEST_SCHEMA_VERSION
+            && !manifest.state_checksum.is_empty()
+        {
+            let state_bytes = fs::read(&state_path)
+                .with_context(|| format!("Failed to read save state {:?}", state_path))?;
+            let actual_checksum = format!("{:016x}", fnv1a_64(&state_bytes));
+            if actual_checksum != manifest.state_checksum {
+                anyhow::bail!(
+                    "Slot {} state checksum mismatch: expected {}, got {}",
+                    slot,
+                    manifest.state_checksum,
+                    actual_checksum
+                );
+            }
+        }
+    }
+
+    Ok(manifest.meta)
+}
+
 /// Returns metadata for all 8 save slots (`index = (slot - 1) as usize`) of `game_key`.
 /// Only valid, intact slots are returned.
 pub fn list_game_slots(
@@ -1008,8 +1234,8 @@ pub fn list_game_slots(
     let mut slots: [Option<SaveStateMeta>; SAVE_SLOT_COUNT] = Default::default();
     for idx in 0..SAVE_SLOT_COUNT {
         let slot = (idx + 1) as u8;
-        if let Ok((manifest, _)) = read_and_validate_manifest_slot(states_root, game_key, slot) {
-            slots[idx] = Some(manifest.meta);
+        if let Ok(meta) = read_slot_summary_fast(states_root, game_key, slot) {
+            slots[idx] = Some(meta);
         }
     }
     slots
@@ -1191,6 +1417,7 @@ mod tests {
             tape_path: String::new(),
             resolution: (640, 400),
             size_bytes: 6,
+            state_len: Some(6),
         };
         let mut meta2 = meta1.clone();
         meta2.game_key = k2.clone();
@@ -1214,6 +1441,7 @@ mod tests {
             tape_path: String::new(),
             resolution: (640, 400),
             size_bytes: 12,
+            state_len: None,
         };
         fs::write(legacy_dir.join("slot_2.state"), b"LEGACY_BYTES").unwrap();
         fs::write(
@@ -1259,6 +1487,7 @@ mod tests {
             tape_path: String::new(),
             resolution: (640, 400),
             size_bytes: 8,
+            state_len: Some(8),
         };
         write_slot_files(root, game_key, &meta_v1, b"STATE_V1", Some(&frame_v1)).unwrap();
         let thumb_v1 = load_slot_thumbnail_rgba(root, game_key, 1).unwrap().2;
@@ -1277,6 +1506,7 @@ mod tests {
             tape_path: String::new(),
             resolution: (640, 400),
             size_bytes: 8,
+            state_len: Some(8),
         };
 
         for fault in [
@@ -1365,6 +1595,7 @@ mod tests {
             tape_path: String::new(),
             resolution: (640, 400),
             size_bytes: 9,
+            state_len: Some(9),
         };
         write_slot_files_with_options(
             root,
@@ -1464,6 +1695,7 @@ mod tests {
             tape_path: String::new(),
             resolution: (640, 400),
             size_bytes: 5,
+            state_len: Some(5),
         };
 
         write_slot_files(root, game_key, &meta, b"STATE", Some(&frame)).unwrap();
@@ -1507,5 +1739,134 @@ mod tests {
         assert_eq!(pc88.active_slot, 1);
         assert_eq!(pc88.cycle_slot(-1), 8);
         assert_eq!(pc88.cycle_slot(1), 1);
+    }
+
+    #[test]
+    fn test_list_game_slots_fast_stat_validation_and_load_byte_flip_checksum() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let game_key = "fast_list_game";
+
+        let payload = vec![0x5Au8; 64 * 1024];
+        let meta = SaveStateMeta {
+            slot: 2,
+            created_at: 1_700_123_456,
+            system: "PC-98".to_string(),
+            game_key: game_key.to_string(),
+            game_title: "Fast Slot Test".to_string(),
+            fdd1_path: String::new(),
+            fdd2_path: String::new(),
+            hdd1_path: String::new(),
+            tape_path: String::new(),
+            resolution: (640, 400),
+            size_bytes: 0,
+            state_len: None,
+        };
+        write_slot_files(root, game_key, &meta, &payload, None).unwrap();
+
+        // 1. `write_slot_files` populates `state_len` and `size_bytes` in the persisted manifest.
+        let listed = list_game_slots(root, game_key);
+        let slot2 = listed[1].as_ref().expect("slot 2 should be listed");
+        assert_eq!(slot2.state_len, Some(payload.len() as u64));
+        assert_eq!(slot2.size_bytes, payload.len());
+
+        // 2. Truncated `.state` file is rejected via O(1) `fs::metadata` length check.
+        let state_file = slot_state_path(root, game_key, 2);
+        fs::write(&state_file, &payload[..1024]).unwrap();
+        assert!(list_game_slots(root, game_key)[1].is_none());
+        assert!(read_slot_state(root, game_key, 2).is_err());
+
+        // 3. In-place byte flip keeping exact file length: `list_game_slots` does NOT read or hash
+        //    the multi-MB payload when `state_len` is `Some`, whereas `read_slot_state` (`LoadState`)
+        //    still catches the in-place byte-flip corruption via `state_checksum` (FNV-1a).
+        let mut flipped = payload.clone();
+        flipped[32_000] ^= 0xFF;
+        fs::write(&state_file, &flipped).unwrap();
+        assert!(
+            list_game_slots(root, game_key)[1].is_some(),
+            "Fast stat summary should not read/hash payload when state_len matches"
+        );
+        let load_err = read_slot_state(root, game_key, 2)
+            .expect_err("read_slot_state must catch in-place byte-flip corruption via FNV-1a");
+        assert!(
+            load_err.to_string().contains("checksum mismatch"),
+            "unexpected error: {load_err}"
+        );
+
+        // 4. Legacy manifest without `state_len` (`None`) falls back to FNV-1a verification.
+        let meta_file = slot_meta_path(root, game_key, 2);
+        let mut legacy_manifest: SlotManifest =
+            serde_json::from_str(&fs::read_to_string(&meta_file).unwrap()).unwrap();
+        legacy_manifest.meta.state_len = None;
+        fs::write(
+            &meta_file,
+            serde_json::to_string_pretty(&legacy_manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            list_game_slots(root, game_key)[1].is_none(),
+            "Legacy manifest without state_len must fall back to checksum verification"
+        );
+        fs::write(&state_file, &payload).unwrap();
+        assert!(list_game_slots(root, game_key)[1].is_some());
+    }
+
+    #[test]
+    fn test_async_savestate_commit_worker_fifo_ordering_and_flush_barrier() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let game_key = "async_worker_game";
+
+        let worker = SaveStateCommitWorker::new("test-savestate-commit");
+        let (done_tx, done_rx) = crossbeam_channel::unbounded::<(u8, usize)>();
+
+        for (seq, bytes) in [
+            (1usize, b"FIRST_STATE".as_slice()),
+            (2usize, b"SECOND_STATE_NEWER".as_slice()),
+            (3usize, b"THIRD_STATE_FINAL!".as_slice()),
+        ] {
+            let tx = done_tx.clone();
+            let meta = SaveStateMeta {
+                slot: 1,
+                created_at: 1_700_000_000 + seq as i64,
+                system: "PC-98".to_string(),
+                game_key: game_key.to_string(),
+                game_title: format!("Seq {seq}"),
+                fdd1_path: String::new(),
+                fdd2_path: String::new(),
+                hdd1_path: String::new(),
+                tape_path: String::new(),
+                resolution: (640, 400),
+                size_bytes: bytes.len(),
+                state_len: Some(bytes.len() as u64),
+            };
+            worker.submit(SaveStateCommitRequest {
+                states_root: root.clone(),
+                game_key: game_key.to_string(),
+                meta,
+                state_bytes: bytes.to_vec(),
+                frame: Some(Arc::new(make_test_frame(seq as u8 * 40, 100, 200))),
+                core_id: Some("np2kai_libretro".to_string()),
+                on_complete: Box::new(move |res| {
+                    let committed = res.expect("async commit must succeed");
+                    let _ = tx.send((committed.slot, seq));
+                }),
+            });
+        }
+
+        // Flush acts as a strict barrier before LoadState: all 3 back-to-back saves must have
+        // committed in FIFO order, leaving generation #3 active on disk.
+        worker.flush();
+
+        let completions: Vec<(u8, usize)> = done_rx.try_iter().collect();
+        assert_eq!(completions, vec![(1, 1), (1, 2), (1, 3)]);
+
+        let (loaded_meta, loaded_bytes) = read_slot_state(&root, game_key, 1).unwrap();
+        assert_eq!(loaded_bytes, b"THIRD_STATE_FINAL!");
+        assert_eq!(loaded_meta.game_title, "Seq 3");
+        assert_eq!(
+            loaded_meta.state_len,
+            Some(b"THIRD_STATE_FINAL!".len() as u64)
+        );
     }
 }

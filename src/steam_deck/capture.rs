@@ -1,4 +1,4 @@
-use crate::video::types::{ColorRange, RawFrame};
+use crate::video::types::{checkout_frame_buffer, ColorRange, RawFrame};
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::{
     atomic::{AtomicU64, AtomicU8, Ordering},
@@ -141,7 +141,62 @@ unsafe extern "C" fn on_state(data: *mut c_void, state: i32, error: *const c_cha
     }
 }
 
-/// Copy only visible pixels, respecting padded scanlines and normalizing BGRx to RGBA.
+#[inline]
+fn swizzle_bgrx_word(px: u32) -> u32 {
+    0xFF00_0000 | (px & 0x0000_FF00) | ((px & 0x00FF_0000) >> 16) | ((px & 0x0000_00FF) << 16)
+}
+
+#[inline]
+fn convert_xrgb_slice_to_rgba(src: &[u8], dst: &mut [u8], bgr: bool) {
+    let (src_chunks, src_rem) = src.as_chunks::<16>();
+    let (dst_chunks, dst_rem) = dst.as_chunks_mut::<16>();
+
+    if bgr {
+        for (in_blk, out_blk) in src_chunks.iter().zip(dst_chunks) {
+            let p0 = swizzle_bgrx_word(u32::from_le_bytes([
+                in_blk[0], in_blk[1], in_blk[2], in_blk[3],
+            ]));
+            let p1 = swizzle_bgrx_word(u32::from_le_bytes([
+                in_blk[4], in_blk[5], in_blk[6], in_blk[7],
+            ]));
+            let p2 = swizzle_bgrx_word(u32::from_le_bytes([
+                in_blk[8], in_blk[9], in_blk[10], in_blk[11],
+            ]));
+            let p3 = swizzle_bgrx_word(u32::from_le_bytes([
+                in_blk[12], in_blk[13], in_blk[14], in_blk[15],
+            ]));
+            out_blk[0..4].copy_from_slice(&p0.to_le_bytes());
+            out_blk[4..8].copy_from_slice(&p1.to_le_bytes());
+            out_blk[8..12].copy_from_slice(&p2.to_le_bytes());
+            out_blk[12..16].copy_from_slice(&p3.to_le_bytes());
+        }
+        for (in_px, out_px) in src_rem.chunks_exact(4).zip(dst_rem.chunks_exact_mut(4)) {
+            let px =
+                swizzle_bgrx_word(u32::from_le_bytes([in_px[0], in_px[1], in_px[2], in_px[3]]));
+            out_px.copy_from_slice(&px.to_le_bytes());
+        }
+    } else {
+        for (in_blk, out_blk) in src_chunks.iter().zip(dst_chunks) {
+            let p0 = u32::from_le_bytes([in_blk[0], in_blk[1], in_blk[2], in_blk[3]]) | 0xFF00_0000;
+            let p1 = u32::from_le_bytes([in_blk[4], in_blk[5], in_blk[6], in_blk[7]]) | 0xFF00_0000;
+            let p2 =
+                u32::from_le_bytes([in_blk[8], in_blk[9], in_blk[10], in_blk[11]]) | 0xFF00_0000;
+            let p3 =
+                u32::from_le_bytes([in_blk[12], in_blk[13], in_blk[14], in_blk[15]]) | 0xFF00_0000;
+            out_blk[0..4].copy_from_slice(&p0.to_le_bytes());
+            out_blk[4..8].copy_from_slice(&p1.to_le_bytes());
+            out_blk[8..12].copy_from_slice(&p2.to_le_bytes());
+            out_blk[12..16].copy_from_slice(&p3.to_le_bytes());
+        }
+        for (in_px, out_px) in src_rem.chunks_exact(4).zip(dst_rem.chunks_exact_mut(4)) {
+            let px = u32::from_le_bytes([in_px[0], in_px[1], in_px[2], in_px[3]]) | 0xFF00_0000;
+            out_px.copy_from_slice(&px.to_le_bytes());
+        }
+    }
+}
+
+/// Copy only visible pixels into a pooled frame buffer, respecting padded scanlines and
+/// normalizing BGRx/RGBx to opaque RGBA using SIMD-vectorizable `u32` chunked operations.
 pub fn rgba_pixels(
     bytes: &[u8],
     width: u32,
@@ -163,15 +218,20 @@ pub fn rgba_pixels(
     if bytes.len() < needed {
         return None;
     }
-    let mut rgba = Vec::with_capacity(row_bytes.checked_mul(height as usize)?);
-    for row in bytes[..needed].chunks(stride) {
-        for pixel in row[..row_bytes].chunks_exact(4) {
-            let pixel = if bgr {
-                [pixel[2], pixel[1], pixel[0], 255]
-            } else {
-                [pixel[0], pixel[1], pixel[2], 255]
-            };
-            rgba.extend_from_slice(&pixel);
+    let total_bytes = row_bytes.checked_mul(height as usize)?;
+    let mut rgba = checkout_frame_buffer(total_bytes);
+
+    if stride == row_bytes {
+        convert_xrgb_slice_to_rgba(&bytes[..total_bytes], &mut rgba, bgr);
+    } else {
+        for y in 0..height as usize {
+            let src_start = y * stride;
+            let dst_start = y * row_bytes;
+            convert_xrgb_slice_to_rgba(
+                &bytes[src_start..src_start + row_bytes],
+                &mut rgba[dst_start..dst_start + row_bytes],
+                bgr,
+            );
         }
     }
     Some(rgba)
@@ -302,6 +362,49 @@ mod tests {
         assert!(limiter.accept(Duration::from_secs(20)));
         for _ in 0..100 {
             assert!(!limiter.accept(Duration::from_secs(20)));
+        }
+    }
+
+    #[test]
+    fn rgba_pixels_swizzles_bgrx_and_rgbx_across_tight_and_padded_strides() {
+        // 5 pixels wide (tests 4-pixel 16-byte chunk + 1-pixel tail) x 2 rows with 8-byte stride padding
+        let width = 5u32;
+        let height = 2u32;
+        let stride = 28u32; // 20 visible bytes + 8 padding bytes
+        let mut src = vec![0xEEu8; (stride * height) as usize];
+
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let off = y * stride as usize + x * 4;
+                src[off] = (10 + y * 20 + x) as u8; // B or R
+                src[off + 1] = (50 + y * 10 + x) as u8; // G
+                src[off + 2] = (150 + y * 5 + x) as u8; // R or B
+                src[off + 3] = 0; // X=0 must become A=255
+            }
+        }
+
+        let bgr_out = rgba_pixels(&src, width, height, stride, true).unwrap();
+        assert_eq!(bgr_out.len(), (width * height * 4) as usize);
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let dst_off = (y * width as usize + x) * 4;
+                assert_eq!(bgr_out[dst_off], (150 + y * 5 + x) as u8);
+                assert_eq!(bgr_out[dst_off + 1], (50 + y * 10 + x) as u8);
+                assert_eq!(bgr_out[dst_off + 2], (10 + y * 20 + x) as u8);
+                assert_eq!(bgr_out[dst_off + 3], 255);
+            }
+        }
+
+        let rgb_out = rgba_pixels(&src, width, height, stride, false).unwrap();
+        assert_eq!(rgb_out.len(), (width * height * 4) as usize);
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let dst_off = (y * width as usize + x) * 4;
+                assert_eq!(rgb_out[dst_off], (10 + y * 20 + x) as u8);
+                assert_eq!(rgb_out[dst_off + 1], (50 + y * 10 + x) as u8);
+                assert_eq!(rgb_out[dst_off + 2], (150 + y * 5 + x) as u8);
+                assert_eq!(rgb_out[dst_off + 3], 255);
+            }
         }
     }
 }

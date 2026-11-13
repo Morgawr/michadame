@@ -4,7 +4,7 @@
 // Uniforms control axis (0=horizontal, 1=vertical), step size, and direction.
 
 in vec2 v_tc;
-out vec4 fragColor;
+out vec2 fragColor;
 
 uniform sampler2D input_texture;
 uniform int axis;        // 0 = horizontal (along X), 1 = vertical (along Y)
@@ -64,5 +64,5 @@ void main() {
         result = even_val - t;
     }
 
-    fragColor = vec4(result, 0.0, 1.0);
+    fragColor = result;
 }

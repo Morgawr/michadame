@@ -126,6 +126,7 @@ fn call_post_clip(
 ) -> Result<ureq::Response, ureq::Error> {
     agent
         .post(CLIPS_URL)
+        .timeout(Duration::from_secs(10))
         .query("broadcaster_id", broadcaster_id)
         .query("title", title)
         .query("duration", &format!("{CLIP_DURATION_SECS:.1}"))
@@ -224,6 +225,7 @@ fn poll_clip_ready(
 
         let get_resp = agent
             .get(CLIPS_URL)
+            .timeout(Duration::from_secs(10))
             .query("id", clip_id)
             .set("Client-Id", token.effective_client_id())
             .set("Authorization", &format!("Bearer {}", token.access_token))
@@ -276,14 +278,13 @@ pub fn trigger_warmup_clip(broadcaster_id: String, token: StoredToken) {
                 Ok(None) => token,
                 Err(_) => return,
             };
-            let agent = ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(10))
-                .build();
+            let agent = super::http_agent();
             tracing::info!(
                 "Sending background Twitch stream warm-up clip for broadcaster '{broadcaster_id}' (preempting issue #935)..."
             );
             let resp = agent
                 .post(CLIPS_URL)
+                .timeout(Duration::from_secs(10))
                 .query("broadcaster_id", &broadcaster_id)
                 .query("title", "michadame-stream-warmup")
                 .set("Client-Id", active_token.effective_client_id())
@@ -318,12 +319,10 @@ fn create_and_poll_clip(
         Err(super::auth::AuthError::Network(_)) => token.clone(),
     };
 
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(10))
-        .build();
+    let agent = super::http_agent();
 
-    let clip_id = post_create_clip(&agent, broadcaster_id, title, &mut active_token)?;
-    if let Some(url) = poll_clip_ready(&agent, &clip_id, &active_token)? {
+    let clip_id = post_create_clip(agent, broadcaster_id, title, &mut active_token)?;
+    if let Some(url) = poll_clip_ready(agent, &clip_id, &active_token)? {
         return Ok(url);
     }
 

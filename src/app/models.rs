@@ -32,6 +32,7 @@ pub struct HardwareState {
     pub selected_format_index: usize,
     pub selected_resolution: (u32, u32),
     pub selected_framerate: u32,
+    pub video_hwdec: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -61,11 +62,43 @@ pub struct UiState {
     pub dismissed_config_error: bool,
     pub active_settings_tab: SettingsTab,
     pub config_save_pending: bool,
+    pub config_save_deadline: Option<Instant>,
     pub in_egui_frame: bool,
     pub any_pointer_down: bool,
     pub is_window_focused: bool,
+    pub last_cursor_grab: Option<egui::CursorGrab>,
+    pub last_cursor_visible: Option<bool>,
+    /// Guards async native file dialogs (`rfd::FileDialog`) so only one opens at a time.
+    pub file_dialog_in_flight: Arc<AtomicBool>,
     /// Resolution-aware UI scale (desktop only).
     pub scale: crate::ui::scaling::UiScaleState,
+}
+
+impl UiState {
+    pub fn is_file_dialog_open(&self) -> bool {
+        self.file_dialog_in_flight
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn set_cursor_grab(&mut self, ctx: &egui::Context, grab: egui::CursorGrab) {
+        if self.last_cursor_grab != Some(grab) {
+            self.last_cursor_grab = Some(grab);
+            ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(grab));
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn set_cursor_visible(&mut self, ctx: &egui::Context, visible: bool) {
+        if self.last_cursor_visible != Some(visible) {
+            self.last_cursor_visible = Some(visible);
+            ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(visible));
+        }
+    }
+
+    pub fn reset_cursor_state_cache(&mut self) {
+        self.last_cursor_grab = None;
+        self.last_cursor_visible = None;
+    }
 }
 
 pub struct CrtSettings {
@@ -1803,6 +1836,18 @@ impl Default for AudioReactiveRuntime {
 }
 
 impl AudioReactiveRuntime {
+    pub fn has_active_energy(&self, threshold: f32) -> bool {
+        self.low_env > threshold
+            || self.mid_env > threshold
+            || self.high_env > threshold
+            || self.transient_env > threshold
+            || self.slow_energy > threshold
+            || self.spring_pos_x.abs() > threshold
+            || self.spring_pos_y.abs() > threshold
+            || self.spring_vel_x.abs() > threshold
+            || self.spring_vel_y.abs() > threshold
+    }
+
     pub fn step(
         &mut self,
         raw: (f32, f32, f32, f32, f32),
@@ -2148,6 +2193,36 @@ impl WebcamState {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum AsyncFileDialogResult {
+    VideoFile(std::path::PathBuf),
+    GamescopeScript(std::path::PathBuf),
+    PitchDictZip(std::path::PathBuf),
+    Pc98Media(crate::pc98::Pc98MediaSlot, std::path::PathBuf),
+    Pc88Media(crate::pc88::Pc88MediaSlot, std::path::PathBuf),
+}
+
+#[derive(Debug, Clone)]
+pub enum V4l2FormatProbeTarget {
+    Capture {
+        saved_fourcc: Option<String>,
+        saved_res: Option<(u32, u32)>,
+        saved_fps: Option<u32>,
+        announce: bool,
+    },
+    Webcam {
+        select_first_defaults: bool,
+        announce_err: bool,
+    },
+}
+
+pub struct V4l2FormatProbeResult {
+    pub generation: u64,
+    pub device: String,
+    pub target: V4l2FormatProbeTarget,
+    pub formats: Result<Vec<VideoFormat>, String>,
+}
+
 pub struct AppState {
     pub steam_deck: Option<crate::steam_deck::SteamDeckState>,
     pub replay: crate::replay::Replay,
@@ -2183,7 +2258,15 @@ pub struct AppState {
     pub video_player: Option<VideoPlayerState>,
     pub video_player_event_receiver:
         Option<crossbeam_channel::Receiver<crate::video::player::PlayerEvent>>,
-    pub video_file_dialog_receiver: Option<crossbeam_channel::Receiver<std::path::PathBuf>>,
+    pub file_dialog_receiver: Option<crossbeam_channel::Receiver<AsyncFileDialogResult>>,
+    pub usb_reset_in_progress: bool,
+    pub usb_reset_receiver: Option<crossbeam_channel::Receiver<(bool, Result<(), String>)>>,
+    pub capture_format_probe_gen: u64,
+    pub webcam_format_probe_gen: u64,
+    pub capture_format_probing: bool,
+    pub webcam_format_probing: bool,
+    pub v4l2_format_probe_tx: crossbeam_channel::Sender<V4l2FormatProbeResult>,
+    pub v4l2_format_probe_rx: crossbeam_channel::Receiver<V4l2FormatProbeResult>,
     pub pending_audio_stream: Option<PendingAudioStream>,
     pub device_scan_receiver: Option<crossbeam_channel::Receiver<devices::DeviceScanResult>>,
     pub logo_texture: Option<egui::TextureHandle>,
@@ -2219,7 +2302,6 @@ pub struct AppState {
     pub gamescope_launcher_script: String,
     pub steam_games: Vec<crate::gamescope::steam::SteamGame>,
     pub selected_steam_game: Option<String>,
-    pub gamescope_script_dialog_receiver: Option<crossbeam_channel::Receiver<std::path::PathBuf>>,
     pub retro_pc_system: crate::pc88::RetroPcSystem,
     pub pc98: crate::pc98::Pc98State,
     pub pc88: crate::pc88::Pc88State,
@@ -2233,6 +2315,7 @@ pub struct AppState {
     pub fft_black_threshold: f32,
     pub fft_mask_save_name: String,
     pub fft_available_masks: Vec<String>,
+    pub fft_masks_scanned_res: Option<(u32, u32)>,
     pub ocr: crate::ocr::OcrState,
     pub dict: crate::dict::DictState,
     pub bank: crate::bank::BankState,
@@ -2242,6 +2325,7 @@ pub struct AppState {
     pub whiteboard: crate::ui::whiteboard::WhiteboardState,
     pub screenshot: crate::screenshot::ScreenshotState,
     pub replay_scrub: crate::ui::replay_scrub::ReplayScrubState,
+    pub loaded_config_base: Option<config::MichadameConfig>,
     pub config_load_error: Option<String>,
     pub config_quarantine_path: Option<std::path::PathBuf>,
 }
@@ -2263,6 +2347,9 @@ mod tests {
         assert!(!state.ui.video_window_open);
         assert!(state.video_status_receiver.is_none());
         assert!(state.pending_audio_stream.is_none());
+        assert!(state.fft_masks_scanned_res.is_none());
+        assert!(!state.ui.is_file_dialog_open());
+        assert!(!state.usb_reset_in_progress);
         assert_eq!(state.crt.hard_scan, -8.0);
         assert_eq!(state.halo.brightboost, 1.30);
         assert_eq!(state.halo_defaults, state.halo);

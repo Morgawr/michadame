@@ -10,12 +10,14 @@ use super::{
 use crate::video::types::{ColorRange, RawFrame};
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender};
-use rodio::{Sink, Source};
+use rodio::Source;
+use rtrb::{Consumer, Producer, RingBuffer};
+use std::cell::{Cell, UnsafeCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{c_char, c_int, c_uint, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     Arc, Condvar, Mutex, OnceLock,
 };
 use std::time::{Duration, Instant};
@@ -103,50 +105,140 @@ type RetroInputPollFn = unsafe extern "C" fn();
 type RetroInputStateFn =
     unsafe extern "C" fn(port: c_uint, device: c_uint, index: c_uint, id: c_uint) -> i16;
 
-struct Pc98AudioQueue {
-    samples: VecDeque<f32>,
-}
+const PC98_AUDIO_RING_CAPACITY: usize = 32_768;
+const PC98_AUDIO_BATCH_SAMPLES: usize = 512;
 
 struct Pc98AudioSource {
-    queue: Arc<Mutex<Pc98AudioQueue>>,
-    read_buf: VecDeque<f32>,
+    consumer: Consumer<f32>,
+    read_buf: [f32; PC98_AUDIO_BATCH_SAMPLES],
+    read_pos: usize,
+    read_len: usize,
+    volume_bits: Arc<AtomicU32>,
+    stop: Arc<AtomicBool>,
+    flush: Arc<AtomicBool>,
+}
+
+impl Pc98AudioSource {
+    fn new(
+        consumer: Consumer<f32>,
+        volume_bits: Arc<AtomicU32>,
+        stop: Arc<AtomicBool>,
+        flush: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            consumer,
+            read_buf: [0.0; PC98_AUDIO_BATCH_SAMPLES],
+            read_pos: 0,
+            read_len: 0,
+            volume_bits,
+            stop,
+            flush,
+        }
+    }
 }
 
 impl Iterator for Pc98AudioSource {
     type Item = f32;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        if self.read_buf.is_empty() {
-            if let Ok(mut q) = self.queue.try_lock() {
-                let take_count = q.samples.len().min(64);
-                if take_count > 0 {
-                    self.read_buf.extend(q.samples.drain(..take_count));
+        if self.read_pos < self.read_len {
+            let sample = self.read_buf[self.read_pos];
+            self.read_pos += 1;
+            let vol = f32::from_bits(self.volume_bits.load(Ordering::Relaxed));
+            return Some(sample * vol);
+        }
+        self.read_pos = 0;
+        self.read_len = 0;
+
+        if self.stop.load(Ordering::Relaxed) {
+            return None;
+        }
+
+        if self.flush.swap(false, Ordering::Acquire) {
+            let drop_even = self.consumer.slots() & !1;
+            if drop_even > 0 {
+                if let Ok(chunk) = self.consumer.read_chunk(drop_even) {
+                    chunk.commit_all();
                 }
             }
-            if self.read_buf.is_empty() {
-                self.read_buf.push_back(0.0);
-                self.read_buf.push_back(0.0);
+        }
+
+        // Cap queued latency to ~70ms at 44.1kHz stereo so audio never drifts behind video.
+        const MAX_QUEUED_SAMPLES: usize = (44100 * 2 / 14) & !1;
+        let total_slots = self.consumer.slots();
+        if total_slots > MAX_QUEUED_SAMPLES {
+            let drop_even = (total_slots - MAX_QUEUED_SAMPLES) & !1;
+            if drop_even > 0 {
+                if let Ok(chunk) = self.consumer.read_chunk(drop_even) {
+                    chunk.commit_all();
+                }
             }
         }
-        Some(self.read_buf.pop_front().unwrap_or(0.0))
+
+        let available_even = (self.consumer.slots() & !1).min(PC98_AUDIO_BATCH_SAMPLES);
+        if available_even >= 2 {
+            if let Ok(chunk) = self.consumer.read_chunk(available_even) {
+                let (first, second) = chunk.as_slices();
+                let first_len = first.len();
+                let second_len = second.len();
+                self.read_buf[..first_len].copy_from_slice(first);
+                if second_len > 0 {
+                    self.read_buf[first_len..first_len + second_len].copy_from_slice(second);
+                }
+                chunk.commit_all();
+                self.read_len = first_len + second_len;
+                self.read_pos = 1;
+                let vol = f32::from_bits(self.volume_bits.load(Ordering::Relaxed));
+                return Some(self.read_buf[0] * vol);
+            }
+        }
+
+        if self.consumer.is_abandoned() {
+            return None;
+        }
+
+        self.read_buf[0] = 0.0;
+        self.read_buf[1] = 0.0;
+        self.read_len = 2;
+        self.read_pos = 1;
+        Some(0.0)
     }
 }
 
 impl Source for Pc98AudioSource {
+    #[inline]
     fn current_frame_len(&self) -> Option<usize> {
         None
     }
 
+    #[inline]
     fn channels(&self) -> u16 {
         PC98_AUDIO_CHANNELS
     }
 
+    #[inline]
     fn sample_rate(&self) -> u32 {
         PC98_AUDIO_SAMPLE_RATE
     }
 
+    #[inline]
     fn total_duration(&self) -> Option<Duration> {
         None
+    }
+}
+
+struct Pc98AudioPlayback {
+    _guard: crate::devices::audio::SharedPlaybackGuard,
+    _handle: rodio::OutputStreamHandle,
+    volume_bits: Arc<AtomicU32>,
+    stop: Arc<AtomicBool>,
+    flush: Arc<AtomicBool>,
+}
+
+impl Drop for Pc98AudioPlayback {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
     }
 }
 
@@ -407,6 +499,11 @@ static mut NP2_PCM_CHANNELS: [Np2PcmChannel; 3] = [
 ];
 
 unsafe extern "C" fn np2_snddrv_pcmplay(_cookie: *mut c_void, num: c_uint, loop_flag: c_int) {
+    let rt_ptr = CURRENT_REALTIME_STATE.with(|c| c.get());
+    if !rt_ptr.is_null() {
+        (*rt_ptr).seek_mixer.play(num as usize, loop_flag != 0);
+        return;
+    }
     if let Ok(mut guard) = ACTIVE_BRIDGE.lock() {
         if let Some(ctx) = guard.as_mut() {
             ctx.seek_mixer.play(num as usize, loop_flag != 0);
@@ -415,6 +512,11 @@ unsafe extern "C" fn np2_snddrv_pcmplay(_cookie: *mut c_void, num: c_uint, loop_
 }
 
 unsafe extern "C" fn np2_snddrv_pcmstop(_cookie: *mut c_void, num: c_uint) {
+    let rt_ptr = CURRENT_REALTIME_STATE.with(|c| c.get());
+    if !rt_ptr.is_null() {
+        (*rt_ptr).seek_mixer.stop(num as usize);
+        return;
+    }
     if let Ok(mut guard) = ACTIVE_BRIDGE.lock() {
         if let Some(ctx) = guard.as_mut() {
             ctx.seek_mixer.stop(num as usize);
@@ -423,6 +525,13 @@ unsafe extern "C" fn np2_snddrv_pcmstop(_cookie: *mut c_void, num: c_uint) {
 }
 
 unsafe extern "C" fn np2_snddrv_pcmvolume(_cookie: *mut c_void, num: c_uint, volume: c_int) {
+    let rt_ptr = CURRENT_REALTIME_STATE.with(|c| c.get());
+    if !rt_ptr.is_null() {
+        (*rt_ptr)
+            .seek_mixer
+            .set_channel_volume(num as usize, volume);
+        return;
+    }
     if let Ok(mut guard) = ACTIVE_BRIDGE.lock() {
         if let Some(ctx) = guard.as_mut() {
             ctx.seek_mixer.set_channel_volume(num as usize, volume);
@@ -462,6 +571,20 @@ impl ContinuousStereoResampler {
         }
         let est_out = ((in_frames as u64 * self.out_rate) / self.in_rate) as usize + 2;
         let mut out = Vec::with_capacity(est_out * 2);
+        self.process_stereo_chunks(input, |chunk| out.extend_from_slice(chunk));
+        out
+    }
+
+    #[inline]
+    pub fn process_stereo_chunks<F>(&mut self, input: &[f32], mut on_chunk: F)
+    where
+        F: FnMut(&[f32]),
+    {
+        if input.len() < 2 {
+            return;
+        }
+        let mut stack_out = [0.0f32; PC98_AUDIO_BATCH_SAMPLES];
+        let mut out_len = 0usize;
         let out_rate_f = self.out_rate as f32;
 
         for chunk in input.chunks_exact(2) {
@@ -471,14 +594,22 @@ impl ContinuousStereoResampler {
                 let frac = (self.phase as f32) / out_rate_f;
                 let l = prev[0] + (curr[0] - prev[0]) * frac;
                 let r = prev[1] + (curr[1] - prev[1]) * frac;
-                out.push(l);
-                out.push(r);
+                if out_len + 2 > stack_out.len() {
+                    on_chunk(&stack_out[..out_len]);
+                    out_len = 0;
+                }
+                stack_out[out_len] = l;
+                stack_out[out_len + 1] = r;
+                out_len += 2;
                 self.phase += self.in_rate;
             }
             self.phase -= self.out_rate;
             self.prev_frame = Some(curr);
         }
-        out
+
+        if out_len > 0 {
+            on_chunk(&stack_out[..out_len]);
+        }
     }
 }
 
@@ -604,6 +735,207 @@ impl Drop for Pc98SessionGuard {
     }
 }
 
+#[derive(Clone)]
+struct LatchedInputState {
+    joypad_buttons: u16,
+    analog_axes: [[i16; 2]; 2],
+    keys: [bool; 512],
+    mouse_dx: i16,
+    mouse_dy: i16,
+    mouse_left: bool,
+    mouse_right: bool,
+    mouse_middle: bool,
+}
+
+impl Default for LatchedInputState {
+    fn default() -> Self {
+        Self {
+            joypad_buttons: 0,
+            analog_axes: [[0; 2]; 2],
+            keys: [false; 512],
+            mouse_dx: 0,
+            mouse_dy: 0,
+            mouse_left: false,
+            mouse_right: false,
+            mouse_middle: false,
+        }
+    }
+}
+
+impl LatchedInputState {
+    #[inline]
+    fn latch_from(&mut self, input: &mut Pc98InputState) {
+        self.joypad_buttons = input.joypad_buttons;
+        self.analog_axes = input.analog_axes;
+        self.keys = input.keys;
+        for (key_code, ref mut rem) in input.pulse_keys.iter_mut() {
+            if *rem > 0 && (*key_code as usize) < self.keys.len() {
+                self.keys[*key_code as usize] = true;
+                *rem -= 1;
+            }
+        }
+        input.pulse_keys.retain(|(_, rem)| *rem > 0);
+
+        self.mouse_dx = input.mouse_dx.clamp(-127, 127) as i16;
+        self.mouse_dy = input.mouse_dy.clamp(-127, 127) as i16;
+        input.mouse_dx -= self.mouse_dx as i32;
+        input.mouse_dy -= self.mouse_dy as i32;
+
+        self.mouse_left = input.mouse_left;
+        self.mouse_right = input.mouse_right;
+        self.mouse_middle = input.mouse_middle;
+    }
+
+    #[inline]
+    fn query(&self, device: c_uint, index: c_uint, id: c_uint) -> i16 {
+        match device & 0xff {
+            1 if id == 256 => self.joypad_buttons as i16,
+            1 if id < 16 => i16::from((self.joypad_buttons & (1 << id)) != 0),
+            5 => self
+                .analog_axes
+                .get(index as usize)
+                .and_then(|axis| axis.get(id as usize))
+                .copied()
+                .unwrap_or(0),
+            RETRO_DEVICE_KEYBOARD => {
+                if (id as usize) < self.keys.len() && self.keys[id as usize] {
+                    1
+                } else {
+                    0
+                }
+            }
+            RETRO_DEVICE_MOUSE => match id {
+                RETRO_DEVICE_ID_MOUSE_X => self.mouse_dx,
+                RETRO_DEVICE_ID_MOUSE_Y => self.mouse_dy,
+                RETRO_DEVICE_ID_MOUSE_LEFT => i16::from(self.mouse_left),
+                RETRO_DEVICE_ID_MOUSE_RIGHT => i16::from(self.mouse_right),
+                RETRO_DEVICE_ID_MOUSE_MIDDLE => i16::from(self.mouse_middle),
+                _ => 0,
+            },
+            _ => 0,
+        }
+    }
+}
+
+struct Pc98RealtimeState {
+    input_state: Arc<Mutex<Pc98InputState>>,
+    latched_input: LatchedInputState,
+    audio_producer: Option<Producer<f32>>,
+    peak_amplitude: Arc<AtomicU64>,
+    audio_latency_ms: Arc<AtomicU64>,
+    replay_audio: Arc<crate::replay::AudioTap>,
+    seek_mixer: FloppySeekMixer,
+    resampler: ContinuousStereoResampler,
+}
+
+impl Pc98RealtimeState {
+    #[inline]
+    fn process_audio_batch(&mut self, raw_samples: &[i16]) {
+        let mut chunk_f32 = [0.0f32; PC98_AUDIO_BATCH_SAMPLES];
+        let mut max_abs = 0.0f32;
+        let replay_enabled = self.replay_audio.is_enabled();
+        if !replay_enabled {
+            self.resampler.reset();
+        }
+        let now_at = if replay_enabled {
+            crate::replay::now_us()
+        } else {
+            0
+        };
+        let mut submitted_frames = 0i64;
+
+        for raw_chunk in raw_samples.chunks(PC98_AUDIO_BATCH_SAMPLES) {
+            let count = raw_chunk.len() & !1;
+            if count == 0 {
+                continue;
+            }
+            let slice_f32 = &mut chunk_f32[..count];
+            for (dst, &src) in slice_f32.iter_mut().zip(&raw_chunk[..count]) {
+                *dst = (src as f32) / 32768.0;
+            }
+
+            self.seek_mixer.mix_into_stereo(slice_f32);
+
+            for &val in slice_f32.iter() {
+                let abs = val.abs();
+                if abs > max_abs {
+                    max_abs = abs;
+                }
+            }
+
+            if let Some(ref mut prod) = self.audio_producer {
+                let writable = (prod.slots() & !1).min(count);
+                if writable >= 2 {
+                    if let Ok(mut wchunk) = prod.write_chunk(writable) {
+                        let (first, second) = wchunk.as_mut_slices();
+                        let f_len = first.len();
+                        let s_len = second.len();
+                        first.copy_from_slice(&slice_f32[..f_len]);
+                        if s_len > 0 {
+                            second.copy_from_slice(&slice_f32[f_len..f_len + s_len]);
+                        }
+                        wchunk.commit_all();
+                    }
+                }
+            }
+
+            self.replay_audio.observe_reactive(
+                slice_f32,
+                PC98_AUDIO_SAMPLE_RATE,
+                PC98_AUDIO_CHANNELS,
+            );
+
+            if replay_enabled {
+                let replay_tap = &self.replay_audio;
+                self.resampler
+                    .process_stereo_chunks(slice_f32, |resampled| {
+                        let chunk_at = now_at
+                            + submitted_frames * 1_000_000 / (PC98_REPLAY_SAMPLE_RATE as i64);
+                        replay_tap.submit(
+                            resampled,
+                            PC98_REPLAY_SAMPLE_RATE,
+                            PC98_AUDIO_CHANNELS,
+                            chunk_at,
+                        );
+                        submitted_frames += (resampled.len() / 2) as i64;
+                    });
+            }
+        }
+
+        let peak_bits = (max_abs * 1000.0) as u64;
+        self.peak_amplitude.fetch_max(peak_bits, Ordering::Relaxed);
+        self.audio_latency_ms.store(18, Ordering::Relaxed);
+    }
+}
+
+thread_local! {
+    static CURRENT_INPUT_LATCH: Cell<*const LatchedInputState> =
+        Cell::new(std::ptr::null());
+    static CURRENT_REALTIME_STATE: Cell<*mut Pc98RealtimeState> =
+        Cell::new(std::ptr::null_mut());
+}
+
+struct RetroRunScopeGuard;
+
+impl RetroRunScopeGuard {
+    #[inline]
+    fn enter(rt_cell: &UnsafeCell<Pc98RealtimeState>) -> Self {
+        let rt_ptr = rt_cell.get();
+        let latch_ptr = unsafe { std::ptr::addr_of!((*rt_ptr).latched_input) };
+        CURRENT_REALTIME_STATE.with(|c| c.set(rt_ptr));
+        CURRENT_INPUT_LATCH.with(|c| c.set(latch_ptr));
+        Self
+    }
+}
+
+impl Drop for RetroRunScopeGuard {
+    #[inline]
+    fn drop(&mut self) {
+        CURRENT_INPUT_LATCH.with(|c| c.set(std::ptr::null()));
+        CURRENT_REALTIME_STATE.with(|c| c.set(std::ptr::null_mut()));
+    }
+}
+
 struct BridgeContext {
     session_id: u64,
     sys_dir_cstr: CString,
@@ -618,13 +950,7 @@ struct BridgeContext {
     last_resolution: (u32, u32),
     last_frame: Option<Arc<RawFrame>>,
     input_state: Arc<Mutex<Pc98InputState>>,
-    latched_keys: [bool; 512],
-    latched_mouse_dx: i16,
-    latched_mouse_dy: i16,
-    latched_mouse_left: bool,
-    latched_mouse_right: bool,
-    latched_mouse_middle: bool,
-    audio_queue: Arc<Mutex<Pc98AudioQueue>>,
+    latched_input: LatchedInputState,
     peak_amplitude: Arc<AtomicU64>,
     audio_latency_ms: Arc<AtomicU64>,
     replay_audio: Arc<crate::replay::AudioTap>,
@@ -700,10 +1026,11 @@ pub fn build_core_variables(cfg: &Pc98Config) -> BTreeMap<String, CString> {
 pub fn convert_rgb565_to_rgba(src_bytes: &[u8], width: u32, height: u32, pitch: usize) -> Vec<u8> {
     let w = width as usize;
     let h = height as usize;
-    let mut out = vec![0u8; w * h * 4];
+    let mut out = crate::video::types::checkout_frame_buffer(w * h * 4);
     for y in 0..h {
         let row_start = y * pitch;
         if row_start + w * 2 > src_bytes.len() {
+            out[y * w * 4..].fill(0);
             break;
         }
         let row = &src_bytes[row_start..row_start + w * 2];
@@ -731,10 +1058,11 @@ pub fn convert_xrgb8888_to_rgba(
 ) -> Vec<u8> {
     let w = width as usize;
     let h = height as usize;
-    let mut out = vec![0u8; w * h * 4];
+    let mut out = crate::video::types::checkout_frame_buffer(w * h * 4);
     for y in 0..h {
         let row_start = y * pitch;
         if row_start + w * 4 > src_bytes.len() {
+            out[y * w * 4..].fill(0);
             break;
         }
         let row = &src_bytes[row_start..row_start + w * 4];
@@ -754,10 +1082,11 @@ pub fn convert_xrgb8888_to_rgba(
 pub fn convert_rgb1555_to_rgba(src_bytes: &[u8], width: u32, height: u32, pitch: usize) -> Vec<u8> {
     let w = width as usize;
     let h = height as usize;
-    let mut out = vec![0u8; w * h * 4];
+    let mut out = crate::video::types::checkout_frame_buffer(w * h * 4);
     for y in 0..h {
         let row_start = y * pitch;
         if row_start + w * 2 > src_bytes.len() {
+            out[y * w * 4..].fill(0);
             break;
         }
         let row = &src_bytes[row_start..row_start + w * 2];
@@ -946,102 +1275,92 @@ unsafe extern "C" fn retro_audio_sample_batch_cb(data: *const i16, frames: usize
     let sample_count = frames.saturating_mul(2);
     let raw_samples = std::slice::from_raw_parts(data, sample_count);
 
-    let mut f32_samples = Vec::with_capacity(sample_count);
-    for &s in raw_samples {
-        f32_samples.push((s as f32) / 32768.0);
+    let rt_ptr = CURRENT_REALTIME_STATE.with(|c| c.get());
+    if !rt_ptr.is_null() {
+        (*rt_ptr).process_audio_batch(raw_samples);
+        return frames;
     }
 
-    let (audio_queue, peak_amplitude, audio_latency_ms, replay_audio, resampled_opt) = {
-        let Ok(mut guard) = ACTIVE_BRIDGE.lock() else {
-            return frames;
-        };
-        let Some(ctx) = guard.as_mut() else {
-            return frames;
-        };
-        ctx.seek_mixer.mix_into_stereo(&mut f32_samples);
-        let resampled_opt = if ctx.replay_audio.is_enabled() {
-            Some(ctx.resampler.process_stereo(&f32_samples))
-        } else {
-            ctx.resampler.reset();
-            None
-        };
-        (
-            ctx.audio_queue.clone(),
-            ctx.peak_amplitude.clone(),
-            ctx.audio_latency_ms.clone(),
-            ctx.replay_audio.clone(),
-            resampled_opt,
-        )
+    let Ok(mut guard) = ACTIVE_BRIDGE.lock() else {
+        return frames;
+    };
+    let Some(ctx) = guard.as_mut() else {
+        return frames;
     };
 
+    let mut chunk_f32 = [0.0f32; PC98_AUDIO_BATCH_SAMPLES];
     let mut max_abs = 0.0f32;
-    for &val in &f32_samples {
-        let abs = val.abs();
-        if abs > max_abs {
-            max_abs = abs;
+    let replay_enabled = ctx.replay_audio.is_enabled();
+    if !replay_enabled {
+        ctx.resampler.reset();
+    }
+    let now_at = if replay_enabled {
+        crate::replay::now_us()
+    } else {
+        0
+    };
+    let mut submitted_frames = 0i64;
+
+    for raw_chunk in raw_samples.chunks(PC98_AUDIO_BATCH_SAMPLES) {
+        let count = raw_chunk.len() & !1;
+        if count == 0 {
+            continue;
+        }
+        let slice_f32 = &mut chunk_f32[..count];
+        for (dst, &src) in slice_f32.iter_mut().zip(&raw_chunk[..count]) {
+            *dst = (src as f32) / 32768.0;
+        }
+        ctx.seek_mixer.mix_into_stereo(slice_f32);
+        for &val in slice_f32.iter() {
+            let abs = val.abs();
+            if abs > max_abs {
+                max_abs = abs;
+            }
+        }
+        ctx.replay_audio
+            .observe_reactive(slice_f32, PC98_AUDIO_SAMPLE_RATE, PC98_AUDIO_CHANNELS);
+        if replay_enabled {
+            let replay_tap = &ctx.replay_audio;
+            ctx.resampler.process_stereo_chunks(slice_f32, |resampled| {
+                let chunk_at =
+                    now_at + submitted_frames * 1_000_000 / (PC98_REPLAY_SAMPLE_RATE as i64);
+                replay_tap.submit(
+                    resampled,
+                    PC98_REPLAY_SAMPLE_RATE,
+                    PC98_AUDIO_CHANNELS,
+                    chunk_at,
+                );
+                submitted_frames += (resampled.len() / 2) as i64;
+            });
         }
     }
 
     let peak_bits = (max_abs * 1000.0) as u64;
-    peak_amplitude.fetch_max(peak_bits, Ordering::Relaxed);
-    audio_latency_ms.store(18, Ordering::Relaxed);
-
-    if let Ok(mut q) = audio_queue.lock() {
-        // Cap queue to ~70ms at 44.1kHz stereo so audio never lags behind video
-        const MAX_QUEUED_SAMPLES: usize = 44100 * 2 / 14;
-        if q.samples.len() + f32_samples.len() > MAX_QUEUED_SAMPLES {
-            let drop_n = (q.samples.len() + f32_samples.len()) - MAX_QUEUED_SAMPLES;
-            let drop_even = ((drop_n / 2) * 2).min(q.samples.len());
-            q.samples.drain(..drop_even);
-        }
-        q.samples.extend(&f32_samples);
-    }
-
-    replay_audio.observe_reactive(&f32_samples, PC98_AUDIO_SAMPLE_RATE, PC98_AUDIO_CHANNELS);
-
-    if let Some(resampled) = resampled_opt {
-        if !resampled.is_empty() {
-            replay_audio.submit(
-                &resampled,
-                PC98_REPLAY_SAMPLE_RATE,
-                PC98_AUDIO_CHANNELS,
-                crate::replay::now_us(),
-            );
-        }
-    }
+    ctx.peak_amplitude.fetch_max(peak_bits, Ordering::Relaxed);
+    ctx.audio_latency_ms.store(18, Ordering::Relaxed);
 
     frames
 }
 
 unsafe extern "C" fn retro_input_poll_cb() {
+    let rt_ptr = CURRENT_REALTIME_STATE.with(|c| c.get());
+    if !rt_ptr.is_null() {
+        let rt = &mut *rt_ptr;
+        if let Ok(mut input) = rt.input_state.lock() {
+            rt.latched_input.latch_from(&mut input);
+        }
+        return;
+    }
+
     let Ok(mut guard) = ACTIVE_BRIDGE.lock() else {
         return;
     };
     let Some(ctx) = guard.as_mut() else {
         return;
     };
-
-    let mut input_guard = ctx.input_state.lock().ok();
-    if let Some(ref mut input) = input_guard {
-        ctx.latched_keys = input.keys;
-        for (key_code, ref mut rem) in input.pulse_keys.iter_mut() {
-            if *rem > 0 && (*key_code as usize) < ctx.latched_keys.len() {
-                ctx.latched_keys[*key_code as usize] = true;
-                *rem -= 1;
-            }
-        }
-        input.pulse_keys.retain(|(_, rem)| *rem > 0);
-
-        ctx.latched_mouse_dx = input.mouse_dx.clamp(-127, 127) as i16;
-        ctx.latched_mouse_dy = input.mouse_dy.clamp(-127, 127) as i16;
-        input.mouse_dx -= ctx.latched_mouse_dx as i32;
-        input.mouse_dy -= ctx.latched_mouse_dy as i32;
-
-        ctx.latched_mouse_left = input.mouse_left;
-        ctx.latched_mouse_right = input.mouse_right;
-        ctx.latched_mouse_middle = input.mouse_middle;
-    }
-    drop(input_guard);
+    if let Ok(mut input) = ctx.input_state.lock() {
+        ctx.latched_input.latch_from(&mut input);
+    };
 }
 
 unsafe extern "C" fn retro_input_state_cb(
@@ -1050,39 +1369,18 @@ unsafe extern "C" fn retro_input_state_cb(
     index: c_uint,
     id: c_uint,
 ) -> i16 {
+    let latch_ptr = CURRENT_INPUT_LATCH.with(|c| c.get());
+    if !latch_ptr.is_null() {
+        return (*latch_ptr).query(device, index, id);
+    }
+
     let Ok(guard) = ACTIVE_BRIDGE.lock() else {
         return 0;
     };
     let Some(ctx) = guard.as_ref() else {
         return 0;
     };
-
-    if matches!(device & 0xff, 1 | 5) {
-        return ctx
-            .input_state
-            .lock()
-            .map(|input| input.controller_value(device, index, id))
-            .unwrap_or(0);
-    }
-
-    match device {
-        RETRO_DEVICE_KEYBOARD => {
-            if (id as usize) < ctx.latched_keys.len() && ctx.latched_keys[id as usize] {
-                1
-            } else {
-                0
-            }
-        }
-        RETRO_DEVICE_MOUSE => match id {
-            RETRO_DEVICE_ID_MOUSE_X => ctx.latched_mouse_dx,
-            RETRO_DEVICE_ID_MOUSE_Y => ctx.latched_mouse_dy,
-            RETRO_DEVICE_ID_MOUSE_LEFT => i16::from(ctx.latched_mouse_left),
-            RETRO_DEVICE_ID_MOUSE_RIGHT => i16::from(ctx.latched_mouse_right),
-            RETRO_DEVICE_ID_MOUSE_MIDDLE => i16::from(ctx.latched_mouse_middle),
-            _ => 0,
-        },
-        _ => 0,
-    }
+    ctx.latched_input.query(device, index, id)
 }
 
 pub struct Pc98WorkerParams {
@@ -1134,36 +1432,63 @@ pub fn run_pc98_worker(params: Pc98WorkerParams) -> Result<()> {
         return Ok(());
     }
 
-    let audio_queue = Arc::new(Mutex::new(Pc98AudioQueue {
-        samples: VecDeque::with_capacity(8192),
-    }));
+    let volume_bits = Arc::new(AtomicU32::new(
+        params.master_volume.clamp(0.0, 1.0).to_bits(),
+    ));
+    let audio_stop = Arc::new(AtomicBool::new(false));
+    let audio_flush = Arc::new(AtomicBool::new(false));
+    let (audio_producer, audio_consumer) = RingBuffer::<f32>::new(PC98_AUDIO_RING_CAPACITY);
 
-    let audio_stream_opt = match crate::devices::audio::initialize_rodio_playback() {
-        Ok((stream_guard, stream_handle)) => match Sink::try_new(&stream_handle) {
-            Ok(sink) => {
-                sink.set_volume(params.master_volume.clamp(0.0, 1.0));
-                sink.append(Pc98AudioSource {
-                    queue: audio_queue.clone(),
-                    read_buf: VecDeque::with_capacity(128),
-                });
-                sink.play();
-                Some((stream_guard, sink))
+    let (audio_playback_opt, audio_producer_opt) =
+        match crate::devices::audio::initialize_rodio_playback() {
+            Ok((stream_guard, stream_handle)) => {
+                let source = Pc98AudioSource::new(
+                    audio_consumer,
+                    Arc::clone(&volume_bits),
+                    Arc::clone(&audio_stop),
+                    Arc::clone(&audio_flush),
+                );
+                match stream_handle.play_raw(source) {
+                    Ok(()) => (
+                        Some(Pc98AudioPlayback {
+                            _guard: stream_guard,
+                            _handle: stream_handle,
+                            volume_bits: Arc::clone(&volume_bits),
+                            stop: Arc::clone(&audio_stop),
+                            flush: Arc::clone(&audio_flush),
+                        }),
+                        Some(audio_producer),
+                    ),
+                    Err(e) => {
+                        tracing::warn!("Failed to start PC-98 raw audio stream: {e}");
+                        (None, None)
+                    }
+                }
             }
             Err(e) => {
-                tracing::warn!("Failed to create PC-98 audio sink: {e}");
-                None
+                tracing::warn!("Failed to open audio output for PC-98: {e}");
+                (None, None)
             }
-        },
-        Err(e) => {
-            tracing::warn!("Failed to open audio output for PC-98: {e}");
-            None
-        }
-    };
+        };
 
     let sys_dir_cstr =
         CString::new(sys_dir.to_string_lossy().as_bytes()).context("Invalid system dir path")?;
     let save_dir_cstr =
         CString::new(save_dir.to_string_lossy().as_bytes()).context("Invalid save dir path")?;
+
+    let rt_state = UnsafeCell::new(Pc98RealtimeState {
+        input_state: params.input_state.clone(),
+        latched_input: LatchedInputState::default(),
+        audio_producer: audio_producer_opt,
+        peak_amplitude: params.peak_amplitude.clone(),
+        audio_latency_ms: params.audio_latency_ms.clone(),
+        replay_audio: params.replay_audio.clone(),
+        seek_mixer: FloppySeekMixer::new(
+            params.config.floppy_seek_sound,
+            params.config.floppy_seek_volume,
+        ),
+        resampler: ContinuousStereoResampler::new(PC98_AUDIO_SAMPLE_RATE, PC98_REPLAY_SAMPLE_RATE),
+    });
 
     let bridge_ctx = BridgeContext {
         session_id: session_guard.session_id,
@@ -1179,13 +1504,7 @@ pub fn run_pc98_worker(params: Pc98WorkerParams) -> Result<()> {
         last_resolution: (640, 400),
         last_frame: None,
         input_state: params.input_state.clone(),
-        latched_keys: [false; 512],
-        latched_mouse_dx: 0,
-        latched_mouse_dy: 0,
-        latched_mouse_left: false,
-        latched_mouse_right: false,
-        latched_mouse_middle: false,
-        audio_queue,
+        latched_input: LatchedInputState::default(),
         peak_amplitude: params.peak_amplitude,
         audio_latency_ms: params.audio_latency_ms,
         replay_audio: params.replay_audio,
@@ -1208,7 +1527,8 @@ pub fn run_pc98_worker(params: Pc98WorkerParams) -> Result<()> {
             &params.event_tx,
             &params.stop_requested,
             &params.input_state,
-            audio_stream_opt.as_ref().map(|(_, sink)| sink),
+            &rt_state,
+            audio_playback_opt.as_ref(),
         )
     };
 
@@ -1287,6 +1607,14 @@ fn enqueue_dos_command(queue: &mut VecDeque<(u32, bool, u8, u8)>, cmd: &str) {
     }
 }
 
+const DOS_PROMPT_SCAN_MAX_FRAMES: u32 = 600;
+
+fn tvram_contains_dos_prompt(tvram: &[u8]) -> bool {
+    tvram.windows(14).any(|w| w == b"A\0:\0\\\0>\0 \0 \0 \0")
+        || tvram.windows(10).any(|w| w == b"A\0>\0 \0 \0 \0")
+}
+
+#[allow(clippy::too_many_arguments)]
 unsafe fn run_loaded_core(
     so_path: &Path,
     initial_config: &Pc98Config,
@@ -1294,7 +1622,8 @@ unsafe fn run_loaded_core(
     event_tx: &Sender<Pc98Event>,
     stop_requested: &AtomicBool,
     input_state: &Arc<Mutex<Pc98InputState>>,
-    audio_sink: Option<&Sink>,
+    rt_cell: &UnsafeCell<Pc98RealtimeState>,
+    audio_playback: Option<&Pc98AudioPlayback>,
 ) -> Result<()> {
     let lib = libloading::Library::new(so_path)
         .with_context(|| format!("Failed to dlopen NP2kai core at {:?}", so_path))?;
@@ -1364,7 +1693,10 @@ unsafe fn run_loaded_core(
     }
 
     // Call 1 to retro_run() initializes pre_main(RPATH), update_variables(), and pccore_reset().
-    retro_run();
+    {
+        let _run_guard = RetroRunScopeGuard::enter(rt_cell);
+        retro_run();
+    }
 
     // Locate NP2kai's 1MB base RAM buffer (`mem`, symbol offset 0x1599260 relative to
     // `retro_get_memory_data` at 0x16d7a0) and verify the x86 reset vector `JMP FAR` (0xEA) at 0xFFFF0.
@@ -1436,8 +1768,9 @@ unsafe fn run_loaded_core(
     let mut frames_since_boot: u32 = 0;
 
     let startup_cmd = super::library::detect_startup_command(initial_config);
-    let mut startup_cmd_sent = false;
+    let mut startup_cmd_sent = startup_cmd.is_none() || pc98_mem_base.is_none();
     let mut dos_prompt_frames: u32 = 0;
+    let mut dos_prompt_scan_frames: u32 = 0;
     let mut auto_type_queue: VecDeque<(u32, bool, u8, u8)> = VecDeque::new();
 
     let mut av_info: RetroSystemAvInfo = std::mem::zeroed();
@@ -1451,6 +1784,8 @@ unsafe fn run_loaded_core(
     };
 
     let _ = event_tx.send(Pc98Event::Started { width, height, fps });
+
+    let save_commit_worker = super::savestate::SaveStateCommitWorker::new("pc98-savestate-commit");
 
     let frame_duration = Duration::from_secs_f64(1.0 / fps);
     let mut next_frame_instant = Instant::now();
@@ -1474,11 +1809,12 @@ unsafe fn run_loaded_core(
                 deferred_fdd_pending = false;
             }
         } else if !startup_cmd_sent {
-            if let (Some(ref cmd_str), Some(base)) = (&startup_cmd, pc98_mem_base) {
+            dos_prompt_scan_frames = dos_prompt_scan_frames.saturating_add(1);
+            if dos_prompt_scan_frames > DOS_PROMPT_SCAN_MAX_FRAMES {
+                startup_cmd_sent = true;
+            } else if let (Some(ref cmd_str), Some(base)) = (&startup_cmd, pc98_mem_base) {
                 let tvram = std::slice::from_raw_parts(base.add(0xA0000), 0x1E00);
-                let has_idle_prompt = tvram.windows(14).any(|w| w == b"A\0:\0\\\0>\0 \0 \0 \0")
-                    || tvram.windows(10).any(|w| w == b"A\0>\0 \0 \0 \0");
-                if has_idle_prompt {
+                if tvram_contains_dos_prompt(tvram) {
                     dos_prompt_frames += 1;
                 } else {
                     dos_prompt_frames = 0;
@@ -1487,6 +1823,8 @@ unsafe fn run_loaded_core(
                     enqueue_dos_command(&mut auto_type_queue, cmd_str);
                     startup_cmd_sent = true;
                 }
+            } else {
+                startup_cmd_sent = true;
             }
         }
 
@@ -1519,15 +1857,21 @@ unsafe fn run_loaded_core(
                     }
                     hdd_boot_detected_frames = 0;
                     frames_since_boot = 0;
-                    startup_cmd_sent = false;
+                    startup_cmd_sent = startup_cmd.is_none() || pc98_mem_base.is_none();
                     dos_prompt_frames = 0;
+                    dos_prompt_scan_frames = 0;
                     auto_type_queue.clear();
+                    if let Some(playback) = audio_playback {
+                        playback.flush.store(true, Ordering::Release);
+                    }
                     retro_reset();
                     let _ = event_tx.send(Pc98Event::Info("PC-98 system reset.".to_string()));
                 }
                 Pc98Command::SetVolume(vol) => {
-                    if let Some(sink) = audio_sink {
-                        sink.set_volume(vol.clamp(0.0, 1.0));
+                    if let Some(playback) = audio_playback {
+                        playback
+                            .volume_bits
+                            .store(vol.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
                     }
                 }
                 Pc98Command::MountFdd { drive, path } => {
@@ -1558,6 +1902,9 @@ unsafe fn run_loaded_core(
                     }
                 }
                 Pc98Command::UpdateOptions(new_cfg) => {
+                    (*rt_cell.get())
+                        .seek_mixer
+                        .set_config(new_cfg.floppy_seek_sound, new_cfg.floppy_seek_volume);
                     if let Ok(mut guard) = ACTIVE_BRIDGE.lock() {
                         if let Some(ctx) = guard.as_mut() {
                             let prev_drive = ctx.variables.get("np2kai_drive").cloned();
@@ -1582,14 +1929,19 @@ unsafe fn run_loaded_core(
                     } else {
                         let mut state_buf = vec![0u8; state_size];
                         if retro_serialize(state_buf.as_mut_ptr() as *mut c_void, state_size) {
-                            let (last_frame, last_res) = ACTIVE_BRIDGE
+                            let (last_frame, last_res, repaint) = ACTIVE_BRIDGE
                                 .lock()
                                 .ok()
                                 .and_then(|g| {
-                                    g.as_ref()
-                                        .map(|ctx| (ctx.last_frame.clone(), ctx.last_resolution))
+                                    g.as_ref().map(|ctx| {
+                                        (
+                                            ctx.last_frame.clone(),
+                                            ctx.last_resolution,
+                                            Some(ctx.request_repaint.clone()),
+                                        )
+                                    })
                                 })
-                                .unwrap_or((None, (width, height)));
+                                .unwrap_or((None, (width, height), None));
                             let (game_key, game_title) =
                                 super::savestate::derive_pc98_game_key(&active_config);
                             let meta = super::savestate::SaveStateMeta {
@@ -1610,26 +1962,37 @@ unsafe fn run_loaded_core(
                                 tape_path: String::new(),
                                 resolution: last_res,
                                 size_bytes: state_buf.len(),
+                                state_len: Some(state_buf.len() as u64),
                             };
-                            match super::savestate::write_slot_files_with_options(
-                                &super::savestate::pc98_states_root(),
-                                &game_key,
-                                &meta,
-                                &state_buf,
-                                last_frame.as_deref(),
-                                Some("np2kai_libretro"),
-                                None,
-                            ) {
-                                Ok(()) => {
-                                    let _ = event_tx.send(Pc98Event::StateSaved { slot, meta });
-                                }
-                                Err(e) => {
-                                    let _ = event_tx.send(Pc98Event::Info(format!(
-                                        "Failed to write PC-98 slot {}: {e}",
-                                        slot
-                                    )));
-                                }
-                            }
+                            let states_root = super::savestate::pc98_states_root();
+                            let tx = event_tx.clone();
+                            save_commit_worker.submit(super::savestate::SaveStateCommitRequest {
+                                states_root,
+                                game_key,
+                                meta,
+                                state_bytes: state_buf,
+                                frame: last_frame,
+                                core_id: Some("np2kai_libretro".to_string()),
+                                on_complete: Box::new(move |res| {
+                                    match res {
+                                        Ok(committed_meta) => {
+                                            let _ = tx.send(Pc98Event::StateSaved {
+                                                slot,
+                                                meta: committed_meta,
+                                            });
+                                        }
+                                        Err(e) => {
+                                            let _ = tx.send(Pc98Event::Info(format!(
+                                                "Failed to write PC-98 slot {}: {e}",
+                                                slot
+                                            )));
+                                        }
+                                    }
+                                    if let Some(cb) = repaint {
+                                        cb();
+                                    }
+                                }),
+                            });
                         } else {
                             let _ = event_tx.send(Pc98Event::Info(format!(
                                 "PC-98 core failed to serialize state into slot {}.",
@@ -1639,6 +2002,7 @@ unsafe fn run_loaded_core(
                     }
                 }
                 Pc98Command::LoadState { slot } => {
+                    save_commit_worker.flush();
                     let slot = slot.clamp(1, super::savestate::SAVE_SLOT_COUNT as u8);
                     let (game_key, _) = super::savestate::derive_pc98_game_key(&active_config);
                     let max_state_size = retro_serialize_size();
@@ -1701,18 +2065,26 @@ unsafe fn run_loaded_core(
                                 Ok(()) => {
                                     deferred_fdd_pending = false;
                                     startup_cmd_sent = true;
+                                    dos_prompt_scan_frames = DOS_PROMPT_SCAN_MAX_FRAMES;
                                     auto_type_queue.clear();
                                     if let Ok(mut inp) = input_state.lock() {
                                         inp.release_all();
+                                    }
+                                    {
+                                        let rt = &mut *rt_cell.get();
+                                        rt.latched_input = LatchedInputState::default();
+                                        rt.seek_mixer.stop(0);
+                                        rt.seek_mixer.stop(1);
+                                        rt.resampler.reset();
+                                    }
+                                    if let Some(playback) = audio_playback {
+                                        playback.flush.store(true, Ordering::Release);
                                     }
                                     if let Ok(mut guard) = ACTIVE_BRIDGE.lock() {
                                         if let Some(ctx) = guard.as_mut() {
                                             ctx.seek_mixer.stop(0);
                                             ctx.seek_mixer.stop(1);
                                             ctx.resampler.reset();
-                                            if let Ok(mut q) = ctx.audio_queue.lock() {
-                                                q.samples.clear();
-                                            }
                                         }
                                     }
                                     let _ = event_tx.send(Pc98Event::StateLoaded { slot, meta });
@@ -1734,7 +2106,10 @@ unsafe fn run_loaded_core(
             break;
         }
 
-        retro_run();
+        {
+            let _run_guard = RetroRunScopeGuard::enter(rt_cell);
+            retro_run();
+        }
 
         next_frame_instant += frame_duration;
         let now = Instant::now();
@@ -1744,6 +2119,9 @@ unsafe fn run_loaded_core(
             next_frame_instant = now;
         }
     }
+
+    save_commit_worker.flush();
+    drop(save_commit_worker);
 
     if let Some(chan_table) = pcm_channel_table {
         for i in 0..3 {
@@ -1886,15 +2264,7 @@ mod tests {
                 last_resolution: (640, 400),
                 last_frame: None,
                 input_state: Arc::new(Mutex::new(Pc98InputState::default())),
-                latched_keys: [false; 512],
-                latched_mouse_dx: 0,
-                latched_mouse_dy: 0,
-                latched_mouse_left: false,
-                latched_mouse_right: false,
-                latched_mouse_middle: false,
-                audio_queue: Arc::new(Mutex::new(Pc98AudioQueue {
-                    samples: VecDeque::new(),
-                })),
+                latched_input: LatchedInputState::default(),
                 peak_amplitude: Arc::new(AtomicU64::new(0)),
                 audio_latency_ms: Arc::new(AtomicU64::new(0)),
                 replay_audio: Arc::new(crate::replay::AudioTap::default()),
@@ -1987,5 +2357,88 @@ mod tests {
         handle_b.join().unwrap();
         assert_eq!(pc98_lifecycle_state(), EmulatorLifecycleState::Idle);
         assert!(ACTIVE_BRIDGE.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_pc98_lock_free_input_latch_and_rtrb_audio_batch() {
+        let input_state = Arc::new(Mutex::new(Pc98InputState::default()));
+        {
+            let mut inp = input_state.lock().unwrap();
+            inp.joypad_buttons = (1 << 0) | (1 << 4);
+            inp.analog_axes[0][1] = -12345;
+            inp.keys[super::super::input::RETROK_RETURN as usize] = true;
+            inp.mouse_dx = 42;
+            inp.mouse_dy = -17;
+            inp.mouse_left = true;
+            inp.pulse_key(RETROK_F12, 1);
+        }
+
+        let (prod, cons) = RingBuffer::<f32>::new(PC98_AUDIO_RING_CAPACITY);
+        let volume_bits = Arc::new(AtomicU32::new(0.5f32.to_bits()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let flush = Arc::new(AtomicBool::new(false));
+        let mut source = Pc98AudioSource::new(
+            cons,
+            Arc::clone(&volume_bits),
+            Arc::clone(&stop),
+            Arc::clone(&flush),
+        );
+        assert_eq!(source.current_frame_len(), None);
+
+        let rt_cell = UnsafeCell::new(Pc98RealtimeState {
+            input_state: Arc::clone(&input_state),
+            latched_input: LatchedInputState::default(),
+            audio_producer: Some(prod),
+            peak_amplitude: Arc::new(AtomicU64::new(0)),
+            audio_latency_ms: Arc::new(AtomicU64::new(0)),
+            replay_audio: Arc::new(crate::replay::AudioTap::default()),
+            seek_mixer: FloppySeekMixer::new(false, 0),
+            resampler: ContinuousStereoResampler::new(44100, 48000),
+        });
+
+        unsafe {
+            let _guard = RetroRunScopeGuard::enter(&rt_cell);
+            retro_input_poll_cb();
+
+            // Hold input_state mutex to prove retro_input_state_cb never locks input_state!
+            let _held_input_lock = input_state.lock().unwrap();
+            assert_eq!(retro_input_state_cb(0, 1, 0, 0), 1);
+            assert_eq!(retro_input_state_cb(0, 1, 0, 4), 1);
+            assert_eq!(retro_input_state_cb(0, 5, 0, 1), -12345);
+            assert_eq!(
+                retro_input_state_cb(0, RETRO_DEVICE_KEYBOARD, 0, RETROK_F12),
+                1
+            );
+            assert_eq!(
+                retro_input_state_cb(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_X),
+                42
+            );
+            assert_eq!(
+                retro_input_state_cb(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_LEFT),
+                1
+            );
+
+            // Feed 600 stereo frames (1200 i16 samples) into audio_sample_batch_cb
+            let raw_pcm = [16384i16; 1200]; // 0.5 linear
+            assert_eq!(retro_audio_sample_batch_cb(raw_pcm.as_ptr(), 600), 600);
+        }
+
+        // Guard dropped: thread-local latch pointer must be cleared back to null
+        assert!(CURRENT_INPUT_LATCH.with(|c| c.get().is_null()));
+
+        // Source scales 0.5 * 0.5 volume = 0.25 and batch-pops 512 samples
+        let first = source.next().unwrap();
+        assert!((first - 0.25).abs() < 1e-4);
+        assert_eq!(source.read_len, PC98_AUDIO_BATCH_SAMPLES);
+
+        stop.store(true, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn test_tvram_contains_dos_prompt() {
+        let mut tvram = vec![0u8; 0x1E00];
+        assert!(!tvram_contains_dos_prompt(&tvram));
+        tvram[64..78].copy_from_slice(b"A\0:\0\\\0>\0 \0 \0 \0");
+        assert!(tvram_contains_dos_prompt(&tvram));
     }
 }

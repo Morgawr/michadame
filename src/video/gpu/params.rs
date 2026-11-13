@@ -33,6 +33,10 @@ pub struct ShaderParams {
     pub underscan_x: f32,
     pub underscan_y: f32,
     pub border_crop: [f32; 4],
+    #[serde(skip)]
+    pub fallback_captured_at: Option<i64>,
+    #[serde(skip)]
+    pub render_fft_spectrum: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -62,6 +66,8 @@ pub struct HaloShaderParams {
     pub horizontal_stretch: f32,
     pub vibrance: f32,
     pub border_crop: [f32; 4],
+    #[serde(skip)]
+    pub source_captured_at: Option<i64>,
 }
 
 impl HaloShaderParams {
@@ -101,6 +107,7 @@ impl HaloShaderParams {
                 state.video.border_crop_top,
                 state.video.border_crop_bottom,
             ],
+            source_captured_at: None,
         }
     }
 }
@@ -133,6 +140,7 @@ impl Default for HaloShaderParams {
             horizontal_stretch: 1.0,
             vibrance: 1.0,
             border_crop: [0.0, 0.0, 0.0, 0.0],
+            source_captured_at: None,
         }
     }
 }
@@ -593,6 +601,11 @@ impl ShaderParams {
                 state.video.border_crop_top,
                 state.video.border_crop_bottom,
             ],
+            fallback_captured_at: state
+                .gamescope_hook
+                .as_ref()
+                .and_then(|h| h.current_dmabuf_frame.as_ref().map(|f| f.captured_at)),
+            render_fft_spectrum: state.video.fft_mask_window_open,
         }
     }
 }
@@ -629,6 +642,8 @@ impl Default for ShaderParams {
             underscan_x: 0.0,
             underscan_y: 0.0,
             border_crop: [0.0, 0.0, 0.0, 0.0],
+            fallback_captured_at: None,
+            render_fft_spectrum: false,
         }
     }
 }
@@ -1076,5 +1091,24 @@ mod tests {
         assert_eq!(capture.scanline_strength, 0.85);
         assert_eq!(capture.mask_strength, 0.45);
         assert_eq!(capture.halation, 0.25);
+    }
+
+    #[test]
+    fn test_transient_cache_and_fft_spectrum_params() {
+        let default_shader = ShaderParams::default();
+        assert_eq!(default_shader.fallback_captured_at, None);
+        assert!(!default_shader.render_fft_spectrum);
+
+        let default_halo = HaloShaderParams::default();
+        assert_eq!(default_halo.source_captured_at, None);
+
+        let mut state = AppState::default();
+        state.video.fft_mask_window_open = true;
+        let shader_from_state = ShaderParams::from_state(&state);
+        assert_eq!(shader_from_state.fallback_captured_at, None);
+        assert!(shader_from_state.render_fft_spectrum);
+
+        let halo_from_state = HaloShaderParams::from_state(&state);
+        assert_eq!(halo_from_state.source_captured_at, None);
     }
 }

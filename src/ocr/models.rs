@@ -84,6 +84,74 @@ pub struct OcrBox {
     pub writing_direction: WritingDirection,
 }
 
+impl OcrBox {
+    /// Computes a fast deterministic content/geometry fingerprint for overlay layout and hover caches.
+    pub fn layout_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.text.hash(&mut hasher);
+        self.center_x.to_bits().hash(&mut hasher);
+        self.center_y.to_bits().hash(&mut hasher);
+        self.width.to_bits().hash(&mut hasher);
+        self.height.to_bits().hash(&mut hasher);
+        (self.writing_direction as i32).hash(&mut hasher);
+        self.lines.len().hash(&mut hasher);
+        for line in &self.lines {
+            line.text.hash(&mut hasher);
+            line.center_x.to_bits().hash(&mut hasher);
+            line.center_y.to_bits().hash(&mut hasher);
+            line.width.to_bits().hash(&mut hasher);
+            line.height.to_bits().hash(&mut hasher);
+            (line.writing_direction as i32).hash(&mut hasher);
+            line.char_spans.len().hash(&mut hasher);
+            for &(s0, s1) in &line.char_spans {
+                s0.to_bits().hash(&mut hasher);
+                s1.to_bits().hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+}
+
+/// Cached pre-fitted glyph layout for a single character cell inside an OCR box.
+#[derive(Clone)]
+pub struct CachedOcrGlyph {
+    #[allow(dead_code)]
+    pub fitted_font_size: f32,
+    pub galley: Arc<eframe::egui::Galley>,
+    #[allow(dead_code)]
+    pub ink_offset: eframe::egui::Vec2,
+    pub origin: eframe::egui::Pos2,
+    pub clip_rect: eframe::egui::Rect,
+}
+
+/// Cache key for per-box fitted OCR character layouts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct OcrBoxLayoutKey {
+    pub ocr_generation: u64,
+    pub boxes_revision: u64,
+    pub box_idx: usize,
+    pub box_fingerprint: u64,
+    pub quantized_video_rect: [i32; 4],
+    pub pixels_per_point_bits: u32,
+    pub color_rgba: [u8; 4],
+}
+
+/// Stationary hover cache key for skipping redundant OCR substring/dictionary scans
+/// when the pointer remains on the exact same character while a popup is open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HoveredOcrCharKey {
+    pub ocr_generation: u64,
+    pub boxes_revision: u64,
+    pub boxes_len: usize,
+    pub box_idx: usize,
+    pub box_fingerprint: u64,
+    pub char_idx: usize,
+    pub video_rect_bits: [u32; 4],
+    pub dict_gen_sig: (u64, bool, u64, u64, u64),
+    pub mining_tag_hash: u64,
+}
+
 /// Represents an individual OCR-detected line prior to multi-line block grouping.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct ParsedLine {
@@ -382,6 +450,14 @@ pub struct OcrState {
     pub ocr_sender: Option<crossbeam_channel::Sender<OcrWorkerResult>>,
     /// Channel receiver for completed OCR results from the background worker.
     pub result_receiver: Option<crossbeam_channel::Receiver<OcrWorkerResult>>,
+    /// Whether `crt_renderer.popup_primitives` currently holds non-empty primitives from a previous frame.
+    pub had_popup_primitives: bool,
+    /// Monotonically increasing revision counter incremented whenever `boxes` or overlay caches change.
+    pub boxes_revision: u64,
+    /// Last hovered character cell for short-circuiting stationary OCR dictionary hover scans.
+    pub last_hovered_char: Option<HoveredOcrCharKey>,
+    /// Per-box cached fitted CJK character galleys and per-character clip rects.
+    pub box_glyph_cache: std::collections::HashMap<OcrBoxLayoutKey, Vec<CachedOcrGlyph>>,
 }
 
 impl OcrState {
@@ -391,6 +467,20 @@ impl OcrState {
         self.session_generation.load(Ordering::Acquire)
     }
 
+    /// Invalidates cached OCR overlay glyph layouts and stationary hover tracking.
+    pub fn invalidate_overlay_caches(&mut self) {
+        self.boxes_revision = self.boxes_revision.wrapping_add(1);
+        self.last_hovered_char = None;
+        self.box_glyph_cache.clear();
+    }
+
+    /// Fast readiness check for the local Chrome Screen AI model directory.
+    #[inline]
+    #[allow(dead_code)]
+    pub fn is_screen_ai_ready(&self) -> bool {
+        crate::ocr::screen_ai::is_screen_ai_ready(&self.screen_ai_dir)
+    }
+
     /// Advances the OCR session generation and invalidates any in-flight request so stale
     /// completions cannot repopulate boxes, errors, or backoff state.
     pub fn bump_generation(&mut self) -> u64 {
@@ -398,6 +488,7 @@ impl OcrState {
         self.active_request_id.store(0, Ordering::Release);
         self.is_processing.store(false, Ordering::Release);
         self.capture_requested.store(false, Ordering::Release);
+        self.invalidate_overlay_caches();
         next
     }
 
@@ -516,6 +607,7 @@ impl OcrState {
         if changed {
             self.last_copied_index = None;
             self.copy_feedback_time = None;
+            self.invalidate_overlay_caches();
         }
         self.last_error = None;
         if self.boxes.is_empty() {
@@ -610,7 +702,7 @@ impl OcrState {
                         crate::ocr::lens::ping_warmup(&agent);
                     }
                     OcrBackend::LocalScreenAi => {
-                        if crate::ocr::screen_ai::is_screen_ai_installed(&screen_ai_dir) {
+                        if crate::ocr::screen_ai::is_screen_ai_ready(&screen_ai_dir) {
                             let _ = crate::ocr::screen_ai::warmup_screen_ai(&screen_ai_dir);
                         }
                     }
@@ -678,7 +770,7 @@ impl OcrState {
                                     }
 
                                     // Auto-download on demand if not yet installed
-                                    let install_res = if !crate::ocr::screen_ai::is_screen_ai_installed(&screen_ai_dir) {
+                                    let install_res = if !crate::ocr::screen_ai::is_screen_ai_ready(&screen_ai_dir) {
                                         is_syncing_screen_ai.store(true, Ordering::Release);
                                         let tx_prog = screen_ai_event_tx.clone();
                                         let ctx_prog = egui_ctx.clone();
@@ -778,6 +870,7 @@ impl OcrState {
         };
         self.boxes = crate::ocr::lens::group_lines_into_blocks(&self.raw_lines, safe_sticky);
         self.last_copied_index = None;
+        self.invalidate_overlay_caches();
     }
 
     /// Clears all detected OCR boxes, lines, and related state.
@@ -870,6 +963,10 @@ impl Default for OcrState {
             free_rgba_rx: None,
             ocr_sender: Some(tx),
             result_receiver: Some(rx),
+            had_popup_primitives: false,
+            boxes_revision: 1,
+            last_hovered_char: None,
+            box_glyph_cache: std::collections::HashMap::new(),
         }
     }
 }

@@ -1,5 +1,6 @@
 use super::params::BeamShaderParams;
 use super::programs::*;
+use crate::video::types::ScalerFilter;
 use eframe::glow::{self, HasContext};
 
 pub struct BeamRenderer {
@@ -357,7 +358,7 @@ impl BeamRenderer {
         scaler_filter: u8,
     ) {
         let (w, h) = (input_size.0.max(1), input_size.1.max(1));
-        let filter_param = if scaler_filter == 0 {
+        let filter_param = if scaler_filter == ScalerFilter::Point as u8 {
             glow::NEAREST as i32
         } else {
             glow::LINEAR as i32
@@ -404,7 +405,7 @@ impl BeamRenderer {
     }
 
     unsafe fn update_filter_mode(&self, gl: &glow::Context, scaler_filter: u8) {
-        let filter_param = if scaler_filter == 0 {
+        let filter_param = if scaler_filter == ScalerFilter::Point as u8 {
             glow::NEAREST as i32
         } else {
             glow::LINEAR as i32
@@ -433,7 +434,23 @@ impl BeamRenderer {
         let out_w = (output_size.0 as u32).max(1);
         let out_h = (output_size.1 as u32).max(1);
 
-        self.setup_beam_output_buffer(gl, out_w, out_h);
+        let stretch = if params.horizontal_stretch.is_finite() && params.horizontal_stretch > 0.0 {
+            params.horizontal_stretch
+        } else {
+            1.0
+        };
+        let video_aspect = (in_w as f32 * stretch) / (in_h as f32);
+        let output_aspect = (out_w as f32) / (out_h as f32);
+        let (scale_x, scale_y) = if video_aspect > output_aspect {
+            (1.0, output_aspect / video_aspect.max(1e-6))
+        } else {
+            (video_aspect / output_aspect.max(1e-6), 1.0)
+        };
+        let zoom = params.screen_scale.clamp(50.0, 100.0) / 100.0;
+        let tube_w = ((out_w as f32 * scale_x * zoom).round() as u32).clamp(1, out_w);
+        let tube_h = ((out_h as f32 * scale_y * zoom).round() as u32).clamp(1, out_h);
+
+        self.setup_beam_output_buffer(gl, tube_w, tube_h);
 
         let (
             curr_tex,
@@ -444,23 +461,18 @@ impl BeamRenderer {
             fps_divisor,
             lcd_anti_retention_uniform,
             scan_direction_uniform,
-            saved_input_tex_params,
         ) = if params.steady_state_one_shot {
             // One-shot steady-state 1x capture (screenshots): sample `input_texture` directly
             // without touching the sub-frame history ring buffer or phase counters so live
             // 120Hz/144Hz/240Hz scanout resumes seamlessly on the very next sub-frame.
             gl.bind_vertex_array(Some(self.vertex_array));
-            let filter_param = if params.scaler_filter == 0 {
+            let filter_param = if params.scaler_filter == ScalerFilter::Point as u8 {
                 glow::NEAREST as i32
             } else {
                 glow::LINEAR as i32
             };
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(input_texture));
-            let prev_min = gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER);
-            let prev_mag = gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER);
-            let prev_wrap_s = gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S);
-            let prev_wrap_t = gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T);
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, filter_param);
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter_param);
             gl.tex_parameter_i32(
@@ -482,7 +494,6 @@ impl BeamRenderer {
                 1.0f32,
                 0,
                 0,
-                Some((prev_min, prev_mag, prev_wrap_s, prev_wrap_t)),
             )
         } else {
             if self.last_input_size != (in_w, in_h) {
@@ -580,14 +591,13 @@ impl BeamRenderer {
                 fps_divisor,
                 if params.lcd_anti_retention { 1 } else { 0 },
                 params.scan_direction.min(4) as i32,
-                None,
             )
         };
 
-        // Stage 1: CRT Electron Beam Yoke Simulator -> renders linear light + steady luma to `self.beam_fbo` (RGBA16F)
+        // Stage 1: CRT Electron Beam Yoke Simulator -> renders active tube linear light + steady luma to `self.beam_fbo` (RGBA16F)
         gl.disable(glow::SCISSOR_TEST);
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.beam_fbo));
-        gl.viewport(0, 0, out_w as i32, out_h as i32);
+        gl.viewport(0, 0, tube_w as i32, tube_h as i32);
 
         gl.use_program(Some(self.beam_prog));
         gl.active_texture(glow::TEXTURE0);
@@ -597,7 +607,7 @@ impl BeamRenderer {
         gl.active_texture(glow::TEXTURE2);
         gl.bind_texture(glow::TEXTURE_2D, Some(prev2_tex));
 
-        gl.uniform_2_f32(self.output_res_loc.as_ref(), out_w as f32, out_h as f32);
+        gl.uniform_2_f32(self.output_res_loc.as_ref(), tube_w as f32, tube_h as f32);
         gl.uniform_2_f32(self.source_size_loc.as_ref(), in_w as f32, in_h as f32);
         gl.uniform_3_f32(
             self.background_color_loc.as_ref(),
@@ -672,14 +682,6 @@ impl BeamRenderer {
         gl.bind_texture(glow::TEXTURE_2D, None);
         gl.active_texture(glow::TEXTURE1);
         gl.bind_texture(glow::TEXTURE_2D, None);
-        if let Some((prev_min, prev_mag, prev_wrap_s, prev_wrap_t)) = saved_input_tex_params {
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(input_texture));
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, prev_min);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, prev_mag);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, prev_wrap_s);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, prev_wrap_t);
-        }
 
         // Stage 2: CRT Tube Geometry Transformation + Gamma-Curve-Preserving Scanlines & Phosphor Mask -> `target_fbo`
         gl.bind_framebuffer(glow::FRAMEBUFFER, target_fbo);

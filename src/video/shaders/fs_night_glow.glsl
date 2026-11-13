@@ -47,8 +47,7 @@ const vec2 ring2_dirs[8] = vec2[8](
 
 void main() {
     if (glow_intensity <= 0.001) {
-        out_color = vec4(0.0);
-        return;
+        discard;
     }
 
     // 1. Calculate active video coordinate mapping
@@ -111,6 +110,9 @@ void main() {
     vec2 max_q = max(q, vec2(0.0));
     float len_max_q = length(max_q);
     float d_ap = min(max(q.x, q.y), 0.0) + len_max_q - r_corner;
+    if (d_ap <= 0.0) {
+        discard;
+    }
 
     // Continuous 2D unit normal pointing outward from the rounded aperture
     vec2 n_dir = (len_max_q > 0.0001) ? (max_q / len_max_q) : ((q.x > q.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0));

@@ -210,6 +210,52 @@ impl DictPopupState {
         }
         self.entries.is_empty()
     }
+
+    /// Returns cached `(sentence, word_char_offset)` for `(self.source_text, self.char_range)`
+    /// without re-running `extract_sentence` on every frame while the popup remains open.
+    pub fn cached_sentence_rc(&self) -> (std::rc::Rc<str>, (usize, usize)) {
+        struct CachedPopupSentence {
+            source_text: String,
+            char_range: (usize, usize),
+            sentence: std::rc::Rc<str>,
+            word_range: (usize, usize),
+        }
+        thread_local! {
+            static SENTENCE_CACHE: std::cell::RefCell<Option<CachedPopupSentence>> =
+                const { std::cell::RefCell::new(None) };
+        }
+        SENTENCE_CACHE.with(|cache| {
+            if let Some(hit) = cache.borrow().as_ref() {
+                if hit.char_range == self.char_range && hit.source_text == self.source_text {
+                    return (hit.sentence.clone(), hit.word_range);
+                }
+            }
+            let (sentence_str, word_range) =
+                crate::bank::sentence::extract_sentence(&self.source_text, self.char_range);
+            let sentence: std::rc::Rc<str> = std::rc::Rc::from(sentence_str);
+            *cache.borrow_mut() = Some(CachedPopupSentence {
+                source_text: self.source_text.clone(),
+                char_range: self.char_range,
+                sentence: sentence.clone(),
+                word_range,
+            });
+            (sentence, word_range)
+        })
+    }
+
+    /// Invokes `f(sentence, word_range)` using the cached extracted sentence for this popup.
+    #[inline]
+    pub fn with_cached_sentence<R>(&self, f: impl FnOnce(&str, (usize, usize)) -> R) -> R {
+        let (sentence, word_range) = self.cached_sentence_rc();
+        f(&sentence, word_range)
+    }
+
+    /// Convenience helper returning `(sentence, word_range)` as an owned `(String, (usize, usize))`.
+    #[allow(dead_code)]
+    pub fn cached_sentence(&self) -> (String, (usize, usize)) {
+        let (sentence, word_range) = self.cached_sentence_rc();
+        (sentence.to_string(), word_range)
+    }
 }
 
 /// Background events sent between worker threads and the UI.

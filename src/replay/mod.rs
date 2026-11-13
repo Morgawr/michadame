@@ -28,8 +28,134 @@ pub fn now_us() -> i64 {
     ts.tv_sec * 1_000_000 + ts.tv_nsec / 1000
 }
 
+enum FrameRecycler {
+    Replay {
+        free_tx: Sender<Vec<u8>>,
+        pool_generation: Arc<AtomicU64>,
+        generation: u64,
+    },
+    Broadcast {
+        free_tx: Sender<Vec<u8>>,
+    },
+}
+
+struct SharedFrameInner {
+    data: Vec<u8>,
+    recycler: Option<FrameRecycler>,
+}
+
+impl Drop for SharedFrameInner {
+    fn drop(&mut self) {
+        let data = std::mem::take(&mut self.data);
+        if data.capacity() == 0 {
+            return;
+        }
+        match &self.recycler {
+            Some(FrameRecycler::Replay {
+                free_tx,
+                pool_generation,
+                generation,
+            }) => {
+                if pool_generation.load(Ordering::Acquire) == *generation {
+                    let _ = free_tx.try_send(data);
+                }
+            }
+            Some(FrameRecycler::Broadcast { free_tx }) => {
+                let _ = free_tx.try_send(data);
+            }
+            None => {}
+        }
+    }
+}
+
+/// Reference-counted RGBA capture buffer shared zero-copy across Replay and Broadcast
+/// consumers, returning its backing `Vec<u8>` to the originating pool on the final drop.
+#[derive(Clone)]
+pub struct SharedFrameBytes(Arc<SharedFrameInner>);
+
+impl SharedFrameBytes {
+    #[allow(dead_code)]
+    pub fn from_vec(data: Vec<u8>) -> Self {
+        Self(Arc::new(SharedFrameInner {
+            data,
+            recycler: None,
+        }))
+    }
+
+    pub(crate) fn from_replay_pool(
+        data: Vec<u8>,
+        free_tx: Sender<Vec<u8>>,
+        pool_generation: Arc<AtomicU64>,
+        generation: u64,
+    ) -> Self {
+        Self(Arc::new(SharedFrameInner {
+            data,
+            recycler: Some(FrameRecycler::Replay {
+                free_tx,
+                pool_generation,
+                generation,
+            }),
+        }))
+    }
+
+    pub(crate) fn from_broadcast_pool(data: Vec<u8>, free_tx: Sender<Vec<u8>>) -> Self {
+        Self(Arc::new(SharedFrameInner {
+            data,
+            recycler: Some(FrameRecycler::Broadcast { free_tx }),
+        }))
+    }
+
+    #[allow(dead_code)]
+    pub fn strong_count(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
+}
+
+impl std::ops::Deref for SharedFrameBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0.data
+    }
+}
+
+impl AsRef<[u8]> for SharedFrameBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.0.data
+    }
+}
+
+impl std::fmt::Debug for SharedFrameBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedFrameBytes")
+            .field("len", &self.0.data.len())
+            .field("strong_count", &Arc::strong_count(&self.0))
+            .finish()
+    }
+}
+
+impl PartialEq<[u8]> for SharedFrameBytes {
+    fn eq(&self, other: &[u8]) -> bool {
+        self.0.data.as_slice() == other
+    }
+}
+
+impl PartialEq<Vec<u8>> for SharedFrameBytes {
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        self.0.data == *other
+    }
+}
+
+impl PartialEq for SharedFrameBytes {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.data == other.0.data
+    }
+}
+
+impl Eq for SharedFrameBytes {}
+
 pub struct VideoFrame {
-    pub rgba: Vec<u8>,
+    pub rgba: SharedFrameBytes,
     pub width: u32,
     pub height: u32,
     pub at: i64,
@@ -55,6 +181,62 @@ pub(crate) struct AudioRoute {
     pub next_continuous: bool,
     pub format: Option<(u32, u16)>,
 }
+fn mix_alert_in_place(
+    dst: &mut [f32],
+    alert_samples: &[f32],
+    start_playhead: f64,
+    frame_offset: usize,
+    rate: u32,
+    channels: u16,
+) {
+    let src_frames = alert_samples.len() / 2;
+    let channels_usize = channels as usize;
+    if src_frames == 0 || rate == 0 || channels_usize == 0 {
+        return;
+    }
+    let frames = dst.len() / channels_usize;
+    let step = 48000.0 / rate as f64;
+
+    for k in 0..frames {
+        let pos = start_playhead + ((frame_offset + k) as f64) * step;
+        if pos >= src_frames as f64 {
+            break;
+        }
+        let idx = pos.floor() as usize;
+        let frac = (pos - idx as f64) as f32;
+
+        let idx0 = idx.saturating_sub(1);
+        let idx1 = idx.min(src_frames - 1);
+        let idx2 = (idx + 1).min(src_frames - 1);
+        let idx3 = (idx + 2).min(src_frames - 1);
+
+        // High-fidelity Catmull-Rom cubic interpolation per channel
+        let mut ch_samples = [0.0f32; 2];
+        for c in 0..2 {
+            let p0 = alert_samples[idx0 * 2 + c];
+            let p1 = alert_samples[idx1 * 2 + c];
+            let p2 = alert_samples[idx2 * 2 + c];
+            let p3 = alert_samples[idx3 * 2 + c];
+
+            let c0 = p1;
+            let c1 = 0.5 * (p2 - p0);
+            let c2 = p0 - 2.5 * p1 + 2.0 * p2 - 0.5 * p3;
+            let c3 = 0.5 * (p3 - p0) + 1.5 * (p1 - p2);
+
+            ch_samples[c] = ((c3 * frac + c2) * frac + c1) * frac + c0;
+        }
+
+        if channels == 1 {
+            let mono_mix = (ch_samples[0] + ch_samples[1]) * 0.5;
+            dst[k] = (dst[k] + mono_mix).clamp(-1.0, 1.0);
+        } else {
+            let base = k * channels_usize;
+            dst[base] = (dst[base] + ch_samples[0]).clamp(-1.0, 1.0);
+            dst[base + 1] = (dst[base + 1] + ch_samples[1]).clamp(-1.0, 1.0);
+        }
+    }
+}
+
 fn submit_to_route(
     route_mutex: &Mutex<Option<AudioRoute>>,
     discontinuity: &AtomicBool,
@@ -62,6 +244,7 @@ fn submit_to_route(
     rate: u32,
     channels: u16,
     at: i64,
+    alert_mix: Option<(&[f32], f64)>,
 ) {
     let Ok(mut route) = route_mutex.try_lock() else {
         discontinuity.store(true, Ordering::Relaxed);
@@ -111,8 +294,18 @@ fn submit_to_route(
         }
         let block = route.partial.as_mut().unwrap();
         let count = (chunk_len - block.len).min(len - offset);
-        block.samples[block.len..block.len + count]
-            .copy_from_slice(&samples[offset..offset + count]);
+        let dst_slice = &mut block.samples[block.len..block.len + count];
+        dst_slice.copy_from_slice(&samples[offset..offset + count]);
+        if let Some((alert_samples, start_playhead)) = alert_mix {
+            mix_alert_in_place(
+                dst_slice,
+                alert_samples,
+                start_playhead,
+                offset / channels_usize,
+                rate,
+                channels,
+            );
+        }
         block.len += count;
         offset += count;
         if block.len == chunk_len {
@@ -128,7 +321,7 @@ fn submit_to_route(
 }
 
 struct ActiveAlertAudio {
-    samples: Vec<f32>,
+    samples: Arc<[f32]>,
     playhead_frames: f64,
 }
 
@@ -146,6 +339,7 @@ pub struct AudioTap {
     broadcast_preroll_active: AtomicBool,
     pub filter: std::sync::RwLock<crate::replay::config::AudioFilterConfig>,
     game_volume: Arc<AtomicU32>,
+    has_active_alert: AtomicBool,
     active_alert: Mutex<Option<ActiveAlertAudio>>,
     last_game_submit: AtomicI64,
     reactive_listening: AtomicBool,
@@ -174,6 +368,7 @@ impl Default for AudioTap {
             broadcast_preroll_active: AtomicBool::new(false),
             filter: std::sync::RwLock::new(crate::replay::config::AudioFilterConfig::default()),
             game_volume: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            has_active_alert: AtomicBool::new(false),
             active_alert: Mutex::new(None),
             last_game_submit: AtomicI64::new(0),
             reactive_listening: AtomicBool::new(false),
@@ -357,7 +552,15 @@ impl AudioTap {
     /// on-the-fly to match the ALSA capture rate (e.g. 44.1 kHz, 48 kHz) and channel layout.
     /// If ALSA audio is idle/stopped, the chime is directly submitted as 48 kHz stereo audio blocks.
     pub fn play_alert(&self, samples: &[f32]) {
-        if !self.is_enabled() {
+        if !self.is_enabled() || samples.len() < 2 {
+            return;
+        }
+        self.play_alert_arc(Arc::from(samples));
+    }
+
+    /// Zero-copy variant of [`AudioTap::play_alert`] accepting shared `Arc<[f32]>` alert samples.
+    pub fn play_alert_arc(&self, samples: Arc<[f32]>) {
+        if !self.is_enabled() || samples.len() < 2 {
             return;
         }
         let now = now_us();
@@ -367,10 +570,16 @@ impl AudioTap {
             // ALSA capture is actively running; queue samples to be resampled and mixed in submit()
             let mut guard = self.active_alert.lock().unwrap();
             *guard = Some(ActiveAlertAudio {
-                samples: samples.to_vec(),
+                samples,
                 playhead_frames: 0.0,
             });
+            self.has_active_alert.store(true, Ordering::Release);
         } else {
+            {
+                let mut guard = self.active_alert.lock().unwrap();
+                *guard = None;
+                self.has_active_alert.store(false, Ordering::Release);
+            }
             // ALSA capture is idle or not running; submit directly to broadcast and replay routes
             let chunk_size = 1920 * 2; // 40ms of 48 kHz stereo
             let mut offset = 0;
@@ -378,7 +587,7 @@ impl AudioTap {
             while offset < samples.len() {
                 let end = (offset + chunk_size).min(samples.len());
                 let chunk = &samples[offset..end];
-                submit_to_route(&self.route, &self.discontinuity, chunk, 48000, 2, at);
+                submit_to_route(&self.route, &self.discontinuity, chunk, 48000, 2, at, None);
                 if !self.broadcast_preroll_active.load(Ordering::Relaxed) {
                     submit_to_route(
                         &self.broadcast_route,
@@ -387,6 +596,7 @@ impl AudioTap {
                         48000,
                         2,
                         at,
+                        None,
                     );
                 }
                 at += (chunk.len() as i64 / 2) * 1_000_000 / 48000;
@@ -400,89 +610,56 @@ impl AudioTap {
             return;
         }
 
-        let mixed_buf;
-        let effective_samples = {
+        let alert_mix: Option<(Arc<[f32]>, f64)> = if self.has_active_alert.load(Ordering::Acquire)
+        {
             let mut alert_guard = self.active_alert.lock().unwrap();
             if let Some(active) = alert_guard.as_mut() {
                 let src_frames = active.samples.len() / 2;
                 if src_frames == 0 || rate == 0 || channels == 0 {
                     *alert_guard = None;
-                    samples
+                    self.has_active_alert.store(false, Ordering::Release);
+                    None
                 } else {
-                    let mut buf = samples.to_vec();
-                    let frames = buf.len() / channels as usize;
+                    let start_playhead = active.playhead_frames;
+                    let frames = samples.len() / channels as usize;
                     let step = 48000.0 / rate as f64;
-                    let mut finished = false;
-
-                    for k in 0..frames {
-                        if active.playhead_frames >= src_frames as f64 {
-                            finished = true;
-                            break;
-                        }
-                        let pos = active.playhead_frames;
-                        let idx = pos.floor() as usize;
-                        let frac = (pos - idx as f64) as f32;
-
-                        let idx0 = idx.saturating_sub(1);
-                        let idx1 = idx.min(src_frames - 1);
-                        let idx2 = (idx + 1).min(src_frames - 1);
-                        let idx3 = (idx + 2).min(src_frames - 1);
-
-                        // High-fidelity Catmull-Rom cubic interpolation per channel
-                        let mut ch_samples = [0.0f32; 2];
-                        for c in 0..2 {
-                            let p0 = active.samples[idx0 * 2 + c];
-                            let p1 = active.samples[idx1 * 2 + c];
-                            let p2 = active.samples[idx2 * 2 + c];
-                            let p3 = active.samples[idx3 * 2 + c];
-
-                            let c0 = p1;
-                            let c1 = 0.5 * (p2 - p0);
-                            let c2 = p0 - 2.5 * p1 + 2.0 * p2 - 0.5 * p3;
-                            let c3 = 0.5 * (p3 - p0) + 1.5 * (p1 - p2);
-
-                            ch_samples[c] = ((c3 * frac + c2) * frac + c1) * frac + c0;
-                        }
-
-                        if channels == 1 {
-                            let mono_mix = (ch_samples[0] + ch_samples[1]) * 0.5;
-                            buf[k] = (buf[k] + mono_mix).clamp(-1.0, 1.0);
-                        } else {
-                            let base = k * channels as usize;
-                            buf[base] = (buf[base] + ch_samples[0]).clamp(-1.0, 1.0);
-                            buf[base + 1] = (buf[base + 1] + ch_samples[1]).clamp(-1.0, 1.0);
-                        }
-
-                        active.playhead_frames += step;
-                    }
-
-                    if finished || active.playhead_frames >= src_frames as f64 {
+                    let next_playhead = start_playhead + (frames as f64) * step;
+                    let arc_samples = Arc::clone(&active.samples);
+                    if next_playhead >= src_frames as f64 {
                         *alert_guard = None;
+                        self.has_active_alert.store(false, Ordering::Release);
+                    } else {
+                        active.playhead_frames = next_playhead;
                     }
-                    mixed_buf = buf;
-                    &mixed_buf[..]
+                    Some((arc_samples, start_playhead))
                 }
             } else {
-                samples
+                self.has_active_alert.store(false, Ordering::Release);
+                None
             }
+        } else {
+            None
         };
+        let alert_slice = alert_mix.as_ref().map(|(s, p)| (s.as_ref(), *p));
 
         submit_to_route(
             &self.route,
             &self.discontinuity,
-            effective_samples,
+            samples,
             rate,
             channels,
             at,
+            alert_slice,
         );
         if !self.broadcast_preroll_active.load(Ordering::Relaxed) {
             submit_to_route(
                 &self.broadcast_route,
                 &self.broadcast_discontinuity,
-                effective_samples,
+                samples,
                 rate,
                 channels,
                 at,
+                alert_slice,
             );
         }
     }
@@ -497,6 +674,7 @@ impl AudioTap {
             rate,
             channels,
             at,
+            None,
         );
         if !self.broadcast_preroll_active.load(Ordering::Relaxed) {
             submit_to_route(
@@ -506,6 +684,7 @@ impl AudioTap {
                 rate,
                 channels,
                 at,
+                None,
             );
         }
     }
@@ -521,6 +700,7 @@ impl AudioTap {
             rate,
             channels,
             at,
+            None,
         );
     }
     pub fn set_broadcast_preroll_active(&self, active: bool) {
@@ -551,8 +731,13 @@ impl AudioTap {
     fn refresh_enabled(&self) {
         let replay_on = self.route.lock().unwrap().is_some();
         let broadcast_on = self.broadcast_route.lock().unwrap().is_some();
-        self.enabled
-            .store(replay_on || broadcast_on, Ordering::Release);
+        let any_on = replay_on || broadcast_on;
+        self.enabled.store(any_on, Ordering::Release);
+        if !any_on {
+            let mut guard = self.active_alert.lock().unwrap();
+            *guard = None;
+            self.has_active_alert.store(false, Ordering::Release);
+        }
     }
 }
 #[derive(Default, Clone)]
@@ -803,6 +988,8 @@ impl Replay {
         });
         self.audio.refresh_enabled();
         self.available_before = Some(available);
+        self.available_now = Some(available);
+        self.memory_checked = Some(std::time::Instant::now());
         self.runtime = Some(Runtime {
             queue,
             config: Arc::new(self.config.clone()),
@@ -975,9 +1162,10 @@ impl Replay {
         status
     }
     pub fn update(&mut self) {
-        if self
-            .memory_checked
-            .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1))
+        if (self.runtime.is_some() || self.audio.is_enabled())
+            && self
+                .memory_checked
+                .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1))
         {
             self.available_now = config::available_memory();
             self.memory_checked = Some(std::time::Instant::now());
@@ -1354,5 +1542,41 @@ mod tests {
         // 0.1 game + 0.4 average chime = 0.5
         assert!((mixed.samples[0] - 0.5).abs() < 1e-3);
         free.send(mixed).unwrap();
+    }
+
+    #[test]
+    fn test_audio_tap_play_alert_arc_and_has_active_alert_clears() {
+        let (tap, rx, free, _) = test_tap(4);
+        assert!(!tap.has_active_alert.load(Ordering::Acquire));
+
+        // Simulate active 48 kHz stereo game audio
+        tap.submit(&[0.15f32; 3840], 48000, 2, now_us());
+        free.send(rx.try_recv().unwrap()).unwrap();
+
+        // Install a 2-block (7680 samples = 3840 frames) shared Arc<[f32]> alert
+        let chime: Arc<[f32]> = Arc::from(vec![0.25f32; 7680]);
+        tap.play_alert_arc(Arc::clone(&chime));
+        assert!(tap.has_active_alert.load(Ordering::Acquire));
+
+        // First block consumes half the alert; has_active_alert remains true
+        tap.submit(&[0.15f32; 3840], 48000, 2, now_us());
+        assert!(tap.has_active_alert.load(Ordering::Acquire));
+        let first = rx.try_recv().unwrap();
+        assert!((first.samples[0] - 0.40).abs() < 1e-4);
+        free.send(first).unwrap();
+
+        // Second block finishes the alert and clears has_active_alert
+        tap.submit(&[0.15f32; 3840], 48000, 2, now_us());
+        assert!(!tap.has_active_alert.load(Ordering::Acquire));
+        assert!(tap.active_alert.lock().unwrap().is_none());
+        let second = rx.try_recv().unwrap();
+        assert!((second.samples[0] - 0.40).abs() < 1e-4);
+        free.send(second).unwrap();
+
+        // Subsequent submits take the lock-free fast-path with pure game audio
+        tap.submit(&[0.15f32; 3840], 48000, 2, now_us());
+        let third = rx.try_recv().unwrap();
+        assert!((third.samples[0] - 0.15).abs() < 1e-4);
+        free.send(third).unwrap();
     }
 }

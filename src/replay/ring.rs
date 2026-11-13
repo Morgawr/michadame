@@ -137,15 +137,44 @@ impl History {
     pub fn clip(&self, seconds: u32, requested_end: i64) -> Option<Vec<Arc<Encoded>>> {
         let end = self.end()?.min(requested_end);
         let target = end - seconds as i64 * 1_000_000;
-        // Round start forward to a keyframe, never extend beyond the requested duration.
-        let start = self
-            .packets
-            .iter()
-            .find(|p| p.key && p.start >= target && p.start < end)?
-            .start;
+        // Reverse-scan from the tail to locate the earliest keyframe in `[target, end)`
+        // without traversing minutes of older GOP packets at the front of the ring.
+        let mut earliest_key: Option<(usize, i64)> = None;
+        for (idx, p) in self.packets.iter().enumerate().rev() {
+            if p.key {
+                if p.start < target {
+                    break;
+                }
+                if p.start < end {
+                    earliest_key = Some((idx, p.start));
+                }
+            }
+        }
+        let (key_idx, start) = earliest_key?;
+
+        // Audio and video packets are appended independently, so a few audio packets with
+        // `p.start >= start` may reside just before `key_idx`. Step back only until both
+        // tracks are safely earlier than `start`.
+        let mut scan_start_idx = key_idx;
+        let mut seen_video_before = false;
+        let mut seen_audio_before = false;
+        for idx in (0..key_idx).rev() {
+            let p = &self.packets[idx];
+            if p.start >= start {
+                scan_start_idx = idx;
+            } else if p.video {
+                seen_video_before = true;
+            } else if p.start + 1_000_000 < start {
+                seen_audio_before = true;
+            }
+            if seen_video_before && seen_audio_before {
+                break;
+            }
+        }
+
         let packets: Vec<_> = self
             .packets
-            .iter()
+            .range(scan_start_idx..)
             .filter(|p| p.start >= start && p.start < end && (p.video || p.end <= end))
             .map(|p| {
                 if p.video && p.end > end {
@@ -418,5 +447,126 @@ mod tests {
         assert!(cut[0].key);
         assert_eq!(cut[0].start, 4_000_000);
         assert_eq!(cut.iter().map(|p| p.end).max().unwrap(), 8_000_000);
+    }
+
+    fn forward_clip_reference(
+        history: &History,
+        seconds: u32,
+        requested_end: i64,
+    ) -> Option<Vec<Arc<Encoded>>> {
+        let end = history.end()?.min(requested_end);
+        let target = end - seconds as i64 * 1_000_000;
+        let start = history
+            .packets
+            .iter()
+            .find(|p| p.key && p.start >= target && p.start < end)?
+            .start;
+        let packets: Vec<_> = history
+            .packets
+            .iter()
+            .filter(|p| p.start >= start && p.start < end && (p.video || p.end <= end))
+            .map(|p| {
+                if p.video && p.end > end {
+                    let mut clipped = p.as_ref().clone();
+                    clipped.end = end;
+                    clipped.packet.set_duration(end - clipped.start);
+                    Arc::new(clipped)
+                } else {
+                    p.clone()
+                }
+            })
+            .collect();
+        if !packets.iter().any(|p| !p.video) || !packets.iter().any(|p| p.key) {
+            return None;
+        }
+        Some(packets)
+    }
+
+    #[test]
+    fn reverse_scan_clip_matches_forward_reference_across_multi_gop_rings() {
+        let mut h = History::new(600);
+        let epoch = 10_000_000i64;
+        // Build a 120-second multi-GOP ring at 60fps with:
+        // - irregular GOP intervals (every ~1s and ~2s)
+        // - a 2-second video stall around t=70..72s where audio continues ahead of video
+        // - audio packets pushed slightly ahead of video keyframes at GOP boundaries
+        let mut audio_us = epoch;
+        for frame_idx in 0..(120 * 60) {
+            let video_us = epoch + (frame_idx as i64 * 1_000_000) / 60;
+            // Push audio up to 60ms ahead of video so audio with `start >= key.start`
+            // precedes `key` in `h.packets`.
+            while audio_us <= video_us + 60_000 {
+                let mut ap = Packet::copy(&[1u8; 8]);
+                ap.set_pts(Some(audio_us));
+                ap.set_dts(Some(audio_us));
+                ap.set_duration(21_333);
+                h.push(Encoded::new(ap, false), usize::MAX);
+                audio_us += 21_333;
+            }
+
+            // Simulate a 2-second video stall between 70s and 72s
+            if (70 * 60..72 * 60).contains(&frame_idx) {
+                continue;
+            }
+            let is_key = frame_idx == 0
+                || frame_idx == 72 * 60
+                || frame_idx % 60 == 0
+                || frame_idx % 95 == 0;
+            let mut vp = Packet::copy(&[2u8; 16]);
+            vp.set_pts(Some(video_us));
+            vp.set_dts(Some(video_us));
+            vp.set_duration(16_666);
+            if is_key {
+                vp.set_flags(ffmpeg_next::packet::Flags::KEY);
+            }
+            h.push(Encoded::new(vp, true), usize::MAX);
+        }
+
+        let ring_end = h.end().unwrap();
+        for &(secs, req_end) in &[
+            (1u32, ring_end),
+            (5, ring_end),
+            (15, ring_end),
+            (30, ring_end),
+            (60, ring_end),
+            (600, ring_end),
+            (10, epoch + 71_250_000), // Requested end inside held-picture video stall
+            (25, epoch + 90_500_000), // Mid-ring clip
+            (1, epoch + 10_100_000),  // Too short / edge clip
+        ] {
+            let actual = h.clip(secs, req_end);
+            let expected = forward_clip_reference(&h, secs, req_end);
+            assert_eq!(
+                actual.is_some(),
+                expected.is_some(),
+                "Mismatch for secs={secs}, req_end={req_end}"
+            );
+            if let (Some(act), Some(exp)) = (actual, expected) {
+                assert_eq!(act.len(), exp.len(), "Length mismatch for secs={secs}");
+                for (i, (a, e)) in act.iter().zip(exp.iter()).enumerate() {
+                    assert_eq!(
+                        (
+                            a.video,
+                            a.key,
+                            a.start,
+                            a.end,
+                            a.packet.pts(),
+                            a.packet.dts(),
+                            a.packet.duration()
+                        ),
+                        (
+                            e.video,
+                            e.key,
+                            e.start,
+                            e.end,
+                            e.packet.pts(),
+                            e.packet.dts(),
+                            e.packet.duration()
+                        ),
+                        "Packet {i} mismatch for secs={secs}, req_end={req_end}"
+                    );
+                }
+            }
+        }
     }
 }

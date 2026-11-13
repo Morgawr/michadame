@@ -4,34 +4,32 @@
 // Output: RG = (real, imag) in bit-reversed order
 
 in vec2 v_tc;
-out vec4 fragColor;
+out vec2 fragColor;
 
 uniform sampler2D input_texture;
 uniform ivec2 fft_size;      // padded power-of-2 size
 uniform ivec2 orig_size;     // original frame size
+uniform ivec2 u_log2_size;   // (log2(fft_size.x), log2(fft_size.y))
 
-// Bit-reverse an index for FFT butterfly ordering
-uint bitReverse(uint x, uint bits) {
-    uint result = 0u;
-    for (uint i = 0u; i < bits; i++) {
-        result = (result << 1u) | (x & 1u);
-        x >>= 1u;
-    }
-    return result;
+uint bitReverse32(uint x) {
+    x = ((x & 0x55555555u) << 1u) | ((x >> 1u) & 0x55555555u);
+    x = ((x & 0x33333333u) << 2u) | ((x >> 2u) & 0x33333333u);
+    x = ((x & 0x0F0F0F0Fu) << 4u) | ((x >> 4u) & 0x0F0F0F0Fu);
+    x = ((x & 0x00FF00FFu) << 8u) | ((x >> 8u) & 0x00FF00FFu);
+    return (x << 16u) | (x >> 16u);
 }
 
-uint log2u(uint n) {
-    uint r = 0u;
-    while (n > 1u) { n >>= 1u; r++; }
-    return r;
+// Bit-reverse an index for FFT butterfly ordering in 5 constant ALU steps
+uint bitReverse(uint x, uint bits) {
+    return (bits == 0u) ? 0u : (bitReverse32(x) >> (32u - bits));
 }
 
 void main() {
     ivec2 pos = ivec2(gl_FragCoord.xy);
 
     // Bit-reverse both x and y indices
-    uint bitsX = log2u(uint(fft_size.x));
-    uint bitsY = log2u(uint(fft_size.y));
+    uint bitsX = uint(max(u_log2_size.x, 0));
+    uint bitsY = uint(max(u_log2_size.y, 0));
     uint revX = bitReverse(uint(pos.x), bitsX);
     uint revY = bitReverse(uint(pos.y), bitsY);
 
@@ -46,5 +44,5 @@ void main() {
 
     // Store as complex number: (real, imag) = (gray, 0)
     // No normalization here - normalization is applied at the extract step
-    fragColor = vec4(gray, 0.0, 0.0, 1.0);
+    fragColor = vec2(gray, 0.0);
 }

@@ -51,10 +51,9 @@ pub fn parse_streams_response(body: &serde_json::Value) -> Option<StreamStatus> 
 }
 
 fn call_streams_api(channel: &str, token: &StoredToken) -> Result<ureq::Response, ureq::Error> {
-    ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(15))
-        .build()
+    super::http_agent()
         .get(STREAMS_URL)
+        .timeout(Duration::from_secs(15))
         .query("user_login", channel)
         .set("Client-Id", token.effective_client_id())
         .set("Authorization", &format!("Bearer {}", token.access_token))

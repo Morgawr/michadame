@@ -5,10 +5,10 @@
 //! sustained, sawtoothy FM synth pad design heard across classic PC-98 visual novels
 //! (such as Ryu Umemoto's soundtrack for *YU-NO: A girl who chants love at the bound of this world*).
 
-use rodio::buffer::SamplesBuffer;
 use rodio::{Sink, Source};
 use std::f32::consts::PI;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub const ALERT_SAMPLE_RATE: u32 = 48_000;
 pub const ALERT_CHANNELS: u16 = 2;
@@ -204,8 +204,37 @@ pub fn generate_light_switch_on_samples() -> Vec<f32> {
 }
 
 struct GuardedSamplesSource {
-    inner: SamplesBuffer<f32>,
+    samples: Arc<[f32]>,
+    pos: usize,
+    channels: u16,
+    sample_rate: u32,
+    duration: Duration,
     _guard: crate::devices::audio::SharedPlaybackGuard,
+}
+
+impl GuardedSamplesSource {
+    fn new(
+        samples: Arc<[f32]>,
+        channels: u16,
+        sample_rate: u32,
+        guard: crate::devices::audio::SharedPlaybackGuard,
+    ) -> Self {
+        let denom = (sample_rate as u64).saturating_mul(channels.max(1) as u64);
+        let duration = if denom > 0 {
+            let ns = 1_000_000_000u64.saturating_mul(samples.len() as u64) / denom;
+            Duration::from_nanos(ns)
+        } else {
+            Duration::ZERO
+        };
+        Self {
+            samples,
+            pos: 0,
+            channels,
+            sample_rate,
+            duration,
+            _guard: guard,
+        }
+    }
 }
 
 impl Iterator for GuardedSamplesSource {
@@ -213,34 +242,37 @@ impl Iterator for GuardedSamplesSource {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next()
+        let sample = *self.samples.get(self.pos)?;
+        self.pos += 1;
+        Some(sample)
     }
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.inner.size_hint()
+        let remaining = self.samples.len().saturating_sub(self.pos);
+        (remaining, Some(remaining))
     }
 }
 
 impl Source for GuardedSamplesSource {
     #[inline]
     fn current_frame_len(&self) -> Option<usize> {
-        self.inner.current_frame_len()
+        None
     }
 
     #[inline]
     fn channels(&self) -> u16 {
-        self.inner.channels()
+        self.channels
     }
 
     #[inline]
     fn sample_rate(&self) -> u32 {
-        self.inner.sample_rate()
+        self.sample_rate
     }
 
     #[inline]
-    fn total_duration(&self) -> Option<std::time::Duration> {
-        self.inner.total_duration()
+    fn total_duration(&self) -> Option<Duration> {
+        Some(self.duration)
     }
 }
 
@@ -252,9 +284,9 @@ pub struct AlertSoundPlayer {
     enable_hardware: bool,
     active_chime_sink: std::sync::Mutex<Option<Sink>>,
     active_switch_sink: std::sync::Mutex<Option<Sink>>,
-    chime_samples: Arc<Vec<f32>>,
-    light_switch_samples: Arc<Vec<f32>>,
-    light_switch_on_samples: Arc<Vec<f32>>,
+    chime_samples: Arc<[f32]>,
+    light_switch_samples: Arc<[f32]>,
+    light_switch_on_samples: Arc<[f32]>,
     volume: std::sync::atomic::AtomicU32,
 }
 
@@ -279,9 +311,9 @@ impl AlertSoundPlayer {
     }
 
     fn with_playback(enable_hardware: bool) -> Self {
-        let chime_samples = Arc::new(generate_retro_chime_samples());
-        let light_switch_samples = Arc::new(generate_light_switch_clack_samples());
-        let light_switch_on_samples = Arc::new(generate_light_switch_on_samples());
+        let chime_samples: Arc<[f32]> = Arc::from(generate_retro_chime_samples());
+        let light_switch_samples: Arc<[f32]> = Arc::from(generate_light_switch_clack_samples());
+        let light_switch_on_samples: Arc<[f32]> = Arc::from(generate_light_switch_on_samples());
 
         Self {
             enable_hardware,
@@ -352,14 +384,12 @@ impl AlertSoundPlayer {
             return;
         };
         let vol = self.volume();
-        let source = GuardedSamplesSource {
-            inner: SamplesBuffer::new(
-                ALERT_CHANNELS,
-                ALERT_SAMPLE_RATE,
-                self.chime_samples.as_ref().clone(),
-            ),
-            _guard: playback_guard,
-        };
+        let source = GuardedSamplesSource::new(
+            Arc::clone(&self.chime_samples),
+            ALERT_CHANNELS,
+            ALERT_SAMPLE_RATE,
+            playback_guard,
+        );
 
         if let Ok(mut chime_guard) = self.active_chime_sink.lock() {
             if let Some(existing) = chime_guard.as_ref() {
@@ -396,14 +426,12 @@ impl AlertSoundPlayer {
         };
         let vol = self.volume();
         let samples = if turning_on {
-            self.light_switch_on_samples.as_ref().clone()
+            Arc::clone(&self.light_switch_on_samples)
         } else {
-            self.light_switch_samples.as_ref().clone()
+            Arc::clone(&self.light_switch_samples)
         };
-        let source = GuardedSamplesSource {
-            inner: SamplesBuffer::new(ALERT_CHANNELS, ALERT_SAMPLE_RATE, samples),
-            _guard: playback_guard,
-        };
+        let source =
+            GuardedSamplesSource::new(samples, ALERT_CHANNELS, ALERT_SAMPLE_RATE, playback_guard);
         if let Ok(sink) = Sink::try_new(&handle) {
             sink.set_volume(vol);
             sink.append(source);
@@ -418,19 +446,37 @@ impl AlertSoundPlayer {
         }
     }
 
-    /// Returns a reference to the precomputed 48 kHz stereo chime samples.
-    pub fn chime_samples(&self) -> &Arc<Vec<f32>> {
+    /// Returns a slice of the precomputed 48 kHz stereo chime samples.
+    #[cfg(test)]
+    pub fn chime_samples(&self) -> &[f32] {
         &self.chime_samples
     }
 
-    /// Returns a reference to the precomputed 48 kHz stereo light switch clack samples (lights off).
-    pub fn light_switch_samples(&self) -> &Arc<Vec<f32>> {
+    /// Returns a shared `Arc<[f32]>` handle to the precomputed 48 kHz stereo chime samples.
+    pub fn chime_samples_arc(&self) -> Arc<[f32]> {
+        Arc::clone(&self.chime_samples)
+    }
+
+    /// Returns a slice of the precomputed 48 kHz stereo light switch clack samples (lights off).
+    #[cfg(test)]
+    pub fn light_switch_samples(&self) -> &[f32] {
         &self.light_switch_samples
     }
 
-    /// Returns a reference to the precomputed 48 kHz stereo light switch + tube charging hum samples (lights on).
-    pub fn light_switch_on_samples(&self) -> &Arc<Vec<f32>> {
+    /// Returns a shared `Arc<[f32]>` handle to the precomputed 48 kHz stereo light switch clack samples.
+    pub fn light_switch_samples_arc(&self) -> Arc<[f32]> {
+        Arc::clone(&self.light_switch_samples)
+    }
+
+    /// Returns a slice of the precomputed 48 kHz stereo light switch + tube charging hum samples (lights on).
+    #[cfg(test)]
+    pub fn light_switch_on_samples(&self) -> &[f32] {
         &self.light_switch_on_samples
+    }
+
+    /// Returns a shared `Arc<[f32]>` handle to the precomputed 48 kHz stereo light switch + tube charging hum samples.
+    pub fn light_switch_on_samples_arc(&self) -> Arc<[f32]> {
+        Arc::clone(&self.light_switch_on_samples)
     }
 }
 
@@ -511,5 +557,22 @@ mod tests {
         player.play_local();
         player.play_light_switch_local(true);
         player.play_light_switch_local(false);
+    }
+
+    #[test]
+    fn test_alert_samples_arc_zero_copy_sharing() {
+        let player = AlertSoundPlayer::new_headless();
+        let chime_a = player.chime_samples_arc();
+        let chime_b = player.chime_samples_arc();
+        assert!(Arc::ptr_eq(&chime_a, &chime_b));
+        assert_eq!(chime_a.as_ptr(), player.chime_samples().as_ptr());
+
+        let switch_off_a = player.light_switch_samples_arc();
+        let switch_off_b = player.light_switch_samples_arc();
+        assert!(Arc::ptr_eq(&switch_off_a, &switch_off_b));
+
+        let switch_on_a = player.light_switch_on_samples_arc();
+        let switch_on_b = player.light_switch_on_samples_arc();
+        assert!(Arc::ptr_eq(&switch_on_a, &switch_on_b));
     }
 }

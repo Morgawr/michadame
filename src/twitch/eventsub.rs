@@ -488,18 +488,14 @@ impl Worker {
             }
         });
 
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(5))
-            .timeout_read(Duration::from_secs(10))
-            .timeout_write(Duration::from_secs(10))
-            .timeout(Duration::from_secs(15))
-            .build();
+        let agent = super::http_agent();
 
         let body_str = body.to_string();
         let sub_url = self.subscription_url.clone();
         let post_sub = |tok: &StoredToken| {
             agent
                 .post(&sub_url)
+                .timeout(Duration::from_secs(15))
                 .set("Client-Id", tok.effective_client_id())
                 .set("Authorization", &format!("Bearer {}", tok.access_token))
                 .set("Content-Type", "application/json")

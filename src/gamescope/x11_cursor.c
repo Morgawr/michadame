@@ -9,6 +9,7 @@
 #include <sys/eventfd.h>
 #include <sys/uio.h>
 #include <unistd.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
@@ -61,6 +62,19 @@ typedef struct {
     uint32_t pad1;
     uint32_t pad2;
 } xfixes_get_cursor_image_reply_t;
+
+typedef struct {
+    uint8_t         response_type;
+    uint8_t         subtype;
+    uint16_t        sequence;
+    xcb_window_t    window;
+    uint32_t        cursor_serial;
+    xcb_timestamp_t timestamp;
+    xcb_atom_t      name;
+    uint32_t        pad0;
+    uint32_t        pad1;
+    uint32_t        pad2;
+} xfixes_cursor_notify_event_t;
 
 static int xfixes_query_version(xcb_connection_t *conn, uint8_t major_opcode) {
     xfixes_query_version_req_t req = {
@@ -154,7 +168,8 @@ static int query_and_notify_cursor(
     gamescope_x11_cursor_cb cb,
     void *user_data,
     int *last_hidden,
-    unsigned long *last_serial
+    uint32_t *last_cursor_serial,
+    bool *has_last_serial
 ) {
     if (!cb) return 1;
 
@@ -191,12 +206,13 @@ static int query_and_notify_cursor(
         }
     } else {
         int visibility_changed = (*last_hidden != 0);
-        unsigned long serial = (unsigned long)cur->cursor_serial;
-        int serial_changed = (serial != *last_serial);
+        uint32_t serial = cur->cursor_serial;
+        int serial_changed = (!*has_last_serial || serial != *last_cursor_serial);
 
         if (visibility_changed || serial_changed) {
             *last_hidden = 0;
-            *last_serial = serial;
+            *last_cursor_serial = serial;
+            *has_last_serial = true;
 
             unsigned char *rgba = (unsigned char *)malloc(count * 4);
             if (rgba) {
@@ -213,7 +229,7 @@ static int query_and_notify_cursor(
                 img.height = cur->height;
                 img.xhot = cur->xhot;
                 img.yhot = cur->yhot;
-                img.cursor_serial = serial;
+                img.cursor_serial = (unsigned long)serial;
                 img.rgba_pixels = rgba;
 
                 cb(0, &img, user_data);
@@ -302,8 +318,16 @@ static void *monitor_thread_func(void *arg) {
     }
 
     int last_hidden = -1;
-    unsigned long last_serial = 0;
-    if (!query_and_notify_cursor(conn, major_opcode, m->cb, m->user_data, &last_hidden, &last_serial)) {
+    uint32_t last_cursor_serial = 0;
+    bool has_last_serial = false;
+    if (!query_and_notify_cursor(
+            conn,
+            major_opcode,
+            m->cb,
+            m->user_data,
+            &last_hidden,
+            &last_cursor_serial,
+            &has_last_serial)) {
         xcb_disconnect(conn);
         if (!m->stop_requested && m->cb) {
             m->cb(-1, NULL, m->user_data);
@@ -318,24 +342,48 @@ static void *monitor_thread_func(void *arg) {
             break;
         }
 
-        int cursor_event_received = 0;
-        xcb_generic_event_t *ev = NULL;
-        while ((ev = xcb_poll_for_event(conn)) != NULL) {
-            uint8_t response_type = ev->response_type & ~0x80;
-            if (response_type == first_event + XFixesCursorNotify) {
-                cursor_event_received = 1;
+        // Drain all events already buffered in libxcb's user-space queue before calling poll()
+        // so burst events read during xcb_wait_for_reply() are never stranded behind poll().
+        int connection_lost = 0;
+        for (;;) {
+            int need_cursor_query = 0;
+            xcb_generic_event_t *ev = NULL;
+            while ((ev = xcb_poll_for_queued_event(conn)) != NULL) {
+                uint8_t response_type = ev->response_type & ~0x80;
+                if (response_type == first_event + XFixesCursorNotify) {
+                    const xfixes_cursor_notify_event_t *notify =
+                        (const xfixes_cursor_notify_event_t *)ev;
+                    bool is_hidden = (last_hidden != 0);
+                    if (!(!is_hidden && has_last_serial &&
+                          notify->cursor_serial == last_cursor_serial)) {
+                        need_cursor_query = 1;
+                    }
+                }
+                free(ev);
             }
-            free(ev);
-        }
 
-        if (xcb_connection_has_error(conn)) {
-            break;
-        }
-
-        if (cursor_event_received) {
-            if (!query_and_notify_cursor(conn, major_opcode, m->cb, m->user_data, &last_hidden, &last_serial)) {
+            if (xcb_connection_has_error(conn)) {
+                connection_lost = 1;
                 break;
             }
+            if (!need_cursor_query) {
+                break;
+            }
+            if (!query_and_notify_cursor(
+                    conn,
+                    major_opcode,
+                    m->cb,
+                    m->user_data,
+                    &last_hidden,
+                    &last_cursor_serial,
+                    &has_last_serial)) {
+                connection_lost = 1;
+                break;
+            }
+        }
+
+        if (connection_lost || xcb_connection_has_error(conn)) {
+            break;
         }
 
         struct pollfd fds[2];
@@ -356,6 +404,41 @@ static void *monitor_thread_func(void *arg) {
         }
         if (fds[0].revents & (POLLERR | POLLNVAL)) {
             break;
+        }
+
+        if (fds[0].revents & (POLLIN | POLLHUP)) {
+            int need_cursor_query = 0;
+            xcb_generic_event_t *ev = NULL;
+            while ((ev = xcb_poll_for_event(conn)) != NULL) {
+                uint8_t response_type = ev->response_type & ~0x80;
+                if (response_type == first_event + XFixesCursorNotify) {
+                    const xfixes_cursor_notify_event_t *notify =
+                        (const xfixes_cursor_notify_event_t *)ev;
+                    bool is_hidden = (last_hidden != 0);
+                    if (!(!is_hidden && has_last_serial &&
+                          notify->cursor_serial == last_cursor_serial)) {
+                        need_cursor_query = 1;
+                    }
+                }
+                free(ev);
+            }
+
+            if (xcb_connection_has_error(conn)) {
+                break;
+            }
+
+            if (need_cursor_query) {
+                if (!query_and_notify_cursor(
+                        conn,
+                        major_opcode,
+                        m->cb,
+                        m->user_data,
+                        &last_hidden,
+                        &last_cursor_serial,
+                        &has_last_serial)) {
+                    break;
+                }
+            }
         }
     }
 

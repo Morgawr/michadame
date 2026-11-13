@@ -196,7 +196,8 @@ impl EmoteCache {
 
 fn fetch_emote(id: &str) -> Result<egui::ColorImage, String> {
     let url = format!("https://static-cdn.jtvnw.net/emoticons/v2/{id}/static/dark/2.0");
-    let resp = ureq::get(&url)
+    let resp = super::http_agent()
+        .get(&url)
         .timeout(Duration::from_secs(15))
         .call()
         .map_err(|e| e.to_string())?;

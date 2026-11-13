@@ -73,17 +73,23 @@
         vec2 baseTc = floor(tc);
         vec2 f = tc - baseTc;
 
+        float wx[4];
+        float sampleX[4];
+        for (int i = 0; i < 4; i++) {
+            float dx = float(i - 1);
+            wx[i] = lanczosWeight(dx - f.x);
+            sampleX[i] = clamp((baseTc.x + dx + 0.5) * invTexSize.x, 0.0, 1.0);
+        }
+
         vec3 color = vec3(0.0);
         float totalWeight = 0.0;
 
         for (int y = -1; y <= 2; y++) {
             float wy = lanczosWeight(float(y) - f.y);
-            for (int x = -1; x <= 2; x++) {
-                float wx = lanczosWeight(float(x) - f.x);
-                float weight = wx * wy;
-
-                vec2 sampleTc = (baseTc + vec2(x, y) + 0.5) * invTexSize;
-                color += texture(tex, clamp(sampleTc, 0.0, 1.0)).rgb * weight;
+            float sampleY = clamp((baseTc.y + float(y) + 0.5) * invTexSize.y, 0.0, 1.0);
+            for (int i = 0; i < 4; i++) {
+                float weight = wx[i] * wy;
+                color += texture(tex, vec2(sampleX[i], sampleY)).rgb * weight;
                 totalWeight += weight;
             }
         }

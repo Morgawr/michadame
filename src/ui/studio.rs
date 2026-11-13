@@ -749,16 +749,23 @@ pub fn draw_studio_window(state: &mut AppState, ctx: &egui::Context) -> bool {
 fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
     let mut changed = false;
 
-    // Smooth 60 FPS repaints to animate live VU meters while Studio is active
-    ui.ctx().request_repaint_after(Duration::from_millis(16));
-
-    ui.add_space(1.0);
-
     // 1. Giant "GO LIVE ON TWITCH" / dual "END WITH OUTRO" + "END ABRUPTLY" buttons
     let status = state.twitch.broadcast_status();
     let is_live = matches!(status, BroadcastStatus::Live { .. });
     let is_connecting = matches!(status, BroadcastStatus::Connecting);
     let active = is_live || is_connecting;
+
+    // Smooth 60 FPS repaints to animate live VU meters only while audio/broadcast is active
+    let studio_meters_active = active
+        || state.has_active_av_source()
+        || (state.mic.config.enabled && state.mic.active_stream.is_some())
+        || state.hardware.live_audio_peak > 0.001
+        || state.hardware.live_mic_peak > 0.001;
+    if studio_meters_active {
+        ui.ctx().request_repaint_after(Duration::from_millis(16));
+    }
+
+    ui.add_space(1.0);
 
     if active {
         let avail_w = ui.available_width();

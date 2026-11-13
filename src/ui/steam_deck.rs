@@ -44,7 +44,7 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) -> bool {
         if let Some(renderer) = &state.crt_renderer {
             renderer.lock().unwrap().popup_primitives.clear();
         }
-        ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+        state.ui.set_cursor_grab(ctx, egui::CursorGrab::None);
         ctx.set_cursor_icon(egui::CursorIcon::Default);
     }
     if (tab != Tab::Game || launching) && state.ui.video_window_open {

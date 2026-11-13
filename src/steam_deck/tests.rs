@@ -237,6 +237,13 @@ fn deck_relative_mouse_uses_supported_xwayland_confinement() {
             .any(
                 |cmd| matches!(cmd, egui::ViewportCommand::CursorGrab(grab) if *grab == expected)
             ));
+        let repeated = frame(&ctx, vec![], |ctx| {
+            forward_inputs(&mut state, ctx, ctx.screen_rect());
+        });
+        assert!(!repeated.viewport_output[&egui::ViewportId::ROOT]
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, egui::ViewportCommand::CursorGrab(_))));
     }
 }
 
@@ -1157,4 +1164,144 @@ fn hooked_cursor_hides_ocr_overlay_and_popup_and_passes_clicks_over_ocr_boxes() 
         |ctx| render(&mut state, ctx),
     );
     assert!(!state.pc98.input_state.lock().unwrap().mouse_left);
+}
+
+#[test]
+fn eis_modifier_transitions_emit_once_and_idle_frames_send_zero_key_ups() {
+    use crate::gamescope::input::{GamescopeInputClient, InputCmd};
+
+    let ctx = egui::Context::default();
+    let mut state = deck_state();
+    let (client, cmd_rx) = GamescopeInputClient::mock_for_test();
+    state.gamescope_hook = Some(crate::gamescope::GamescopeHookState {
+        is_active: true,
+        passthrough_enabled: true,
+        input_client: Some(client),
+        initial_resolution: (1280, 800),
+        ..Default::default()
+    });
+    let video = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0));
+
+    // 1. Multiple idle frames with empty modifiers emit zero EIS key-up events.
+    for _ in 0..5 {
+        let _ = frame(&ctx, vec![], |ctx| forward_inputs(&mut state, ctx, video));
+    }
+    let idle_keys: Vec<InputCmd> = cmd_rx
+        .try_iter()
+        .filter(|c| matches!(c, InputCmd::Key(..)))
+        .collect();
+    assert!(
+        idle_keys.is_empty(),
+        "Idle frames must not spam modifier key-up events: {idle_keys:?}"
+    );
+
+    // 2. Pressing Ctrl+Shift+Z sends only the changed modifier bits + key down.
+    let _ = frame(
+        &ctx,
+        vec![key(Key::Z, Modifiers::CTRL | Modifiers::SHIFT, true)],
+        |ctx| forward_inputs(&mut state, ctx, video),
+    );
+    let press_keys: Vec<InputCmd> = cmd_rx
+        .try_iter()
+        .filter(|c| matches!(c, InputCmd::Key(..)))
+        .collect();
+    assert_eq!(
+        press_keys,
+        vec![
+            InputCmd::Key(29, true),
+            InputCmd::Key(42, true),
+            InputCmd::Key(44, true),
+        ]
+    );
+
+    // 3. Holding Z across frames emits zero redundant modifier events.
+    let _ = frame(&ctx, vec![], |ctx| forward_inputs(&mut state, ctx, video));
+    let held_keys: Vec<InputCmd> = cmd_rx
+        .try_iter()
+        .filter(|c| matches!(c, InputCmd::Key(..)))
+        .collect();
+    assert!(held_keys.is_empty());
+
+    // 4. Releasing Z releases the active modifiers once; subsequent idle frames emit zero key-ups.
+    let _ = frame(
+        &ctx,
+        vec![key(Key::Z, Modifiers::CTRL | Modifiers::SHIFT, false)],
+        |ctx| forward_inputs(&mut state, ctx, video),
+    );
+    let release_keys: Vec<InputCmd> = cmd_rx
+        .try_iter()
+        .filter(|c| matches!(c, InputCmd::Key(..)))
+        .collect();
+    assert_eq!(
+        release_keys,
+        vec![
+            InputCmd::Key(44, false),
+            InputCmd::Key(29, false),
+            InputCmd::Key(42, false),
+        ]
+    );
+    assert_eq!(
+        state.steam_deck.as_ref().unwrap().forwarded_modifiers_mask,
+        0
+    );
+
+    for _ in 0..5 {
+        let _ = frame(&ctx, vec![], |ctx| forward_inputs(&mut state, ctx, video));
+    }
+    let post_release_keys: Vec<InputCmd> = cmd_rx
+        .try_iter()
+        .filter(|c| matches!(c, InputCmd::Key(..)))
+        .collect();
+    assert!(post_release_keys.is_empty());
+
+    // 5. Focus loss releases held key + active modifier once, then stays silent while unfocused.
+    let _ = frame(&ctx, vec![key(Key::W, Modifiers::ALT, true)], |ctx| {
+        forward_inputs(&mut state, ctx, video)
+    });
+    let _ = cmd_rx.try_iter().count();
+
+    for step in 0..3 {
+        let _ = ctx.run(
+            RawInput {
+                screen_rect: Some(video),
+                focused: false,
+                ..Default::default()
+            },
+            |ctx| forward_inputs(&mut state, ctx, video),
+        );
+        let unfocused_keys: Vec<InputCmd> = cmd_rx
+            .try_iter()
+            .filter(|c| matches!(c, InputCmd::Key(..)))
+            .collect();
+        if step == 0 {
+            assert_eq!(
+                unfocused_keys,
+                vec![InputCmd::Key(17, false), InputCmd::Key(56, false)]
+            );
+        } else {
+            assert!(unfocused_keys.is_empty());
+        }
+    }
+
+    // 6. Stationary absolute pointer motion remains preserved while emitting zero key spam.
+    let _ = frame(
+        &ctx,
+        vec![Event::PointerMoved(egui::pos2(640.0, 400.0))],
+        |ctx| forward_inputs(&mut state, ctx, video),
+    );
+    let _ = cmd_rx.try_iter().count();
+    let _ = frame(&ctx, vec![], |ctx| forward_inputs(&mut state, ctx, video));
+    let stationary_cmds: Vec<InputCmd> = cmd_rx.try_iter().collect();
+    assert!(
+        stationary_cmds
+            .iter()
+            .any(|c| matches!(c, InputCmd::PointerMotionAbsolute(..))),
+        "Stationary absolute pointer motion must remain intact"
+    );
+    assert!(
+        !stationary_cmds
+            .iter()
+            .any(|c| matches!(c, InputCmd::Key(..))),
+        "Stationary frame must emit zero modifier key events"
+    );
 }

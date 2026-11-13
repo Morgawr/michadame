@@ -7,10 +7,73 @@ use std::time::Instant;
 pub fn top_popup_entry_mine_info(state: &AppState) -> Option<(crate::bank::MineStatus, String)> {
     let popup = state.dict.popup.as_ref()?;
     let first = popup.entries.first()?;
-    let (sentence, _) =
-        crate::bank::sentence::extract_sentence(&popup.source_text, popup.char_range);
-    let status = state.bank.status(&first.term, &first.reading, &sentence);
+    let status = popup.with_cached_sentence(|sentence, _| {
+        state.bank.status(&first.term, &first.reading, sentence)
+    });
     Some((status, first.term.clone()))
+}
+
+fn enqueue_ocr_clipboard_copy(text: String) -> Result<(), &'static str> {
+    static CLIPBOARD_TX: std::sync::OnceLock<Option<crossbeam_channel::Sender<String>>> =
+        std::sync::OnceLock::new();
+    let tx_opt = CLIPBOARD_TX.get_or_init(|| {
+        let (tx, rx) = crossbeam_channel::bounded::<String>(16);
+        std::thread::Builder::new()
+            .name("ocr-clipboard".into())
+            .spawn(move || {
+                let mut clipboard = arboard::Clipboard::new().ok();
+                while let Ok(mut latest) = rx.recv() {
+                    while let Ok(newer) = rx.try_recv() {
+                        latest = newer;
+                    }
+                    if clipboard.is_none() {
+                        clipboard = arboard::Clipboard::new().ok();
+                    }
+                    let failed = match clipboard.as_mut() {
+                        Some(cb) => cb.set_text(latest.clone()).is_err(),
+                        None => true,
+                    };
+                    if failed {
+                        clipboard = arboard::Clipboard::new().ok();
+                        if let Some(cb) = clipboard.as_mut() {
+                            let _ = cb.set_text(latest);
+                        }
+                    }
+                }
+            })
+            .ok()
+            .map(|_| tx)
+    });
+    let Some(tx) = tx_opt.as_ref() else {
+        return Err("Clipboard worker unavailable");
+    };
+    match tx.try_send(text) {
+        Ok(()) => Ok(()),
+        Err(crossbeam_channel::TrySendError::Full(text)) => tx
+            .send(text)
+            .map_err(|_| "Background clipboard worker disconnected"),
+        Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+            Err("Background clipboard worker disconnected")
+        }
+    }
+}
+
+#[inline]
+fn hash_optional_str(val: Option<&str>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    val.hash(&mut hasher);
+    hasher.finish()
+}
+
+#[inline]
+fn quantize_video_rect(rect: egui::Rect) -> [i32; 4] {
+    [
+        (rect.min.x * 16.0).round() as i32,
+        (rect.min.y * 16.0).round() as i32,
+        (rect.max.x * 16.0).round() as i32,
+        (rect.max.y * 16.0).round() as i32,
+    ]
 }
 
 /// Triggers mining (`+`) or mining with a 20s Twitch clip (`++`) for the entry at `idx`
@@ -78,14 +141,18 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         || state.ocr.boxes.is_empty()
     {
         state.ocr.is_box_hovered = false;
+        state.ocr.last_hovered_char = None;
         if passthrough_active || state.ocr.boxes.is_empty() {
             state.dict.popup = None;
             if let Some(deck) = &mut state.steam_deck {
                 deck.pinned_dictionary = false;
             }
         }
-        if let Some(ref r) = state.crt_renderer {
-            r.lock().unwrap().popup_primitives.clear();
+        if state.ocr.had_popup_primitives {
+            if let Some(ref r) = state.crt_renderer {
+                r.lock().unwrap().popup_primitives.clear();
+            }
+            state.ocr.had_popup_primitives = false;
         }
         return;
     }
@@ -137,16 +204,25 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
     let mut copied_index: Option<usize> = None;
     let mut dismissed_box_idx: Option<usize> = None;
 
+    let quantized_rect = quantize_video_rect(video_rect);
+    let ppp_bits = ui.ctx().pixels_per_point().to_bits();
+
     // Draw detected OCR boxes
-    for (idx, ocr_box) in state.ocr.boxes.iter().enumerate() {
-        let min_x =
-            video_rect.min.x + (ocr_box.center_x - ocr_box.width / 2.0) * video_rect.width();
-        let min_y =
-            video_rect.min.y + (ocr_box.center_y - ocr_box.height / 2.0) * video_rect.height();
-        let max_x =
-            video_rect.min.x + (ocr_box.center_x + ocr_box.width / 2.0) * video_rect.width();
-        let max_y =
-            video_rect.min.y + (ocr_box.center_y + ocr_box.height / 2.0) * video_rect.height();
+    let boxes_len = state.ocr.boxes.len();
+    for idx in 0..boxes_len {
+        let (box_cx, box_cy, box_w, box_h) = {
+            let ocr_box = &state.ocr.boxes[idx];
+            (
+                ocr_box.center_x,
+                ocr_box.center_y,
+                ocr_box.width,
+                ocr_box.height,
+            )
+        };
+        let min_x = video_rect.min.x + (box_cx - box_w / 2.0) * video_rect.width();
+        let min_y = video_rect.min.y + (box_cy - box_h / 2.0) * video_rect.height();
+        let max_x = video_rect.min.x + (box_cx + box_w / 2.0) * video_rect.width();
+        let max_y = video_rect.min.y + (box_cy + box_h / 2.0) * video_rect.height();
 
         let box_rect = egui::Rect::from_min_max(egui::pos2(min_x, min_y), egui::pos2(max_x, max_y));
 
@@ -214,45 +290,30 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
             // When hovered or actively displaying a dictionary popup, render the OCR text inside the darkened box!
             if is_active_box {
                 let text_color = egui::Color32::from_rgb(240, 243, 246);
-                let is_box_vertical = ocr_box.writing_direction.is_vertical();
-                if ocr_box.lines.is_empty() {
-                    paint_ocr_text_line(
-                        ui.painter(),
-                        &ocr_box.text,
-                        &[],
-                        video_rect,
-                        min_x,
-                        max_x,
-                        min_y,
-                        max_y,
-                        text_color,
-                        is_box_vertical,
-                    );
-                } else {
-                    for line in &ocr_box.lines {
-                        let line_min_x = video_rect.min.x
-                            + (line.center_x - line.width / 2.0) * video_rect.width();
-                        let line_max_x = video_rect.min.x
-                            + (line.center_x + line.width / 2.0) * video_rect.width();
-                        let line_min_y = video_rect.min.y
-                            + (line.center_y - line.height / 2.0) * video_rect.height();
-                        let line_max_y = video_rect.min.y
-                            + (line.center_y + line.height / 2.0) * video_rect.height();
-
-                        paint_ocr_text_line(
-                            ui.painter(),
-                            &line.text,
-                            &line.char_spans,
-                            video_rect,
-                            line_min_x,
-                            line_max_x,
-                            line_min_y,
-                            line_max_y,
-                            text_color,
-                            line.writing_direction.is_vertical(),
-                        );
-                    }
-                }
+                let ocr_generation = state.ocr.current_generation();
+                let crate::ocr::OcrState {
+                    ref boxes,
+                    boxes_revision,
+                    ref mut box_glyph_cache,
+                    ..
+                } = state.ocr;
+                let ocr_box = &boxes[idx];
+                paint_ocr_box_cached(
+                    ui.painter(),
+                    ocr_box,
+                    idx,
+                    ocr_generation,
+                    boxes_revision,
+                    video_rect,
+                    quantized_rect,
+                    ppp_bits,
+                    min_x,
+                    max_x,
+                    min_y,
+                    max_y,
+                    text_color,
+                    box_glyph_cache,
+                );
             }
         }
 
@@ -260,7 +321,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
             if deck_mode {
                 tapped_word = true;
             } else {
-                copied_text = Some(ocr_box.text.clone());
+                copied_text = Some(state.ocr.boxes[idx].text.clone());
                 copied_index = Some(idx);
             }
         }
@@ -272,8 +333,9 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
             } else {
                 "📋 Click to copy | Right-click to dismiss"
             };
+            let tooltip_text = &state.ocr.boxes[idx].text;
             response.on_hover_ui(|ui| {
-                ui.label(egui::RichText::new(&ocr_box.text).size(16.0).strong());
+                ui.label(egui::RichText::new(tooltip_text).size(16.0).strong());
                 ui.label(egui::RichText::new(hint_label).italics().weak());
             });
         }
@@ -311,6 +373,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
                     state.ocr.last_copied_index = Some(last_idx - 1);
                 }
             }
+            state.ocr.invalidate_overlay_caches();
             state.dict.popup = None;
             if state.ocr.boxes.is_empty() {
                 state.ocr.last_scan_time = None;
@@ -318,26 +381,28 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         }
     }
 
-    // Execute copy if a box was clicked
+    // Execute copy via persistent background clipboard worker if a box was clicked
     if let (Some(text), Some(idx)) = (copied_text, copied_index) {
-        match arboard::Clipboard::new() {
-            Ok(mut clipboard) => {
-                if let Err(e) = clipboard.set_text(&text) {
-                    state.error(format!("Failed to copy to clipboard: {e}"));
-                } else {
-                    state.info(format!("Copied: {}", text));
-                    state.ocr.last_copied_index = Some(idx);
-                    state.ocr.copy_feedback_time = Some(Instant::now());
-                }
+        match enqueue_ocr_clipboard_copy(text.clone()) {
+            Ok(()) => {
+                state.info(format!("Copied: {}", text));
+                state.ocr.last_copied_index = Some(idx);
+                state.ocr.copy_feedback_time = Some(Instant::now());
             }
             Err(e) => {
-                state.error(format!("Clipboard initialization failed: {e}"));
+                state.error(format!("Failed to copy to clipboard: {e}"));
             }
         }
     }
 
     // If a box was just dismissed, do not run dictionary lookup this frame
     if dismissed_box_idx.is_some() {
+        if state.ocr.had_popup_primitives {
+            if let Some(ref r) = state.crt_renderer {
+                r.lock().unwrap().popup_primitives.clear();
+            }
+            state.ocr.had_popup_primitives = false;
+        }
         return;
     }
 
@@ -362,6 +427,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
     if tapped_word {
         state.steam_deck.as_mut().unwrap().pinned_dictionary = true;
         state.dict.popup = None;
+        state.ocr.last_hovered_char = None;
     } else if deck_mode
         && ui.input(|i| i.pointer.primary_clicked())
         && !pointer_in_popup
@@ -369,6 +435,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         && !overlay_blocked
     {
         state.dict.popup = None;
+        state.ocr.last_hovered_char = None;
         state.steam_deck.as_mut().unwrap().pinned_dictionary = false;
     }
     let pinned = state
@@ -392,58 +459,137 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
                     let pitch_guard = state.dict.pitch_db.lock().ok();
                     let pitch_db = pitch_guard.as_ref().and_then(|g| g.as_ref());
                     let current_tag = state.bank.mining_tag();
-                    let lookup = crate::dict::lookup::lookup_word_at_pointer_with_pitch(
+
+                    let dict_gen_sig = (
+                        db.map_or(0, |d| d.generation),
+                        db.and_then(|d| d.particle_index()).is_some(),
+                        freq_db.map_or(0, |f| f.generation),
+                        pitch_db.map_or(0, |p| p.generation),
+                        state.bank.custom_names_generation,
+                    );
+                    let mining_tag_hash = hash_optional_str(current_tag.as_deref());
+                    let video_rect_bits = [
+                        video_rect.min.x.to_bits(),
+                        video_rect.min.y.to_bits(),
+                        video_rect.max.x.to_bits(),
+                        video_rect.max.y.to_bits(),
+                    ];
+                    let ocr_generation = state.ocr.current_generation();
+                    let boxes_revision = state.ocr.boxes_revision;
+                    let boxes_len = state.ocr.boxes.len();
+                    let candidate_hover_key = crate::dict::lookup::resolve_ocr_hover_char(
                         pos,
                         &state.ocr.boxes,
                         video_rect,
-                        db,
-                        freq_db,
-                        pitch_db,
-                        crate::dict::global_deinflector(),
-                        &state.bank.custom_names,
-                        current_tag.as_deref(),
-                        state.bank.custom_names_generation,
-                    );
-                    if let Some(new_popup) = lookup {
-                        // Don't jump to a neighboring word right after leaving the current
-                        // word/popup: the cursor may just be passing over it on its way to
-                        // the popup.
-                        let wait = state.dict.popup.as_ref().and_then(|current| {
-                            crate::dict::popup::popup_switch_wait(
-                                current,
-                                &new_popup,
-                                pos,
-                                crate::dict::popup::POPUP_SWITCH_DELAY,
-                            )
-                        });
-                        match wait {
-                            Some(remaining) => ui.ctx().request_repaint_after(remaining),
-                            None => match state.dict.popup.as_mut() {
-                                Some(current)
-                                    if current.source_text == new_popup.source_text
-                                        && current.char_range == new_popup.char_range =>
-                                {
-                                    current.word_rect = new_popup.word_rect;
-                                    current.extra_word_rects = new_popup.extra_word_rects;
-                                    current.box_rect = new_popup.box_rect;
-                                    current.entries = new_popup.entries;
-                                    current.last_hover_time = new_popup.last_hover_time;
-                                    current.last_word_hover_time = new_popup.last_word_hover_time;
-                                }
-                                _ => state.dict.popup = Some(new_popup),
-                            },
+                    )
+                    .map(|(box_idx, char_idx)| {
+                        crate::ocr::models::HoveredOcrCharKey {
+                            ocr_generation,
+                            boxes_revision,
+                            boxes_len,
+                            box_idx,
+                            box_fingerprint: state.ocr.boxes[box_idx].layout_fingerprint(),
+                            char_idx,
+                            video_rect_bits,
+                            dict_gen_sig,
+                            mining_tag_hash,
                         }
-                    } else if let Some(ref popup) = state.dict.popup {
-                        if popup.last_hover_time.elapsed() < grace_period {
-                            let remaining =
-                                grace_period.saturating_sub(popup.last_hover_time.elapsed());
-                            ui.ctx().request_repaint_after(remaining);
+                    });
+
+                    if !tapped_word
+                        && state.dict.popup.is_some()
+                        && candidate_hover_key.is_some()
+                        && state.ocr.last_hovered_char == candidate_hover_key
+                    {
+                        if let Some(current) = state.dict.popup.as_mut() {
+                            let now = Instant::now();
+                            current.last_hover_time = now;
+                            current.last_word_hover_time = now;
+                        }
+                    } else {
+                        let lookup =
+                            crate::dict::lookup::lookup_word_at_pointer_with_pitch_and_char(
+                                pos,
+                                &state.ocr.boxes,
+                                video_rect,
+                                db,
+                                freq_db,
+                                pitch_db,
+                                crate::dict::global_deinflector(),
+                                &state.bank.custom_names,
+                                current_tag.as_deref(),
+                                state.bank.custom_names_generation,
+                            );
+                        if let Some((matched_box_idx, matched_char_idx, new_popup)) = lookup {
+                            // Don't jump to a neighboring word right after leaving the current
+                            // word/popup: the cursor may just be passing over it on its way to
+                            // the popup.
+                            let wait = state.dict.popup.as_ref().and_then(|current| {
+                                crate::dict::popup::popup_switch_wait(
+                                    current,
+                                    &new_popup,
+                                    pos,
+                                    crate::dict::popup::POPUP_SWITCH_DELAY,
+                                )
+                            });
+                            match wait {
+                                Some(remaining) => {
+                                    state.ocr.last_hovered_char = None;
+                                    ui.ctx().request_repaint_after(remaining);
+                                }
+                                None => {
+                                    match state.dict.popup.as_mut() {
+                                        Some(current)
+                                            if current.source_text == new_popup.source_text
+                                                && current.char_range == new_popup.char_range =>
+                                        {
+                                            current.word_rect = new_popup.word_rect;
+                                            current.extra_word_rects = new_popup.extra_word_rects;
+                                            current.box_rect = new_popup.box_rect;
+                                            current.entries = new_popup.entries;
+                                            current.last_hover_time = new_popup.last_hover_time;
+                                            current.last_word_hover_time =
+                                                new_popup.last_word_hover_time;
+                                        }
+                                        _ => state.dict.popup = Some(new_popup),
+                                    }
+                                    state.ocr.last_hovered_char = candidate_hover_key.filter(|k| {
+                                        k.box_idx == matched_box_idx
+                                            && k.char_idx == matched_char_idx
+                                    });
+                                }
+                            }
                         } else {
-                            state.dict.popup = None;
+                            state.ocr.last_hovered_char = None;
+                            if let Some(ref popup) = state.dict.popup {
+                                if popup.last_hover_time.elapsed() < grace_period {
+                                    let remaining = grace_period
+                                        .saturating_sub(popup.last_hover_time.elapsed());
+                                    ui.ctx().request_repaint_after(remaining);
+                                } else {
+                                    state.dict.popup = None;
+                                }
+                            }
                         }
                     }
                 }
-            } else if let Some(ref popup) = state.dict.popup {
+            } else {
+                state.ocr.last_hovered_char = None;
+                if let Some(ref popup) = state.dict.popup {
+                    if popup.last_hover_time.elapsed() < grace_period {
+                        let remaining =
+                            grace_period.saturating_sub(popup.last_hover_time.elapsed());
+                        ui.ctx().request_repaint_after(remaining);
+                    } else {
+                        state.dict.popup = None;
+                    }
+                } else {
+                    state.dict.popup = None;
+                }
+            }
+        } else {
+            state.ocr.last_hovered_char = None;
+            if let Some(ref popup) = state.dict.popup {
                 if popup.last_hover_time.elapsed() < grace_period {
                     let remaining = grace_period.saturating_sub(popup.last_hover_time.elapsed());
                     ui.ctx().request_repaint_after(remaining);
@@ -453,25 +599,11 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
             } else {
                 state.dict.popup = None;
             }
-        } else if let Some(ref popup) = state.dict.popup {
-            if popup.last_hover_time.elapsed() < grace_period {
-                let remaining = grace_period.saturating_sub(popup.last_hover_time.elapsed());
-                ui.ctx().request_repaint_after(remaining);
-            } else {
-                state.dict.popup = None;
-            }
-        } else {
-            state.dict.popup = None;
         }
     }
 
     // Draw the dictionary popup window and word highlight on top of the video feed
-    let popup_sentence = state
-        .dict
-        .popup
-        .as_ref()
-        .map(|p| crate::bank::sentence::extract_sentence(&p.source_text, p.char_range).0)
-        .unwrap_or_default();
+    let popup_sentence = state.dict.popup.as_ref().map(|p| p.cached_sentence_rc().0);
     let bank = &state.bank;
     let target_rect = if state.dict.popup_under_crt {
         let border_crop = [
@@ -514,6 +646,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         let dict_db = &state.dict.db;
         let dict_freq_db = &state.dict.freq_db;
         let dict_pitch_db = &state.dict.pitch_db;
+        let sentence_ref = popup_sentence.as_deref().unwrap_or("");
         crate::dict::popup::draw_dict_popup_with_lookup(
             ui,
             &mut state.dict.popup,
@@ -525,7 +658,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
             } else {
                 1.0
             },
-            |entry| bank.status(&entry.term, &entry.reading, &popup_sentence),
+            |entry| bank.status(&entry.term, &entry.reading, sentence_ref),
             |entry| bank.is_entry_mined(&entry.term, &entry.reading, entry.sequence),
             !deck_mode && state.twitch.is_stream_live(),
             Some(|text: &str, char_idx: usize| {
@@ -555,8 +688,12 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         )
     };
 
-    if let Some(ref r) = state.crt_renderer {
-        r.lock().unwrap().popup_primitives = popup_primitives;
+    let has_primitives = !popup_primitives.is_empty();
+    if has_primitives || state.ocr.had_popup_primitives {
+        if let Some(ref r) = state.crt_renderer {
+            r.lock().unwrap().popup_primitives = popup_primitives;
+        }
+        state.ocr.had_popup_primitives = has_primitives;
     }
 
     // Handle user actions in popup: mining, clipping, or deleting a custom name
@@ -573,6 +710,7 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
                     state.error(format!("Failed to delete custom name: {e}"));
                 } else {
                     state.info("Deleted custom name.");
+                    state.ocr.last_hovered_char = None;
                     if let Some(ref mut popup) = state.dict.popup {
                         if popup.remove_custom_name(id) {
                             state.dict.popup = None;
@@ -586,9 +724,117 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
     }
 }
 
-/// Paints an individual OCR text line character-by-character to guarantee exact alignment
-/// with mouse hover coordinates and the dictionary popup highlight box.
-fn paint_ocr_text_line(
+#[inline]
+fn ocr_cjk_font_family() -> egui::FontFamily {
+    static FAMILY: std::sync::OnceLock<egui::FontFamily> = std::sync::OnceLock::new();
+    FAMILY
+        .get_or_init(|| egui::FontFamily::Name("GothicCJK".into()))
+        .clone()
+}
+
+#[inline]
+fn quantize_ocr_font_size(size: f32) -> f32 {
+    if size >= 2.0 {
+        (size * 4.0).floor() * 0.25
+    } else {
+        size
+    }
+}
+
+const MAX_CACHED_OCR_BOX_LAYOUTS: usize = 128;
+
+#[allow(clippy::too_many_arguments)]
+fn paint_ocr_box_cached(
+    painter: &egui::Painter,
+    ocr_box: &crate::ocr::OcrBox,
+    box_idx: usize,
+    ocr_generation: u64,
+    boxes_revision: u64,
+    video_rect: egui::Rect,
+    quantized_video_rect: [i32; 4],
+    pixels_per_point_bits: u32,
+    min_x: f32,
+    max_x: f32,
+    min_y: f32,
+    max_y: f32,
+    text_color: egui::Color32,
+    cache: &mut std::collections::HashMap<
+        crate::ocr::models::OcrBoxLayoutKey,
+        Vec<crate::ocr::models::CachedOcrGlyph>,
+    >,
+) {
+    let key = crate::ocr::models::OcrBoxLayoutKey {
+        ocr_generation,
+        boxes_revision,
+        box_idx,
+        box_fingerprint: ocr_box.layout_fingerprint(),
+        quantized_video_rect,
+        pixels_per_point_bits,
+        color_rgba: text_color.to_array(),
+    };
+
+    if !cache.contains_key(&key) {
+        if cache.len() >= MAX_CACHED_OCR_BOX_LAYOUTS {
+            cache.clear();
+        }
+        let mut glyphs = Vec::new();
+        if ocr_box.lines.is_empty() {
+            append_ocr_line_glyphs(
+                painter,
+                &ocr_box.text,
+                &[],
+                video_rect,
+                min_x,
+                max_x,
+                min_y,
+                max_y,
+                text_color,
+                ocr_box.writing_direction.is_vertical(),
+                &mut glyphs,
+            );
+        } else {
+            for line in &ocr_box.lines {
+                let line_min_x =
+                    video_rect.min.x + (line.center_x - line.width / 2.0) * video_rect.width();
+                let line_max_x =
+                    video_rect.min.x + (line.center_x + line.width / 2.0) * video_rect.width();
+                let line_min_y =
+                    video_rect.min.y + (line.center_y - line.height / 2.0) * video_rect.height();
+                let line_max_y =
+                    video_rect.min.y + (line.center_y + line.height / 2.0) * video_rect.height();
+
+                append_ocr_line_glyphs(
+                    painter,
+                    &line.text,
+                    &line.char_spans,
+                    video_rect,
+                    line_min_x,
+                    line_max_x,
+                    line_min_y,
+                    line_max_y,
+                    text_color,
+                    line.writing_direction.is_vertical(),
+                    &mut glyphs,
+                );
+            }
+        }
+        cache.insert(key, glyphs);
+    }
+
+    if let Some(glyphs) = cache.get(&key) {
+        for glyph in glyphs {
+            // Clipping also covers subpixel rounding and very narrow OCR spans.
+            painter.with_clip_rect(glyph.clip_rect).galley(
+                glyph.origin,
+                glyph.galley.clone(),
+                text_color,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_ocr_line_glyphs(
     painter: &egui::Painter,
     text: &str,
     char_spans: &[(f32, f32)],
@@ -599,6 +845,7 @@ fn paint_ocr_text_line(
     max_y: f32,
     text_color: egui::Color32,
     is_vertical: bool,
+    out: &mut Vec<crate::ocr::models::CachedOcrGlyph>,
 ) {
     let chars: Vec<char> = text.chars().collect();
     if chars.is_empty() {
@@ -620,6 +867,7 @@ fn paint_ocr_text_line(
     }
     .min(72.0);
 
+    out.reserve(chars.len());
     for (i, &c) in chars.iter().enumerate() {
         if c.is_whitespace() {
             continue;
@@ -649,50 +897,113 @@ fn paint_ocr_text_line(
             };
             egui::Rect::from_min_max(egui::pos2(x0, min_y), egui::pos2(x1, max_y))
         };
-        paint_ocr_glyph(painter, c, cell, font_size, text_color);
+        if let Some(fitted) = fit_ocr_glyph(painter, c, cell, font_size, text_color) {
+            out.push(fitted);
+        }
+    }
+}
+
+/// Paints an individual OCR text line character-by-character to guarantee exact alignment
+/// with mouse hover coordinates and the dictionary popup highlight box.
+#[cfg_attr(not(test), allow(dead_code))]
+fn paint_ocr_text_line(
+    painter: &egui::Painter,
+    text: &str,
+    char_spans: &[(f32, f32)],
+    video_rect: egui::Rect,
+    min_x: f32,
+    max_x: f32,
+    min_y: f32,
+    max_y: f32,
+    text_color: egui::Color32,
+    is_vertical: bool,
+) {
+    let mut glyphs = Vec::new();
+    append_ocr_line_glyphs(
+        painter,
+        text,
+        char_spans,
+        video_rect,
+        min_x,
+        max_x,
+        min_y,
+        max_y,
+        text_color,
+        is_vertical,
+        &mut glyphs,
+    );
+    for glyph in glyphs {
+        // Clipping also covers subpixel rounding and very narrow OCR spans.
+        painter
+            .with_clip_rect(glyph.clip_rect)
+            .galley(glyph.origin, glyph.galley, text_color);
     }
 }
 
 /// Fit the actual font ink to its OCR hit cell. Logical minimum font sizes and
 /// typographic advance widths can otherwise put visible ink in a neighbor's
 /// selection cell, particularly at fractional/high DPI and for punctuation.
-fn paint_ocr_glyph(
+fn fit_ocr_glyph(
     painter: &egui::Painter,
     character: char,
     cell: egui::Rect,
     mut font_size: f32,
     color: egui::Color32,
-) {
+) -> Option<crate::ocr::models::CachedOcrGlyph> {
     if !cell.is_finite()
         || cell.width() <= 0.0
         || cell.height() <= 0.0
         || !font_size.is_finite()
         || font_size <= 0.0
     {
-        return;
+        return None;
     }
+    font_size = quantize_ocr_font_size(font_size);
+    let family = ocr_cjk_font_family();
     let mut galley;
     // Font rasterization rounds to physical pixels, so remeasure after sizing.
     for attempt in 0..3 {
         galley = painter.layout_no_wrap(
             character.to_string(),
-            egui::FontId::new(font_size, egui::FontFamily::Name("GothicCJK".into())),
+            egui::FontId::new(font_size, family.clone()),
             color,
         );
         let ink = galley.mesh_bounds;
         if !ink.is_positive() {
-            return;
+            return None;
         }
         let fit = (cell.width() / ink.width())
             .min(cell.height() / ink.height())
             .min(1.0);
         if fit >= 0.999 || attempt == 2 {
-            let origin = cell.center() - ink.center().to_vec2();
-            // Clipping also covers subpixel rounding and very narrow OCR spans.
-            painter.with_clip_rect(cell).galley(origin, galley, color);
-            return;
+            let ink_offset = ink.center().to_vec2();
+            let origin = cell.center() - ink_offset;
+            return Some(crate::ocr::models::CachedOcrGlyph {
+                fitted_font_size: font_size,
+                galley,
+                ink_offset,
+                origin,
+                clip_rect: cell,
+            });
         }
-        font_size *= fit * 0.98;
+        font_size = quantize_ocr_font_size(font_size * fit * 0.98);
+    }
+    None
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn paint_ocr_glyph(
+    painter: &egui::Painter,
+    character: char,
+    cell: egui::Rect,
+    font_size: f32,
+    color: egui::Color32,
+) {
+    if let Some(fitted) = fit_ocr_glyph(painter, character, cell, font_size, color) {
+        // Clipping also covers subpixel rounding and very narrow OCR spans.
+        painter
+            .with_clip_rect(fitted.clip_rect)
+            .galley(fitted.origin, fitted.galley, color);
     }
 }
 
@@ -1129,5 +1440,140 @@ mod tests {
             .as_ref()
             .expect("Popup must remain open while quit dialog is open");
         assert!(popup.last_hover_time > stale);
+    }
+
+    #[test]
+    fn test_stationary_hover_short_circuits_and_caches_box_galleys() {
+        let ctx = egui::Context::default();
+        ctx.set_pixels_per_point(1.5);
+        let mut fonts = egui::FontDefinitions::default();
+        let jp_font =
+            egui::FontData::from_static(include_bytes!("../../assets/NotoSansJP-Regular.ttf"));
+        fonts.font_data.insert("test_jp".into(), jp_font);
+        fonts.families.insert(
+            egui::FontFamily::Name("GothicCJK".into()),
+            vec!["test_jp".into()],
+        );
+        fonts.families.insert(
+            egui::FontFamily::Name(crate::dict::render::FONT_DICT_FAMILY.into()),
+            vec!["test_jp".into()],
+        );
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .push("test_jp".into());
+        ctx.set_fonts(fonts);
+
+        let screen_rect =
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1280.0, 720.0));
+        let mut state = crate::app::AppState::default();
+        state
+            .bank
+            .custom_names
+            .push(crate::bank::database::CustomNameEntry {
+                id: 1,
+                created_at: 0,
+                kanji: "日本語".to_string(),
+                furigana: "にほんご".to_string(),
+                source_tag: None,
+                notes: Some("Japanese language".to_string()),
+            });
+        state.bank.custom_names_generation = 1;
+        state.ocr.boxes.push(OcrBox {
+            text: "日本語を学ぶ。".to_string(),
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.3,
+            height: 0.08,
+            lines: vec![ParsedLine {
+                text: "日本語を学ぶ。".to_string(),
+                center_x: 0.5,
+                center_y: 0.5,
+                width: 0.3,
+                height: 0.08,
+                writing_direction: WritingDirection::LeftToRight,
+                ..Default::default()
+            }],
+            writing_direction: WritingDirection::LeftToRight,
+        });
+
+        // Frame 0: initial widget registration pass so egui hit-testing knows `box_id` bounds.
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    draw_ocr_overlay(ui, &mut state, screen_rect);
+                });
+            },
+        );
+
+        // Frame 1: hover over the first character '日' inside the box (x ~ 468, y ~ 360)
+        let hover_pt = egui::pos2(468.0, 360.0);
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                events: vec![egui::Event::PointerMoved(hover_pt)],
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    draw_ocr_overlay(ui, &mut state, screen_rect);
+                });
+            },
+        );
+
+        assert!(state.dict.popup.is_some());
+        assert!(state.ocr.last_hovered_char.is_some());
+        assert_eq!(state.ocr.box_glyph_cache.len(), 1);
+        let first_galley_ptr = std::sync::Arc::as_ptr(
+            &state
+                .ocr
+                .box_glyph_cache
+                .values()
+                .next()
+                .unwrap()
+                .first()
+                .unwrap()
+                .galley,
+        );
+        let first_entries_ptr = state.dict.popup.as_ref().unwrap().entries.as_ptr();
+
+        // Stationary second frame at exact same pointer position: reuses cached galleys
+        // AND short-circuits hover lookup without replacing `popup.entries`.
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                events: vec![egui::Event::PointerMoved(hover_pt)],
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    draw_ocr_overlay(ui, &mut state, screen_rect);
+                });
+            },
+        );
+
+        let second_galley_ptr = std::sync::Arc::as_ptr(
+            &state
+                .ocr
+                .box_glyph_cache
+                .values()
+                .next()
+                .unwrap()
+                .first()
+                .unwrap()
+                .galley,
+        );
+        let second_entries_ptr = state.dict.popup.as_ref().unwrap().entries.as_ptr();
+        assert_eq!(first_galley_ptr, second_galley_ptr);
+        assert_eq!(first_entries_ptr, second_entries_ptr);
+
+        // Verify cached sentence helper in top_popup_entry_mine_info
+        let info = top_popup_entry_mine_info(&state).expect("mine info should resolve");
+        assert_eq!(info.1, "日本語");
     }
 }

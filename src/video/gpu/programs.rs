@@ -19,7 +19,6 @@ pub const FS_HALO_GLOW_H: &str = include_str!("../shaders/fs_halo_glow_h.glsl");
 pub const FS_HALO_GLOW_V: &str = include_str!("../shaders/fs_halo_glow_v.glsl");
 pub const FS_HALO_BLOOM_H: &str = include_str!("../shaders/fs_halo_bloom_h.glsl");
 pub const FS_HALO_BLOOM_V: &str = include_str!("../shaders/fs_halo_bloom_v.glsl");
-pub const FS_HALO_SCANLINES: &str = include_str!("../shaders/fs_halo_scanlines.glsl");
 pub const FS_HALO_COMPOSITE: &str = include_str!("../shaders/fs_halo_composite.glsl");
 pub const FS_HALO_FINAL: &str = include_str!("../shaders/fs_halo_final.glsl");
 pub const FS_CATHODE_INTERFERENCE: &str = include_str!("../shaders/fs_cathode_interference.glsl");

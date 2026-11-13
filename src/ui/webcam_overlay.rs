@@ -175,12 +175,19 @@ pub fn draw_webcam_overlay(
     }
 
     // 3. Compute effective dimensions and aspect ratio from cutout coordinates
+    // Cutout margins are configured in native `config.resolution` pixel units, so prefer
+    // `config.resolution` to preserve exact UV crop ratios even when PiP frames are pre-scaled.
     let (raw_w, raw_h) = state
         .webcam
-        .latest_frame
-        .as_ref()
-        .map(|f| (f.width, f.height))
-        .or(state.webcam.config.resolution)
+        .config
+        .resolution
+        .or_else(|| {
+            state
+                .webcam
+                .latest_frame
+                .as_ref()
+                .map(|f| (f.width, f.height))
+        })
         .unwrap_or((640, 480));
 
     let (_eff_w, _eff_h, aspect_ratio, uv) =
@@ -195,6 +202,13 @@ pub fn draw_webcam_overlay(
         (viewport_w - FRAME_PADDING * 2.0).max(MIN_CONTENT_WIDTH),
     );
     let target_content_h = target_content_w / aspect_ratio;
+
+    let ppp = ctx.pixels_per_point().max(1.0);
+    let uv_w = uv.width().clamp(0.1, 1.0);
+    let uv_h = uv.height().clamp(0.1, 1.0);
+    let desired_tex_w = ((target_content_w * ppp) / uv_w).ceil() as u32;
+    let desired_tex_h = ((target_content_h * ppp) / uv_h).ceil() as u32;
+    crate::devices::webcam::set_webcam_target_dimensions(desired_tex_w, desired_tex_h);
 
     let total_w = target_content_w + FRAME_PADDING * 2.0;
     let total_h = target_content_h + FRAME_PADDING * 2.0;

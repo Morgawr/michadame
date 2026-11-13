@@ -1087,33 +1087,296 @@ pub fn render_entry_header(ui: &mut egui::Ui, entry: &TermEntry, is_mined: bool)
     }
 }
 
-/// Renders all glossaries / senses of an entry.
-pub fn render_glossaries(ui: &mut egui::Ui, entry: &TermEntry) {
-    if entry.custom_name_id.is_some() {
-        if let Some(GlossaryEntry::Text(notes)) = entry.glossary.first() {
-            if !notes.trim().is_empty() {
-                ui.horizontal_wrapped(|ui| {
-                    render_interactive_text(ui, notes, dict_font(32.0), COLOR_DEFINITION);
-                });
-            }
+/// Pre-parsed formatting span for scale-independent interactive text layout jobs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PrebuiltJobSection {
+    pub byte_range: std::ops::Range<usize>,
+    pub base_font_size: f32,
+    pub color: Color32,
+    pub italics: bool,
+    pub is_default_format: bool,
+}
+
+/// Pre-parsed text and formatting sections ready to instantiate an egui `LayoutJob` at current `dict_scale()`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PrebuiltInteractiveJob {
+    pub text: String,
+    pub sections: Vec<PrebuiltJobSection>,
+    pub ruby_rt_ranges: Vec<std::ops::Range<usize>>,
+}
+
+impl PrebuiltInteractiveJob {
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    fn to_layout_job(&self) -> LayoutJob {
+        let mut sections = Vec::with_capacity(self.sections.len());
+        for sec in &self.sections {
+            let format = if sec.is_default_format {
+                TextFormat::default()
+            } else {
+                TextFormat {
+                    font_id: dict_font(sec.base_font_size),
+                    color: sec.color,
+                    italics: sec.italics,
+                    ..Default::default()
+                }
+            };
+            sections.push(egui::text::LayoutSection {
+                leading_space: 0.0,
+                byte_range: sec.byte_range.clone(),
+                format,
+            });
         }
+        LayoutJob {
+            text: self.text.clone(),
+            sections,
+            ..Default::default()
+        }
+    }
+}
+
+/// Pre-parsed Japanese/English example sentence inside a dictionary sense.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParsedExampleNode {
+    pub ja_segments: Vec<RubySegment>,
+    pub en_text: String,
+}
+
+/// Pre-parsed cross-reference ("See also") item inside a dictionary sense.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParsedXrefNode {
+    pub target: Option<PrebuiltInteractiveJob>,
+    pub gloss_display: Option<String>,
+}
+
+/// Pre-parsed numbered dictionary sense.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParsedSenseNode {
+    pub sense_num: String,
+    pub def_str: String,
+    pub notes: Vec<String>,
+    pub examples: Vec<ParsedExampleNode>,
+    pub xrefs: Vec<ParsedXrefNode>,
+}
+
+/// Compact pre-parsed intermediate representation (IR) for Yomitan / Jitendex glossary entries,
+/// eliminating per-frame `serde_json::Value` map lookups, subtree searches, and HTML tag scans.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GlossaryNode {
+    CustomNameNotes(String),
+    NumberedText {
+        number_prefix: Option<String>,
+        job: PrebuiltInteractiveJob,
+    },
+    PlainHtml(PrebuiltInteractiveJob),
+    Deinflection(String),
+    SenseGroup {
+        tags: Vec<String>,
+        senses: Vec<ParsedSenseNode>,
+    },
+    Forms(String),
+    Attribution(String),
+    ListItem {
+        symbol: String,
+        content: Option<PrebuiltInteractiveJob>,
+    },
+    RubyItem {
+        base: String,
+        rt: String,
+    },
+    Break,
+    InlineRubyFlow(Vec<RubySegment>),
+    InlineWrapped(PrebuiltInteractiveJob),
+    Table(Vec<GlossaryNode>),
+    Group(Vec<GlossaryNode>),
+}
+
+const MAX_GLOSSARY_IR_CACHE_ENTRIES: usize = 256;
+const MAX_STRUCTURED_IR_CACHE_ENTRIES: usize = 128;
+
+struct GlossaryIrCacheSlot {
+    sequence: i64,
+    custom_name_id: Option<i64>,
+    glossary_ptr: usize,
+    glossary_len: usize,
+    content_hash: Option<u64>,
+    term: String,
+    reading: String,
+    nodes: std::rc::Rc<[GlossaryNode]>,
+}
+
+thread_local! {
+    static GLOSSARY_IR_CACHE: std::cell::RefCell<std::collections::VecDeque<GlossaryIrCacheSlot>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+    static STRUCTURED_IR_CACHE: std::cell::RefCell<std::collections::VecDeque<(u64, std::rc::Rc<[GlossaryNode]>)>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+}
+
+fn hash_json_value_linear(
+    val: &serde_json::Value,
+    hasher: &mut impl std::hash::Hasher,
+    depth: usize,
+) {
+    use std::hash::Hash;
+    if depth > MAX_JSON_WALK_DEPTH {
+        0xFFu8.hash(hasher);
         return;
     }
+    match val {
+        serde_json::Value::Null => 0u8.hash(hasher),
+        serde_json::Value::Bool(b) => {
+            1u8.hash(hasher);
+            b.hash(hasher);
+        }
+        serde_json::Value::Number(n) => {
+            2u8.hash(hasher);
+            if let Some(i) = n.as_i64() {
+                i.hash(hasher);
+            } else if let Some(u) = n.as_u64() {
+                u.hash(hasher);
+            } else if let Some(f) = n.as_f64() {
+                f.to_bits().hash(hasher);
+            }
+        }
+        serde_json::Value::String(s) => {
+            3u8.hash(hasher);
+            s.hash(hasher);
+        }
+        serde_json::Value::Array(arr) => {
+            4u8.hash(hasher);
+            arr.len().hash(hasher);
+            for item in arr {
+                hash_json_value_linear(item, hasher, depth + 1);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            5u8.hash(hasher);
+            map.len().hash(hasher);
+            for (k, v) in map {
+                k.hash(hasher);
+                hash_json_value_linear(v, hasher, depth + 1);
+            }
+        }
+    }
+}
+
+fn compute_glossary_slice_hash(glossary: &[GlossaryEntry]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    glossary.len().hash(&mut hasher);
+    for item in glossary {
+        match item {
+            GlossaryEntry::Text(t) => {
+                0u8.hash(&mut hasher);
+                t.hash(&mut hasher);
+            }
+            GlossaryEntry::Structured(v) => {
+                1u8.hash(&mut hasher);
+                hash_json_value_linear(v, &mut hasher, 0);
+            }
+        }
+    }
+    hasher.finish()
+}
+
+fn compute_structured_value_hash(val: &serde_json::Value) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hash_json_value_linear(val, &mut hasher, 0);
+    hasher.finish()
+}
+
+pub(crate) fn cached_entry_glossary_ir(entry: &TermEntry) -> std::rc::Rc<[GlossaryNode]> {
+    let glossary_ptr = entry.glossary.as_ptr() as usize;
+    let glossary_len = entry.glossary.len();
+    let has_stable_id = entry.sequence != 0 || entry.custom_name_id.is_some();
+
+    GLOSSARY_IR_CACHE.with(|cache_cell| {
+        {
+            let mut cache = cache_cell.borrow_mut();
+            if has_stable_id {
+                if let Some(pos) = cache.iter().position(|slot| {
+                    slot.sequence == entry.sequence
+                        && slot.custom_name_id == entry.custom_name_id
+                        && slot.glossary_ptr == glossary_ptr
+                        && slot.glossary_len == glossary_len
+                        && slot.term == entry.term
+                        && slot.reading == entry.reading
+                }) {
+                    if pos > 0 {
+                        let slot = cache.remove(pos).unwrap();
+                        let rc = slot.nodes.clone();
+                        cache.push_front(slot);
+                        return rc;
+                    }
+                    return cache[0].nodes.clone();
+                }
+            }
+
+            let content_hash = compute_glossary_slice_hash(&entry.glossary);
+            if let Some(pos) = cache.iter_mut().position(|slot| {
+                slot.sequence == entry.sequence
+                    && slot.custom_name_id == entry.custom_name_id
+                    && slot.glossary_len == glossary_len
+                    && slot.term == entry.term
+                    && slot.reading == entry.reading
+                    && *slot
+                        .content_hash
+                        .get_or_insert_with(|| content_hash.wrapping_add(1))
+                        == content_hash
+            }) {
+                let mut slot = cache.remove(pos).unwrap();
+                slot.glossary_ptr = glossary_ptr;
+                let rc = slot.nodes.clone();
+                cache.push_front(slot);
+                return rc;
+            }
+        }
+
+        let content_hash = compute_glossary_slice_hash(&entry.glossary);
+        let parsed: std::rc::Rc<[GlossaryNode]> = parse_entry_glossaries(entry).into();
+        let mut cache = cache_cell.borrow_mut();
+        if cache.len() >= MAX_GLOSSARY_IR_CACHE_ENTRIES {
+            cache.pop_back();
+        }
+        cache.push_front(GlossaryIrCacheSlot {
+            sequence: entry.sequence,
+            custom_name_id: entry.custom_name_id,
+            glossary_ptr,
+            glossary_len,
+            content_hash: Some(content_hash),
+            term: entry.term.clone(),
+            reading: entry.reading.clone(),
+            nodes: parsed.clone(),
+        });
+        parsed
+    })
+}
+
+/// Parses all glossaries / senses of a `TermEntry` into compact `GlossaryNode` IR.
+pub fn parse_entry_glossaries(entry: &TermEntry) -> Vec<GlossaryNode> {
+    if entry.custom_name_id.is_some() {
+        let mut out = Vec::new();
+        if let Some(GlossaryEntry::Text(notes)) = entry.glossary.first() {
+            if !notes.trim().is_empty() {
+                out.push(GlossaryNode::CustomNameNotes(notes.clone()));
+            }
+        }
+        return out;
+    }
+
+    let mut nodes = Vec::with_capacity(entry.glossary.len());
+    let multi = entry.glossary.len() > 1;
     for (g_idx, item) in entry.glossary.iter().enumerate() {
         match item {
             GlossaryEntry::Text(text) => {
-                ui.horizontal_wrapped(|ui| {
-                    if entry.glossary.len() > 1 {
-                        ui.label(
-                            RichText::new(format!("{}.", g_idx + 1))
-                                .font(dict_font(34.0))
-                                .strong()
-                                .color(COLOR_READING),
-                        );
-                    }
-                    render_plain_html_text(ui, text);
+                nodes.push(GlossaryNode::NumberedText {
+                    number_prefix: multi.then(|| format!("{}.", g_idx + 1)),
+                    job: parse_plain_html_job(text),
                 });
-                ui.add_space(4.0);
             }
             GlossaryEntry::Structured(val) => {
                 if let Some((term, reasons)) = as_deinflection_glossary(val) {
@@ -1124,14 +1387,504 @@ pub fn render_glossaries(ui: &mut egui::Ui, entry: &TermEntry) {
                     } else {
                         format!("{term}  ({})", reasons.join(", "))
                     };
-                    render_interactive_text(ui, text, dict_font(28.0), COLOR_MUTED);
-                    ui.add_space(4.0);
+                    nodes.push(GlossaryNode::Deinflection(text));
                 } else {
-                    render_structured_entry(ui, val);
+                    parse_structured_entry_inner(val, &mut nodes, 0);
                 }
             }
         }
     }
+    nodes
+}
+
+/// Parses a standalone Yomitan / Jitendex structured JSON value into `GlossaryNode` IR.
+pub fn parse_structured_entry(val: &serde_json::Value) -> Vec<GlossaryNode> {
+    let mut nodes = Vec::new();
+    parse_structured_entry_inner(val, &mut nodes, 0);
+    nodes
+}
+
+fn parse_structured_entry_inner(
+    val: &serde_json::Value,
+    out: &mut Vec<GlossaryNode>,
+    depth: usize,
+) {
+    if depth > MAX_JSON_WALK_DEPTH {
+        return;
+    }
+    if let serde_json::Value::Array(arr) = val {
+        for item in arr {
+            parse_structured_entry_inner(item, out, depth + 1);
+        }
+        return;
+    }
+
+    let Some(obj) = val.as_object() else {
+        if let Some(s) = val.as_str() {
+            out.push(GlossaryNode::PlainHtml(parse_plain_html_job(s)));
+        }
+        return;
+    };
+
+    let content_type = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if content_type == "structured-content" {
+        if let Some(content) = obj.get("content") {
+            parse_structured_entry_inner(content, out, depth + 1);
+        }
+        return;
+    }
+
+    let data_content = obj
+        .get("data")
+        .and_then(|d| d.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
+
+    match data_content {
+        "sense-groups" => {
+            if let Some(content) = obj.get("content") {
+                parse_sense_groups(content, out);
+            }
+        }
+        "sense-group" => {
+            out.push(parse_single_sense_group(val));
+        }
+        "forms" => {
+            if let Some(forms_node) = parse_forms(val) {
+                out.push(forms_node);
+            }
+        }
+        "attribution" => {
+            if let Some(attr_node) = parse_attribution(val) {
+                out.push(attr_node);
+            }
+        }
+        _ => {
+            parse_generic_node(val, out, depth + 1);
+        }
+    }
+}
+
+fn parse_sense_groups(content: &serde_json::Value, out: &mut Vec<GlossaryNode>) {
+    match content {
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                if let Some(obj) = item.as_object() {
+                    let dc = obj
+                        .get("data")
+                        .and_then(|d| d.get("content"))
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("");
+                    match dc {
+                        "sense-group" => out.push(parse_single_sense_group(item)),
+                        "forms" => {
+                            if let Some(forms_node) = parse_forms(item) {
+                                out.push(forms_node);
+                            }
+                        }
+                        _ => parse_generic_node(item, out, 0),
+                    }
+                } else {
+                    parse_generic_node(item, out, 0);
+                }
+            }
+        }
+        serde_json::Value::Object(_) => {
+            out.push(parse_single_sense_group(content));
+        }
+        _ => {}
+    }
+}
+
+fn parse_single_sense_group(group: &serde_json::Value) -> GlossaryNode {
+    let mut tags = Vec::new();
+    collect_tags(group, &mut tags);
+
+    let mut sense_vals = Vec::new();
+    collect_nodes_by_data_content(group, "sense", &mut sense_vals);
+
+    let mut senses = Vec::with_capacity(sense_vals.len());
+    for (s_idx, sense_val) in sense_vals.iter().enumerate() {
+        senses.push(parse_sense(sense_val, s_idx));
+    }
+
+    GlossaryNode::SenseGroup { tags, senses }
+}
+
+fn parse_sense(sense_val: &serde_json::Value, index: usize) -> ParsedSenseNode {
+    let sense = sense_val.as_object();
+
+    let list_style = sense
+        .and_then(|s| s.get("style"))
+        .and_then(|s| s.get("listStyleType"))
+        .and_then(|t| t.as_str())
+        .map(|s| s.trim_matches('"'))
+        .unwrap_or("");
+
+    let sense_num = if !list_style.is_empty() && list_style != "none" {
+        list_style.to_string()
+    } else if index < CIRCLED_NUMBERS.len() {
+        CIRCLED_NUMBERS[index].to_string()
+    } else {
+        format!("{}.", index + 1)
+    };
+
+    let mut defs = Vec::new();
+    if let Some(glossary_node) = find_node_by_data_content(sense_val, "glossary") {
+        collect_definitions(glossary_node, &mut defs);
+    }
+
+    let def_str = if !defs.is_empty() {
+        defs.join("; ")
+    } else {
+        extract_plain_text_excluding_extras(sense_val)
+    };
+
+    let mut note_vals = Vec::new();
+    collect_nodes_by_data_content(sense_val, "sense-note", &mut note_vals);
+    collect_nodes_by_data_content(sense_val, "info-gloss", &mut note_vals);
+
+    let mut notes = Vec::new();
+    for note in note_vals {
+        let label = find_node_by_data_content(note, "sense-note-label")
+            .or_else(|| find_node_by_data_content(note, "info-gloss-label"))
+            .map(|n| extract_plain_text_from_node(Some(n)))
+            .unwrap_or_else(|| "Note".to_string());
+
+        let content = find_node_by_data_content(note, "sense-note-content")
+            .or_else(|| find_node_by_data_content(note, "info-gloss-content"))
+            .map(|n| extract_plain_text_from_node(Some(n)))
+            .unwrap_or_default();
+
+        let note_text = if !content.is_empty() {
+            format!("{label}: {content}")
+        } else {
+            extract_plain_text_from_node(Some(note))
+        };
+
+        if !note_text.is_empty() {
+            notes.push(note_text);
+        }
+    }
+
+    let mut example_vals = Vec::new();
+    collect_nodes_by_data_content(sense_val, "example-sentence", &mut example_vals);
+
+    let mut examples = Vec::with_capacity(example_vals.len());
+    for ex in example_vals {
+        let ja_segments = find_node_by_data_content(ex, "example-sentence-a")
+            .map(extract_ruby_segments)
+            .unwrap_or_default();
+        let en_text = find_node_by_data_content(ex, "example-sentence-b")
+            .map(extract_en_sentence_text)
+            .unwrap_or_default();
+        examples.push(ParsedExampleNode {
+            ja_segments,
+            en_text,
+        });
+    }
+
+    let mut xref_vals = Vec::new();
+    collect_nodes_by_data_content(sense_val, "xref", &mut xref_vals);
+
+    let mut xrefs = Vec::with_capacity(xref_vals.len());
+    for xref in xref_vals {
+        let target = find_node_by_data_content(xref, "xref-content").map(parse_inline_node_job);
+        let gloss_text = find_node_by_data_content(xref, "xref-glossary")
+            .map(|n| extract_plain_text_from_node(Some(n)))
+            .unwrap_or_default();
+        let gloss_display = (!gloss_text.is_empty()).then(|| format!("— {gloss_text}"));
+        xrefs.push(ParsedXrefNode {
+            target,
+            gloss_display,
+        });
+    }
+
+    ParsedSenseNode {
+        sense_num,
+        def_str,
+        notes,
+        examples,
+        xrefs,
+    }
+}
+
+fn parse_forms(forms_val: &serde_json::Value) -> Option<GlossaryNode> {
+    let mut form_words = Vec::new();
+    collect_definitions(forms_val, &mut form_words);
+    (!form_words.is_empty()).then(|| GlossaryNode::Forms(form_words.join(", ")))
+}
+
+fn parse_attribution(attr_val: &serde_json::Value) -> Option<GlossaryNode> {
+    let text = extract_plain_text_from_node(Some(attr_val));
+    (!text.is_empty()).then(|| GlossaryNode::Attribution(text))
+}
+
+fn parse_generic_node(node: &serde_json::Value, out: &mut Vec<GlossaryNode>, depth: usize) {
+    if depth > MAX_JSON_WALK_DEPTH {
+        return;
+    }
+    match node {
+        serde_json::Value::String(s) => {
+            out.push(GlossaryNode::PlainHtml(parse_plain_html_job(s)));
+        }
+        serde_json::Value::Array(arr) => {
+            for child in arr {
+                parse_generic_node(child, out, depth + 1);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            let tag = map.get("tag").and_then(|v| v.as_str()).unwrap_or("");
+            match tag {
+                "ul" | "ol" => {
+                    if let Some(content) = map.get("content") {
+                        let mut children = Vec::new();
+                        parse_generic_node(content, &mut children, depth + 1);
+                        if !children.is_empty() {
+                            out.push(GlossaryNode::Group(children));
+                        }
+                    }
+                }
+                "li" => {
+                    let symbol = map
+                        .get("style")
+                        .and_then(|s| s.get("listStyleType"))
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.trim_matches('"'))
+                        .unwrap_or("•")
+                        .to_string();
+                    let content = map.get("content").map(parse_inline_node_job);
+                    out.push(GlossaryNode::ListItem { symbol, content });
+                }
+                "ruby" => {
+                    let (base, rt) = extract_ruby_components(map);
+                    out.push(GlossaryNode::RubyItem { base, rt });
+                }
+                "br" => {
+                    out.push(GlossaryNode::Break);
+                }
+                "table" => {
+                    let Some(content) = map.get("content") else {
+                        return;
+                    };
+                    let mut children = Vec::new();
+                    if !content.is_string() && is_inline_only(content) {
+                        if contains_ruby(content) {
+                            let mut segments = extract_ruby_segments(content);
+                            normalize_glyphs(&mut segments);
+                            children.push(GlossaryNode::InlineRubyFlow(segments));
+                        } else {
+                            children
+                                .push(GlossaryNode::InlineWrapped(parse_inline_node_job(content)));
+                        }
+                    } else {
+                        parse_generic_node(content, &mut children, depth + 1);
+                    }
+                    if !children.is_empty() {
+                        out.push(GlossaryNode::Table(children));
+                    }
+                }
+                _ => {
+                    let Some(content) = map.get("content") else {
+                        return;
+                    };
+                    if !content.is_string() && is_inline_only(content) {
+                        if contains_ruby(content) {
+                            let mut segments = extract_ruby_segments(content);
+                            normalize_glyphs(&mut segments);
+                            out.push(GlossaryNode::InlineRubyFlow(segments));
+                        } else {
+                            out.push(GlossaryNode::InlineWrapped(parse_inline_node_job(content)));
+                        }
+                    } else {
+                        parse_generic_node(content, out, depth + 1);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Renders pre-parsed `GlossaryNode` IR slices directly into `ui`.
+pub fn render_glossary_nodes(ui: &mut egui::Ui, nodes: &[GlossaryNode]) {
+    for node in nodes {
+        render_glossary_node(ui, node);
+    }
+}
+
+fn render_prebuilt_interactive_job(ui: &mut egui::Ui, prebuilt: &PrebuiltInteractiveJob) {
+    if !prebuilt.is_empty() {
+        render_interactive_job(ui, prebuilt.to_layout_job(), &prebuilt.ruby_rt_ranges);
+    }
+}
+
+fn render_glossary_node(ui: &mut egui::Ui, node: &GlossaryNode) {
+    match node {
+        GlossaryNode::CustomNameNotes(notes) => {
+            ui.horizontal_wrapped(|ui| {
+                render_interactive_text(ui, notes, dict_font(32.0), COLOR_DEFINITION);
+            });
+        }
+        GlossaryNode::NumberedText { number_prefix, job } => {
+            ui.horizontal_wrapped(|ui| {
+                if let Some(prefix) = number_prefix {
+                    ui.label(
+                        RichText::new(prefix)
+                            .font(dict_font(34.0))
+                            .strong()
+                            .color(COLOR_READING),
+                    );
+                }
+                render_prebuilt_interactive_job(ui, job);
+            });
+            ui.add_space(4.0);
+        }
+        GlossaryNode::PlainHtml(job) => {
+            render_prebuilt_interactive_job(ui, job);
+        }
+        GlossaryNode::Deinflection(text) => {
+            render_interactive_text(ui, text, dict_font(28.0), COLOR_MUTED);
+            ui.add_space(4.0);
+        }
+        GlossaryNode::SenseGroup { tags, senses } => {
+            if !tags.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    for tag in tags {
+                        render_pill_badge(ui, tag, COLOR_TAG_BG, COLOR_TAG_TEXT, COLOR_TAG_BORDER);
+                    }
+                });
+                ui.add_space(4.0);
+            }
+            for sense in senses {
+                render_parsed_sense(ui, sense);
+            }
+        }
+        GlossaryNode::Forms(forms_str) => {
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new("Forms: ")
+                        .font(dict_font(30.0))
+                        .strong()
+                        .color(COLOR_MUTED),
+                );
+                render_interactive_text(ui, forms_str, dict_font(32.0), COLOR_HEADWORD);
+            });
+        }
+        GlossaryNode::Attribution(text) => {
+            ui.add_space(6.0);
+            ui.label(RichText::new(text).font(dict_font(24.0)).color(COLOR_MUTED));
+        }
+        GlossaryNode::ListItem { symbol, content } => {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(symbol)
+                        .font(dict_font(30.0))
+                        .color(COLOR_MUTED),
+                );
+                if let Some(job) = content {
+                    render_prebuilt_interactive_job(ui, job);
+                }
+            });
+        }
+        GlossaryNode::RubyItem { base, rt } => {
+            render_ruby_item(ui, base, rt);
+        }
+        GlossaryNode::Break => {
+            ui.add_space(2.0);
+        }
+        GlossaryNode::InlineRubyFlow(segments) => {
+            render_ruby_flow(ui, segments, None);
+        }
+        GlossaryNode::InlineWrapped(job) => {
+            ui.horizontal_wrapped(|ui| render_prebuilt_interactive_job(ui, job));
+        }
+        GlossaryNode::Table(children) | GlossaryNode::Group(children) => {
+            render_glossary_nodes(ui, children);
+        }
+    }
+}
+
+fn render_parsed_sense(ui: &mut egui::Ui, sense: &ParsedSenseNode) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new(&sense.sense_num)
+                .font(dict_font(36.0))
+                .strong()
+                .color(COLOR_READING),
+        );
+        render_interactive_text(ui, &sense.def_str, dict_font(34.0), COLOR_DEFINITION);
+    });
+
+    for note_text in &sense.notes {
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.add_space(32.0);
+            ui.label(RichText::new("ℹ").font(dict_font(28.0)).color(COLOR_MUTED));
+            render_interactive_text(ui, note_text, dict_font(30.0), COLOR_TAG_TEXT);
+        });
+    }
+
+    for ex in &sense.examples {
+        ui.add_space(4.0);
+        let accent_color = theme::EXAMPLE_ACCENT;
+        let frame_resp = egui::Frame::none()
+            .fill(COLOR_EXAMPLE_BG)
+            .rounding(egui::Rounding::ZERO)
+            .stroke(egui::Stroke::NONE)
+            .inner_margin(egui::Margin {
+                left: 14.0,
+                right: 10.0,
+                top: 6.0,
+                bottom: 6.0,
+            })
+            .show(ui, |ui| {
+                if !ex.ja_segments.is_empty() {
+                    render_ruby_flow(ui, &ex.ja_segments, Some("例  "));
+                }
+                if !ex.en_text.is_empty() {
+                    ui.add_space(3.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(&ex.en_text)
+                                .font(dict_font(27.0))
+                                .italics()
+                                .color(COLOR_EXAMPLE_EN),
+                        );
+                    });
+                }
+            });
+        let r = frame_resp.response.rect;
+        ui.painter().vline(
+            r.min.x + 2.0,
+            r.y_range(),
+            egui::Stroke::new(4.0, accent_color),
+        );
+    }
+
+    for xref in &sense.xrefs {
+        ui.add_space(3.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.add_space(20.0);
+            ui.label(RichText::new("🔗").font(dict_font(28.0)).color(COLOR_MUTED));
+            if let Some(target) = &xref.target {
+                render_prebuilt_interactive_job(ui, target);
+            }
+            if let Some(gloss_display) = &xref.gloss_display {
+                render_interactive_text(ui, gloss_display, dict_font(30.0), COLOR_TAG_TEXT);
+            }
+        });
+    }
+
+    ui.add_space(6.0);
+}
+
+/// Renders all glossaries / senses of an entry using cached pre-parsed `GlossaryNode` IR.
+pub fn render_glossaries(ui: &mut egui::Ui, entry: &TermEntry) {
+    let nodes = cached_entry_glossary_ir(entry);
+    render_glossary_nodes(ui, &nodes);
 }
 
 /// Recognizes Yomitan's deinflection glossary item: `[uninflected_term, [reason, ...]]`.
@@ -1179,9 +1932,32 @@ pub fn render_pill_badge(
 
 /// Top-level dispatcher for Yomitan / Jitendex structured content.
 pub fn render_structured_entry(ui: &mut egui::Ui, val: &serde_json::Value) {
-    render_structured_entry_inner(ui, val, 0);
+    let content_hash = compute_structured_value_hash(val);
+    let nodes = STRUCTURED_IR_CACHE.with(|cache_cell| {
+        {
+            let mut cache = cache_cell.borrow_mut();
+            if let Some(pos) = cache.iter().position(|(h, _)| *h == content_hash) {
+                if pos > 0 {
+                    let slot = cache.remove(pos).unwrap();
+                    let rc = slot.1.clone();
+                    cache.push_front(slot);
+                    return rc;
+                }
+                return cache[0].1.clone();
+            }
+        }
+        let parsed: std::rc::Rc<[GlossaryNode]> = parse_structured_entry(val).into();
+        let mut cache = cache_cell.borrow_mut();
+        if cache.len() >= MAX_STRUCTURED_IR_CACHE_ENTRIES {
+            cache.pop_back();
+        }
+        cache.push_front((content_hash, parsed.clone()));
+        parsed
+    });
+    render_glossary_nodes(ui, &nodes);
 }
 
+#[cfg(test)]
 fn render_structured_entry_inner(ui: &mut egui::Ui, val: &serde_json::Value, depth: usize) {
     if depth > MAX_JSON_WALK_DEPTH {
         return;
@@ -1236,6 +2012,7 @@ fn render_structured_entry_inner(ui: &mut egui::Ui, val: &serde_json::Value, dep
 }
 
 /// Renders a group of senses and forms.
+#[cfg(test)]
 fn render_sense_groups(ui: &mut egui::Ui, content: &serde_json::Value) {
     match content {
         serde_json::Value::Array(arr) => {
@@ -1264,6 +2041,7 @@ fn render_sense_groups(ui: &mut egui::Ui, content: &serde_json::Value) {
 }
 
 /// Renders a single sense group (POS tags followed by numbered senses).
+#[cfg(test)]
 fn render_single_sense_group(ui: &mut egui::Ui, group: &serde_json::Value) {
     // 1. Part-of-speech & misc pills
     let mut tags = Vec::new();
@@ -1287,6 +2065,7 @@ fn render_single_sense_group(ui: &mut egui::Ui, group: &serde_json::Value) {
 }
 
 /// Renders an individual numbered dictionary sense.
+#[cfg(test)]
 fn render_sense(ui: &mut egui::Ui, sense_val: &serde_json::Value, index: usize) {
     let sense = sense_val.as_object();
 
@@ -1442,6 +2221,7 @@ fn render_sense(ui: &mut egui::Ui, sense_val: &serde_json::Value, index: usize) 
 }
 
 /// Renders variant forms table/row.
+#[cfg(test)]
 fn render_forms(ui: &mut egui::Ui, forms_val: &serde_json::Value) {
     let mut form_words = Vec::new();
     collect_definitions(forms_val, &mut form_words);
@@ -1461,6 +2241,7 @@ fn render_forms(ui: &mut egui::Ui, forms_val: &serde_json::Value) {
 }
 
 /// Renders attribution footer.
+#[cfg(test)]
 fn render_attribution(ui: &mut egui::Ui, attr_val: &serde_json::Value) {
     let text = extract_plain_text_from_node(Some(attr_val));
     if !text.is_empty() {
@@ -1470,6 +2251,7 @@ fn render_attribution(ui: &mut egui::Ui, attr_val: &serde_json::Value) {
 }
 
 /// Generic fallback renderer for arbitrary HTML/structured nodes.
+#[cfg(test)]
 fn render_generic_node(ui: &mut egui::Ui, node: &serde_json::Value, depth: usize) {
     if depth > MAX_JSON_WALK_DEPTH {
         return;
@@ -1527,7 +2309,7 @@ fn render_generic_node(ui: &mut egui::Ui, node: &serde_json::Value, depth: usize
                         if contains_ruby(content) {
                             let mut segments = extract_ruby_segments(content);
                             normalize_glyphs(&mut segments);
-                            render_ruby_flow(ui, segments, None);
+                            render_ruby_flow(ui, &segments, None);
                         } else {
                             ui.horizontal_wrapped(|ui| render_inline_content(ui, content));
                         }
@@ -1562,24 +2344,20 @@ pub fn is_cjk_char(c: char) -> bool {
 }
 
 pub fn push_plain_text_segments(s: &str, out: &mut Vec<RubySegment>) {
-    let mut current_word = String::new();
-    for c in s.chars() {
-        if is_cjk_char(c) {
-            if !current_word.is_empty() {
-                out.push(RubySegment::Plain(std::mem::take(&mut current_word)));
+    let mut run_start: Option<usize> = None;
+    for (idx, c) in s.char_indices() {
+        if is_cjk_char(c) || c.is_whitespace() {
+            if let Some(start) = run_start.take() {
+                out.push(RubySegment::Plain(s[start..idx].to_string()));
             }
-            out.push(RubySegment::Plain(c.to_string()));
-        } else if c.is_whitespace() {
-            if !current_word.is_empty() {
-                out.push(RubySegment::Plain(std::mem::take(&mut current_word)));
-            }
-            out.push(RubySegment::Plain(c.to_string()));
-        } else {
-            current_word.push(c);
+            let end = idx + c.len_utf8();
+            out.push(RubySegment::Plain(s[idx..end].to_string()));
+        } else if run_start.is_none() {
+            run_start = Some(idx);
         }
     }
-    if !current_word.is_empty() {
-        out.push(RubySegment::Plain(current_word));
+    if let Some(start) = run_start {
+        out.push(RubySegment::Plain(s[start..].to_string()));
     }
 }
 
@@ -1727,12 +2505,13 @@ pub fn render_ruby_item(ui: &mut egui::Ui, base: &str, rt: &str) {
 
 /// Renders a complete Japanese example sentence with furigana stacked neatly on top of the kanji.
 pub fn render_ruby_sentence(ui: &mut egui::Ui, node: &serde_json::Value) {
-    render_ruby_flow(ui, extract_ruby_segments(node), Some("例  "));
+    let segments = extract_ruby_segments(node);
+    render_ruby_flow(ui, &segments, Some("例  "));
 }
 
 /// Renders ruby/plain segments as one wrapped line of text, with furigana on top of the
 /// kanji and all text sharing the same baseline. `badge` is an optional muted prefix.
-fn render_ruby_flow(ui: &mut egui::Ui, segments: Vec<RubySegment>, badge: Option<&str>) {
+fn render_ruby_flow(ui: &mut egui::Ui, segments: &[RubySegment], badge: Option<&str>) {
     if segments.is_empty() {
         return;
     }
@@ -1800,10 +2579,14 @@ fn render_ruby_flow(ui: &mut egui::Ui, segments: Vec<RubySegment>, badge: Option
         for seg in segments {
             match seg {
                 RubySegment::Ruby { base, rt } => {
-                    let galley_rt = ui.painter().layout_no_wrap(rt, font_rt.clone(), COLOR_RUBY);
-                    let galley_base =
+                    let galley_rt =
                         ui.painter()
-                            .layout_no_wrap(base, font_base.clone(), COLOR_EXAMPLE_JA);
+                            .layout_no_wrap(rt.clone(), font_rt.clone(), COLOR_RUBY);
+                    let galley_base = ui.painter().layout_no_wrap(
+                        base.clone(),
+                        font_base.clone(),
+                        COLOR_EXAMPLE_JA,
+                    );
                     let w = galley_rt.size().x.max(galley_base.size().x);
                     if w <= 0.0 {
                         continue;
@@ -1863,9 +2646,11 @@ fn render_ruby_flow(ui: &mut egui::Ui, segments: Vec<RubySegment>, badge: Option
                     ui.painter().galley(base_pos, galley_base, COLOR_EXAMPLE_JA);
                 }
                 RubySegment::Plain(text) => {
-                    let galley =
-                        ui.painter()
-                            .layout_no_wrap(text, font_base.clone(), COLOR_EXAMPLE_JA);
+                    let galley = ui.painter().layout_no_wrap(
+                        text.clone(),
+                        font_base.clone(),
+                        COLOR_EXAMPLE_JA,
+                    );
                     let w = galley.size().x;
                     if w <= 0.0 {
                         continue;
@@ -1986,21 +2771,57 @@ fn normalize_glyphs(segments: &mut [RubySegment]) {
     }
 }
 
-/// Renders inline content (handling ruby, bold, plain text) using LayoutJob.
-pub fn render_inline_content(ui: &mut egui::Ui, node: &serde_json::Value) {
-    let mut job = LayoutJob::default();
-    let mut ruby_rt_ranges = Vec::new();
-    build_layout_job_from_node(node, &mut job, &mut ruby_rt_ranges, false, 0);
-    if !job.text.is_empty() {
-        render_interactive_job(ui, job, &ruby_rt_ranges);
-    }
+fn push_raw_prebuilt_section(
+    job: &mut PrebuiltInteractiveJob,
+    text: &str,
+    base_font_size: f32,
+    color: Color32,
+    italics: bool,
+    is_default_format: bool,
+) {
+    let start = job.text.len();
+    job.text.push_str(text);
+    job.sections.push(PrebuiltJobSection {
+        byte_range: start..job.text.len(),
+        base_font_size,
+        color,
+        italics,
+        is_default_format,
+    });
 }
 
-/// Appends nodes to an egui `LayoutJob`.
-fn build_layout_job_from_node(
+fn append_to_prebuilt_job(
+    job: &mut PrebuiltInteractiveJob,
+    text: &str,
+    base_font_size: f32,
+    color: Color32,
+    italics: bool,
+) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(last_char) = job.text.chars().last() {
+        let first_char = text.chars().next().unwrap();
+        if !job.text.ends_with(' ')
+            && !job.text.ends_with('\n')
+            && !text.starts_with(' ')
+            && should_insert_space(last_char, first_char)
+        {
+            push_raw_prebuilt_section(job, " ", base_font_size, color, italics, false);
+        }
+    }
+    push_raw_prebuilt_section(job, text, base_font_size, color, italics, false);
+}
+
+fn parse_inline_node_job(node: &serde_json::Value) -> PrebuiltInteractiveJob {
+    let mut job = PrebuiltInteractiveJob::default();
+    build_prebuilt_job_from_node(node, &mut job, false, 0);
+    job
+}
+
+fn build_prebuilt_job_from_node(
     node: &serde_json::Value,
-    job: &mut LayoutJob,
-    ruby_rt_ranges: &mut Vec<std::ops::Range<usize>>,
+    job: &mut PrebuiltInteractiveJob,
     is_bold: bool,
     depth: usize,
 ) {
@@ -2014,19 +2835,11 @@ fn build_layout_job_from_node(
             } else {
                 COLOR_DEFINITION
             };
-            append_to_layout_job(
-                job,
-                s,
-                TextFormat {
-                    font_id: dict_font(34.0),
-                    color,
-                    ..Default::default()
-                },
-            );
+            append_to_prebuilt_job(job, s, 34.0, color, false);
         }
         serde_json::Value::Array(arr) => {
             for child in arr {
-                build_layout_job_from_node(child, job, ruby_rt_ranges, is_bold, depth + 1);
+                build_prebuilt_job_from_node(child, job, is_bold, depth + 1);
             }
         }
         serde_json::Value::Object(map) => {
@@ -2034,47 +2847,25 @@ fn build_layout_job_from_node(
             match tag {
                 "b" | "strong" => {
                     if let Some(content) = map.get("content") {
-                        build_layout_job_from_node(content, job, ruby_rt_ranges, true, depth + 1);
+                        build_prebuilt_job_from_node(content, job, true, depth + 1);
                     }
                 }
                 "ruby" => {
                     let (base, rt) = extract_ruby_components(map);
-                    append_to_layout_job(
-                        job,
-                        &base,
-                        TextFormat {
-                            font_id: dict_font(36.0),
-                            color: COLOR_EXAMPLE_JA,
-                            ..Default::default()
-                        },
-                    );
+                    append_to_prebuilt_job(job, &base, 36.0, COLOR_EXAMPLE_JA, false);
                     if !rt.is_empty() {
                         let start_char = job.text.chars().count();
                         let rt_str = format!("({})", rt);
-                        append_to_layout_job(
-                            job,
-                            &rt_str,
-                            TextFormat {
-                                font_id: dict_font(24.0),
-                                color: COLOR_RUBY,
-                                ..Default::default()
-                            },
-                        );
+                        append_to_prebuilt_job(job, &rt_str, 24.0, COLOR_RUBY, false);
                         let end_char = job.text.chars().count();
                         if end_char > start_char {
-                            ruby_rt_ranges.push(start_char..end_char);
+                            job.ruby_rt_ranges.push(start_char..end_char);
                         }
                     }
                 }
                 _ => {
                     if let Some(content) = map.get("content") {
-                        build_layout_job_from_node(
-                            content,
-                            job,
-                            ruby_rt_ranges,
-                            is_bold,
-                            depth + 1,
-                        );
+                        build_prebuilt_job_from_node(content, job, is_bold, depth + 1);
                     }
                 }
             }
@@ -2083,22 +2874,10 @@ fn build_layout_job_from_node(
     }
 }
 
-/// Appends text to a `LayoutJob`, inserting a space when needed to prevent mashed words.
-fn append_to_layout_job(job: &mut LayoutJob, text: &str, format: TextFormat) {
-    if text.is_empty() {
-        return;
-    }
-    if let Some(last_char) = job.text.chars().last() {
-        let first_char = text.chars().next().unwrap();
-        if !job.text.ends_with(' ')
-            && !job.text.ends_with('\n')
-            && !text.starts_with(' ')
-            && should_insert_space(last_char, first_char)
-        {
-            job.append(" ", 0.0, format.clone());
-        }
-    }
-    job.append(text, 0.0, format);
+/// Renders inline content (handling ruby, bold, plain text) using LayoutJob.
+pub fn render_inline_content(ui: &mut egui::Ui, node: &serde_json::Value) {
+    let prebuilt = parse_inline_node_job(node);
+    render_prebuilt_interactive_job(ui, &prebuilt);
 }
 
 /// Determines whether an automatic space is needed between two adjacent text fragments.
@@ -2110,6 +2889,7 @@ fn should_insert_space(last: char, first: char) -> bool {
 }
 
 /// Renders ruby text with furigana on top.
+#[cfg(test)]
 fn render_ruby_inline(ui: &mut egui::Ui, map: &serde_json::Map<String, serde_json::Value>) {
     let (base, rt) = extract_ruby_components(map);
     render_ruby_item(ui, &base, &rt);
@@ -2415,19 +3195,17 @@ fn collect_text_recursive(val: &serde_json::Value, out: &mut String, depth: usiz
     }
 }
 
-/// Renders plain HTML text snippets with support for simple `<b>`, `<i>`, `<br>` tags.
-fn render_plain_html_text(ui: &mut egui::Ui, text: &str) {
+fn parse_plain_html_job(text: &str) -> PrebuiltInteractiveJob {
     let mut remaining = text;
     let mut is_bold = false;
     let mut is_italic = false;
-
-    let mut job = LayoutJob::default();
+    let mut job = PrebuiltInteractiveJob::default();
 
     while !remaining.is_empty() {
         if let Some(tag_start) = remaining.find('<') {
             if tag_start > 0 {
                 let piece = &remaining[..tag_start];
-                append_styled_text(&mut job, piece, is_bold, is_italic);
+                append_styled_prebuilt(&mut job, piece, is_bold, is_italic);
             }
 
             if let Some(tag_end) = remaining[tag_start..].find('>') {
@@ -2438,47 +3216,46 @@ fn render_plain_html_text(ui: &mut egui::Ui, text: &str) {
                     "i" | "em" => is_italic = true,
                     "/i" | "/em" => is_italic = false,
                     "br" | "br/" | "br /" => {
-                        job.append("\n", 0.0, TextFormat::default());
+                        push_raw_prebuilt_section(
+                            &mut job,
+                            "\n",
+                            0.0,
+                            Color32::TRANSPARENT,
+                            false,
+                            true,
+                        );
                     }
                     _ => {}
                 }
                 remaining = &remaining[tag_start + tag_end + 1..];
             } else {
-                append_styled_text(&mut job, &remaining[tag_start..], is_bold, is_italic);
+                append_styled_prebuilt(&mut job, &remaining[tag_start..], is_bold, is_italic);
                 break;
             }
         } else {
-            append_styled_text(&mut job, remaining, is_bold, is_italic);
+            append_styled_prebuilt(&mut job, remaining, is_bold, is_italic);
             break;
         }
     }
 
-    if !job.text.is_empty() {
-        render_interactive_job(ui, job, &[]);
-    }
+    job
 }
 
-fn append_styled_text(job: &mut LayoutJob, text: &str, bold: bool, italic: bool) {
+fn append_styled_prebuilt(job: &mut PrebuiltInteractiveJob, text: &str, bold: bool, italic: bool) {
     let color = if bold {
         COLOR_HEADWORD
     } else {
         COLOR_DEFINITION
     };
-    let font_id = if bold {
-        dict_font(36.0)
-    } else {
-        dict_font(34.0)
-    };
-    append_to_layout_job(
-        job,
-        text,
-        TextFormat {
-            font_id,
-            color,
-            italics: italic,
-            ..Default::default()
-        },
-    );
+    let base_font_size = if bold { 36.0 } else { 34.0 };
+    append_to_prebuilt_job(job, text, base_font_size, color, italic);
+}
+
+/// Renders plain HTML text snippets with support for simple `<b>`, `<i>`, `<br>` tags.
+#[cfg_attr(not(test), allow(dead_code))]
+fn render_plain_html_text(ui: &mut egui::Ui, text: &str) {
+    let prebuilt = parse_plain_html_job(text);
+    render_prebuilt_interactive_job(ui, &prebuilt);
 }
 
 /// Strips HTML tags from a plain glossary string.
@@ -3274,5 +4051,263 @@ mod tests {
                 assert!(resp.rect.width() > 0.0);
             });
         });
+    }
+
+    #[test]
+    fn test_glossary_node_ir_matches_structured_json_rendering() {
+        fn make_ctx() -> egui::Context {
+            let ctx = egui::Context::default();
+            ctx.set_pixels_per_point(1.25);
+            let mut fonts = egui::FontDefinitions::default();
+            fonts.font_data.insert(
+                "noto_sans_jp".to_owned(),
+                egui::FontData::from_static(include_bytes!("../../assets/NotoSansJP-Regular.ttf")),
+            );
+            fonts.families.insert(
+                egui::FontFamily::Name("GothicCJK".into()),
+                vec!["noto_sans_jp".to_owned()],
+            );
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .push("noto_sans_jp".to_owned());
+            ctx.set_fonts(fonts);
+            ctx
+        }
+
+        fn summarize_shapes(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
+            shapes
+                .iter()
+                .map(|cs| match &cs.shape {
+                    egui::Shape::Text(t) => format!(
+                        "T:{:?}:{:.2},{:.2}:{:?}:{:?}:{:?}",
+                        t.galley.job.text,
+                        t.pos.x,
+                        t.pos.y,
+                        t.fallback_color,
+                        t.override_text_color,
+                        cs.clip_rect
+                    ),
+                    egui::Shape::Rect(r) => format!(
+                        "R:{:?}:{:?}:{:?}:{:?}",
+                        r.rect, r.fill, r.stroke, cs.clip_rect
+                    ),
+                    egui::Shape::LineSegment { points, stroke } => {
+                        format!("L:{points:?}:{stroke:?}:{:?}", cs.clip_rect)
+                    }
+                    other => format!("O:{other:?}:{:?}", cs.clip_rect),
+                })
+                .collect()
+        }
+
+        let complex_json: serde_json::Value = serde_json::from_str(
+            r#"{
+            "type": "structured-content",
+            "content": [
+                {
+                    "tag": "div",
+                    "data": { "content": "sense-groups" },
+                    "content": [
+                        {
+                            "tag": "div",
+                            "data": { "content": "sense-group" },
+                            "content": [
+                                {
+                                    "tag": "span",
+                                    "data": { "content": "part-of-speech-info" },
+                                    "content": "v1"
+                                },
+                                {
+                                    "tag": "span",
+                                    "data": { "content": "misc-info" },
+                                    "content": "uk"
+                                },
+                                {
+                                    "tag": "div",
+                                    "data": { "content": "sense" },
+                                    "content": [
+                                        {
+                                            "tag": "ul",
+                                            "data": { "content": "glossary" },
+                                            "content": [
+                                                { "tag": "li", "content": "to eat" },
+                                                { "tag": "li", "content": "to live on (e.g. a salary)" }
+                                            ]
+                                        },
+                                        {
+                                            "tag": "div",
+                                            "data": { "content": "sense-note" },
+                                            "content": [
+                                                { "tag": "span", "data": { "content": "sense-note-label" }, "content": "Usage" },
+                                                { "tag": "span", "data": { "content": "sense-note-content" }, "content": "often polite" }
+                                            ]
+                                        },
+                                        {
+                                            "tag": "div",
+                                            "data": { "content": "example-sentence" },
+                                            "content": [
+                                                {
+                                                    "tag": "div",
+                                                    "data": { "content": "example-sentence-a" },
+                                                    "content": [
+                                                        { "tag": "ruby", "content": ["朝ご飯", { "tag": "rt", "content": "あさごはん" }] },
+                                                        "をCD付きで",
+                                                        { "tag": "ruby", "content": ["食", { "tag": "rt", "content": "た" }] },
+                                                        "べる。"
+                                                    ]
+                                                },
+                                                {
+                                                    "tag": "div",
+                                                    "data": { "content": "example-sentence-b" },
+                                                    "content": [
+                                                        { "tag": "span", "content": "To eat breakfast with a CD." },
+                                                        { "tag": "span", "data": { "content": "attribution-footnote" }, "content": "[1]" }
+                                                    ]
+                                                }
+                                            ]
+                                        },
+                                        {
+                                            "tag": "div",
+                                            "data": { "content": "xref" },
+                                            "content": [
+                                                {
+                                                    "tag": "span",
+                                                    "data": { "content": "xref-content" },
+                                                    "content": {
+                                                        "tag": "a",
+                                                        "href": "?query=飲む",
+                                                        "content": [
+                                                            { "tag": "b", "content": "See" },
+                                                            { "tag": "ruby", "content": ["飲", { "tag": "rt", "content": "の" }] },
+                                                            "む"
+                                                        ]
+                                                    }
+                                                },
+                                                {
+                                                    "tag": "span",
+                                                    "data": { "content": "xref-glossary" },
+                                                    "content": "to drink"
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        {
+                            "tag": "table",
+                            "data": { "content": "forms" },
+                            "content": [
+                                { "tag": "li", "content": "喰べる" },
+                                { "tag": "li", "content": "たべる" }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "tag": "div",
+                    "content": [
+                        "⟶",
+                        {
+                            "tag": "a",
+                            "href": "?query=熱い",
+                            "content": [{ "tag": "ruby", "content": ["熱", { "tag": "rt", "content": "あつ" }] }, "い"]
+                        }
+                    ]
+                },
+                {
+                    "tag": "ul",
+                    "content": [
+                        {
+                            "tag": "li",
+                            "style": { "listStyleType": "\"★\"" },
+                            "content": [{ "tag": "b", "content": "Important" }, "item"]
+                        }
+                    ]
+                },
+                { "tag": "br" },
+                {
+                    "tag": "table",
+                    "content": [
+                        {
+                            "tag": "tr",
+                            "content": [
+                                { "tag": "td", "content": "<b>Cell 1</b><br><i>italic</i>" },
+                                { "tag": "td", "content": [{ "tag": "span", "content": "Cell 2" }] }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "tag": "div",
+                    "data": { "content": "attribution" },
+                    "content": "JMdict / Jitendex"
+                }
+            ]
+        }"#,
+        )
+        .unwrap();
+
+        let parsed = parse_structured_entry(&complex_json);
+        assert!(parsed
+            .iter()
+            .any(|n| matches!(n, GlossaryNode::SenseGroup { .. })));
+        assert!(parsed.iter().any(|n| matches!(n, GlossaryNode::Forms(_))));
+        assert!(parsed
+            .iter()
+            .any(|n| matches!(n, GlossaryNode::InlineRubyFlow(_))));
+        assert!(parsed.iter().any(|n| matches!(n, GlossaryNode::Table(_))));
+        assert!(parsed.iter().any(|n| matches!(n, GlossaryNode::Break)));
+        assert!(parsed
+            .iter()
+            .any(|n| matches!(n, GlossaryNode::Attribution(_))));
+
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 1200.0),
+            )),
+            ..Default::default()
+        };
+
+        let ctx_legacy = make_ctx();
+        let out_legacy = ctx_legacy.run(raw_input.clone(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                render_structured_entry_inner(ui, &complex_json, 0);
+            });
+        });
+
+        let ctx_ir = make_ctx();
+        let out_ir = ctx_ir.run(raw_input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                render_structured_entry(ui, &complex_json);
+            });
+        });
+
+        assert_eq!(
+            summarize_shapes(&out_legacy.shapes),
+            summarize_shapes(&out_ir.shapes)
+        );
+
+        // Also verify entry-level IR cache reuses the exact Rc allocation across frames.
+        let entry = TermEntry {
+            term: "食べる".into(),
+            reading: "たべる".into(),
+            definition_tags: None,
+            rules: "v1".into(),
+            score: 100.0,
+            glossary: vec![GlossaryEntry::Structured(complex_json)],
+            sequence: 1358280,
+            term_tags: None,
+            inflection_reasons: vec![],
+            frequency: None,
+            pitches: vec![],
+            custom_name_id: None,
+            custom_tag: None,
+        };
+        let ir_a = cached_entry_glossary_ir(&entry);
+        let ir_b = cached_entry_glossary_ir(&entry);
+        assert!(std::rc::Rc::ptr_eq(&ir_a, &ir_b));
     }
 }

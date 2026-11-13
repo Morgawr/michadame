@@ -29,8 +29,25 @@ pub use irc::ConnectionStatus;
 use irc::{IrcEvent, IrcMessage};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
+
+/// Shared connection-pooled HTTP client for all Twitch Helix, OAuth2, GQL, and CDN requests.
+/// Reuses TLS configuration and keep-alive sockets across background workers instead of
+/// constructing a fresh `ureq::Agent` per request.
+pub(crate) fn http_agent() -> &'static ureq::Agent {
+    static HTTP_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    HTTP_AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(10))
+            .timeout_read(Duration::from_secs(15))
+            .timeout_write(Duration::from_secs(15))
+            .timeout(Duration::from_secs(15))
+            .max_idle_connections(16)
+            .max_idle_connections_per_host(4)
+            .build()
+    })
+}
 
 /// Messages fade out over this long before they expire.
 pub const FADE_DURATION: Duration = Duration::from_secs(5);
@@ -259,7 +276,7 @@ impl TwitchState {
     pub fn play_alert_sound(&self) {
         self.alert_player.play_local();
         if let Some(tap) = &self.audio_tap {
-            tap.play_alert(self.alert_player.chime_samples());
+            tap.play_alert_arc(self.alert_player.chime_samples_arc());
         }
     }
 
@@ -269,11 +286,11 @@ impl TwitchState {
         self.alert_player.play_light_switch_local(turning_on);
         if let Some(tap) = &self.audio_tap {
             let samples = if turning_on {
-                self.alert_player.light_switch_on_samples()
+                self.alert_player.light_switch_on_samples_arc()
             } else {
-                self.alert_player.light_switch_samples()
+                self.alert_player.light_switch_samples_arc()
             };
-            tap.play_alert(samples);
+            tap.play_alert_arc(samples);
         }
     }
 }
@@ -792,27 +809,31 @@ impl TwitchState {
                 .status_message
                 .as_ref()
                 .is_some_and(|(is_err, _)| *is_err);
-        self.token = Some(token.clone());
+        self.token = Some(token);
         self.last_token_check = Some(Instant::now());
         if need_stream_info_retry && !self.stream_info.is_loading {
             self.stream_info_loaded = true;
             if !cfg!(test) {
-                self.stream_info.fetch_channel(&token, ctx);
+                if let Some(token) = self.token.as_ref() {
+                    self.stream_info.fetch_channel(token, ctx);
+                }
             }
         }
     }
 
     fn handle_token_invalid(&mut self, reason: &str, ctx: &egui::Context) {
-        let Some(current_acc) = self.token.clone() else {
-            return;
-        };
-        if let Some(latest) = self.auth_token_store.latest_token() {
-            if auth::same_account(&current_acc, &latest)
-                && latest.access_token != current_acc.access_token
-            {
-                self.apply_refreshed_token(latest, ctx);
+        let upgraded = {
+            let Some(current_acc) = self.token.as_ref() else {
                 return;
-            }
+            };
+            self.auth_token_store.latest_token().filter(|latest| {
+                auth::same_account(current_acc, latest)
+                    && latest.access_token != current_acc.access_token
+            })
+        };
+        if let Some(latest) = upgraded {
+            self.apply_refreshed_token(latest, ctx);
+            return;
         }
         self.token = None;
         self.eventsub = None;
@@ -940,21 +961,25 @@ impl TwitchState {
         }
 
         if let Some(player) = &mut self.preroll {
-            let _ = player.poll_frame();
+            if player.try_recv_latest_frame().is_some() {
+                changed = true;
+            }
             if player.is_completed() {
                 self.preroll = None;
                 self.notify_info("Pre-roll finished: stream is now live!");
+                changed = true;
             }
-            changed = true;
         }
 
         let mut outro_finished = false;
         if let Some(player) = &mut self.outro {
-            let _ = player.poll_frame();
+            if player.try_recv_latest_frame().is_some() {
+                changed = true;
+            }
             if player.is_completed() {
                 outro_finished = true;
+                changed = true;
             }
-            changed = true;
         }
         if outro_finished {
             self.stop_broadcast();
@@ -1112,23 +1137,27 @@ impl TwitchState {
     /// Poll Helix for the real live status while the overlay is on. Needs a login
     /// token (public client); otherwise the status is reported as unknown.
     fn sync_live_poller(&mut self, ctx: &egui::Context) {
-        let channel = self.config.channel.clone();
         let wanted = (self.config.chat_overlay_enabled
             || self.is_broadcasting()
             || self.studio_active
             || self.config.share_mined_words_to_chat)
-            && !channel.is_empty();
+            && !self.config.channel.is_empty();
         if !wanted {
             self.live_poller = None;
-            self.stream_status = StreamStatus::Unknown(String::new());
+            if !matches!(&self.stream_status, StreamStatus::Unknown(s) if s.is_empty()) {
+                self.stream_status = StreamStatus::Unknown(String::new());
+            }
             return;
         }
-        let Some(token) = self.token.clone() else {
+        let Some(token) = self.token.as_ref() else {
             self.live_poller = None;
-            self.stream_status =
-                StreamStatus::Unknown("log in to Twitch to see live status".into());
+            const LOGIN_MSG: &str = "log in to Twitch to see live status";
+            if !matches!(&self.stream_status, StreamStatus::Unknown(s) if s == LOGIN_MSG) {
+                self.stream_status = StreamStatus::Unknown(LOGIN_MSG.into());
+            }
             return;
         };
+        let channel = self.config.channel.as_str();
         let up_to_date = self.live_poller.as_ref().map_or(false, |p| {
             p.channel == channel && p.access_token == token.access_token
         });
@@ -1137,36 +1166,39 @@ impl TwitchState {
                 .live_poller
                 .as_ref()
                 .map_or(true, |p| p.channel != channel);
+            let channel_owned = channel.to_string();
+            let token_owned = token.clone();
             if channel_changed {
                 self.stream_status = StreamStatus::Unknown("checking…".into());
             }
-            self.live_poller = Some(live::spawn(channel, token, ctx.clone()));
+            self.live_poller = Some(live::spawn(channel_owned, token_owned, ctx.clone()));
         }
     }
 
     /// Start/stop/restart the IRC worker to match the settings.
     fn sync_connection(&mut self, ctx: &egui::Context) {
-        let channel = self.config.channel.clone();
+        let channel = self.config.channel.as_str();
         let wanted = (self.config.chat_overlay_enabled
             || self.config.niconico_enabled
             || self.config.share_mined_words_to_chat)
             && !channel.is_empty();
-        let login = self.token.as_ref().map(|t| t.login.clone());
-        let up_to_date = self
-            .worker
-            .as_ref()
-            .map_or(false, |w| w.channel == channel && w.login == login);
+        let login = self.token.as_ref().map(|t| t.login.as_str());
+        let up_to_date = self.worker.as_ref().map_or(false, |w| {
+            w.channel == channel && w.login.as_deref() == login
+        });
         if wanted && !up_to_date {
             let channel_changed = self.worker.as_ref().map_or(true, |w| w.channel != channel);
+            let channel_owned = channel.to_string();
+            let token_owned = self.token.clone();
             if channel_changed {
                 self.messages.clear();
                 self.comments.clear();
                 self.messages.push_back(ChatMessage::system(
-                    format!("Joining #{channel}…"),
+                    format!("Joining #{channel_owned}…"),
                     Instant::now(),
                 ));
             }
-            self.worker = Some(irc::spawn(channel, self.token.clone(), Some(ctx.clone())));
+            self.worker = Some(irc::spawn(channel_owned, token_owned, Some(ctx.clone())));
             self.status = ConnectionStatus::Connecting;
         } else if !wanted && self.worker.is_some() {
             self.worker = None;
@@ -2765,5 +2797,67 @@ mod tests {
         assert!(state.token.is_none());
         assert!(state.auth_token_store.load_token().is_none());
         assert!(!token_path.exists());
+    }
+
+    #[test]
+    fn test_shared_http_agent_is_singleton_and_steady_poll_keeps_workers() {
+        assert!(
+            std::ptr::eq(http_agent(), http_agent()),
+            "http_agent() must return the same shared pooled ureq::Agent instance"
+        );
+
+        let ctx = egui::Context::default();
+        let mut state = TwitchState::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        state
+            .auth_token_store
+            .set_token_path_override(Some(dir.path().join("twitch_token.json")));
+
+        state.config.channel = "retro_streamer".into();
+        state.studio_active = true;
+        state.token_loaded = true;
+
+        // Logged-out steady poll sets Unknown status once and reuses its String allocation.
+        state.poll(&ctx);
+        let msg_ptr_1 = match &state.stream_status {
+            StreamStatus::Unknown(s) => s.as_ptr(),
+            other => panic!("expected Unknown status when logged out, got {other:?}"),
+        };
+        state.poll(&ctx);
+        let msg_ptr_2 = match &state.stream_status {
+            StreamStatus::Unknown(s) => s.as_ptr(),
+            other => panic!("expected Unknown status when logged out, got {other:?}"),
+        };
+        assert_eq!(
+            msg_ptr_1, msg_ptr_2,
+            "steady-state logged-out poll must not reallocate status string"
+        );
+
+        // Logged-in steady poll with an up-to-date LivePoller preserves the existing poller.
+        let token = StoredToken {
+            access_token: "access_tok".into(),
+            refresh_token: Some("refresh_tok".into()),
+            login: "retro_streamer".into(),
+            user_id: "777".into(),
+            client_id: "cid".into(),
+        };
+        state.set_authenticated_token(token);
+        state.config.channel = "retro_streamer".into();
+        state.studio_active = true;
+        let (_tx, rx) = crossbeam_channel::unbounded();
+        state.live_poller = Some(live::LivePoller::mock(
+            "retro_streamer".into(),
+            "access_tok".into(),
+            rx,
+        ));
+        let poller_channel_ptr = state.live_poller.as_ref().unwrap().channel.as_ptr();
+
+        state.poll(&ctx);
+        state.poll(&ctx);
+        assert_eq!(
+            state.live_poller.as_ref().map(|p| p.channel.as_ptr()),
+            Some(poller_channel_ptr),
+            "steady-state poll must keep the existing LivePoller without respawning"
+        );
     }
 }

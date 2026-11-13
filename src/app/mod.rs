@@ -10,15 +10,143 @@ pub use models::*;
 use std::collections::BTreeMap;
 use std::sync::{
     atomic::{AtomicU64, AtomicU8, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::time::Instant;
+
+pub fn init_app_state_with_logo(
+    cc: &eframe::CreationContext,
+    steam_deck: bool,
+    logo_rgba: Option<(u32, u32, Vec<u8>)>,
+) -> AppState {
+    let Some((logo_w, logo_h, logo_bytes)) = logo_rgba else {
+        return init_app_state(cc, steam_deck);
+    };
+
+    let mut state = AppState::default();
+    if steam_deck {
+        state.steam_deck = Some(crate::steam_deck::SteamDeckState::default());
+    }
+
+    let ctx_clone = cc.egui_ctx.clone();
+    crate::ui::setup_style(&ctx_clone);
+    if !steam_deck {
+        ctx_clone.options_mut(|o| o.zoom_with_keyboard = false);
+    }
+
+    let logo_color_image =
+        egui::ColorImage::from_rgba_unmultiplied([logo_w as usize, logo_h as usize], &logo_bytes);
+    let logo_texture = cc
+        .egui_ctx
+        .load_texture("logo", logo_color_image, Default::default());
+    state.logo_texture = Some(logo_texture);
+
+    let config_path = config::configuration_path(&state).ok();
+    match config_path
+        .as_ref()
+        .ok_or_else(|| "Could not locate configuration".to_string())
+        .and_then(|path| {
+            confy::load_path::<config::MichadameConfig>(path).map_err(|e| e.to_string())
+        }) {
+        Ok(loaded_cfg) => {
+            if let Some(ref path) = config_path {
+                config::persistence::create_rotating_backup(path);
+            }
+            config::apply_config(&mut state, &loaded_cfg);
+        }
+        Err(e) => {
+            let err_msg = e.to_string();
+            tracing::error!("Failed to load configuration: {}", err_msg);
+            if let Some(ref path) = config_path {
+                if let Some(quarantine) = config::persistence::quarantine_corrupted_config(path) {
+                    state.config_quarantine_path = Some(quarantine);
+                }
+            }
+            state.config_load_error = Some(err_msg);
+            let default_cfg = config::MichadameConfig::default();
+            config::apply_config(&mut state, &default_cfg);
+        }
+    }
+
+    if steam_deck {
+        crate::steam_deck::configure(&mut state, &cc.egui_ctx);
+    } else if let Some(manual) = state.ui.scale.manual {
+        cc.egui_ctx
+            .set_zoom_factor(crate::ui::scaling::sanitize_manual_scale(manual));
+    }
+
+    if let Ok(pitch_guard) = state.dict.pitch_db.lock() {
+        if let Some(ref pitch_db) = *pitch_guard {
+            let backfilled = state.bank.backfill_pitches(pitch_db);
+            if backfilled > 0 {
+                tracing::info!(
+                    "Backfilled pitch accents for {} existing mined words on startup",
+                    backfilled
+                );
+            }
+        }
+    }
+
+    crate::gamescope::steam::restore_steam_launch_wrappers();
+    state.steam_games = crate::gamescope::steam::scan_steam_games();
+    if let Some(ref selected) = state.selected_steam_game {
+        if !state.steam_games.iter().any(|g| &g.appid == selected) {
+            state.selected_steam_game = None;
+        }
+    }
+
+    let egui_ctx = cc.egui_ctx.clone();
+    state.ocr.start_worker(Some(egui_ctx.clone()));
+    if !steam_deck {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        state.device_scan_receiver = Some(rx);
+        std::thread::spawn(move || {
+            let video_result = crate::devices::video::find_video_devices();
+            let audio_result = crate::devices::audio::find_audio_devices();
+            let usb_result = crate::devices::usb::find_usb_devices();
+
+            let result: crate::devices::DeviceScanResult = (|| {
+                let video_devices = video_result?;
+                let audio_sources = audio_result?;
+                let usb_devices = usb_result?;
+                Ok((video_devices, audio_sources, usb_devices))
+            })();
+
+            if let Err(e) = &result {
+                tracing::error!("Device scan failed: {:?}", e);
+            };
+            let _ = tx.send(result);
+            egui_ctx.request_repaint();
+        });
+    }
+
+    let video_texture = {
+        let tex_manager = cc.egui_ctx.tex_manager();
+        let tex_id = tex_manager.write().alloc(
+            "video_stream".to_string(),
+            egui::ImageData::Color(egui::ColorImage::new([1, 1], egui::Color32::BLACK).into()),
+            egui::TextureOptions::LINEAR,
+        );
+        egui::TextureHandle::new(tex_manager, tex_id)
+    };
+    state.video_texture = Some(video_texture);
+
+    if let Some(gl) = cc.gl.as_ref() {
+        state.crt_renderer = Some(Arc::new(Mutex::new(
+            crate::video::gpu::CrtFilterRenderer::new(gl),
+        )));
+        state.fft_filter = Some(Arc::new(Mutex::new(crate::video::gpu::FftFilter::new(gl))));
+    }
+
+    state
+}
 
 impl Default for AppState {
     fn default() -> Self {
         let replay = crate::replay::Replay::default();
         let mut twitch = crate::twitch::TwitchState::default();
         twitch.audio_tap = Some(replay.audio.clone());
+        let (v4l2_format_probe_tx, v4l2_format_probe_rx) = crossbeam_channel::unbounded();
         Self {
             steam_deck: None,
             replay,
@@ -43,6 +171,7 @@ impl Default for AppState {
                 selected_format_index: 0,
                 selected_resolution: (0, 0),
                 selected_framerate: 0,
+                video_hwdec: true,
             },
             ui: UiState {
                 debug_open: false,
@@ -57,9 +186,13 @@ impl Default for AppState {
                 dismissed_config_error: false,
                 active_settings_tab: crate::app::models::SettingsTab::default(),
                 config_save_pending: false,
+                config_save_deadline: None,
                 in_egui_frame: false,
                 any_pointer_down: false,
                 is_window_focused: true,
+                last_cursor_grab: None,
+                last_cursor_visible: None,
+                file_dialog_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 scale: Default::default(),
             },
             crt: CrtSettings {
@@ -143,7 +276,15 @@ impl Default for AppState {
             video_status_receiver: None,
             video_player: None,
             video_player_event_receiver: None,
-            video_file_dialog_receiver: None,
+            file_dialog_receiver: None,
+            usb_reset_in_progress: false,
+            usb_reset_receiver: None,
+            capture_format_probe_gen: 0,
+            webcam_format_probe_gen: 0,
+            capture_format_probing: false,
+            webcam_format_probing: false,
+            v4l2_format_probe_tx,
+            v4l2_format_probe_rx,
             pending_audio_stream: None,
             device_scan_receiver: None,
             logo_texture: None,
@@ -182,7 +323,6 @@ impl Default for AppState {
             gamescope_launcher_script: String::new(),
             steam_games: Vec::new(),
             selected_steam_game: None,
-            gamescope_script_dialog_receiver: None,
             retro_pc_system: crate::pc88::RetroPcSystem::default(),
             pc98: crate::pc98::Pc98State::default(),
             pc88: crate::pc88::Pc88State::default(),
@@ -195,6 +335,7 @@ impl Default for AppState {
             fft_black_threshold: 0.0,
             fft_mask_save_name: String::new(),
             fft_available_masks: Vec::new(),
+            fft_masks_scanned_res: None,
             ocr: crate::ocr::OcrState::default(),
             dict: crate::dict::DictState::default(),
             bank: crate::bank::BankState::default(),
@@ -204,6 +345,7 @@ impl Default for AppState {
             whiteboard: crate::ui::whiteboard::WhiteboardState::default(),
             screenshot: crate::screenshot::ScreenshotState::default(),
             replay_scrub: crate::ui::replay_scrub::ReplayScrubState::default(),
+            loaded_config_base: None,
             config_load_error: None,
             config_quarantine_path: None,
         }
@@ -211,6 +353,25 @@ impl Default for AppState {
 }
 
 impl AppState {
+    pub fn has_active_av_source(&self) -> bool {
+        self.video_thread.is_some()
+            || self.hardware.active_audio_stream.is_some()
+            || self
+                .video_player
+                .as_ref()
+                .is_some_and(|p| !p.is_paused && !p.is_eof)
+            || self.gamescope_hook.as_ref().is_some_and(|h| h.is_active)
+            || self.pc98.is_active
+            || self.pc88.is_active
+    }
+
+    pub fn should_repaint_audio_reactive(&self) -> bool {
+        self.audio_reactive.enabled
+            && self.has_active_av_source()
+            && (self.hardware.live_audio_peak > 1e-4
+                || self.audio_reactive_runtime.has_active_energy(1e-4))
+    }
+
     #[cfg(test)]
     pub fn handle_device_scan_result(&mut self, result: devices::DeviceScanResult) -> bool {
         self.handle_device_scan_result_with_ctx(result, None)
@@ -234,7 +395,11 @@ impl AppState {
                 self.hardware.usb_devices = usb_devices;
 
                 if !cfg!(test) {
-                    if let Ok(cfg) = confy::load::<config::MichadameConfig>("michadame", None) {
+                    if let Some(cfg) = self.loaded_config_base.clone() {
+                        config::apply_hardware_devices_from_config(self, &cfg);
+                    } else if let Ok(cfg) =
+                        confy::load::<config::MichadameConfig>("michadame", None)
+                    {
                         config::apply_hardware_devices_from_config(self, &cfg);
                     }
                 }
@@ -808,6 +973,7 @@ impl AppState {
             if self.fft_mask_resolution != (fft_w, fft_h) {
                 self.fft_mask_resolution = (fft_w, fft_h);
                 self.fft_mask_data = vec![255u8; (fft_w * fft_h) as usize];
+                self.fft_masks_scanned_res = None;
             }
         }
         self.latest_frame = Some(frame);
@@ -1251,6 +1417,7 @@ impl eframe::App for AppState {
         if self.ui.config_save_pending {
             config::flush_pending_config(self);
         }
+        config::shutdown_flush_config_worker();
         self.replay.disable();
         if let Some(gl) = _gl {
             self.replay.gpu.lock().unwrap().destroy(gl);
@@ -1269,11 +1436,17 @@ impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ui.in_egui_frame = true;
         self.ui.any_pointer_down = ctx.input(|i| i.pointer.any_down());
-        self.ui.is_window_focused = is_root_viewport_focused(ctx);
+        let new_focused = is_root_viewport_focused(ctx);
+        if new_focused != self.ui.is_window_focused {
+            self.ui.is_window_focused = new_focused;
+            self.ui.reset_cursor_state_cache();
+        }
         if self.steam_deck.is_none() {
             ui::scaling::apply_ui_scale(ctx, &mut self.ui.scale);
         }
         self.pace_gui_frame();
+        let beam_subframe_only =
+            self.is_beam_lockstep_active() && self.beam_lockstep.subframe_index > 0;
 
         let raw_audio_peak = self
             .hardware
@@ -1310,7 +1483,11 @@ impl eframe::App for AppState {
         if self.replay.runtime.is_some() || self.replay.status().saving {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
-        self.ui.is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        let new_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        if new_fullscreen != self.ui.is_fullscreen {
+            self.ui.is_fullscreen = new_fullscreen;
+            self.ui.reset_cursor_state_cache();
+        }
 
         // If Gamescope hook or PC-98/PC-88 mode is active, ensure any widget focus captured by
         // Shift+Tab tab-navigation is cleared so hotkeys and passthrough work cleanly,
@@ -1555,21 +1732,8 @@ impl eframe::App for AppState {
             repaint_requested = true;
         }
 
-        if let Some(rx) = &self.video_file_dialog_receiver {
-            if let Ok(path) = rx.try_recv() {
-                self.start_video_file(&path, ctx);
-                repaint_requested = true;
-            }
-        }
-
-        if let Some(rx) = &self.gamescope_script_dialog_receiver {
-            if let Ok(path) = rx.try_recv() {
-                self.gamescope_launcher_script = path.to_string_lossy().to_string();
-                crate::config::save_config(self);
-                crate::config::save_global_hardware_config(self);
-                repaint_requested = true;
-            }
-        }
+        repaint_requested |= self.poll_async_file_dialogs(ctx);
+        repaint_requested |= self.poll_async_hardware_tasks(ctx);
 
         let dropped_file = ctx.input(|i| i.raw.dropped_files.first().and_then(|f| f.path.clone()));
         if let Some(path) = dropped_file.filter(|_| self.steam_deck.is_none()) {
@@ -1581,8 +1745,6 @@ impl eframe::App for AppState {
             if let Ok(scan_result) = rx.try_recv() {
                 repaint_requested |=
                     self.handle_device_scan_result_with_ctx(scan_result, Some(ctx));
-            } else {
-                repaint_requested = true;
             }
         }
 
@@ -1644,245 +1806,255 @@ impl eframe::App for AppState {
             repaint_requested = true;
         }
 
-        while let Some(worker_result) = self
-            .ocr
-            .result_receiver
-            .as_ref()
-            .and_then(|rx| rx.try_recv().ok())
-        {
-            repaint_requested |= self.handle_ocr_worker_result(worker_result, ctx);
-        }
+        if !beam_subframe_only {
+            while let Some(worker_result) = self
+                .ocr
+                .result_receiver
+                .as_ref()
+                .and_then(|rx| rx.try_recv().ok())
+            {
+                repaint_requested |= self.handle_ocr_worker_result(worker_result, ctx);
+            }
 
-        let screen_ai_events: Vec<crate::ocr::ScreenAiEvent> =
-            if let Some(rx) = &self.ocr.screen_ai_event_rx {
+            let screen_ai_events: Vec<crate::ocr::ScreenAiEvent> =
+                if let Some(rx) = &self.ocr.screen_ai_event_rx {
+                    let mut events = Vec::new();
+                    while let Ok(ev) = rx.try_recv() {
+                        events.push(ev);
+                    }
+                    events
+                } else {
+                    Vec::new()
+                };
+
+            for event in screen_ai_events {
+                match event {
+                    crate::ocr::ScreenAiEvent::UpdateCheckFinished {
+                        update_available,
+                        remote_metadata,
+                    } => {
+                        self.ocr.screen_ai_update_available = update_available;
+                        self.ocr.screen_ai_remote_metadata = remote_metadata;
+                        repaint_requested = true;
+                    }
+                    crate::ocr::ScreenAiEvent::SyncProgress { message, progress } => {
+                        if let Ok(mut lock) = self.ocr.screen_ai_sync_progress.lock() {
+                            *lock = Some((message, progress));
+                        }
+                        repaint_requested = true;
+                    }
+                    crate::ocr::ScreenAiEvent::SyncFinished(result) => {
+                        if let Ok(mut lock) = self.ocr.screen_ai_sync_progress.lock() {
+                            *lock = None;
+                        }
+                        match result {
+                            Ok(meta) => {
+                                self.ocr.screen_ai_sync_error = None;
+                                self.ocr.screen_ai_installed_metadata = Some(meta.clone());
+                                self.ocr.screen_ai_update_available = false;
+                                let dir = self.ocr.screen_ai_dir.clone();
+                                let restart_needed =
+                                    crate::ocr::screen_ai::is_screen_ai_restart_required(&dir);
+                                if !restart_needed {
+                                    std::thread::spawn(move || {
+                                        let _ = crate::ocr::screen_ai::warmup_screen_ai(&dir);
+                                    });
+                                    self.info(format!(
+                                        "Chrome Screen AI local OCR model updated to {}!",
+                                        meta.version
+                                    ));
+                                } else {
+                                    self.info(format!(
+                                        "Chrome Screen AI {} staged on disk (restart Michadame to activate new runtime).",
+                                        meta.version
+                                    ));
+                                }
+                            }
+                            Err(e) => {
+                                self.ocr.screen_ai_sync_error = Some(e.clone());
+                                self.error(format!("Chrome Screen AI model sync failed: {e}"));
+                            }
+                        }
+                        repaint_requested = true;
+                    }
+                }
+            }
+
+            if !self.ocr.boxes.is_empty() && self.ocr.last_scan_time.is_none() {
+                self.ocr.last_scan_time = Some(Instant::now());
+            }
+
+            repaint_requested |= self.handle_ocr_timeout(ctx);
+            repaint_requested |= self.handle_constant_ocr_scanning(ctx);
+
+            let dict_events: Vec<crate::dict::DictEvent> = if let Some(rx) = &self.dict.event_rx {
                 let mut events = Vec::new();
-                while let Ok(ev) = rx.try_recv() {
-                    events.push(ev);
+                while let Ok(event) = rx.try_recv() {
+                    events.push(event);
                 }
                 events
             } else {
                 Vec::new()
             };
 
-        for event in screen_ai_events {
-            match event {
-                crate::ocr::ScreenAiEvent::UpdateCheckFinished {
-                    update_available,
-                    remote_metadata,
-                } => {
-                    self.ocr.screen_ai_update_available = update_available;
-                    self.ocr.screen_ai_remote_metadata = remote_metadata;
-                    repaint_requested = true;
-                }
-                crate::ocr::ScreenAiEvent::SyncProgress { message, progress } => {
-                    if let Ok(mut lock) = self.ocr.screen_ai_sync_progress.lock() {
-                        *lock = Some((message, progress));
+            for event in dict_events {
+                match event {
+                    crate::dict::DictEvent::UpdateCheckFinished {
+                        update_available,
+                        remote_metadata,
+                    } => {
+                        self.dict.update_available = update_available;
+                        self.dict.remote_metadata = remote_metadata;
+                        repaint_requested = true;
                     }
-                    repaint_requested = true;
-                }
-                crate::ocr::ScreenAiEvent::SyncFinished(result) => {
-                    if let Ok(mut lock) = self.ocr.screen_ai_sync_progress.lock() {
-                        *lock = None;
-                    }
-                    match result {
-                        Ok(meta) => {
-                            self.ocr.screen_ai_sync_error = None;
-                            self.ocr.screen_ai_installed_metadata = Some(meta.clone());
-                            self.ocr.screen_ai_update_available = false;
-                            let dir = self.ocr.screen_ai_dir.clone();
-                            let restart_needed =
-                                crate::ocr::screen_ai::is_screen_ai_restart_required(&dir);
-                            if !restart_needed {
-                                std::thread::spawn(move || {
-                                    let _ = crate::ocr::screen_ai::warmup_screen_ai(&dir);
-                                });
-                                self.info(format!(
-                                    "Chrome Screen AI local OCR model updated to {}!",
-                                    meta.version
-                                ));
-                            } else {
-                                self.info(format!(
-                                    "Chrome Screen AI {} staged on disk (restart Michadame to activate new runtime).",
-                                    meta.version
-                                ));
-                            }
+                    crate::dict::DictEvent::SyncProgress { message, progress } => {
+                        if let Ok(mut lock) = self.dict.sync_progress.lock() {
+                            *lock = Some((message, progress));
                         }
-                        Err(e) => {
-                            self.ocr.screen_ai_sync_error = Some(e.clone());
-                            self.error(format!("Chrome Screen AI model sync failed: {e}"));
+                        repaint_requested = true;
+                    }
+                    crate::dict::DictEvent::SyncFinished(result) => {
+                        if let Ok(mut lock) = self.dict.sync_progress.lock() {
+                            *lock = None;
                         }
-                    }
-                    repaint_requested = true;
-                }
-            }
-        }
-
-        if !self.ocr.boxes.is_empty() && self.ocr.last_scan_time.is_none() {
-            self.ocr.last_scan_time = Some(Instant::now());
-        }
-
-        repaint_requested |= self.handle_ocr_timeout(ctx);
-        repaint_requested |= self.handle_constant_ocr_scanning(ctx);
-
-        let dict_events: Vec<crate::dict::DictEvent> = if let Some(rx) = &self.dict.event_rx {
-            let mut events = Vec::new();
-            while let Ok(event) = rx.try_recv() {
-                events.push(event);
-            }
-            events
-        } else {
-            Vec::new()
-        };
-
-        for event in dict_events {
-            match event {
-                crate::dict::DictEvent::UpdateCheckFinished {
-                    update_available,
-                    remote_metadata,
-                } => {
-                    self.dict.update_available = update_available;
-                    self.dict.remote_metadata = remote_metadata;
-                    repaint_requested = true;
-                }
-                crate::dict::DictEvent::SyncProgress { message, progress } => {
-                    if let Ok(mut lock) = self.dict.sync_progress.lock() {
-                        *lock = Some((message, progress));
-                    }
-                    repaint_requested = true;
-                }
-                crate::dict::DictEvent::SyncFinished(result) => {
-                    if let Ok(mut lock) = self.dict.sync_progress.lock() {
-                        *lock = None;
-                    }
-                    match result {
-                        Ok(meta) => match self.dict.reload_dict_db(Some(meta.clone())) {
-                            Ok(meta) => {
-                                self.info(format!(
-                                    "Jitendex dictionary updated to {}!",
-                                    meta.revision
-                                ));
-                            }
+                        match result {
+                            Ok(meta) => match self.dict.reload_dict_db(Some(meta.clone())) {
+                                Ok(meta) => {
+                                    self.info(format!(
+                                        "Jitendex dictionary updated to {}!",
+                                        meta.revision
+                                    ));
+                                }
+                                Err(e) => {
+                                    self.error(e.to_string());
+                                }
+                            },
                             Err(e) => {
-                                self.error(e.to_string());
+                                self.error(format!("Dictionary sync failed: {e}"));
                             }
-                        },
-                        Err(e) => {
-                            self.error(format!("Dictionary sync failed: {e}"));
                         }
+                        repaint_requested = true;
                     }
-                    repaint_requested = true;
-                }
-                crate::dict::DictEvent::FreqUpdateCheckFinished {
-                    update_available,
-                    remote_metadata,
-                } => {
-                    self.dict.freq_update_available = update_available;
-                    self.dict.remote_freq_metadata = remote_metadata;
-                    repaint_requested = true;
-                }
-                crate::dict::DictEvent::FreqSyncProgress { message, progress } => {
-                    if let Ok(mut lock) = self.dict.freq_sync_progress.lock() {
-                        *lock = Some((message, progress));
+                    crate::dict::DictEvent::FreqUpdateCheckFinished {
+                        update_available,
+                        remote_metadata,
+                    } => {
+                        self.dict.freq_update_available = update_available;
+                        self.dict.remote_freq_metadata = remote_metadata;
+                        repaint_requested = true;
                     }
-                    repaint_requested = true;
-                }
-                crate::dict::DictEvent::FreqSyncFinished(result) => {
-                    if let Ok(mut lock) = self.dict.freq_sync_progress.lock() {
-                        *lock = None;
+                    crate::dict::DictEvent::FreqSyncProgress { message, progress } => {
+                        if let Ok(mut lock) = self.dict.freq_sync_progress.lock() {
+                            *lock = Some((message, progress));
+                        }
+                        repaint_requested = true;
                     }
-                    match result {
-                        Ok(meta) => match self.dict.reload_freq_db(Some(meta.clone())) {
-                            Ok(meta) => {
-                                self.info(format!(
-                                    "Jiten frequency dictionary updated to {}!",
-                                    meta.revision
-                                ));
-                            }
+                    crate::dict::DictEvent::FreqSyncFinished(result) => {
+                        if let Ok(mut lock) = self.dict.freq_sync_progress.lock() {
+                            *lock = None;
+                        }
+                        match result {
+                            Ok(meta) => match self.dict.reload_freq_db(Some(meta.clone())) {
+                                Ok(meta) => {
+                                    self.info(format!(
+                                        "Jiten frequency dictionary updated to {}!",
+                                        meta.revision
+                                    ));
+                                }
+                                Err(e) => {
+                                    self.error(e.to_string());
+                                }
+                            },
                             Err(e) => {
-                                self.error(e.to_string());
+                                self.error(format!("Frequency dictionary sync failed: {e}"));
                             }
-                        },
-                        Err(e) => {
-                            self.error(format!("Frequency dictionary sync failed: {e}"));
                         }
+                        repaint_requested = true;
                     }
-                    repaint_requested = true;
-                }
-                crate::dict::DictEvent::PitchImportProgress { message, progress } => {
-                    if let Ok(mut lock) = self.dict.pitch_import_progress.lock() {
-                        *lock = Some((message, progress));
+                    crate::dict::DictEvent::PitchImportProgress { message, progress } => {
+                        if let Ok(mut lock) = self.dict.pitch_import_progress.lock() {
+                            *lock = Some((message, progress));
+                        }
+                        repaint_requested = true;
                     }
-                    repaint_requested = true;
-                }
-                crate::dict::DictEvent::PitchImportFinished(result) => {
-                    if let Ok(mut lock) = self.dict.pitch_import_progress.lock() {
-                        *lock = None;
-                    }
-                    match result {
-                        Ok(meta) => match self.dict.reload_pitch_db(Some(meta.clone())) {
-                            Ok(meta) => {
-                                self.dict.pitch_import_error = None;
-                                if let Ok(guard) = self.dict.pitch_db.lock() {
-                                    if let Some(ref db) = *guard {
-                                        let backfilled = self.bank.backfill_pitches(db);
-                                        if backfilled > 0 {
-                                            tracing::info!(
-                                                "Backfilled pitch accents for {} mined words",
-                                                backfilled
-                                            );
+                    crate::dict::DictEvent::PitchImportFinished(result) => {
+                        if let Ok(mut lock) = self.dict.pitch_import_progress.lock() {
+                            *lock = None;
+                        }
+                        match result {
+                            Ok(meta) => match self.dict.reload_pitch_db(Some(meta.clone())) {
+                                Ok(meta) => {
+                                    self.dict.pitch_import_error = None;
+                                    if let Ok(guard) = self.dict.pitch_db.lock() {
+                                        if let Some(ref db) = *guard {
+                                            let backfilled = self.bank.backfill_pitches(db);
+                                            if backfilled > 0 {
+                                                tracing::info!(
+                                                    "Backfilled pitch accents for {} mined words",
+                                                    backfilled
+                                                );
+                                            }
                                         }
                                     }
+                                    self.info(format!(
+                                        "Imported pitch dictionary '{}' ({} entries)!",
+                                        meta.title, meta.total_entries
+                                    ));
                                 }
-                                self.info(format!(
-                                    "Imported pitch dictionary '{}' ({} entries)!",
-                                    meta.title, meta.total_entries
-                                ));
-                            }
+                                Err(e) => {
+                                    self.dict.pitch_import_error = Some(format!("{e:#}"));
+                                    self.error(e.to_string());
+                                }
+                            },
                             Err(e) => {
-                                self.dict.pitch_import_error = Some(format!("{e:#}"));
-                                self.error(e.to_string());
+                                self.dict.pitch_import_error = Some(e.clone());
+                                self.error(format!("Pitch dictionary import failed: {e}"));
                             }
-                        },
-                        Err(e) => {
-                            self.dict.pitch_import_error = Some(e.clone());
-                            self.error(format!("Pitch dictionary import failed: {e}"));
                         }
+                        repaint_requested = true;
                     }
-                    repaint_requested = true;
                 }
             }
-        }
 
-        for message in self.bank.poll() {
-            match message {
-                Ok(info) => self.info(info),
-                Err(err) => self.error(err),
+            for message in self.bank.poll() {
+                match message {
+                    Ok(info) => self.info(info),
+                    Err(err) => self.error(err),
+                }
+                repaint_requested = true;
             }
-            repaint_requested = true;
-        }
-        for event in self.screenshot.poll_events() {
-            match event {
-                crate::screenshot::ScreenshotEvent::Copied(
-                    crate::screenshot::ScreenshotMode::Normal,
-                ) => {
-                    self.info("Copied screenshot to clipboard");
+            for event in self.screenshot.poll_events() {
+                match event {
+                    crate::screenshot::ScreenshotEvent::Copied(
+                        crate::screenshot::ScreenshotMode::Normal,
+                    ) => {
+                        self.info("Copied screenshot to clipboard");
+                    }
+                    crate::screenshot::ScreenshotEvent::Copied(
+                        crate::screenshot::ScreenshotMode::PhonePhoto,
+                    ) => {
+                        self.info("Copied smartphone photo to clipboard");
+                    }
+                    crate::screenshot::ScreenshotEvent::Failed(_, err) => {
+                        self.error(format!("Screenshot failed: {err}"));
+                    }
                 }
-                crate::screenshot::ScreenshotEvent::Copied(
-                    crate::screenshot::ScreenshotMode::PhonePhoto,
-                ) => {
-                    self.info("Copied smartphone photo to clipboard");
-                }
-                crate::screenshot::ScreenshotEvent::Failed(_, err) => {
-                    self.error(format!("Screenshot failed: {err}"));
-                }
+                repaint_requested = true;
             }
-            repaint_requested = true;
-        }
-        for mined in self.bank.take_newly_mined() {
-            self.maybe_share_mined_word_to_twitch(&mined);
-        }
-        if self.bank.is_busy() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            for mined in self.bank.take_newly_mined() {
+                self.maybe_share_mined_word_to_twitch(&mined);
+            }
+            if self.bank.is_busy() {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            if self.pc98.is_scanning_library
+                || self.pc88.is_scanning_library
+                || self.capture_format_probing
+                || self.webcam_format_probing
+                || self.usb_reset_in_progress
+            {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
         }
         if self.steam_deck.is_none() {
             ui::bank::draw_bank_window(self, ctx);
@@ -1890,18 +2062,20 @@ impl eframe::App for AppState {
             repaint_requested |= ui::replay_scrub::draw_replay_scrub_window(self, ctx);
 
             self.twitch.studio_active = self.ui.studio_window_open;
-            repaint_requested |= self.twitch.poll(ctx);
-            for (request_id, clip_url) in self.twitch.take_ready_mined_clips() {
-                if let Err(e) = self.bank.attach_twitch_clip(request_id, &clip_url) {
-                    tracing::warn!("Mining bank: failed to attach Twitch clip: {e}");
-                    self.error(format!("Failed to attach Twitch clip: {e}"));
+            if !beam_subframe_only {
+                repaint_requested |= self.twitch.poll(ctx);
+                for (request_id, clip_url) in self.twitch.take_ready_mined_clips() {
+                    if let Err(e) = self.bank.attach_twitch_clip(request_id, &clip_url) {
+                        tracing::warn!("Mining bank: failed to attach Twitch clip: {e}");
+                        self.error(format!("Failed to attach Twitch clip: {e}"));
+                    }
                 }
-            }
-            for (is_error, message) in self.twitch.take_notifications() {
-                if is_error {
-                    self.error(message);
-                } else {
-                    self.info(message);
+                for (is_error, message) in self.twitch.take_notifications() {
+                    if is_error {
+                        self.error(message);
+                    } else {
+                        self.info(message);
+                    }
                 }
             }
             ui::twitch_overlay::draw(self, ctx);
@@ -1919,7 +2093,16 @@ impl eframe::App for AppState {
 
         self.ui.in_egui_frame = false;
         if self.ui.config_save_pending && !self.ui.any_pointer_down {
-            config::flush_pending_config(self);
+            let now = Instant::now();
+            if let Some(deadline) = self.ui.config_save_deadline {
+                if now >= deadline {
+                    config::flush_pending_config(self);
+                } else {
+                    ctx.request_repaint_after(deadline.saturating_duration_since(now));
+                }
+            } else {
+                config::flush_pending_config(self);
+            }
         }
 
         if repaint_requested {
@@ -2761,5 +2944,61 @@ mod tests {
         assert_eq!(req.scene.corner_size, 0.005);
         assert_eq!(req.scene.beam.gain_vs_blur, 0.60);
         assert_eq!(req.scene.beam.halation, 0.06);
+    }
+
+    #[test]
+    fn test_audio_reactive_repaint_gate_and_cursor_grab_dedup() {
+        let mut state = AppState::default();
+        state.audio_reactive.enabled = true;
+
+        // Idle (no active AV source): never requests audio-reactive 60Hz repaint
+        assert!(!state.should_repaint_audio_reactive());
+
+        // Active source but completely silent: still does not request repaint
+        state.pc98.is_active = true;
+        assert!(!state.should_repaint_audio_reactive());
+
+        // Active source with non-silent energy (> 1e-4): requests repaint
+        state.audio_reactive_runtime.low_env = 0.05;
+        assert!(state.should_repaint_audio_reactive());
+
+        // Cursor grab commands only emit on transitions or after cache reset
+        let ctx = egui::Context::default();
+        let out1 = ctx.run(egui::RawInput::default(), |ctx| {
+            state.ui.set_cursor_grab(ctx, egui::CursorGrab::Locked);
+        });
+        assert_eq!(
+            out1.viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .iter()
+                .filter(|c| matches!(c, egui::ViewportCommand::CursorGrab(_)))
+                .count(),
+            1
+        );
+
+        let out2 = ctx.run(egui::RawInput::default(), |ctx| {
+            state.ui.set_cursor_grab(ctx, egui::CursorGrab::Locked);
+        });
+        assert_eq!(
+            out2.viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .iter()
+                .filter(|c| matches!(c, egui::ViewportCommand::CursorGrab(_)))
+                .count(),
+            0
+        );
+
+        state.ui.reset_cursor_state_cache();
+        let out3 = ctx.run(egui::RawInput::default(), |ctx| {
+            state.ui.set_cursor_grab(ctx, egui::CursorGrab::Locked);
+        });
+        assert_eq!(
+            out3.viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .iter()
+                .filter(|c| matches!(c, egui::ViewportCommand::CursorGrab(_)))
+                .count(),
+            1
+        );
     }
 }

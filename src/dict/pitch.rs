@@ -202,7 +202,9 @@ impl PitchDatabase {
 
     /// Loads the stored dictionary metadata from the `metadata` table.
     pub fn get_metadata(&self) -> Result<DictMetadata> {
-        let mut stmt = self.conn.prepare("SELECT key, value FROM metadata")?;
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT key, value FROM metadata")?;
         let rows = stmt.query_map([], |row| {
             let key: String = row.get(0)?;
             let value: String = row.get(1)?;
@@ -238,6 +240,42 @@ impl PitchDatabase {
             target_language: map.remove("targetLanguage"),
             total_entries,
         })
+    }
+
+    /// Returns a cheap, deterministic fingerprint of this pitch dictionary's contents
+    /// (combining stored metadata with O(1) structural markers) so callers can skip
+    /// redundant full-bank pitch backfills across restarts.
+    pub fn fingerprint(&self) -> String {
+        let mut meta_pairs: Vec<(String, String)> = self
+            .conn
+            .prepare_cached("SELECT key, value FROM metadata")
+            .and_then(|mut stmt| {
+                let rows =
+                    stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+                Ok(rows.filter_map(|r| r.ok()).collect())
+            })
+            .unwrap_or_default();
+        meta_pairs.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let max_id: i64 = self
+            .conn
+            .query_row("SELECT COALESCE(MAX(id), 0) FROM pitches", [], |r| r.get(0))
+            .unwrap_or(0);
+        let page_count: i64 = self
+            .conn
+            .query_row("PRAGMA page_count", [], |r| r.get(0))
+            .unwrap_or(0);
+
+        let mut out = String::new();
+        for (k, v) in meta_pairs {
+            out.push_str(&k);
+            out.push('=');
+            out.push_str(&v);
+            out.push(';');
+        }
+        use std::fmt::Write;
+        let _ = write!(out, "max_id={max_id};pages={page_count}");
+        out
     }
 
     /// Looks up all valid pitch accent patterns for `(term, reading)`.

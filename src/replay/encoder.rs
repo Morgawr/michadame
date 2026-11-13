@@ -330,7 +330,23 @@ pub fn export(
     audio: codec::Parameters,
     packets: Vec<std::sync::Arc<Encoded>>,
 ) -> Result<()> {
-    export_output(format::output_as(path, "mp4")?, video, audio, packets)
+    remux_mp4(path, video, audio, packets, true)
+}
+
+pub fn remux_mp4(
+    path: &std::path::Path,
+    video: codec::Parameters,
+    audio: codec::Parameters,
+    packets: Vec<std::sync::Arc<Encoded>>,
+    faststart: bool,
+) -> Result<()> {
+    export_output(
+        format::output_as(path, "mp4")?,
+        video,
+        audio,
+        packets,
+        faststart,
+    )
 }
 
 pub fn export_clipboard(
@@ -350,7 +366,7 @@ pub fn export_clipboard(
         file, limit,
     ))?;
     let output = format::output_to_stream(io, path.to_str(), Some("mp4"))?;
-    if let Err(err) = export_output(output, video, audio, packets) {
+    if let Err(err) = export_output(output, video, audio, packets, true) {
         let _ = std::fs::OpenOptions::new()
             .write(true)
             .open(path)
@@ -373,6 +389,7 @@ fn export_output(
     video: codec::Parameters,
     audio: codec::Parameters,
     mut packets: Vec<std::sync::Arc<Encoded>>,
+    faststart: bool,
 ) -> Result<()> {
     ensure!(!packets.is_empty(), "No replay packets");
     let start = packets
@@ -397,7 +414,9 @@ fn export_output(
         stream.set_parameters(parameters);
     }
     let mut options = ff::Dictionary::new();
-    options.set("movflags", "+faststart");
+    if faststart {
+        options.set("movflags", "+faststart");
+    }
     output.write_header_with(options)?;
     for p in packets {
         let mut packet = p.packet.clone();
@@ -1304,5 +1323,143 @@ mod tests {
         );
         drop(input);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn remux_mp4_without_faststart_skips_second_pass_and_produces_playable_mp4() {
+        ff::init().unwrap();
+        let codec = encoder::find_by_name("libx264")
+            .expect("Synthetic MP4 fixture needs software libx264 encoder");
+        let mut video = codec::context::Context::new_with_codec(codec)
+            .encoder()
+            .video()
+            .unwrap();
+        video.set_width(64);
+        video.set_height(48);
+        video.set_format(format::Pixel::YUV420P);
+        video.set_time_base((1, 1_000_000));
+        video.set_frame_rate(Some(Rational(30, 1)));
+        video.set_gop(15);
+        video.set_flags(codec::Flags::GLOBAL_HEADER);
+        video.set_max_b_frames(0);
+        let mut opts = ff::Dictionary::new();
+        opts.set("preset", "ultrafast");
+        opts.set("tune", "zerolatency");
+        let mut video = video.open_with(opts).unwrap();
+        let mut audio = AudioEncoder::new().unwrap();
+
+        let mut history = super::super::ring::History::new(10);
+        let epoch = 1_000_000i64;
+        for tick in 0..30i64 {
+            let pts = epoch + tick * 1_000_000 / 30;
+            let mut f = frame::Video::new(format::Pixel::YUV420P, 64, 48);
+            f.data_mut(0).fill(90);
+            f.data_mut(1).fill(128);
+            f.data_mut(2).fill(128);
+            f.set_pts(Some(pts));
+            f.set_kind(if tick % 15 == 0 {
+                ff::picture::Type::I
+            } else {
+                ff::picture::Type::None
+            });
+            video.send_frame(&f).unwrap();
+            let mut p = Packet::empty();
+            while video.receive_packet(&mut p).is_ok() {
+                p.set_duration(1_000_000 / 30);
+                history.push(Encoded::new(p, true), usize::MAX);
+                p = Packet::empty();
+            }
+        }
+        for block in 0..48i64 {
+            let at = block * 1024;
+            let samples = vec![[0.1f32, -0.1f32]; super::config::AUDIO_FRAME_SIZE];
+            for mut p in audio.encode(&samples, at).unwrap() {
+                p.packet.set_pts(p.packet.pts().map(|t| t + epoch));
+                p.packet.set_dts(p.packet.dts().map(|t| t + epoch));
+                p.start += epoch;
+                p.end += epoch;
+                history.push(p, usize::MAX);
+            }
+        }
+
+        let clip = history.clip(1, epoch + 1_000_000).unwrap();
+        let expected_video_packets = clip.iter().filter(|p| p.video).count();
+        let preview_tmp = tempfile::Builder::new()
+            .prefix("michadame-faststart-off-")
+            .suffix(".mp4")
+            .tempfile()
+            .unwrap();
+
+        remux_mp4(
+            preview_tmp.path(),
+            codec::Parameters::from(&video),
+            audio.parameters(),
+            clip,
+            false,
+        )
+        .unwrap();
+
+        let bytes = std::fs::read(preview_tmp.path()).unwrap();
+        assert_eq!(&bytes[4..8], b"ftyp");
+        let moov_pos = bytes
+            .windows(4)
+            .position(|w| w == b"moov")
+            .expect("MP4 must contain moov box");
+        let mdat_pos = bytes
+            .windows(4)
+            .position(|w| w == b"mdat")
+            .expect("MP4 must contain mdat box");
+        assert!(
+            mdat_pos < moov_pos,
+            "faststart=false must leave mdat before moov without rewriting the file"
+        );
+
+        let mut input = format::input(preview_tmp.path()).unwrap();
+        assert_eq!(input.nb_streams(), 2);
+        let vs = input.streams().best(ff::media::Type::Video).unwrap();
+        let vi = vs.index();
+        let mut vd = codec::context::Context::from_parameters(vs.parameters())
+            .unwrap()
+            .decoder()
+            .video()
+            .unwrap();
+        let as_stream = input.streams().best(ff::media::Type::Audio).unwrap();
+        let ai = as_stream.index();
+        let mut ad = codec::context::Context::from_parameters(as_stream.parameters())
+            .unwrap()
+            .decoder()
+            .audio()
+            .unwrap();
+
+        let mut decoded_video_frames = 0usize;
+        let mut decoded_audio_samples = 0usize;
+        for (stream, pkt) in input.packets() {
+            if stream.index() == vi {
+                vd.send_packet(&pkt).unwrap();
+                let mut vf = frame::Video::empty();
+                while vd.receive_frame(&mut vf).is_ok() {
+                    decoded_video_frames += 1;
+                }
+            } else if stream.index() == ai {
+                ad.send_packet(&pkt).unwrap();
+                let mut af = frame::Audio::empty();
+                while ad.receive_frame(&mut af).is_ok() {
+                    decoded_audio_samples += af.samples();
+                }
+            }
+        }
+        vd.send_eof().unwrap();
+        let mut vf = frame::Video::empty();
+        while vd.receive_frame(&mut vf).is_ok() {
+            decoded_video_frames += 1;
+        }
+        ad.send_eof().unwrap();
+        let mut af = frame::Audio::empty();
+        while ad.receive_frame(&mut af).is_ok() {
+            decoded_audio_samples += af.samples();
+        }
+
+        assert_eq!(decoded_video_frames, expected_video_packets);
+        assert!(decoded_audio_samples > 0);
     }
 }

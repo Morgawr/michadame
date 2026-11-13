@@ -33,20 +33,17 @@
             return;
         }
 
-        // YUYV is packed: [Y0, U0, Y1, V0]
-        // We sample the texture as if it were RGBA (each pixel has 4 channels)
-        // Texture width is width / 2
-        vec4 yuyv_vec = texture(raw_tex, shifted_tc);
-        
-        // Determine if we want the first or second Y based on X coordinate
-        // We multiply by 2 because each texture pixel contains 2 source pixels
-        float x_idx = shifted_tc.x * textureSize(raw_tex, 0).x * 2.0;
-        float y_val;
-        if (int(floor(x_idx)) % 2 == 0) {
-            y_val = yuyv_vec.r; // Y0
-        } else {
-            y_val = yuyv_vec.b; // Y1
-        }
+        // YUYV is packed: [Y0, U0, Y1, V0] across a half-width RGBA8 texture.
+        // Fetch by exact integer macro-pixel coordinate (macro_x, src_y) via texelFetch
+        // so normalized float UV division/filtering can never jitter or blend adjacent Y0/Y1 bytes.
+        ivec2 raw_size = textureSize(raw_tex, 0);
+        int full_w = raw_size.x * 2;
+        int src_x = clamp(int(floor(shifted_tc.x * float(full_w))), 0, max(full_w - 1, 0));
+        int src_y = clamp(int(floor(shifted_tc.y * float(raw_size.y))), 0, max(raw_size.y - 1, 0));
+        int macro_x = src_x >> 1;
+
+        vec4 yuyv_vec = texelFetch(raw_tex, ivec2(macro_x, src_y), 0);
+        float y_val = ((src_x & 1) == 0) ? yuyv_vec.r : yuyv_vec.b;
         
         float u = yuyv_vec.g;
         float v = yuyv_vec.a;

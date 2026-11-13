@@ -1,6 +1,5 @@
 use crate::{
     app::AppState,
-    devices,
     ui::controls::{technical_group, technical_separator},
 };
 use eframe::egui;
@@ -31,44 +30,16 @@ pub fn draw_capture_and_webcam_selectors(ui: &mut egui::Ui, state: &mut AppState
                             .changed();
                     }
                     if combo_changed && !state.hardware.selected_video_device.is_empty() {
-                        state.hardware.supported_formats.clear();
-                        state.hardware.selected_format_index = 0;
-                        state.hardware.selected_resolution = (0, 0);
-
-                        match devices::video::find_video_formats(
-                            &state.hardware.selected_video_device,
-                        ) {
-                            Ok(formats) => {
-                                state.info(format!(
-                                    "Found {} formats for {}.",
-                                    formats.len(),
-                                    state.hardware.selected_video_device
-                                ));
-                                state.hardware.supported_formats = formats;
-                                if let Some(res) = state
-                                    .hardware
-                                    .supported_formats
-                                    .first()
-                                    .and_then(|f| f.resolutions.first())
-                                {
-                                    state.hardware.selected_resolution = (res.width, res.height);
-                                    state.hardware.selected_framerate =
-                                        res.framerates.first().cloned().unwrap_or(0);
-                                }
-                                if let Ok(cfg) =
-                                    confy::load::<crate::config::MichadameConfig>("michadame", None)
-                                {
-                                    crate::video::types::apply_saved_format_config(state, &cfg);
-                                }
-                            }
-                            Err(e) => {
-                                state.error(format!("Failed to scan formats: {}", e));
-                            }
-                        }
+                        state.request_capture_formats_probe(Some(ui.ctx().clone()), true);
                         crate::config::save_global_hardware_config(state);
                         changed = true;
                     }
                 });
+
+            if state.capture_format_probing {
+                ui.add_space(4.0);
+                ui.spinner();
+            }
 
             if !state.hardware.supported_formats.is_empty() {
                 ui.add_space(6.0);
@@ -188,6 +159,24 @@ pub fn draw_capture_and_webcam_selectors(ui: &mut egui::Ui, state: &mut AppState
             }
         });
 
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .checkbox(
+                    &mut state.hardware.video_hwdec,
+                    "Hardware Video Decoding (VAAPI / NVDEC)",
+                )
+                .on_hover_text(
+                    "Accelerates compressed video decoding (H.264, HEVC, AV1, VP9, MJPEG) on the GPU via VAAPI/NVDEC/DRM with automatic fallback to CPU software decoding.",
+                )
+                .changed()
+            {
+                crate::video::player::set_default_video_hwdec(state.hardware.video_hwdec);
+                crate::config::save_config(state);
+                crate::config::save_global_hardware_config(state);
+                changed = true;
+            }
+        });
+
         technical_separator(ui);
 
         ui.horizontal_wrapped(|ui| {
@@ -232,17 +221,22 @@ pub fn draw_capture_and_webcam_selectors(ui: &mut egui::Ui, state: &mut AppState
                 });
 
             let has_usb = state.hardware.selected_usb_device.is_some();
+            let reset_label = if state.usb_reset_in_progress {
+                "Resetting USB..."
+            } else {
+                "Reset USB Device"
+            };
             if ui
-                .add_enabled(has_usb, egui::Button::new("Reset USB Device"))
+                .add_enabled(
+                    has_usb && !state.usb_reset_in_progress,
+                    egui::Button::new(reset_label),
+                )
                 .clicked()
             {
-                if let Some(selected_device) = &state.hardware.selected_usb_device {
-                    let msg = match devices::usb::reset_usb_device(selected_device) {
-                        Ok(_) => "USB device reset successfully.".to_string(),
-                        Err(e) => format!("Failed to reset USB: {}", e),
-                    };
-                    state.info(msg);
-                }
+                state.start_async_usb_reset(Some(ui.ctx().clone()), false);
+            }
+            if state.usb_reset_in_progress {
+                ui.spinner();
             }
             if ui
                 .add_enabled(
@@ -282,7 +276,13 @@ pub fn draw_capture_and_webcam_selectors(ui: &mut egui::Ui, state: &mut AppState
                 crate::config::save_global_hardware_config(state);
                 changed = true;
             }
-            if ui.button("Browse...").clicked() {
+            if ui
+                .add_enabled(
+                    !state.ui.is_file_dialog_open(),
+                    egui::Button::new("Browse..."),
+                )
+                .clicked()
+            {
                 state.open_gamescope_script_dialog(ui.ctx());
             }
             let has_path = !state.gamescope_launcher_script.is_empty();
@@ -312,19 +312,8 @@ pub fn draw_capture_and_webcam_selectors(ui: &mut egui::Ui, state: &mut AppState
                 state.webcam.config.enabled = webcam_enabled;
                 if webcam_enabled && state.webcam.config.device.is_none() {
                     state.webcam.config.device = state.hardware.video_devices.first().cloned();
-                    if let Some(dev) = &state.webcam.config.device {
-                        if let Ok(formats) = crate::devices::video::find_video_formats(dev) {
-                            state.webcam.supported_formats = formats;
-                            if let Some(first_fmt) = state.webcam.supported_formats.first() {
-                                state.webcam.config.format_fourcc = Some(first_fmt.fourcc.clone());
-                                if let Some(first_res) = first_fmt.resolutions.first() {
-                                    state.webcam.config.resolution =
-                                        Some((first_res.width, first_res.height));
-                                    state.webcam.config.framerate =
-                                        first_res.framerates.first().cloned();
-                                }
-                            }
-                        }
+                    if state.webcam.config.device.is_some() {
+                        state.request_webcam_formats_probe(Some(ui.ctx().clone()), true, false);
                     }
                 }
                 crate::config::save_config(state);
@@ -361,29 +350,11 @@ pub fn draw_capture_and_webcam_selectors(ui: &mut egui::Ui, state: &mut AppState
                     }
                     if dev_changed {
                         state.webcam.supported_formats.clear();
-                        state.webcam.formats_probed_for_device = state.webcam.config.device.clone();
                         state.webcam.selected_format_index = 0;
-                        if let Some(dev) = &state.webcam.config.device {
-                            match crate::devices::video::find_video_formats(dev) {
-                                Ok(formats) => {
-                                    state.webcam.supported_formats = formats;
-                                    if let Some(first_fmt) = state.webcam.supported_formats.first()
-                                    {
-                                        state.webcam.config.format_fourcc =
-                                            Some(first_fmt.fourcc.clone());
-                                        if let Some(first_res) = first_fmt.resolutions.first() {
-                                            state.webcam.config.resolution =
-                                                Some((first_res.width, first_res.height));
-                                            state.webcam.config.framerate =
-                                                first_res.framerates.first().cloned();
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    state.error(format!("Failed to scan webcam formats: {}", e));
-                                }
-                            }
+                        if state.webcam.config.device.is_some() {
+                            state.request_webcam_formats_probe(Some(ui.ctx().clone()), true, true);
                         } else {
+                            state.webcam.formats_probed_for_device = None;
                             state.webcam.config.format_fourcc = None;
                             state.webcam.config.resolution = None;
                             state.webcam.config.framerate = None;
@@ -395,26 +366,17 @@ pub fn draw_capture_and_webcam_selectors(ui: &mut egui::Ui, state: &mut AppState
                     }
                 });
 
-            // Ensure formats are queried once if device is selected but formats are empty
-            if state.webcam.supported_formats.is_empty() {
+            // Ensure formats are queried asynchronously once if device is selected but formats are empty
+            if state.webcam.supported_formats.is_empty() && !state.webcam_format_probing {
                 if let Some(dev) = state.webcam.config.device.clone() {
                     if state.webcam.formats_probed_for_device.as_deref() != Some(dev.as_str()) {
-                        state.webcam.formats_probed_for_device = Some(dev.clone());
-                        if let Ok(formats) = crate::devices::video::find_video_formats(&dev) {
-                            state.webcam.supported_formats = formats;
-                            if let Some(saved_fourcc) = &state.webcam.config.format_fourcc {
-                                if let Some(idx) = state
-                                    .webcam
-                                    .supported_formats
-                                    .iter()
-                                    .position(|f| f.fourcc == *saved_fourcc)
-                                {
-                                    state.webcam.selected_format_index = idx;
-                                }
-                            }
-                        }
+                        state.request_webcam_formats_probe(Some(ui.ctx().clone()), false, false);
                     }
                 }
+            }
+            if state.webcam_format_probing {
+                ui.add_space(4.0);
+                ui.spinner();
             }
 
             if !state.webcam.supported_formats.is_empty() {

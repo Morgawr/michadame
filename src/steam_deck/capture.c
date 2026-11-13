@@ -113,7 +113,7 @@ struct deck_capture *michadame_deck_capture_start(const char *target,
             SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
             SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
             SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(5,
-                SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBx),
+                SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA),
             SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(
                 &SPA_RECTANGLE(1280, 800), &SPA_RECTANGLE(1, 1), &SPA_RECTANGLE(8192, 8192)),
             SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(

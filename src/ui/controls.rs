@@ -293,7 +293,10 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             .fill(egui::Color32::from_rgb(24, 50, 80)) // #183250
                             .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 80, 130)))
                             .rounding(egui::Rounding::ZERO);
-                            if ui.add(open_btn).clicked() {
+                            if ui
+                                .add_enabled(!state.ui.is_file_dialog_open(), open_btn)
+                                .clicked()
+                            {
                                 state.open_video_file_dialog(ui.ctx());
                             }
 
@@ -622,10 +625,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         state.steam_deck.is_some(),
                     ) {
                         changed = true;
-                        if let Err(error) = crate::config::save_replay_config(&state.replay.config)
-                        {
-                            state.error(format!("Could not save replay settings: {error}"));
-                        }
+                        crate::config::save_config(state);
                     }
                 }
                 SettingsTab::AudioMic => {
@@ -634,8 +634,6 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         technical_separator(ui);
                         if crate::replay::ui::draw_audio_filter_contents(&mut state.replay, ui) {
                             crate::config::save_config(state);
-                            crate::config::save_global_hardware_config(state);
-                            let _ = crate::config::save_replay_config(&state.replay.config);
                             changed = true;
                         }
                     });
@@ -1224,8 +1222,9 @@ pub(crate) fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed
                     } else {
                         "Import Pitch Dictionary…"
                     };
+                    let dialog_busy = state.steam_deck.is_none() && state.ui.is_file_dialog_open();
                     if ui
-                        .button(btn_label)
+                        .add_enabled(!dialog_busy, egui::Button::new(btn_label))
                         .on_hover_text(
                             "Import a local Yomitan-format pitch accent dictionary (.zip)",
                         )
@@ -1243,11 +1242,8 @@ pub(crate) fn draw_ocr_dict_tab(ui: &mut egui::Ui, state: &mut AppState, changed
                                     let _ = tx.send(path);
                                 },
                             ));
-                        } else if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Yomitan Dictionary (.zip)", &["zip"])
-                            .pick_file()
-                        {
-                            state.dict.trigger_pitch_import(path);
+                        } else {
+                            state.open_pitch_dict_dialog(ui.ctx());
                         }
                     }
 

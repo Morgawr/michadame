@@ -18,6 +18,15 @@ use std::sync::{Arc, Mutex};
 pub const RETRO_CURSOR_WIDTH: u32 = 16;
 pub const RETRO_CURSOR_HEIGHT: u32 = 24;
 
+const PASS_HIST_1: usize = 0;
+const PASS_DEINTERLACE: usize = 1;
+const PASS_HIST_2: usize = 2;
+const PASS_PIXELATE: usize = 3;
+const PASS_MEDIAN: usize = 4;
+const PASS_INPUT: usize = 5;
+const NUM_INTERMEDIATE_PASSES: usize = 6;
+const HISTORY_SLOTS: [usize; 3] = [PASS_INPUT, PASS_HIST_1, PASS_HIST_2];
+
 const RETRO_CURSOR_SPRITE: [&str; 24] = [
     "B...............",
     "BB..............",
@@ -118,8 +127,8 @@ pub struct CrtFilterRenderer {
     pub halo: HaloRenderer,
     pub beam: BeamRenderer,
 
-    fbos: [glow::Framebuffer; 7],
-    pass_textures: [glow::Texture; 7],
+    fbos: [glow::Framebuffer; NUM_INTERMEDIATE_PASSES],
+    pass_textures: [glow::Texture; NUM_INTERMEDIATE_PASSES],
     yuv_planes: [glow::Texture; 3],
     pbos: [glow::Buffer; 3],
     vertex_array: glow::VertexArray,
@@ -205,7 +214,12 @@ pub struct CrtFilterRenderer {
     retro_ambient_glow_loc: Option<glow::UniformLocation>,
     retro_dark_mode_loc: Option<glow::UniformLocation>,
     last_video_texture: Option<glow::Texture>,
-    mipmap_generated_this_frame: std::sync::atomic::AtomicBool,
+    last_video_texture_res: (u32, u32),
+    last_video_tex_base_filter: i32,
+    current_source_frame_id: i64,
+    last_mipmapped_frame: std::cell::Cell<Option<(glow::Texture, i64, (u32, u32))>>,
+    mipmap_generated_this_paint: std::cell::Cell<bool>,
+    last_pixelate_key: Option<(glow::Texture, i64, (u32, u32))>,
 
     crt_glass_prog: glow::Program,
     glass_output_res_loc: Option<glow::UniformLocation>,
@@ -246,6 +260,9 @@ pub struct CrtFilterRenderer {
     popup_vao: glow::VertexArray,
     popup_vbo: glow::Buffer,
     popup_ebo: glow::Buffer,
+    overlay_vertices_scratch: Vec<egui::epaint::Vertex>,
+    overlay_indices_scratch: Vec<u32>,
+    overlay_draws_scratch: Vec<OverlayDrawCmd>,
     popup_screen_size_loc: Option<glow::UniformLocation>,
     popup_offset_loc: Option<glow::UniformLocation>,
     popup_sampler_loc: Option<glow::UniformLocation>,
@@ -287,10 +304,16 @@ pub struct CrtFilterRenderer {
     last_fft_enabled: bool,
     last_fft_thresholds: (f32, f32),
     last_fft_mask_gen: u64,
+    last_fft_spectrum_rendered: bool,
     last_input_tex: Option<glow::Texture>,
+    last_input_slot: Option<usize>,
+    last_source_kind: Option<InputSourceKind>,
+    last_fallback_tex: Option<glow::Texture>,
     last_preprocess_sig: Option<PreprocessCacheSig>,
     last_preprocess_out: Option<(glow::Texture, (u32, u32), bool)>,
-    history_count: u32,
+    history_ring: DeinterlaceHistoryRing,
+    pub fallback_captured_at_next_paint: Option<i64>,
+    pub render_fft_spectrum_next_paint: bool,
     pub capture_ocr_next_paint: bool,
     pub capture_ocr_async_next_paint: bool,
     pub ocr_recycled_buffer: Option<Vec<u8>>,
@@ -313,12 +336,30 @@ struct PendingOcrReadback {
 // while the owning GL context is current (in `paint`, `draw_passthrough`, and `destroy`).
 unsafe impl Send for PendingOcrReadback {}
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InputSourceKind {
+    Raw,
+    Fallback,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreprocessSourceSig {
+    Raw {
+        captured_at: i64,
+    },
+    Fallback {
+        tex: glow::Texture,
+        captured_at: i64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PreprocessCacheSig {
-    captured_at: i64,
+    source: PreprocessSourceSig,
     resolution: (u32, u32),
     effective_res: (u32, u32),
     scaler_filter: u8,
+    allow_srgb_passthrough_fastpath: bool,
     scan_and_color: [u32; 6],
     deinterlace_enabled: bool,
     deinterlace_mode: u8,
@@ -328,6 +369,237 @@ struct PreprocessCacheSig {
     fft_enabled: bool,
     fft_thresholds: [u32; 2],
     fft_gen: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DeinterlaceHistoryRing {
+    slots: [usize; 3],
+    head: usize,
+    count: u32,
+}
+
+impl DeinterlaceHistoryRing {
+    const fn new(slots: [usize; 3]) -> Self {
+        Self {
+            slots,
+            head: 0,
+            count: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.head = 0;
+        self.count = 0;
+    }
+
+    fn select_write_slot(&mut self, deinterlace_enabled: bool, is_new_frame: bool) -> usize {
+        if !deinterlace_enabled {
+            self.reset();
+            return self.slots[0];
+        }
+        if is_new_frame {
+            if self.count >= 1 {
+                self.head = (self.head + 1) % 3;
+            }
+            self.count = self.count.saturating_add(1);
+        } else if self.count == 0 {
+            self.count = 1;
+        }
+        self.slots[self.head]
+    }
+
+    fn active_slots(&self) -> (usize, usize, usize, bool) {
+        let curr = self.slots[self.head];
+        if self.count <= 1 {
+            (curr, curr, curr, false)
+        } else if self.count == 2 {
+            let prev1 = self.slots[(self.head + 2) % 3];
+            (curr, prev1, prev1, false)
+        } else {
+            let prev1 = self.slots[(self.head + 2) % 3];
+            let prev2 = self.slots[(self.head + 1) % 3];
+            (curr, prev1, prev2, true)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OverlayDrawCmd {
+    texture_id: egui::TextureId,
+    scissor: [i32; 4],
+    first_index: usize,
+    index_count: i32,
+}
+
+fn intersect_scissor_rects(a: [i32; 4], b: [i32; 4]) -> Option<[i32; 4]> {
+    let x0 = a[0].max(b[0]);
+    let y0 = a[1].max(b[1]);
+    let x1 = a[0].saturating_add(a[2]).min(b[0].saturating_add(b[2]));
+    let y1 = a[1].saturating_add(a[3]).min(b[1].saturating_add(b[3]));
+    if x1 > x0 && y1 > y0 {
+        Some([x0, y0, x1 - x0, y1 - y0])
+    } else {
+        None
+    }
+}
+
+fn check_and_record_mipmap(
+    last_mipmapped: &mut Option<(glow::Texture, i64, (u32, u32))>,
+    generated_this_paint: &mut bool,
+    tex: glow::Texture,
+    source_frame_id: i64,
+    res: (u32, u32),
+) -> bool {
+    if source_frame_id > 0 {
+        let key = (tex, source_frame_id, res);
+        if *last_mipmapped == Some(key) {
+            return false;
+        }
+        *last_mipmapped = Some(key);
+        *generated_this_paint = true;
+        true
+    } else {
+        if *generated_this_paint {
+            return false;
+        }
+        *generated_this_paint = true;
+        *last_mipmapped = None;
+        true
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_preprocess_cache_sig(
+    raw_frame: Option<&RawFrame>,
+    fallback_texture: Option<glow::Texture>,
+    fallback_captured_at: Option<i64>,
+    resolution: (u32, u32),
+    effective_res: (u32, u32),
+    scaler_filter: u8,
+    allow_srgb_passthrough_fastpath: bool,
+    scan_and_color: [u32; 6],
+    deinterlace_enabled: bool,
+    deinterlace_mode: u8,
+    deinterlace_params: [u32; 4],
+    median_enabled: bool,
+    median_mix: u32,
+    fft_enabled: bool,
+    fft_thresholds: [u32; 2],
+    fft_gen: u64,
+) -> Option<PreprocessCacheSig> {
+    let source = if let Some(f) = raw_frame {
+        if f.captured_at > 0 {
+            PreprocessSourceSig::Raw {
+                captured_at: f.captured_at,
+            }
+        } else {
+            return None;
+        }
+    } else if let (Some(tex), Some(captured_at)) = (fallback_texture, fallback_captured_at) {
+        if captured_at > 0 {
+            PreprocessSourceSig::Fallback { tex, captured_at }
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+
+    Some(PreprocessCacheSig {
+        source,
+        resolution,
+        effective_res,
+        scaler_filter,
+        allow_srgb_passthrough_fastpath,
+        scan_and_color,
+        deinterlace_enabled,
+        deinterlace_mode,
+        deinterlace_params,
+        median_enabled,
+        median_mix,
+        fft_enabled,
+        fft_thresholds,
+        fft_gen,
+    })
+}
+
+fn assemble_overlay_batch(
+    primitive_groups: &[&[egui::ClippedPrimitive]],
+    widget_rect: egui::Rect,
+    output_size: (f32, f32),
+    clip_limit: Option<[i32; 4]>,
+    vertices_out: &mut Vec<egui::epaint::Vertex>,
+    indices_out: &mut Vec<u32>,
+    draws_out: &mut Vec<OverlayDrawCmd>,
+) {
+    vertices_out.clear();
+    indices_out.clear();
+    draws_out.clear();
+
+    if widget_rect.width() <= 0.0 || widget_rect.height() <= 0.0 {
+        return;
+    }
+
+    let ppp = output_size.0 / widget_rect.width();
+    let out_w = output_size.0 as i32;
+    let out_h = output_size.1 as i32;
+
+    for primitives in primitive_groups {
+        for primitive in *primitives {
+            if let egui::epaint::Primitive::Mesh(mesh) = &primitive.primitive {
+                if mesh.vertices.is_empty() || mesh.indices.is_empty() {
+                    continue;
+                }
+
+                let clip_rect = primitive.clip_rect;
+                let clip_min_x = ((clip_rect.min.x - widget_rect.min.x) * ppp).round() as i32;
+                let clip_min_y = ((clip_rect.min.y - widget_rect.min.y) * ppp).round() as i32;
+                let clip_max_x = ((clip_rect.max.x - widget_rect.min.x) * ppp).round() as i32;
+                let clip_max_y = ((clip_rect.max.y - widget_rect.min.y) * ppp).round() as i32;
+
+                let clip_min_x = clip_min_x.clamp(0, out_w);
+                let clip_min_y = clip_min_y.clamp(0, out_h);
+                let clip_max_x = clip_max_x.clamp(clip_min_x, out_w);
+                let clip_max_y = clip_max_y.clamp(clip_min_y, out_h);
+
+                let scissor_w = clip_max_x - clip_min_x;
+                let scissor_h = clip_max_y - clip_min_y;
+                if scissor_w <= 0 || scissor_h <= 0 {
+                    continue;
+                }
+
+                let scissor_y = out_h - clip_max_y;
+                let raw_scissor = [clip_min_x, scissor_y, scissor_w, scissor_h];
+                let Some(scissor) = (match clip_limit {
+                    Some(limit) => intersect_scissor_rects(raw_scissor, limit),
+                    None => Some(raw_scissor),
+                }) else {
+                    continue;
+                };
+
+                let base_vertex = vertices_out.len() as u32;
+                let first_index = indices_out.len();
+                let index_count = mesh.indices.len() as i32;
+
+                vertices_out.extend_from_slice(&mesh.vertices);
+                indices_out.extend(mesh.indices.iter().map(|&idx| idx + base_vertex));
+
+                if let Some(last) = draws_out.last_mut() {
+                    if last.texture_id == mesh.texture_id && last.scissor == scissor {
+                        last.index_count += index_count;
+                        continue;
+                    }
+                }
+
+                draws_out.push(OverlayDrawCmd {
+                    texture_id: mesh.texture_id,
+                    scissor,
+                    first_index,
+                    index_count,
+                });
+            }
+        }
+    }
 }
 
 pub fn read_framebuffer_pixels_raw(
@@ -376,10 +648,9 @@ pub fn read_framebuffer_pixels_raw(
 
 fn intermediate_texture_internal_format(pass_index: usize) -> u32 {
     match pass_index {
-        // These passes store linear RGB that is later sampled by another shader before
-        // the final linear->sRGB presentation step, so RGBA8 causes visible
-        // dark-area quantization. Keep them in half-float instead.
-        0 | 1 | 2 | 4..=6 => glow::RGBA16F,
+        // All 6 active intermediate passes store linear RGB sampled before final
+        // linear->sRGB presentation; keep them in half-float to avoid dark-area banding.
+        0..NUM_INTERMEDIATE_PASSES => glow::RGBA16F,
         _ => glow::RGBA8,
     }
 }
@@ -394,11 +665,11 @@ fn pass_texture_dimensions(
     effective_size: (u32, u32),
 ) -> (u32, u32) {
     match pass_index {
-        // Pass 4 is the low-scale pixelate subrender. The final pass samples it
+        // PASS_PIXELATE is the low-scale pixelate subrender. The final pass samples it
         // back to the output surface, preserving the existing shader order.
-        4 => pixelate_subrender_size(effective_size.0, effective_size.1),
-        // History (0: t-1, 2: t-2), Deinterlace (1), Median (5), and YUV (6) happen before any upscaling.
-        0 | 1 | 2 | 5 | 6 => source_size,
+        PASS_PIXELATE => pixelate_subrender_size(effective_size.0, effective_size.1),
+        // History (0: t-1, 2: t-2), Deinterlace (1), Median (4), and Input (5) happen before any upscaling.
+        PASS_HIST_1 | PASS_DEINTERLACE | PASS_HIST_2 | PASS_MEDIAN | PASS_INPUT => source_size,
         _ => effective_size,
     }
 }
@@ -877,10 +1148,8 @@ impl CrtFilterRenderer {
                 gl.create_framebuffer().unwrap(),
                 gl.create_framebuffer().unwrap(),
                 gl.create_framebuffer().unwrap(),
-                gl.create_framebuffer().unwrap(),
             ];
             let pass_textures = [
-                gl.create_texture().unwrap(),
                 gl.create_texture().unwrap(),
                 gl.create_texture().unwrap(),
                 gl.create_texture().unwrap(),
@@ -948,6 +1217,19 @@ impl CrtFilterRenderer {
             let popup_vao = gl.create_vertex_array().expect("Cannot create popup VAO");
             let popup_vbo = gl.create_buffer().unwrap();
             let popup_ebo = gl.create_buffer().unwrap();
+            gl.bind_vertex_array(Some(popup_vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(popup_vbo));
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(popup_ebo));
+            let popup_stride = std::mem::size_of::<egui::epaint::Vertex>() as i32;
+            gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, popup_stride, 0);
+            gl.enable_vertex_attrib_array(0);
+            gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, popup_stride, 8);
+            gl.enable_vertex_attrib_array(1);
+            gl.vertex_attrib_pointer_f32(2, 4, glow::UNSIGNED_BYTE, false, popup_stride, 16);
+            gl.enable_vertex_attrib_array(2);
+            gl.bind_vertex_array(None);
+            gl.bind_buffer(glow::ARRAY_BUFFER, None);
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, None);
 
             let mut bezel_img =
                 image::load_from_memory(include_bytes!("../../../assets/nec_pc98_bezel.png"))
@@ -1041,7 +1323,12 @@ impl CrtFilterRenderer {
                 retro_ambient_glow_loc,
                 retro_dark_mode_loc,
                 last_video_texture: None,
-                mipmap_generated_this_frame: std::sync::atomic::AtomicBool::new(false),
+                last_video_texture_res: (0, 0),
+                last_video_tex_base_filter: glow::LINEAR as i32,
+                current_source_frame_id: 0,
+                last_mipmapped_frame: std::cell::Cell::new(None),
+                mipmap_generated_this_paint: std::cell::Cell::new(false),
+                last_pixelate_key: None,
                 pixelate_prog,
                 final_prog,
                 yuv_planar_prog,
@@ -1170,6 +1457,9 @@ impl CrtFilterRenderer {
                 popup_vao,
                 popup_vbo,
                 popup_ebo,
+                overlay_vertices_scratch: Vec::new(),
+                overlay_indices_scratch: Vec::new(),
+                overlay_draws_scratch: Vec::new(),
                 popup_screen_size_loc,
                 popup_offset_loc,
                 popup_sampler_loc,
@@ -1214,10 +1504,16 @@ impl CrtFilterRenderer {
                 last_fft_enabled: false,
                 last_fft_thresholds: (0.0, 0.0),
                 last_fft_mask_gen: 0,
+                last_fft_spectrum_rendered: false,
                 last_input_tex: None,
+                last_input_slot: None,
+                last_source_kind: None,
+                last_fallback_tex: None,
                 last_preprocess_sig: None,
                 last_preprocess_out: None,
-                history_count: 0,
+                history_ring: DeinterlaceHistoryRing::new(HISTORY_SLOTS),
+                fallback_captured_at_next_paint: None,
+                render_fft_spectrum_next_paint: false,
                 capture_ocr_next_paint: false,
                 capture_ocr_async_next_paint: false,
                 ocr_recycled_buffer: None,
@@ -1233,13 +1529,15 @@ impl CrtFilterRenderer {
     }
 
     /// Private helper to decode a raw YUV frame into an RGB texture and optionally apply the FFT filter.
-    /// Returns the texture containing the result (usually self.pass_textures[6] or the FFT output).
+    /// Returns the texture containing the result (`self.pass_textures[target_slot]` or the FFT output).
     #[allow(clippy::too_many_arguments)]
     unsafe fn prepare_input_texture(
         &mut self,
         gl: &glow::Context,
         frame: &RawFrame,
         is_new_frame: bool,
+        target_slot: usize,
+        deinterlace_filter_enabled: bool,
         target_width: u32,
         target_height: u32,
         overscan_x: f32,
@@ -1251,12 +1549,26 @@ impl CrtFilterRenderer {
         fft_filter: Option<&Arc<Mutex<FftFilter>>>,
         fft_mask_threshold: f32,
         fft_black_threshold: f32,
+        render_fft_spectrum: bool,
     ) -> glow::Texture {
         let scan_tuple = (overscan_x, overscan_y, underscan_x, underscan_y);
         let color_adj_tuple = (brightness, gamma);
+        let fft_params_changed = if let Some(fft_arc) = fft_filter {
+            let fft = fft_arc.lock().unwrap();
+            let mask_gen = fft.mask_generation();
+            let thresholds = (fft_mask_threshold, fft_black_threshold);
+            !self.last_fft_enabled
+                || thresholds != self.last_fft_thresholds
+                || mask_gen != self.last_fft_mask_gen
+                || (render_fft_spectrum && !self.last_fft_spectrum_rendered)
+        } else {
+            false
+        };
         let need_yuv_upload = is_new_frame
-            || self.history_count == 0
+            || self.last_input_slot != Some(target_slot)
             || self.last_input_tex.is_none()
+            || (self.last_fft_enabled && fft_filter.is_none())
+            || (self.last_fft_enabled && deinterlace_filter_enabled && fft_params_changed)
             || frame.width != self.last_frame_size.0
             || frame.height != self.last_frame_size.1
             || Some(frame.format) != self.last_frame_format
@@ -1265,7 +1577,7 @@ impl CrtFilterRenderer {
             || color_adj_tuple != self.last_input_color_adj;
 
         if need_yuv_upload {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[6]));
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[target_slot]));
             gl.viewport(0, 0, target_width as i32, target_height as i32);
             gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
             gl.clear(glow::COLOR_BUFFER_BIT);
@@ -1296,7 +1608,7 @@ impl CrtFilterRenderer {
                         expected_len,
                         frame.data.len()
                     );
-                    return self.pass_textures[6];
+                    return self.pass_textures[target_slot];
                 }
 
                 let y_data = &frame.data[0..y_end];
@@ -1431,7 +1743,7 @@ impl CrtFilterRenderer {
                         expected_len,
                         frame.data.len()
                     );
-                    return self.pass_textures[6];
+                    return self.pass_textures[target_slot];
                 }
 
                 gl.use_program(Some(self.yuyv_packed_prog));
@@ -1494,7 +1806,7 @@ impl CrtFilterRenderer {
                         expected_len,
                         frame.data.len()
                     );
-                    return self.pass_textures[6];
+                    return self.pass_textures[target_slot];
                 }
 
                 gl.use_program(Some(self.linearize_prog));
@@ -1565,23 +1877,21 @@ impl CrtFilterRenderer {
 
             if rendered_input {
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                self.last_input_slot = Some(target_slot);
                 self.last_input_color_range = Some(frame.color_range);
                 self.last_input_scan = scan_tuple;
                 self.last_input_color_adj = color_adj_tuple;
             }
         }
 
-        let mut tex = self.pass_textures[6];
+        let mut tex = self.pass_textures[target_slot];
 
         // Apply FFT filter to raw frame data (at capture card resolution, before any scaling)
         if let Some(fft_arc) = fft_filter {
             let mut fft = fft_arc.lock().unwrap();
             let mask_gen = fft.mask_generation();
             let thresholds = (fft_mask_threshold, fft_black_threshold);
-            let need_fft = need_yuv_upload
-                || !self.last_fft_enabled
-                || thresholds != self.last_fft_thresholds
-                || mask_gen != self.last_fft_mask_gen;
+            let need_fft = need_yuv_upload || fft_params_changed;
 
             if need_fft {
                 tex = fft.apply(
@@ -1591,6 +1901,7 @@ impl CrtFilterRenderer {
                     frame.height,
                     fft_mask_threshold,
                     fft_black_threshold,
+                    render_fft_spectrum,
                 );
 
                 // Set filtering mode dynamically based on current params.scaler_filter
@@ -1608,35 +1919,47 @@ impl CrtFilterRenderer {
 
                 // Restore our VAO after FFT used its own
                 gl.bind_vertex_array(Some(self.vertex_array));
+
+                // If deinterlace history rotation is active, persist the post-FFT frame into
+                // `target_slot` so future frames read the FFT-filtered `prev1`/`prev2` slot.
+                if deinterlace_filter_enabled && tex != self.pass_textures[target_slot] {
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[target_slot]));
+                    gl.viewport(0, 0, target_width as i32, target_height as i32);
+                    gl.use_program(Some(self.blit_prog));
+                    gl.active_texture(glow::TEXTURE0);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                    gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    gl.bind_texture(glow::TEXTURE_2D, None);
+                    tex = self.pass_textures[target_slot];
+                }
+
                 self.last_fft_enabled = true;
                 self.last_fft_thresholds = thresholds;
                 self.last_fft_mask_gen = mask_gen;
+                self.last_fft_spectrum_rendered = render_fft_spectrum;
             } else if let Some(cached) = self.last_input_tex {
                 tex = cached;
             }
         } else {
             self.last_fft_enabled = false;
+            self.last_fft_spectrum_rendered = false;
         }
 
         self.last_input_tex = Some(tex);
         tex
     }
 
-    /// Linearizes an incoming sRGB framebuffer texture (e.g. from Gamescope DMA-BUF)
-    /// into self.pass_textures[6] (half-float RGBA16F) so that all CRT filters,
-    /// deinterlace, and passthrough presentation shaders receive linear RGB.
-    pub unsafe fn linearize_fallback_texture(
+    unsafe fn linearize_fallback_texture_into(
         &mut self,
         gl: &glow::Context,
         fallback_texture: glow::Texture,
+        target_slot: usize,
         target_width: u32,
         target_height: u32,
         brightness: f32,
         gamma: f32,
     ) -> glow::Texture {
-        self.last_frame_captured_at = -1;
-        self.last_input_tex = None;
-        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[6]));
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[target_slot]));
         gl.viewport(0, 0, target_width as i32, target_height as i32);
         gl.bind_vertex_array(Some(self.vertex_array));
         gl.use_program(Some(self.linearize_prog));
@@ -1659,8 +1982,39 @@ impl CrtFilterRenderer {
         gl.bind_texture(glow::TEXTURE_2D, Some(fallback_texture));
         gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         gl.bind_texture(glow::TEXTURE_2D, None);
+        self.pass_textures[target_slot]
+    }
+
+    /// Linearizes an incoming sRGB framebuffer texture (e.g. from Gamescope DMA-BUF)
+    /// into `self.pass_textures[PASS_INPUT]` (half-float RGBA16F) so that all CRT filters,
+    /// deinterlace, and passthrough presentation shaders receive linear RGB.
+    #[allow(dead_code)]
+    pub unsafe fn linearize_fallback_texture(
+        &mut self,
+        gl: &glow::Context,
+        fallback_texture: glow::Texture,
+        target_width: u32,
+        target_height: u32,
+        brightness: f32,
+        gamma: f32,
+    ) -> glow::Texture {
+        self.history_ring.reset();
+        self.last_frame_captured_at = -1;
+        self.last_input_tex = None;
+        self.last_input_slot = None;
+        self.last_source_kind = Some(InputSourceKind::Fallback);
+        self.last_fallback_tex = Some(fallback_texture);
+        let tex = self.linearize_fallback_texture_into(
+            gl,
+            fallback_texture,
+            PASS_INPUT,
+            target_width,
+            target_height,
+            brightness,
+            gamma,
+        );
         gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-        self.pass_textures[6]
+        tex
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1668,6 +2022,7 @@ impl CrtFilterRenderer {
         &mut self,
         gl: &glow::Context,
         raw_frame: Option<&RawFrame>,
+        deinterlace_filter_enabled: bool,
         target_width: u32,
         target_height: u32,
         overscan_x: f32,
@@ -1679,52 +2034,29 @@ impl CrtFilterRenderer {
         fft_filter: Option<&Arc<Mutex<FftFilter>>>,
         fft_mask_threshold: f32,
         fft_black_threshold: f32,
+        render_fft_spectrum: bool,
     ) -> Option<glow::Texture> {
         let frame = raw_frame?;
-        let is_new_frame = frame.captured_at != self.last_frame_captured_at;
-
-        if is_new_frame {
-            if self.history_count >= 1 {
-                // Shift history: pass_textures[0] (t-1) -> pass_textures[2] (t-2)
-                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.fbos[0]));
-                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.fbos[2]));
-                gl.blit_framebuffer(
-                    0,
-                    0,
-                    target_width as i32,
-                    target_height as i32,
-                    0,
-                    0,
-                    target_width as i32,
-                    target_height as i32,
-                    glow::COLOR_BUFFER_BIT,
-                    glow::NEAREST,
-                );
-
-                // Shift history: pass_textures[6] (t) -> pass_textures[0] (t-1)
-                // pass_textures[6] currently holds the decoded frame from the previous arrival
-                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.fbos[6]));
-                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.fbos[0]));
-                gl.blit_framebuffer(
-                    0,
-                    0,
-                    target_width as i32,
-                    target_height as i32,
-                    0,
-                    0,
-                    target_width as i32,
-                    target_height as i32,
-                    glow::COLOR_BUFFER_BIT,
-                    glow::NEAREST,
-                );
-                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            }
+        if self.last_source_kind != Some(InputSourceKind::Raw) {
+            self.history_ring.reset();
+            self.last_frame_captured_at = -1;
+            self.last_input_tex = None;
+            self.last_input_slot = None;
+            self.last_fallback_tex = None;
+            self.last_source_kind = Some(InputSourceKind::Raw);
         }
+
+        let is_new_frame = frame.captured_at != self.last_frame_captured_at;
+        let target_slot = self
+            .history_ring
+            .select_write_slot(deinterlace_filter_enabled, is_new_frame);
 
         let tex = self.prepare_input_texture(
             gl,
             frame,
             is_new_frame,
+            target_slot,
+            deinterlace_filter_enabled,
             target_width,
             target_height,
             overscan_x,
@@ -1736,29 +2068,11 @@ impl CrtFilterRenderer {
             fft_filter,
             fft_mask_threshold,
             fft_black_threshold,
+            render_fft_spectrum,
         );
 
         if is_new_frame {
-            if self.history_count == 0 {
-                // First frame ever: seed history 1 with the initial frame so it's not uninitialized
-                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.fbos[6]));
-                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.fbos[0]));
-                gl.blit_framebuffer(
-                    0,
-                    0,
-                    target_width as i32,
-                    target_height as i32,
-                    0,
-                    0,
-                    target_width as i32,
-                    target_height as i32,
-                    glow::COLOR_BUFFER_BIT,
-                    glow::NEAREST,
-                );
-                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            }
             self.last_frame_captured_at = frame.captured_at;
-            self.history_count = self.history_count.saturating_add(1);
         }
 
         gl.viewport(0, 0, target_width as i32, target_height as i32);
@@ -1946,6 +2260,7 @@ impl CrtFilterRenderer {
         gl: &glow::Context,
         raw_frame: Option<&RawFrame>,
         fallback_texture: Option<glow::Texture>,
+        fallback_captured_at: Option<i64>,
         resolution: (u32, u32),
         output_size: (f32, f32),
         scaler_filter: u8,
@@ -1966,6 +2281,7 @@ impl CrtFilterRenderer {
         fft_filter: Option<&Arc<Mutex<FftFilter>>>,
         fft_mask_threshold: f32,
         fft_black_threshold: f32,
+        render_fft_spectrum: bool,
         allow_srgb_passthrough_fastpath: bool,
     ) -> (glow::Texture, (u32, u32), bool) {
         let mut video_texture = fallback_texture;
@@ -2019,53 +2335,70 @@ impl CrtFilterRenderer {
             self.last_pass_res = effective_res;
             self.last_preprocess_sig = None;
             self.last_preprocess_out = None;
+            self.last_mipmapped_frame.set(None);
+            self.last_pixelate_key = None;
         }
 
-        let current_sig = raw_frame.filter(|f| f.captured_at > 0).map(|f| {
-            let fft_gen = fft_filter
+        let fft_gen = if raw_frame.is_some() {
+            fft_filter
                 .and_then(|arc| arc.lock().ok().map(|fft| fft.mask_generation()))
-                .unwrap_or(0);
-            PreprocessCacheSig {
-                captured_at: f.captured_at,
-                resolution,
-                effective_res,
-                scaler_filter,
-                scan_and_color: [
-                    overscan_x.to_bits(),
-                    overscan_y.to_bits(),
-                    underscan_x.to_bits(),
-                    underscan_y.to_bits(),
-                    brightness.to_bits(),
-                    gamma.to_bits(),
-                ],
-                deinterlace_enabled: deinterlace_filter_enabled,
-                deinterlace_mode,
-                deinterlace_params: [
-                    deinterlace_blend.to_bits(),
-                    deinterlace_motion_threshold.to_bits(),
-                    deinterlace_line_spacing.to_bits(),
-                    deinterlace_spatial_mix.to_bits(),
-                ],
-                median_enabled: median_filter_enabled,
-                median_mix: median_mix.to_bits(),
-                fft_enabled: fft_filter.is_some(),
-                fft_thresholds: [fft_mask_threshold.to_bits(), fft_black_threshold.to_bits()],
-                fft_gen,
-            }
-        });
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let current_sig = build_preprocess_cache_sig(
+            raw_frame,
+            fallback_texture,
+            fallback_captured_at,
+            resolution,
+            effective_res,
+            scaler_filter,
+            allow_srgb_passthrough_fastpath,
+            [
+                overscan_x.to_bits(),
+                overscan_y.to_bits(),
+                underscan_x.to_bits(),
+                underscan_y.to_bits(),
+                brightness.to_bits(),
+                gamma.to_bits(),
+            ],
+            deinterlace_filter_enabled,
+            deinterlace_mode,
+            [
+                deinterlace_blend.to_bits(),
+                deinterlace_motion_threshold.to_bits(),
+                deinterlace_line_spacing.to_bits(),
+                deinterlace_spatial_mix.to_bits(),
+            ],
+            median_filter_enabled,
+            median_mix.to_bits(),
+            raw_frame.is_some() && fft_filter.is_some(),
+            [fft_mask_threshold.to_bits(), fft_black_threshold.to_bits()],
+            fft_gen,
+        );
         gl.bind_vertex_array(Some(self.vertex_array));
         gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
 
-        if let (Some(sig), Some(cached_out)) = (current_sig, self.last_preprocess_out) {
-            if self.last_preprocess_sig == Some(sig) {
-                return cached_out;
+        let need_spectrum_refresh = raw_frame.is_some()
+            && fft_filter.is_some()
+            && render_fft_spectrum
+            && !self.last_fft_spectrum_rendered;
+        if !need_spectrum_refresh {
+            if let (Some(sig), Some(cached_out)) = (current_sig, self.last_preprocess_out) {
+                if self.last_preprocess_sig == Some(sig) {
+                    return cached_out;
+                }
             }
         }
+
+        self.last_mipmapped_frame.set(None);
+        self.last_pixelate_key = None;
 
         let mut input_is_srgb = false;
         if let Some(tex) = self.update_frame_history_and_prepare_input(
             gl,
             raw_frame,
+            deinterlace_filter_enabled,
             resolution.0,
             resolution.1,
             overscan_x,
@@ -2077,6 +2410,7 @@ impl CrtFilterRenderer {
             fft_filter,
             fft_mask_threshold,
             fft_black_threshold,
+            render_fft_spectrum,
         ) {
             video_texture = Some(tex);
         } else if let Some(tex) = fallback_texture {
@@ -2087,17 +2421,47 @@ impl CrtFilterRenderer {
                 && (brightness - 1.0).abs() <= 0.0001
                 && (gamma - 1.0).abs() <= 0.0001
             {
+                self.history_ring.reset();
+                self.last_source_kind = Some(InputSourceKind::Fallback);
+                self.last_fallback_tex = Some(tex);
+                self.last_input_slot = None;
+                self.last_input_tex = None;
+                self.last_frame_captured_at =
+                    fallback_captured_at.filter(|&ts| ts > 0).unwrap_or(-1);
                 video_texture = Some(tex);
                 input_is_srgb = true;
             } else {
-                video_texture = Some(self.linearize_fallback_texture(
+                if self.last_source_kind != Some(InputSourceKind::Fallback) {
+                    self.history_ring.reset();
+                    self.last_frame_captured_at = -1;
+                    self.last_input_slot = None;
+                    self.last_input_tex = None;
+                    self.last_fallback_tex = None;
+                    self.last_source_kind = Some(InputSourceKind::Fallback);
+                }
+                let is_new_fallback_frame = match fallback_captured_at.filter(|&ts| ts > 0) {
+                    Some(ts) => {
+                        ts != self.last_frame_captured_at || self.last_fallback_tex != Some(tex)
+                    }
+                    None => true,
+                };
+                let target_slot = self
+                    .history_ring
+                    .select_write_slot(deinterlace_filter_enabled, is_new_fallback_frame);
+                video_texture = Some(self.linearize_fallback_texture_into(
                     gl,
                     tex,
+                    target_slot,
                     resolution.0,
                     resolution.1,
                     brightness,
                     gamma,
                 ));
+                self.last_fallback_tex = Some(tex);
+                self.last_input_slot = Some(target_slot);
+                self.last_input_tex = None;
+                self.last_frame_captured_at =
+                    fallback_captured_at.filter(|&ts| ts > 0).unwrap_or(-1);
             }
         }
 
@@ -2107,7 +2471,19 @@ impl CrtFilterRenderer {
 
         // Apply Deinterlace filter before median / upscaling
         if deinterlace_filter_enabled {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[1]));
+            let (_, prev1_slot, prev2_slot, has_prev2) = self.history_ring.active_slots();
+            let prev1_tex = if self.history_ring.count >= 2 {
+                self.pass_textures[prev1_slot]
+            } else {
+                current_video_texture
+            };
+            let prev2_tex = if has_prev2 {
+                self.pass_textures[prev2_slot]
+            } else {
+                prev1_tex
+            };
+
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[PASS_DEINTERLACE]));
             gl.viewport(0, 0, resolution.0 as i32, resolution.1 as i32);
             gl.use_program(Some(self.deinterlace_prog));
             if let Some(loc) = &self.deinterlace_current_frame_loc {
@@ -2120,7 +2496,7 @@ impl CrtFilterRenderer {
                 gl.uniform_1_i32(Some(loc), 2);
             }
             if let Some(loc) = &self.deinterlace_has_prev2_loc {
-                gl.uniform_1_i32(Some(loc), if self.history_count >= 2 { 1 } else { 0 });
+                gl.uniform_1_i32(Some(loc), if has_prev2 { 1 } else { 0 });
             }
             gl.uniform_1_i32(Some(&self.deinterlace_mode_loc), deinterlace_mode as i32);
             gl.uniform_1_f32(Some(&self.deinterlace_blend_loc), deinterlace_blend);
@@ -2140,9 +2516,9 @@ impl CrtFilterRenderer {
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(current_video_texture));
             gl.active_texture(glow::TEXTURE1);
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[0]));
+            gl.bind_texture(glow::TEXTURE_2D, Some(prev1_tex));
             gl.active_texture(glow::TEXTURE2);
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.pass_textures[2]));
+            gl.bind_texture(glow::TEXTURE_2D, Some(prev2_tex));
 
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
@@ -2152,19 +2528,19 @@ impl CrtFilterRenderer {
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.active_texture(glow::TEXTURE0);
 
-            current_video_texture = self.pass_textures[1];
+            current_video_texture = self.pass_textures[PASS_DEINTERLACE];
         }
 
         // Apply Median filter before upscaling
         if median_filter_enabled {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[5]));
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[PASS_MEDIAN]));
             gl.viewport(0, 0, current_res.0 as i32, current_res.1 as i32);
             gl.use_program(Some(self.median_prog));
             gl.uniform_1_f32(Some(&self.median_mix_loc), median_mix);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(current_video_texture));
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-            current_video_texture = self.pass_textures[5];
+            current_video_texture = self.pass_textures[PASS_MEDIAN];
         }
 
         if is_anime4k {
@@ -2205,15 +2581,46 @@ impl CrtFilterRenderer {
         out
     }
 
+    unsafe fn capture_caller_gl_state(
+        gl: &glow::Context,
+    ) -> (
+        Option<glow::Framebuffer>,
+        Option<glow::VertexArray>,
+        bool,
+        [i32; 4],
+        bool,
+    ) {
+        let caller_fbo = NonZero::new(gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING) as u32)
+            .map(glow::NativeFramebuffer);
+        let old_vao = NonZero::new(gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING) as u32)
+            .map(glow::NativeVertexArray);
+        let scissor_enabled = gl.is_enabled(glow::SCISSOR_TEST);
+        let mut caller_scissor = [0i32; 4];
+        if scissor_enabled {
+            gl.get_parameter_i32_slice(glow::SCISSOR_BOX, &mut caller_scissor);
+            gl.disable(glow::SCISSOR_TEST);
+        }
+        let blend_enabled = gl.is_enabled(glow::BLEND);
+        if blend_enabled {
+            gl.disable(glow::BLEND);
+        }
+        (
+            caller_fbo,
+            old_vao,
+            scissor_enabled,
+            caller_scissor,
+            blend_enabled,
+        )
+    }
+
     unsafe fn prepare_postprocess_targets(
         &mut self,
         gl: &glow::Context,
         output_size: (f32, f32),
+        caller_fbo: Option<glow::Framebuffer>,
         cathode_params: Option<&CathodeInterferenceShaderParams>,
         audio_reactive_params: Option<&AudioReactiveShaderParams>,
         glass_params: Option<&GlassShaderParams>,
-        skip_popup: bool,
-        software_mouse_pos: Option<(f32, f32)>,
     ) -> (Option<glow::Framebuffer>, bool) {
         let run_cathode = cathode_params
             .map(|c| c.enabled && c.intensity > 0.001)
@@ -2224,21 +2631,16 @@ impl CrtFilterRenderer {
         let run_glass = glass_params
             .map(|g| g.enabled && g.intensity > 0.001)
             .unwrap_or(false);
-        let has_popup = !skip_popup && !self.popup_primitives.is_empty();
-        let has_comments = !self.comment_primitives.is_empty();
-        let has_alerts = !self.alert_primitives.is_empty();
-        let has_overlay = has_popup || has_comments || has_alerts;
-        let has_mouse = software_mouse_pos.is_some();
-        let has_post = run_cathode || run_audio_reactive || run_glass || has_overlay || has_mouse;
+        let needs_post_fbo = run_cathode || run_audio_reactive || run_glass;
 
-        let upstream_target_fbo = if has_post {
+        let upstream_target_fbo = if needs_post_fbo {
             self.setup_post_framebuffer(gl, output_size.0 as u32, output_size.1 as u32);
             Some(self.post_fbos[0])
         } else {
-            None
+            caller_fbo
         };
 
-        (upstream_target_fbo, has_post)
+        (upstream_target_fbo, needs_post_fbo)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2248,7 +2650,6 @@ impl CrtFilterRenderer {
         painter: &egui_glow::Painter,
         widget_rect: egui::Rect,
         output_size: (f32, f32),
-        final_input_texture: glow::Texture,
         final_input_res: (u32, u32),
         horizontal_stretch: f32,
         s_mask: f32,
@@ -2261,9 +2662,12 @@ impl CrtFilterRenderer {
         skip_popup: bool,
         software_mouse_pos: Option<(f32, f32)>,
         software_mouse_clip: Option<[i32; 4]>,
+        caller_fbo: Option<glow::Framebuffer>,
+        needs_post_fbo: bool,
         scissor_enabled: bool,
+        caller_scissor: [i32; 4],
         blend_enabled: bool,
-        old_vbo: i32,
+        old_vao: Option<glow::VertexArray>,
     ) {
         let run_cathode = cathode_params
             .map(|c| c.enabled && c.intensity > 0.001)
@@ -2278,69 +2682,113 @@ impl CrtFilterRenderer {
         let has_comments = !self.comment_primitives.is_empty();
         let has_alerts = !self.alert_primitives.is_empty();
         let has_overlay = has_popup || has_comments || has_alerts;
-        let has_mouse = software_mouse_pos.is_some();
 
-        // Niconico comments sit on the CRT image (below the dictionary
-        // popup) and are kept in mining captures, unlike the popup.
-        if has_comments {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
-            gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
-            self.draw_overlay_primitives(
-                gl,
-                painter,
-                &self.comment_primitives,
-                output_size,
-                widget_rect,
-                s_mask,
-                scan_str,
-                b_boost,
-            );
-            self.comment_primitives.clear();
-        }
+        // Ensure no stale scissor remains enabled if an upstream pass turned it on.
+        gl.disable(glow::SCISSOR_TEST);
 
-        if has_alerts {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
-            gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
-            self.draw_overlay_primitives(
-                gl,
-                painter,
-                &self.alert_primitives,
-                output_size,
-                widget_rect,
-                s_mask,
-                scan_str,
-                b_boost,
-            );
-            self.alert_primitives.clear();
-        }
+        let overlay_target_fbo = if needs_post_fbo {
+            Some(self.post_fbos[0])
+        } else {
+            caller_fbo
+        };
+        let overlay_clip_limit = if !needs_post_fbo && scissor_enabled {
+            Some(caller_scissor)
+        } else {
+            None
+        };
+        let mut scissor_dirty = false;
+        let mut blend_dirty = false;
 
-        if has_popup {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
-            gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
-            self.draw_popup_primitives(
-                gl,
-                painter,
-                output_size,
+        // Niconico comments and alerts sit on the CRT image (below the dictionary
+        // popup) and are kept in mining captures, unlike the popup. Batch all active
+        // overlay groups into one VBO upload and one EBO upload while preserving order.
+        if has_overlay {
+            let mut groups: [&[egui::ClippedPrimitive]; 3] = [&[], &[], &[]];
+            let mut group_count = 0;
+            if has_comments {
+                groups[group_count] = &self.comment_primitives;
+                group_count += 1;
+            }
+            if has_alerts {
+                groups[group_count] = &self.alert_primitives;
+                group_count += 1;
+            }
+            if has_popup {
+                groups[group_count] = &self.popup_primitives;
+                group_count += 1;
+            }
+
+            assemble_overlay_batch(
+                &groups[..group_count],
                 widget_rect,
-                s_mask,
-                scan_str,
-                b_boost,
+                output_size,
+                overlay_clip_limit,
+                &mut self.overlay_vertices_scratch,
+                &mut self.overlay_indices_scratch,
+                &mut self.overlay_draws_scratch,
             );
-            self.popup_primitives.clear();
+
+            if !self.overlay_draws_scratch.is_empty() {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, overlay_target_fbo);
+                gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+                self.flush_overlay_batch_gl(
+                    gl,
+                    painter,
+                    output_size,
+                    widget_rect,
+                    s_mask,
+                    scan_str,
+                    b_boost,
+                );
+                scissor_dirty = true;
+                blend_dirty = true;
+            }
+
+            if has_comments {
+                self.comment_primitives.clear();
+            }
+            if has_alerts {
+                self.alert_primitives.clear();
+            }
+            if has_popup {
+                self.popup_primitives.clear();
+            }
         }
 
         if let Some(mouse_pos) = software_mouse_pos {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.post_fbos[0]));
-            gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
-            self.draw_software_mouse(
-                gl,
-                mouse_pos,
-                output_size,
-                s_mask,
-                scan_str,
-                b_boost,
-                output_size.0 / widget_rect.width(),
-                software_mouse_clip,
+            let has_clip_constraint = software_mouse_clip.is_some() || overlay_clip_limit.is_some();
+            let effective_mouse_clip = match (software_mouse_clip, overlay_clip_limit) {
+                (Some(a), Some(b)) => intersect_scissor_rects(a, b),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+            if !has_clip_constraint || effective_mouse_clip.is_some() {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, overlay_target_fbo);
+                gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+                self.draw_software_mouse_internal(
+                    gl,
+                    mouse_pos,
+                    output_size,
+                    s_mask,
+                    scan_str,
+                    b_boost,
+                    output_size.0 / widget_rect.width(),
+                    effective_mouse_clip,
+                );
+                if effective_mouse_clip.is_some() {
+                    scissor_dirty = true;
+                }
+                blend_dirty = true;
+            }
+        }
+
+        if scissor_enabled && scissor_dirty {
+            gl.scissor(
+                caller_scissor[0],
+                caller_scissor[1],
+                caller_scissor[2],
+                caller_scissor[3],
             );
         }
 
@@ -2353,7 +2801,7 @@ impl CrtFilterRenderer {
             let target_fbo = if has_more_passes {
                 Some(self.post_fbos[1 - current_tex_idx])
             } else {
-                None
+                caller_fbo
             };
             let scissor_cathode = scissor_enabled && !has_more_passes;
             self.draw_cathode_pass(
@@ -2379,7 +2827,7 @@ impl CrtFilterRenderer {
             let target_fbo = if has_more_passes {
                 Some(self.post_fbos[1 - current_tex_idx])
             } else {
-                None
+                caller_fbo
             };
             let scissor_ar = scissor_enabled && !has_more_passes;
             self.draw_audio_reactive_pass(
@@ -2408,24 +2856,12 @@ impl CrtFilterRenderer {
                 final_input_res,
                 gp,
                 time,
-                None,
+                caller_fbo,
                 scissor_glass,
             );
         }
 
-        self.last_video_texture = Some(final_input_texture);
-        self.mipmap_generated_this_frame
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-
-        if !run_cathode && !run_audio_reactive && !run_glass && (has_overlay || has_mouse) {
-            self.blit_texture(
-                gl,
-                self.post_textures[0],
-                output_size,
-                None,
-                scissor_enabled,
-            );
-        }
+        self.mipmap_generated_this_paint.set(false);
 
         if scissor_enabled {
             gl.enable(glow::SCISSOR_TEST);
@@ -2433,19 +2869,21 @@ impl CrtFilterRenderer {
             gl.disable(glow::SCISSOR_TEST);
         }
 
+        if blend_dirty && blend_enabled {
+            gl.blend_func_separate(
+                glow::ONE,
+                glow::ONE_MINUS_SRC_ALPHA,
+                glow::ONE_MINUS_DST_ALPHA,
+                glow::ONE,
+            );
+        }
         if blend_enabled {
             gl.enable(glow::BLEND);
         } else {
             gl.disable(glow::BLEND);
         }
 
-        if old_vbo != 0 {
-            gl.bind_vertex_array(Some(glow::VertexArray::from(glow::NativeVertexArray(
-                NonZero::new(old_vbo as u32).unwrap(),
-            ))));
-        } else {
-            gl.bind_vertex_array(None);
-        }
+        gl.bind_vertex_array(old_vao);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2477,17 +2915,20 @@ impl CrtFilterRenderer {
         skip_popup: bool,
     ) -> RenderedArea {
         unsafe {
-            let old_vbo = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
-            let scissor_enabled = gl.is_enabled(glow::SCISSOR_TEST);
-            gl.disable(glow::SCISSOR_TEST);
-            let blend_enabled = gl.is_enabled(glow::BLEND);
-            gl.disable(glow::BLEND);
+            let (caller_fbo, old_vao, scissor_enabled, caller_scissor, blend_enabled) =
+                Self::capture_caller_gl_state(gl);
+
+            self.current_source_frame_id = raw_frame
+                .map(|f| f.captured_at)
+                .or(params.fallback_captured_at)
+                .unwrap_or(0);
 
             let allow_srgb_fastpath = !run_lottes && !run_halo && !run_beam && !run_pixelate;
             let (current_video_texture, current_res, input_is_srgb) = self.preprocess_video_chain(
                 gl,
                 raw_frame,
                 fallback_texture,
+                params.fallback_captured_at,
                 resolution,
                 output_size,
                 params.scaler_filter,
@@ -2508,6 +2949,7 @@ impl CrtFilterRenderer {
                 fft_filter,
                 fft_mask_threshold,
                 fft_black_threshold,
+                params.render_fft_spectrum,
                 allow_srgb_fastpath,
             );
 
@@ -2576,7 +3018,7 @@ impl CrtFilterRenderer {
                                 height: target_h,
                             },
                         );
-                        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                        gl.bind_framebuffer(glow::FRAMEBUFFER, caller_fbo);
                     }
                 }
             }
@@ -2616,7 +3058,7 @@ impl CrtFilterRenderer {
                     },
                 );
                 self.last_ocr_capture = read_framebuffer_pixels_raw(gl, clean_area);
-                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                gl.bind_framebuffer(glow::FRAMEBUFFER, caller_fbo);
             }
 
             let mut final_input_texture = current_video_texture;
@@ -2624,33 +3066,58 @@ impl CrtFilterRenderer {
 
             if run_pixelate {
                 let pixelate_res = pixelate_subrender_size(current_res.0, current_res.1);
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[4]));
-                gl.viewport(0, 0, pixelate_res.0 as i32, pixelate_res.1 as i32);
-                gl.use_program(Some(self.pixelate_prog));
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(current_video_texture));
-                gl.uniform_2_f32(
-                    Some(&self.p_pixelate_target_res_loc),
-                    pixelate_res.0 as f32,
-                    pixelate_res.1 as f32,
+                let pixelate_key = (
+                    current_video_texture,
+                    self.current_source_frame_id,
+                    pixelate_res,
                 );
-                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                final_input_texture = self.pass_textures[4];
+                let need_pixelate = self.current_source_frame_id <= 0
+                    || self.last_pixelate_key != Some(pixelate_key);
+                if need_pixelate {
+                    gl.bind_vertex_array(Some(self.vertex_array));
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[PASS_PIXELATE]));
+                    gl.viewport(0, 0, pixelate_res.0 as i32, pixelate_res.1 as i32);
+                    gl.use_program(Some(self.pixelate_prog));
+                    gl.active_texture(glow::TEXTURE0);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(current_video_texture));
+                    gl.uniform_2_f32(
+                        Some(&self.p_pixelate_target_res_loc),
+                        pixelate_res.0 as f32,
+                        pixelate_res.1 as f32,
+                    );
+                    gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    self.last_pixelate_key = if self.current_source_frame_id > 0 {
+                        Some(pixelate_key)
+                    } else {
+                        None
+                    };
+                    self.last_mipmapped_frame.set(None);
+                }
+                final_input_texture = self.pass_textures[PASS_PIXELATE];
                 final_input_res = pixelate_res;
             }
             self.last_video_texture = Some(final_input_texture);
+            self.last_video_texture_res = final_input_res;
+            self.last_video_tex_base_filter = if final_input_texture
+                == self.pass_textures[PASS_PIXELATE]
+                || (!input_is_srgb && params.scaler_filter == ScalerFilter::Point as u8)
+            {
+                glow::NEAREST as i32
+            } else {
+                glow::LINEAR as i32
+            };
 
-            let (upstream_target_fbo, has_post) = self.prepare_postprocess_targets(
+            let (upstream_target_fbo, needs_post_fbo) = self.prepare_postprocess_targets(
                 gl,
                 output_size,
+                caller_fbo,
                 Some(cathode_params),
                 audio_reactive_params,
                 glass_params,
-                skip_popup,
-                software_mouse_pos,
             );
 
             if run_lottes {
+                gl.bind_vertex_array(Some(self.vertex_array));
                 gl.bind_framebuffer(glow::FRAMEBUFFER, upstream_target_fbo);
                 gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
                 gl.use_program(Some(self.final_prog));
@@ -2693,7 +3160,7 @@ impl CrtFilterRenderer {
                     params.border_crop[2],
                     params.border_crop[3],
                 );
-                if scissor_enabled && !has_post {
+                if scissor_enabled && !needs_post_fbo {
                     gl.enable(glow::SCISSOR_TEST);
                 }
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
@@ -2704,7 +3171,7 @@ impl CrtFilterRenderer {
                     final_input_res,
                     output_size,
                     halo_params,
-                    scissor_enabled && !has_post,
+                    scissor_enabled && !needs_post_fbo,
                     upstream_target_fbo,
                     !run_pixelate,
                 );
@@ -2715,10 +3182,11 @@ impl CrtFilterRenderer {
                     final_input_res,
                     output_size,
                     beam_params,
-                    scissor_enabled && !has_post,
+                    scissor_enabled && !needs_post_fbo,
                     upstream_target_fbo,
                 );
             } else if run_pixelate {
+                gl.bind_vertex_array(Some(self.vertex_array));
                 gl.bind_framebuffer(glow::FRAMEBUFFER, upstream_target_fbo);
                 gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
                 gl.use_program(Some(self.passthrough_prog));
@@ -2758,12 +3226,18 @@ impl CrtFilterRenderer {
                     params.border_crop[2],
                     params.border_crop[3],
                 );
-                if scissor_enabled && !has_post {
+                if let Some(loc) = &self.passthrough_input_is_srgb_loc {
+                    gl.uniform_1_i32(Some(loc), 0);
+                }
+                if scissor_enabled && !needs_post_fbo {
                     gl.enable(glow::SCISSOR_TEST);
                 }
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             } else {
                 gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
+                if scissor_enabled && !needs_post_fbo {
+                    gl.enable(glow::SCISSOR_TEST);
+                }
                 self.draw_passthrough_internal(
                     gl,
                     current_video_texture,
@@ -2807,7 +3281,6 @@ impl CrtFilterRenderer {
                 painter,
                 widget_rect,
                 output_size,
-                final_input_texture,
                 final_input_res,
                 params.horizontal_stretch,
                 s_mask,
@@ -2820,9 +3293,12 @@ impl CrtFilterRenderer {
                 skip_popup,
                 software_mouse_pos,
                 software_mouse_clip,
+                caller_fbo,
+                needs_post_fbo,
                 scissor_enabled,
+                caller_scissor,
                 blend_enabled,
-                old_vbo,
+                old_vao,
             );
 
             RenderedArea::fit(final_input_res, output_size, params.horizontal_stretch)
@@ -2870,16 +3346,22 @@ impl CrtFilterRenderer {
         skip_popup: bool,
     ) -> RenderedArea {
         unsafe {
-            let old_vbo = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
-            let scissor_enabled = gl.is_enabled(glow::SCISSOR_TEST);
-            gl.disable(glow::SCISSOR_TEST);
-            let blend_enabled = gl.is_enabled(glow::BLEND);
-            gl.disable(glow::BLEND);
+            let (caller_fbo, old_vao, scissor_enabled, caller_scissor, blend_enabled) =
+                Self::capture_caller_gl_state(gl);
+
+            let fallback_captured_at = self.fallback_captured_at_next_paint.take();
+            let render_fft_spectrum = self.render_fft_spectrum_next_paint;
+            self.render_fft_spectrum_next_paint = false;
+            self.current_source_frame_id = raw_frame
+                .map(|f| f.captured_at)
+                .or(fallback_captured_at)
+                .unwrap_or(0);
 
             let (current_video_texture, current_res, input_is_srgb) = self.preprocess_video_chain(
                 gl,
                 raw_frame,
                 fallback_texture,
+                fallback_captured_at,
                 resolution,
                 output_size,
                 scaler_filter,
@@ -2900,21 +3382,28 @@ impl CrtFilterRenderer {
                 fft_filter,
                 fft_mask_threshold,
                 fft_black_threshold,
+                render_fft_spectrum,
                 true,
             );
             self.last_video_texture = Some(current_video_texture);
+            self.last_video_texture_res = current_res;
+            self.last_video_tex_base_filter =
+                if !input_is_srgb && scaler_filter == ScalerFilter::Point as u8 {
+                    glow::NEAREST as i32
+                } else {
+                    glow::LINEAR as i32
+                };
 
-            let (upstream_target_fbo, has_post) = self.prepare_postprocess_targets(
+            let (upstream_target_fbo, needs_post_fbo) = self.prepare_postprocess_targets(
                 gl,
                 output_size,
+                caller_fbo,
                 cathode_params,
                 audio_reactive_params,
                 glass_params,
-                skip_popup,
-                software_mouse_pos,
             );
 
-            if scissor_enabled && !has_post {
+            if scissor_enabled && !needs_post_fbo {
                 gl.enable(glow::SCISSOR_TEST);
             }
             let rendered_area = self.draw_passthrough_internal(
@@ -2957,7 +3446,7 @@ impl CrtFilterRenderer {
                     } else {
                         horizontal_stretch
                     };
-                    if scissor_enabled && !has_post {
+                    if scissor_enabled && !needs_post_fbo {
                         gl.disable(glow::SCISSOR_TEST);
                     }
                     let _ = self.draw_passthrough_internal(
@@ -2997,7 +3486,6 @@ impl CrtFilterRenderer {
                 painter,
                 widget_rect,
                 output_size,
-                current_video_texture,
                 current_res,
                 horizontal_stretch,
                 0.0,
@@ -3010,9 +3498,12 @@ impl CrtFilterRenderer {
                 skip_popup,
                 software_mouse_pos,
                 software_mouse_clip,
+                caller_fbo,
+                needs_post_fbo,
                 scissor_enabled,
+                caller_scissor,
                 blend_enabled,
-                old_vbo,
+                old_vao,
             );
 
             rendered_area
@@ -3330,7 +3821,8 @@ impl CrtFilterRenderer {
         gl.use_program(None);
     }
 
-    pub fn draw_popup_primitives(
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn flush_overlay_batch_gl(
         &self,
         gl: &glow::Context,
         painter: &egui_glow::Painter,
@@ -3340,23 +3832,157 @@ impl CrtFilterRenderer {
         scanline_strength: f32,
         brightboost: f32,
     ) {
-        self.draw_overlay_primitives(
-            gl,
-            painter,
-            &self.popup_primitives,
-            output_size,
-            widget_rect,
-            shadow_mask,
-            scanline_strength,
-            brightboost,
+        if self.overlay_draws_scratch.is_empty() {
+            return;
+        }
+
+        gl.enable(glow::BLEND);
+        gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+        gl.enable(glow::SCISSOR_TEST);
+
+        gl.use_program(Some(self.popup_prog));
+
+        gl.uniform_2_f32(
+            self.popup_screen_size_loc.as_ref(),
+            widget_rect.width(),
+            widget_rect.height(),
         );
+        gl.uniform_2_f32(
+            self.popup_offset_loc.as_ref(),
+            widget_rect.min.x,
+            widget_rect.min.y,
+        );
+        gl.uniform_1_i32(self.popup_sampler_loc.as_ref(), 0);
+
+        gl.uniform_1_f32(self.popup_shadow_mask_loc.as_ref(), shadow_mask);
+        gl.uniform_1_f32(self.popup_scanline_strength_loc.as_ref(), scanline_strength);
+        let scanline_freq = (output_size.1 / 240.0).max(2.0);
+        gl.uniform_1_f32(self.popup_scanline_freq_loc.as_ref(), scanline_freq);
+        gl.uniform_1_f32(self.popup_brightboost_loc.as_ref(), brightboost);
+
+        gl.bind_vertex_array(Some(self.popup_vao));
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.popup_vbo));
+        gl.buffer_data_u8_slice(
+            glow::ARRAY_BUFFER,
+            bytemuck::cast_slice(&self.overlay_vertices_scratch),
+            glow::STREAM_DRAW,
+        );
+        gl.buffer_data_u8_slice(
+            glow::ELEMENT_ARRAY_BUFFER,
+            bytemuck::cast_slice(&self.overlay_indices_scratch),
+            glow::STREAM_DRAW,
+        );
+
+        gl.active_texture(glow::TEXTURE0);
+        let mut last_tex_id: Option<egui::TextureId> = None;
+        let mut last_scissor: Option<[i32; 4]> = None;
+
+        for cmd in &self.overlay_draws_scratch {
+            let Some(texture) = painter.texture(cmd.texture_id) else {
+                continue;
+            };
+            if last_scissor != Some(cmd.scissor) {
+                gl.scissor(
+                    cmd.scissor[0],
+                    cmd.scissor[1],
+                    cmd.scissor[2],
+                    cmd.scissor[3],
+                );
+                last_scissor = Some(cmd.scissor);
+            }
+            if last_tex_id != Some(cmd.texture_id) {
+                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                last_tex_id = Some(cmd.texture_id);
+            }
+            gl.draw_elements(
+                glow::TRIANGLES,
+                cmd.index_count,
+                glow::UNSIGNED_INT,
+                (cmd.first_index * std::mem::size_of::<u32>()) as i32,
+            );
+        }
+
+        // Unbind VAO BEFORE unbinding buffers so `popup_vao` retains its `ELEMENT_ARRAY_BUFFER`.
+        gl.bind_vertex_array(None);
+        gl.bind_buffer(glow::ARRAY_BUFFER, None);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        gl.use_program(None);
+        gl.disable(glow::SCISSOR_TEST);
+        gl.disable(glow::BLEND);
+    }
+
+    #[allow(dead_code)]
+    pub fn draw_popup_primitives(
+        &mut self,
+        gl: &glow::Context,
+        painter: &egui_glow::Painter,
+        output_size: (f32, f32),
+        widget_rect: egui::Rect,
+        shadow_mask: f32,
+        scanline_strength: f32,
+        brightboost: f32,
+    ) {
+        if self.popup_primitives.is_empty()
+            || widget_rect.width() <= 0.0
+            || widget_rect.height() <= 0.0
+        {
+            return;
+        }
+        unsafe {
+            let scissor_enabled = gl.is_enabled(glow::SCISSOR_TEST);
+            let mut caller_scissor = [0i32; 4];
+            if scissor_enabled {
+                gl.get_parameter_i32_slice(glow::SCISSOR_BOX, &mut caller_scissor);
+            }
+            let blend_enabled = gl.is_enabled(glow::BLEND);
+            assemble_overlay_batch(
+                &[&self.popup_primitives],
+                widget_rect,
+                output_size,
+                if scissor_enabled {
+                    Some(caller_scissor)
+                } else {
+                    None
+                },
+                &mut self.overlay_vertices_scratch,
+                &mut self.overlay_indices_scratch,
+                &mut self.overlay_draws_scratch,
+            );
+            self.flush_overlay_batch_gl(
+                gl,
+                painter,
+                output_size,
+                widget_rect,
+                shadow_mask,
+                scanline_strength,
+                brightboost,
+            );
+            if scissor_enabled {
+                gl.scissor(
+                    caller_scissor[0],
+                    caller_scissor[1],
+                    caller_scissor[2],
+                    caller_scissor[3],
+                );
+                gl.enable(glow::SCISSOR_TEST);
+            }
+            if blend_enabled {
+                gl.blend_func_separate(
+                    glow::ONE,
+                    glow::ONE_MINUS_SRC_ALPHA,
+                    glow::ONE_MINUS_DST_ALPHA,
+                    glow::ONE,
+                );
+                gl.enable(glow::BLEND);
+            }
+        }
     }
 
     /// Draw tessellated egui primitives into the current framebuffer with the
     /// simulated shadow mask / scanlines, so they look part of the CRT image.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code, clippy::too_many_arguments)]
     pub fn draw_overlay_primitives(
-        &self,
+        &mut self,
         gl: &glow::Context,
         painter: &egui_glow::Painter,
         primitives: &[egui::ClippedPrimitive],
@@ -3369,165 +3995,124 @@ impl CrtFilterRenderer {
         if primitives.is_empty() || widget_rect.width() <= 0.0 || widget_rect.height() <= 0.0 {
             return;
         }
-
         unsafe {
-            let mut prev_scissor = [0i32; 4];
-            gl.get_parameter_i32_slice(glow::SCISSOR_BOX, &mut prev_scissor);
-            let prev_scissor_enabled = gl.is_enabled(glow::SCISSOR_TEST);
-            let prev_blend_enabled = gl.is_enabled(glow::BLEND);
-            let prev_src_rgb = gl.get_parameter_i32(glow::BLEND_SRC_RGB) as u32;
-            let prev_dst_rgb = gl.get_parameter_i32(glow::BLEND_DST_RGB) as u32;
-            let prev_src_alpha = gl.get_parameter_i32(glow::BLEND_SRC_ALPHA) as u32;
-            let prev_dst_alpha = gl.get_parameter_i32(glow::BLEND_DST_ALPHA) as u32;
-            let prev_vao = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
-
-            gl.enable(glow::BLEND);
-            gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
-            gl.enable(glow::SCISSOR_TEST);
-
-            gl.use_program(Some(self.popup_prog));
-
-            gl.uniform_2_f32(
-                self.popup_screen_size_loc.as_ref(),
-                widget_rect.width(),
-                widget_rect.height(),
-            );
-            gl.uniform_2_f32(
-                self.popup_offset_loc.as_ref(),
-                widget_rect.min.x,
-                widget_rect.min.y,
-            );
-            gl.uniform_1_i32(self.popup_sampler_loc.as_ref(), 0);
-
-            gl.uniform_1_f32(self.popup_shadow_mask_loc.as_ref(), shadow_mask);
-            gl.uniform_1_f32(self.popup_scanline_strength_loc.as_ref(), scanline_strength);
-            let scanline_freq = (output_size.1 / 240.0).max(2.0);
-            gl.uniform_1_f32(self.popup_scanline_freq_loc.as_ref(), scanline_freq);
-            gl.uniform_1_f32(self.popup_brightboost_loc.as_ref(), brightboost);
-
-            gl.bind_vertex_array(Some(self.popup_vao));
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.popup_vbo));
-            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(self.popup_ebo));
-
-            let stride = std::mem::size_of::<egui::epaint::Vertex>() as i32;
-            gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, stride, 0);
-            gl.enable_vertex_attrib_array(0);
-            gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, stride, 8);
-            gl.enable_vertex_attrib_array(1);
-            gl.vertex_attrib_pointer_f32(2, 4, glow::UNSIGNED_BYTE, false, stride, 16);
-            gl.enable_vertex_attrib_array(2);
-
-            let ppp = output_size.0 / widget_rect.width();
-
-            for primitive in primitives {
-                if let egui::epaint::Primitive::Mesh(mesh) = &primitive.primitive {
-                    if mesh.vertices.is_empty() || mesh.indices.is_empty() {
-                        continue;
-                    }
-
-                    let clip_rect = primitive.clip_rect;
-                    let clip_min_x = ((clip_rect.min.x - widget_rect.min.x) * ppp).round() as i32;
-                    let clip_min_y = ((clip_rect.min.y - widget_rect.min.y) * ppp).round() as i32;
-                    let clip_max_x = ((clip_rect.max.x - widget_rect.min.x) * ppp).round() as i32;
-                    let clip_max_y = ((clip_rect.max.y - widget_rect.min.y) * ppp).round() as i32;
-
-                    let clip_min_x = clip_min_x.clamp(0, output_size.0 as i32);
-                    let clip_min_y = clip_min_y.clamp(0, output_size.1 as i32);
-                    let clip_max_x = clip_max_x.clamp(clip_min_x, output_size.0 as i32);
-                    let clip_max_y = clip_max_y.clamp(clip_min_y, output_size.1 as i32);
-
-                    let scissor_w = clip_max_x - clip_min_x;
-                    let scissor_h = clip_max_y - clip_min_y;
-                    if scissor_w <= 0 || scissor_h <= 0 {
-                        continue;
-                    }
-
-                    let scissor_y = output_size.1 as i32 - clip_max_y;
-                    gl.scissor(clip_min_x, scissor_y, scissor_w, scissor_h);
-
-                    if let Some(texture) = painter.texture(mesh.texture_id) {
-                        gl.active_texture(glow::TEXTURE0);
-                        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-                    }
-
-                    gl.buffer_data_u8_slice(
-                        glow::ARRAY_BUFFER,
-                        bytemuck::cast_slice(&mesh.vertices),
-                        glow::STREAM_DRAW,
-                    );
-
-                    gl.buffer_data_u8_slice(
-                        glow::ELEMENT_ARRAY_BUFFER,
-                        bytemuck::cast_slice(&mesh.indices),
-                        glow::STREAM_DRAW,
-                    );
-
-                    gl.draw_elements(
-                        glow::TRIANGLES,
-                        mesh.indices.len() as i32,
-                        glow::UNSIGNED_INT,
-                        0,
-                    );
-                }
+            let scissor_enabled = gl.is_enabled(glow::SCISSOR_TEST);
+            let mut caller_scissor = [0i32; 4];
+            if scissor_enabled {
+                gl.get_parameter_i32_slice(glow::SCISSOR_BOX, &mut caller_scissor);
             }
-
-            gl.bind_vertex_array(None);
-            if prev_vao != 0 {
-                gl.bind_vertex_array(Some(glow::VertexArray::from(glow::NativeVertexArray(
-                    NonZero::new(prev_vao as u32).unwrap(),
-                ))));
-            }
-            gl.bind_buffer(glow::ARRAY_BUFFER, None);
-            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, None);
-
-            gl.scissor(
-                prev_scissor[0],
-                prev_scissor[1],
-                prev_scissor[2],
-                prev_scissor[3],
+            let blend_enabled = gl.is_enabled(glow::BLEND);
+            assemble_overlay_batch(
+                &[primitives],
+                widget_rect,
+                output_size,
+                if scissor_enabled {
+                    Some(caller_scissor)
+                } else {
+                    None
+                },
+                &mut self.overlay_vertices_scratch,
+                &mut self.overlay_indices_scratch,
+                &mut self.overlay_draws_scratch,
             );
-            if prev_scissor_enabled {
+            self.flush_overlay_batch_gl(
+                gl,
+                painter,
+                output_size,
+                widget_rect,
+                shadow_mask,
+                scanline_strength,
+                brightboost,
+            );
+            if scissor_enabled {
+                gl.scissor(
+                    caller_scissor[0],
+                    caller_scissor[1],
+                    caller_scissor[2],
+                    caller_scissor[3],
+                );
                 gl.enable(glow::SCISSOR_TEST);
-            } else {
-                gl.disable(glow::SCISSOR_TEST);
             }
-
-            gl.blend_func_separate(prev_src_rgb, prev_dst_rgb, prev_src_alpha, prev_dst_alpha);
-            if prev_blend_enabled {
+            if blend_enabled {
+                gl.blend_func_separate(
+                    glow::ONE,
+                    glow::ONE_MINUS_SRC_ALPHA,
+                    glow::ONE_MINUS_DST_ALPHA,
+                    glow::ONE,
+                );
                 gl.enable(glow::BLEND);
-            } else {
-                gl.disable(glow::BLEND);
             }
         }
-    }
-
-    unsafe fn blit_texture(
-        &self,
-        gl: &glow::Context,
-        texture: glow::Texture,
-        output_size: (f32, f32),
-        target_fbo: Option<glow::Framebuffer>,
-        scissor_enabled: bool,
-    ) {
-        gl.bind_framebuffer(glow::FRAMEBUFFER, target_fbo);
-        gl.viewport(0, 0, output_size.0 as i32, output_size.1 as i32);
-        gl.use_program(Some(self.blit_prog));
-        gl.active_texture(glow::TEXTURE0);
-        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-
-        gl.bind_vertex_array(Some(self.vertex_array));
-        if scissor_enabled {
-            gl.enable(glow::SCISSOR_TEST);
-        } else {
-            gl.disable(glow::SCISSOR_TEST);
-        }
-        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-        gl.bind_texture(glow::TEXTURE_2D, None);
-        gl.bind_vertex_array(None);
-        gl.use_program(None);
     }
 
     #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_software_mouse_internal(
+        &self,
+        gl: &glow::Context,
+        cursor_pos: (f32, f32),
+        output_size: (f32, f32),
+        shadow_mask: f32,
+        scanline_strength: f32,
+        brightboost: f32,
+        ppp: f32,
+        clip_rect: Option<[i32; 4]>,
+    ) {
+        if let Some([cx, cy, cw, ch]) = clip_rect {
+            gl.enable(glow::SCISSOR_TEST);
+            gl.scissor(cx, cy, cw, ch);
+        } else {
+            gl.disable(glow::SCISSOR_TEST);
+        }
+
+        gl.enable(glow::BLEND);
+        gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+
+        gl.use_program(Some(self.retro_mouse_prog));
+
+        let scale = (1.5 * ppp).round().max(1.0);
+        let cursor_w = RETRO_CURSOR_WIDTH as f32 * scale;
+        let cursor_h = RETRO_CURSOR_HEIGHT as f32 * scale;
+
+        gl.uniform_2_f32(
+            self.retro_mouse_screen_size_loc.as_ref(),
+            output_size.0,
+            output_size.1,
+        );
+        gl.uniform_2_f32(
+            self.retro_mouse_cursor_pos_loc.as_ref(),
+            cursor_pos.0,
+            cursor_pos.1,
+        );
+        gl.uniform_2_f32(
+            self.retro_mouse_cursor_size_loc.as_ref(),
+            cursor_w,
+            cursor_h,
+        );
+        gl.uniform_1_i32(self.retro_mouse_sampler_loc.as_ref(), 0);
+
+        gl.uniform_1_f32(self.retro_mouse_shadow_mask_loc.as_ref(), shadow_mask);
+        gl.uniform_1_f32(
+            self.retro_mouse_scanline_strength_loc.as_ref(),
+            scanline_strength,
+        );
+        let scanline_freq = (output_size.1 / 240.0).max(2.0);
+        gl.uniform_1_f32(self.retro_mouse_scanline_freq_loc.as_ref(), scanline_freq);
+        gl.uniform_1_f32(self.retro_mouse_brightboost_loc.as_ref(), brightboost);
+
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(glow::TEXTURE_2D, Some(self.retro_mouse_texture));
+
+        gl.bind_vertex_array(Some(self.vertex_array));
+        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+        gl.bind_vertex_array(None);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        gl.use_program(None);
+        gl.disable(glow::SCISSOR_TEST);
+        gl.disable(glow::BLEND);
+    }
+
+    #[allow(dead_code, clippy::too_many_arguments)]
     pub fn draw_software_mouse(
         &self,
         gl: &glow::Context,
@@ -3540,88 +4125,41 @@ impl CrtFilterRenderer {
         clip_rect: Option<[i32; 4]>,
     ) {
         unsafe {
-            let mut prev_scissor = [0i32; 4];
-            gl.get_parameter_i32_slice(glow::SCISSOR_BOX, &mut prev_scissor);
-            let prev_scissor_enabled = gl.is_enabled(glow::SCISSOR_TEST);
-
-            if let Some([cx, cy, cw, ch]) = clip_rect {
-                gl.enable(glow::SCISSOR_TEST);
-                gl.scissor(cx, cy, cw, ch);
-            } else {
-                gl.disable(glow::SCISSOR_TEST);
+            let scissor_enabled = gl.is_enabled(glow::SCISSOR_TEST);
+            let mut caller_scissor = [0i32; 4];
+            if scissor_enabled {
+                gl.get_parameter_i32_slice(glow::SCISSOR_BOX, &mut caller_scissor);
             }
-
-            let prev_blend = gl.is_enabled(glow::BLEND);
-            let prev_src_rgb = gl.get_parameter_i32(glow::BLEND_SRC_RGB) as u32;
-            let prev_dst_rgb = gl.get_parameter_i32(glow::BLEND_DST_RGB) as u32;
-            let prev_src_alpha = gl.get_parameter_i32(glow::BLEND_SRC_ALPHA) as u32;
-            let prev_dst_alpha = gl.get_parameter_i32(glow::BLEND_DST_ALPHA) as u32;
-            let prev_vao = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
-
-            gl.enable(glow::BLEND);
-            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
-
-            gl.use_program(Some(self.retro_mouse_prog));
-
-            let scale = (1.5 * ppp).round().max(1.0);
-            let cursor_w = RETRO_CURSOR_WIDTH as f32 * scale;
-            let cursor_h = RETRO_CURSOR_HEIGHT as f32 * scale;
-
-            gl.uniform_2_f32(
-                self.retro_mouse_screen_size_loc.as_ref(),
-                output_size.0,
-                output_size.1,
-            );
-            gl.uniform_2_f32(
-                self.retro_mouse_cursor_pos_loc.as_ref(),
-                cursor_pos.0,
-                cursor_pos.1,
-            );
-            gl.uniform_2_f32(
-                self.retro_mouse_cursor_size_loc.as_ref(),
-                cursor_w,
-                cursor_h,
-            );
-            gl.uniform_1_i32(self.retro_mouse_sampler_loc.as_ref(), 0);
-
-            gl.uniform_1_f32(self.retro_mouse_shadow_mask_loc.as_ref(), shadow_mask);
-            gl.uniform_1_f32(
-                self.retro_mouse_scanline_strength_loc.as_ref(),
+            let blend_enabled = gl.is_enabled(glow::BLEND);
+            self.draw_software_mouse_internal(
+                gl,
+                cursor_pos,
+                output_size,
+                shadow_mask,
                 scanline_strength,
+                brightboost,
+                ppp,
+                clip_rect,
             );
-            let scanline_freq = (output_size.1 / 240.0).max(2.0);
-            gl.uniform_1_f32(self.retro_mouse_scanline_freq_loc.as_ref(), scanline_freq);
-            gl.uniform_1_f32(self.retro_mouse_brightboost_loc.as_ref(), brightboost);
-
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.retro_mouse_texture));
-
-            gl.bind_vertex_array(Some(self.vertex_array));
-            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-
-            gl.bind_texture(glow::TEXTURE_2D, None);
-            gl.use_program(None);
-            gl.blend_func_separate(prev_src_rgb, prev_dst_rgb, prev_src_alpha, prev_dst_alpha);
-            if !prev_blend {
-                gl.disable(glow::BLEND);
-            }
-            gl.scissor(
-                prev_scissor[0],
-                prev_scissor[1],
-                prev_scissor[2],
-                prev_scissor[3],
-            );
-            if prev_scissor_enabled {
+            if scissor_enabled {
+                if clip_rect.is_some() {
+                    gl.scissor(
+                        caller_scissor[0],
+                        caller_scissor[1],
+                        caller_scissor[2],
+                        caller_scissor[3],
+                    );
+                }
                 gl.enable(glow::SCISSOR_TEST);
-            } else {
-                gl.disable(glow::SCISSOR_TEST);
             }
-            if prev_vao != 0 {
-                gl.bind_vertex_array(Some(glow::VertexArray::from(glow::NativeVertexArray(
-                    NonZero::new(prev_vao as u32).unwrap(),
-                ))));
-            } else {
-                gl.bind_vertex_array(None);
+            if blend_enabled {
+                gl.blend_func_separate(
+                    glow::ONE,
+                    glow::ONE_MINUS_SRC_ALPHA,
+                    glow::ONE_MINUS_DST_ALPHA,
+                    glow::ONE,
+                );
+                gl.enable(glow::BLEND);
             }
         }
     }
@@ -3642,12 +4180,7 @@ impl CrtFilterRenderer {
         dark_mode: bool,
     ) {
         unsafe {
-            let old_vbo = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
             let blend_enabled = gl.is_enabled(glow::BLEND);
-            let prev_src_rgb = gl.get_parameter_i32(glow::BLEND_SRC_RGB) as u32;
-            let prev_dst_rgb = gl.get_parameter_i32(glow::BLEND_DST_RGB) as u32;
-            let prev_src_alpha = gl.get_parameter_i32(glow::BLEND_SRC_ALPHA) as u32;
-            let prev_dst_alpha = gl.get_parameter_i32(glow::BLEND_DST_ALPHA) as u32;
             gl.enable(glow::BLEND);
             gl.blend_func_separate(
                 glow::SRC_ALPHA,
@@ -3665,18 +4198,28 @@ impl CrtFilterRenderer {
             gl.bind_texture(glow::TEXTURE_2D, Some(self.bezel_texture));
 
             gl.active_texture(glow::TEXTURE1);
-            let video_tex = self.last_video_texture.unwrap_or(self.pass_textures[6]);
+            let video_tex = self
+                .last_video_texture
+                .unwrap_or(self.pass_textures[PASS_INPUT]);
+            let video_res = if self.last_video_texture_res.0 > 0 {
+                self.last_video_texture_res
+            } else {
+                resolution
+            };
             gl.bind_texture(glow::TEXTURE_2D, Some(video_tex));
-            let prev_min_filter =
-                gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER);
-            let prev_mag_filter =
-                gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER);
-            if !self
-                .mipmap_generated_this_frame
-                .swap(true, std::sync::atomic::Ordering::Relaxed)
-            {
+            let mut last_mipmapped = self.last_mipmapped_frame.get();
+            let mut generated_this_paint = self.mipmap_generated_this_paint.get();
+            if check_and_record_mipmap(
+                &mut last_mipmapped,
+                &mut generated_this_paint,
+                video_tex,
+                self.current_source_frame_id,
+                video_res,
+            ) {
                 gl.generate_mipmap(glow::TEXTURE_2D);
             }
+            self.last_mipmapped_frame.set(last_mipmapped);
+            self.mipmap_generated_this_paint.set(generated_this_paint);
             gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
                 glow::TEXTURE_MIN_FILTER,
@@ -3721,24 +4264,33 @@ impl CrtFilterRenderer {
 
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, prev_min_filter);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, prev_mag_filter);
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                self.last_video_tex_base_filter,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                self.last_video_tex_base_filter,
+            );
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.use_program(None);
 
-            gl.blend_func_separate(prev_src_rgb, prev_dst_rgb, prev_src_alpha, prev_dst_alpha);
-            if !blend_enabled {
+            if blend_enabled {
+                gl.blend_func_separate(
+                    glow::ONE,
+                    glow::ONE_MINUS_SRC_ALPHA,
+                    glow::ONE_MINUS_DST_ALPHA,
+                    glow::ONE,
+                );
+            } else {
                 gl.disable(glow::BLEND);
             }
 
             gl.bind_vertex_array(None);
-            if old_vbo != 0 {
-                gl.bind_vertex_array(Some(glow::VertexArray::from(glow::NativeVertexArray(
-                    NonZero::new(old_vbo as u32).unwrap(),
-                ))));
-            }
         }
     }
 
@@ -3759,7 +4311,6 @@ impl CrtFilterRenderer {
             return;
         }
         unsafe {
-            let old_vbo = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
             let blend_enabled = gl.is_enabled(glow::BLEND);
             gl.enable(glow::BLEND);
             gl.blend_func(glow::ONE, glow::ONE);
@@ -3770,18 +4321,28 @@ impl CrtFilterRenderer {
             gl.use_program(Some(self.night_glow_prog));
 
             gl.active_texture(glow::TEXTURE0);
-            let video_tex = self.last_video_texture.unwrap_or(self.pass_textures[6]);
+            let video_tex = self
+                .last_video_texture
+                .unwrap_or(self.pass_textures[PASS_INPUT]);
+            let video_res = if self.last_video_texture_res.0 > 0 {
+                self.last_video_texture_res
+            } else {
+                resolution
+            };
             gl.bind_texture(glow::TEXTURE_2D, Some(video_tex));
-            let prev_min_filter =
-                gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER);
-            let prev_mag_filter =
-                gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER);
-            if !self
-                .mipmap_generated_this_frame
-                .swap(true, std::sync::atomic::Ordering::Relaxed)
-            {
+            let mut last_mipmapped = self.last_mipmapped_frame.get();
+            let mut generated_this_paint = self.mipmap_generated_this_paint.get();
+            if check_and_record_mipmap(
+                &mut last_mipmapped,
+                &mut generated_this_paint,
+                video_tex,
+                self.current_source_frame_id,
+                video_res,
+            ) {
                 gl.generate_mipmap(glow::TEXTURE_2D);
             }
+            self.last_mipmapped_frame.set(last_mipmapped);
+            self.mipmap_generated_this_paint.set(generated_this_paint);
             gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
                 glow::TEXTURE_MIN_FILTER,
@@ -3821,21 +4382,31 @@ impl CrtFilterRenderer {
 
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, prev_min_filter);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, prev_mag_filter);
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                self.last_video_tex_base_filter,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                self.last_video_tex_base_filter,
+            );
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.use_program(None);
 
-            if !blend_enabled {
+            if blend_enabled {
+                gl.blend_func_separate(
+                    glow::ONE,
+                    glow::ONE_MINUS_SRC_ALPHA,
+                    glow::ONE_MINUS_DST_ALPHA,
+                    glow::ONE,
+                );
+            } else {
                 gl.disable(glow::BLEND);
             }
 
             gl.bind_vertex_array(None);
-            if old_vbo != 0 {
-                gl.bind_vertex_array(Some(glow::VertexArray::from(glow::NativeVertexArray(
-                    NonZero::new(old_vbo as u32).unwrap(),
-                ))));
-            }
         }
     }
 
@@ -3959,7 +4530,7 @@ impl CrtFilterRenderer {
                     glow::UNSIGNED_BYTE,
                     None,
                 );
-                let pass_filter_mode = if i == 4 {
+                let pass_filter_mode = if i == PASS_PIXELATE {
                     glow::NEAREST as i32
                 } else {
                     filter_mode
@@ -4002,9 +4573,14 @@ impl CrtFilterRenderer {
             }
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            self.history_count = 0;
+            self.history_ring.reset();
             self.last_frame_captured_at = -1;
             self.last_input_tex = None;
+            self.last_input_slot = None;
+            self.last_source_kind = None;
+            self.last_fallback_tex = None;
+            self.last_mipmapped_frame.set(None);
+            self.last_pixelate_key = None;
         }
     }
 }
@@ -4622,12 +5198,31 @@ mod tests {
 
     #[test]
     fn linear_prepasses_use_high_precision_targets() {
-        assert_eq!(intermediate_texture_internal_format(0), glow::RGBA16F);
-        assert_eq!(intermediate_texture_internal_format(1), glow::RGBA16F);
-        assert_eq!(intermediate_texture_internal_format(2), glow::RGBA16F);
-        assert_eq!(intermediate_texture_internal_format(4), glow::RGBA16F);
-        assert_eq!(intermediate_texture_internal_format(5), glow::RGBA16F);
-        assert_eq!(intermediate_texture_internal_format(6), glow::RGBA16F);
+        assert_eq!(NUM_INTERMEDIATE_PASSES, 6);
+        assert_eq!(
+            intermediate_texture_internal_format(PASS_HIST_1),
+            glow::RGBA16F
+        );
+        assert_eq!(
+            intermediate_texture_internal_format(PASS_DEINTERLACE),
+            glow::RGBA16F
+        );
+        assert_eq!(
+            intermediate_texture_internal_format(PASS_HIST_2),
+            glow::RGBA16F
+        );
+        assert_eq!(
+            intermediate_texture_internal_format(PASS_PIXELATE),
+            glow::RGBA16F
+        );
+        assert_eq!(
+            intermediate_texture_internal_format(PASS_MEDIAN),
+            glow::RGBA16F
+        );
+        assert_eq!(
+            intermediate_texture_internal_format(PASS_INPUT),
+            glow::RGBA16F
+        );
     }
 
     #[test]
@@ -4644,43 +5239,40 @@ mod tests {
         let effective_size = (1440, 960);
 
         assert_eq!(
-            pass_texture_dimensions(0, source_size, effective_size),
+            pass_texture_dimensions(PASS_HIST_1, source_size, effective_size),
             source_size
         );
         assert_eq!(
-            pass_texture_dimensions(1, source_size, effective_size),
+            pass_texture_dimensions(PASS_DEINTERLACE, source_size, effective_size),
             source_size
         );
         assert_eq!(
-            pass_texture_dimensions(2, source_size, effective_size),
+            pass_texture_dimensions(PASS_HIST_2, source_size, effective_size),
             source_size
         );
         assert_eq!(
-            pass_texture_dimensions(4, source_size, effective_size),
+            pass_texture_dimensions(PASS_PIXELATE, source_size, effective_size),
             (720, 480)
         );
         assert_eq!(
-            pass_texture_dimensions(5, source_size, effective_size),
+            pass_texture_dimensions(PASS_MEDIAN, source_size, effective_size),
             source_size
         );
         assert_eq!(
-            pass_texture_dimensions(6, source_size, effective_size),
+            pass_texture_dimensions(PASS_INPUT, source_size, effective_size),
             source_size
-        );
-        assert_eq!(
-            pass_texture_dimensions(3, source_size, effective_size),
-            effective_size
         );
     }
 
     #[test]
     fn other_intermediate_passes_keep_existing_format() {
-        for pass_index in 3..4 {
-            assert_eq!(
-                intermediate_texture_internal_format(pass_index),
-                glow::RGBA8
-            );
-        }
+        // Dead full-resolution RGBA8 slot was removed (`NUM_INTERMEDIATE_PASSES == 6`);
+        // verify out-of-range fallback remains `RGBA8`.
+        assert_eq!(NUM_INTERMEDIATE_PASSES, 6);
+        assert_eq!(
+            intermediate_texture_internal_format(NUM_INTERMEDIATE_PASSES),
+            glow::RGBA8
+        );
     }
 
     #[test]
@@ -4729,14 +5321,11 @@ mod tests {
 
     #[test]
     fn history_shift_preserves_distinct_frames_across_repeat_paints() {
-        // Simulates arrival of Frame 1, multiple repeat paints, Frame 2, multiple repeat paints
-        // and proves that history buffers retain t-1 and t-2 without collapsing on repeat paints.
-        let mut history_count = 0u32;
+        // Exercises the zero-blit 3-slot `DeinterlaceHistoryRing` across new frames,
+        // repeat paints (Beam sub-frames / UI repaints), and `!deinterlace_enabled` resets.
+        let mut ring = DeinterlaceHistoryRing::new(HISTORY_SLOTS);
+        let mut slot_contents = [0u32; NUM_INTERMEDIATE_PASSES];
         let mut last_captured_at = 0u64;
-
-        let mut buf_curr = 0u32;
-        let mut buf_prev1 = 0u32;
-        let mut buf_prev2 = 0u32;
 
         let arrivals = [
             (100u64, 1u32), // Frame 1 arrival
@@ -4748,37 +5337,330 @@ mod tests {
             (300u64, 3u32), // Frame 3 arrival
             (300u64, 3u32), // Frame 3 repeat paint 1
             (300u64, 3u32), // Frame 3 repeat paint 2
+            (400u64, 4u32), // Frame 4 arrival (ring wraps around cleanly)
+            (400u64, 4u32), // Frame 4 repeat paint
         ];
 
         for (step, (pts, frame_id)) in arrivals.iter().enumerate() {
             let is_new_frame = *pts != last_captured_at;
-            if is_new_frame && history_count >= 1 {
-                buf_prev2 = buf_prev1;
-                buf_prev1 = buf_curr;
-            }
-            buf_curr = *frame_id;
+            let write_slot = ring.select_write_slot(true, is_new_frame);
             if is_new_frame {
-                if history_count == 0 {
-                    buf_prev1 = buf_curr;
-                }
+                slot_contents[write_slot] = *frame_id;
                 last_captured_at = *pts;
-                history_count += 1;
             }
+            let (curr_slot, prev1_slot, prev2_slot, has_prev2) = ring.active_slots();
+            assert_eq!(curr_slot, write_slot);
 
-            if step >= 6 {
-                // Steps 6, 7, 8 are Frame 3 (new + 2 repeat paints)
-                assert_eq!(buf_curr, 3, "Current frame must remain Frame 3");
-                assert_eq!(
-                    buf_prev1, 2,
-                    "Previous frame must remain Frame 2 on both new and repeat paints"
-                );
-                assert_eq!(
-                    buf_prev2, 1,
-                    "Previous-2 frame must remain Frame 1 on both new and repeat paints"
-                );
-                assert_eq!(history_count, 3);
+            match step {
+                0..=2 => {
+                    assert_eq!(slot_contents[curr_slot], 1);
+                    assert_eq!(slot_contents[prev1_slot], 1);
+                    assert!(!has_prev2);
+                    assert_eq!(ring.count, 1);
+                }
+                3..=5 => {
+                    assert_eq!(slot_contents[curr_slot], 2);
+                    assert_eq!(slot_contents[prev1_slot], 1);
+                    assert!(!has_prev2);
+                    assert_eq!(ring.count, 2);
+                }
+                6..=8 => {
+                    assert_eq!(slot_contents[curr_slot], 3, "Current frame must remain 3");
+                    assert_eq!(
+                        slot_contents[prev1_slot], 2,
+                        "prev1 must remain Frame 2 across repeat paints"
+                    );
+                    assert_eq!(
+                        slot_contents[prev2_slot], 1,
+                        "prev2 must remain Frame 1 across repeat paints"
+                    );
+                    assert!(has_prev2);
+                    assert_eq!(ring.count, 3);
+                }
+                9..=10 => {
+                    assert_eq!(slot_contents[curr_slot], 4);
+                    assert_eq!(slot_contents[prev1_slot], 3);
+                    assert_eq!(slot_contents[prev2_slot], 2);
+                    assert!(has_prev2);
+                    assert_eq!(ring.count, 4);
+                }
+                _ => unreachable!(),
             }
         }
+
+        // Disabling deinterlace resets the ring and writes straight to `PASS_INPUT` with zero blits.
+        let non_deint_slot = ring.select_write_slot(false, true);
+        assert_eq!(non_deint_slot, PASS_INPUT);
+        assert_eq!(ring.count, 0);
+    }
+
+    #[test]
+    fn preprocess_cache_sig_fallback_hits_and_invalidates() {
+        let tex1 = glow::NativeTexture(NonZero::new(1).unwrap());
+        let tex2 = glow::NativeTexture(NonZero::new(2).unwrap());
+        let scan_and_color = [
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
+            1.0f32.to_bits(),
+        ];
+        let deint_params = [
+            0.5f32.to_bits(),
+            0.08f32.to_bits(),
+            1.0f32.to_bits(),
+            0.5f32.to_bits(),
+        ];
+        let fft_thresh = [0.0f32.to_bits(), 0.0f32.to_bits()];
+
+        let make_fallback_sig = |tex: Option<glow::Texture>,
+                                 ts: Option<i64>,
+                                 fastpath: bool|
+         -> Option<PreprocessCacheSig> {
+            build_preprocess_cache_sig(
+                None,
+                tex,
+                ts,
+                (1280, 800),
+                (1280, 800),
+                0,
+                fastpath,
+                scan_and_color,
+                false,
+                0,
+                deint_params,
+                false,
+                0.0f32.to_bits(),
+                false,
+                fft_thresh,
+                0,
+            )
+        };
+
+        // Unversioned fallback (`None` or `<= 0`) must not falsely hit cache
+        assert_eq!(make_fallback_sig(Some(tex1), None, false), None);
+        assert_eq!(make_fallback_sig(Some(tex1), Some(0), false), None);
+
+        // Repeat paint of identical `(tex1, 100, fastpath=false)` hits cache
+        let sig_a1 = make_fallback_sig(Some(tex1), Some(100), false).expect("valid fallback sig");
+        let sig_a2 = make_fallback_sig(Some(tex1), Some(100), false).expect("valid fallback sig");
+        assert_eq!(sig_a1, sig_a2);
+
+        // Changing `captured_at`, `fallback_texture`, or `allow_srgb_passthrough_fastpath` invalidates
+        let sig_new_ts = make_fallback_sig(Some(tex1), Some(101), false).unwrap();
+        let sig_new_tex = make_fallback_sig(Some(tex2), Some(100), false).unwrap();
+        let sig_fastpath = make_fallback_sig(Some(tex1), Some(100), true).unwrap();
+        assert_ne!(sig_a1, sig_new_ts);
+        assert_ne!(sig_a1, sig_new_tex);
+        assert_ne!(sig_a1, sig_fastpath);
+
+        // Switching from `Fallback` to `Raw` with the same timestamp also invalidates
+        let raw_frame = RawFrame {
+            captured_at: 100,
+            rate: crate::replay::config::Rate { num: 60, den: 1 },
+            width: 1280,
+            height: 800,
+            data: Vec::new(),
+            format: Pixel::RGBA,
+            color_range: crate::video::types::ColorRange::Full,
+        };
+        let sig_raw = build_preprocess_cache_sig(
+            Some(&raw_frame),
+            Some(tex1),
+            Some(100),
+            (1280, 800),
+            (1280, 800),
+            0,
+            false,
+            scan_and_color,
+            false,
+            0,
+            deint_params,
+            false,
+            0.0f32.to_bits(),
+            false,
+            fft_thresh,
+            0,
+        )
+        .unwrap();
+        assert_ne!(sig_a1, sig_raw);
+    }
+
+    #[test]
+    fn mipmap_generation_tracks_source_frame_and_invalidates() {
+        let tex1 = glow::NativeTexture(NonZero::new(10).unwrap());
+        let tex2 = glow::NativeTexture(NonZero::new(11).unwrap());
+        let mut last_mipmapped = None;
+        let mut generated_this_paint = false;
+
+        // First consumer (`draw_retro_frame`) on frame 50 generates mipmaps
+        assert!(check_and_record_mipmap(
+            &mut last_mipmapped,
+            &mut generated_this_paint,
+            tex1,
+            50,
+            (640, 480),
+        ));
+        // Second consumer (`draw_night_mode_glow`) in the same paint skips regeneration
+        assert!(!check_and_record_mipmap(
+            &mut last_mipmapped,
+            &mut generated_this_paint,
+            tex1,
+            50,
+            (640, 480),
+        ));
+
+        // Next Beam sub-frame / idle UI repaint (`generated_this_paint` reset to `false`, same frame 50)
+        generated_this_paint = false;
+        assert!(!check_and_record_mipmap(
+            &mut last_mipmapped,
+            &mut generated_this_paint,
+            tex1,
+            50,
+            (640, 480),
+        ));
+
+        // New video frame 51 regenerates mipmaps
+        generated_this_paint = false;
+        assert!(check_and_record_mipmap(
+            &mut last_mipmapped,
+            &mut generated_this_paint,
+            tex1,
+            51,
+            (640, 480),
+        ));
+
+        // Changing texture (`run_pixelate` toggled) or resolution on frame 51 regenerates
+        generated_this_paint = false;
+        assert!(check_and_record_mipmap(
+            &mut last_mipmapped,
+            &mut generated_this_paint,
+            tex2,
+            51,
+            (640, 480),
+        ));
+        assert!(check_and_record_mipmap(
+            &mut last_mipmapped,
+            &mut generated_this_paint,
+            tex2,
+            51,
+            (320, 240),
+        ));
+
+        // Explicit invalidation (`preprocess_video_chain` re-rendered `video_tex` on slider change)
+        last_mipmapped = None;
+        generated_this_paint = false;
+        assert!(check_and_record_mipmap(
+            &mut last_mipmapped,
+            &mut generated_this_paint,
+            tex2,
+            51,
+            (320, 240),
+        ));
+
+        // Unversioned source (`frame_id <= 0`) falls back to once-per-paint
+        generated_this_paint = false;
+        assert!(check_and_record_mipmap(
+            &mut last_mipmapped,
+            &mut generated_this_paint,
+            tex1,
+            0,
+            (640, 480),
+        ));
+        assert!(!check_and_record_mipmap(
+            &mut last_mipmapped,
+            &mut generated_this_paint,
+            tex1,
+            0,
+            (640, 480),
+        ));
+        generated_this_paint = false;
+        assert!(check_and_record_mipmap(
+            &mut last_mipmapped,
+            &mut generated_this_paint,
+            tex1,
+            0,
+            (640, 480),
+        ));
+    }
+
+    #[test]
+    fn overlay_batch_concatenates_meshes_and_offsets_indices() {
+        let mk_mesh =
+            |tex_id: egui::TextureId, clip: egui::Rect, v_count: usize, tri_indices: &[u32]| {
+                let mut mesh = egui::Mesh::with_texture(tex_id);
+                for i in 0..v_count {
+                    mesh.vertices.push(egui::epaint::Vertex {
+                        pos: egui::pos2(i as f32 * 10.0, 10.0),
+                        uv: egui::pos2(0.0, 0.0),
+                        color: egui::Color32::WHITE,
+                    });
+                }
+                mesh.indices.extend_from_slice(tri_indices);
+                egui::ClippedPrimitive {
+                    clip_rect: clip,
+                    primitive: egui::epaint::Primitive::Mesh(mesh),
+                }
+            };
+
+        let widget_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 480.0));
+        let full_clip = widget_rect;
+        let popup_clip =
+            egui::Rect::from_min_max(egui::pos2(100.0, 80.0), egui::pos2(300.0, 280.0));
+
+        let comments = vec![
+            mk_mesh(
+                egui::TextureId::Managed(0),
+                full_clip,
+                4,
+                &[0, 1, 2, 0, 2, 3],
+            ),
+            mk_mesh(egui::TextureId::Managed(0), full_clip, 3, &[0, 1, 2]),
+        ];
+        let popup = vec![mk_mesh(
+            egui::TextureId::User(7),
+            popup_clip,
+            4,
+            &[0, 1, 2, 2, 3, 0],
+        )];
+
+        let mut verts = Vec::new();
+        let mut indices = Vec::new();
+        let mut draws = Vec::new();
+
+        assemble_overlay_batch(
+            &[&comments, &popup],
+            widget_rect,
+            (1280.0, 960.0),
+            Some([0, 0, 1000, 960]),
+            &mut verts,
+            &mut indices,
+            &mut draws,
+        );
+
+        assert_eq!(verts.len(), 11);
+        assert_eq!(indices, vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 7, 8, 9, 9, 10, 7]);
+        // First two meshes share `(Managed(0), scissor)` and coalesce into a single draw command!
+        assert_eq!(draws.len(), 2);
+        assert_eq!(
+            draws[0],
+            OverlayDrawCmd {
+                texture_id: egui::TextureId::Managed(0),
+                scissor: [0, 0, 1000, 960],
+                first_index: 0,
+                index_count: 9,
+            }
+        );
+        assert_eq!(
+            draws[1],
+            OverlayDrawCmd {
+                texture_id: egui::TextureId::User(7),
+                scissor: [200, 400, 400, 400],
+                first_index: 9,
+                index_count: 6,
+            }
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::pc98::search::{match_search_index_score, Pc98SearchIndex};
+use crate::pc98::search::{Pc98SearchIndex, PreparedQuery};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -987,11 +987,19 @@ pub fn filter_and_rank_games(games: &[Pc88GameEntry], query: &str) -> Vec<usize>
         return (0..games.len()).collect();
     }
 
+    let prepared = PreparedQuery::new(trimmed);
+    if prepared.is_empty() {
+        return (0..games.len()).collect();
+    }
+
+    let mut dp_buf = Vec::new();
     let mut scored: Vec<(usize, i32)> = games
         .iter()
         .enumerate()
         .filter_map(|(idx, game)| {
-            match_search_index_score(&game.search_index, trimmed).map(|s| (idx, s))
+            prepared
+                .score_index_with_buf(&game.search_index, &mut dp_buf)
+                .map(|s| (idx, s))
         })
         .collect();
 

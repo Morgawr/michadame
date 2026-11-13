@@ -419,6 +419,8 @@ pub struct LegacyConfig {
     pub usb_device: Option<String>,
     pub video_resolution: Option<(u32, u32)>,
     pub video_framerate: Option<u32>,
+    #[serde(default)]
+    pub video_hwdec: Option<bool>,
     pub reset_usb_on_startup: Option<bool>,
     pub has_shown_first_run_warning: Option<bool>,
 
@@ -568,6 +570,7 @@ impl Default for LegacyConfig {
             usb_device: None,
             video_resolution: None,
             video_framerate: None,
+            video_hwdec: None,
             reset_usb_on_startup: None,
             has_shown_first_run_warning: None,
             active_profile: default_active_profile(),
@@ -717,6 +720,8 @@ pub struct MichadameConfig {
     pub usb_device: Option<String>,
     pub video_resolution: Option<(u32, u32)>,
     pub video_framerate: Option<u32>,
+    #[serde(default)]
+    pub video_hwdec: Option<bool>,
     pub reset_usb_on_startup: Option<bool>,
     pub has_shown_first_run_warning: Option<bool>,
     pub audio_source: Option<String>,
@@ -787,6 +792,7 @@ impl Default for MichadameConfig {
             usb_device: None,
             video_resolution: None,
             video_framerate: None,
+            video_hwdec: None,
             reset_usb_on_startup: None,
             has_shown_first_run_warning: None,
             audio_source: None,

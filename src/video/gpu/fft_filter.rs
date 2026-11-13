@@ -17,6 +17,7 @@ pub struct FftFilter {
     // Uniform locations (Option to handle driver optimizations)
     init_fft_size_loc: Option<glow::UniformLocation>,
     init_orig_size_loc: Option<glow::UniformLocation>,
+    init_log2_size_loc: Option<glow::UniformLocation>,
 
     butterfly_axis_loc: Option<glow::UniformLocation>,
     butterfly_stage_loc: Option<glow::UniformLocation>,
@@ -33,8 +34,9 @@ pub struct FftFilter {
     spectrum_fft_size_loc: Option<glow::UniformLocation>,
 
     bitrev_fft_size_loc: Option<glow::UniformLocation>,
+    bitrev_log2_size_loc: Option<glow::UniformLocation>,
 
-    // Two textures for ping-pong (RGBA32F for complex data)
+    // Two textures for ping-pong (RG32F for complex data)
     // FBOs are permanently attached to their respective textures
     tex: [glow::Texture; 2],
     fbo: [glow::Framebuffer; 2],
@@ -58,6 +60,14 @@ pub struct FftFilter {
     last_fft_size: (u32, u32),
     last_orig_size: (u32, u32),
     mask_generation: std::sync::atomic::AtomicU64,
+}
+
+fn fft_complex_texture_internal_format() -> u32 {
+    glow::RG32F
+}
+
+fn fft_complex_texture_format() -> u32 {
+    glow::RG
 }
 
 fn fft_output_texture_internal_format() -> u32 {
@@ -108,6 +118,7 @@ impl FftFilter {
             let bitrev_prog = compile_program(gl, VS_SRC, FS_FFT_BITREV);
             let bitrev_input_loc = gl.get_uniform_location(bitrev_prog, "input_texture");
             let bitrev_fft_size_loc = gl.get_uniform_location(bitrev_prog, "fft_size");
+            let bitrev_log2_size_loc = gl.get_uniform_location(bitrev_prog, "u_log2_size");
             gl.use_program(Some(bitrev_prog));
             gl.uniform_1_i32(bitrev_input_loc.as_ref(), 0);
 
@@ -115,6 +126,7 @@ impl FftFilter {
             let init_input_loc = gl.get_uniform_location(init_prog, "input_texture");
             let init_fft_size_loc = gl.get_uniform_location(init_prog, "fft_size");
             let init_orig_size_loc = gl.get_uniform_location(init_prog, "orig_size");
+            let init_log2_size_loc = gl.get_uniform_location(init_prog, "u_log2_size");
             gl.use_program(Some(init_prog));
             gl.uniform_1_i32(init_input_loc.as_ref(), 0);
 
@@ -211,6 +223,7 @@ impl FftFilter {
                 bitrev_prog,
                 init_fft_size_loc,
                 init_orig_size_loc,
+                init_log2_size_loc,
                 butterfly_axis_loc,
                 butterfly_stage_loc,
                 butterfly_direction_loc,
@@ -222,6 +235,7 @@ impl FftFilter {
                 extract_black_threshold_loc,
                 spectrum_fft_size_loc,
                 bitrev_fft_size_loc,
+                bitrev_log2_size_loc,
                 tex,
                 fbo,
                 output_tex,
@@ -262,17 +276,17 @@ impl FftFilter {
         }
 
         unsafe {
-            // Ping-pong textures (RGBA32F for complex data)
+            // Ping-pong textures (RG32F for complex data)
             for i in 0..2 {
                 gl.bind_texture(glow::TEXTURE_2D, Some(self.tex[i]));
                 gl.tex_image_2d(
                     glow::TEXTURE_2D,
                     0,
-                    glow::RGBA32F as i32,
+                    fft_complex_texture_internal_format() as i32,
                     fft_w as i32,
                     fft_h as i32,
                     0,
-                    glow::RGBA,
+                    fft_complex_texture_format(),
                     glow::FLOAT,
                     None,
                 );
@@ -476,6 +490,7 @@ impl FftFilter {
     }
 
     /// Apply the FFT filter to the input texture. Returns the output texture.
+    #[allow(clippy::too_many_arguments)]
     pub fn apply(
         &mut self,
         gl: &glow::Context,
@@ -484,6 +499,7 @@ impl FftFilter {
         orig_height: u32,
         mask_threshold: f32,
         black_threshold: f32,
+        render_spectrum: bool,
     ) -> glow::Texture {
         let (fft_w, fft_h) = Self::fft_dimensions(orig_width, orig_height);
         self.setup_resources(gl, fft_w, fft_h, orig_width, orig_height);
@@ -494,7 +510,6 @@ impl FftFilter {
         unsafe {
             // Disable scissor test — egui sets a scissor rect for paint callbacks
             // that would clip our FBO renders to the visible widget area
-            let scissor_enabled = gl.is_enabled(glow::SCISSOR_TEST);
             gl.disable(glow::SCISSOR_TEST);
             gl.disable(glow::BLEND);
             gl.bind_vertex_array(Some(self.vertex_array));
@@ -510,6 +525,11 @@ impl FftFilter {
                 self.init_orig_size_loc.as_ref(),
                 orig_width as i32,
                 orig_height as i32,
+            );
+            gl.uniform_2_i32(
+                self.init_log2_size_loc.as_ref(),
+                stages_x as i32,
+                stages_y as i32,
             );
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
@@ -543,19 +563,21 @@ impl FftFilter {
 
             // tex[cur] now holds the complete forward FFT result
 
-            // === Step 3.5: Render spectrum visualization ===
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.spectrum_fbo));
-            gl.use_program(Some(self.spectrum_prog));
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.tex[cur]));
-            gl.active_texture(glow::TEXTURE1);
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.mask_tex));
-            gl.uniform_2_i32(
-                self.spectrum_fft_size_loc.as_ref(),
-                fft_w as i32,
-                fft_h as i32,
-            );
-            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            // === Step 3.5: Render spectrum visualization (only when mask editor is open) ===
+            if render_spectrum {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.spectrum_fbo));
+                gl.use_program(Some(self.spectrum_prog));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.tex[cur]));
+                gl.active_texture(glow::TEXTURE1);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.mask_tex));
+                gl.uniform_2_i32(
+                    self.spectrum_fft_size_loc.as_ref(),
+                    fft_w as i32,
+                    fft_h as i32,
+                );
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            }
 
             // === Step 4: Apply mask ===
             let mask_dst = 1 - cur;
@@ -582,6 +604,11 @@ impl FftFilter {
                 self.bitrev_fft_size_loc.as_ref(),
                 fft_w as i32,
                 fft_h as i32,
+            );
+            gl.uniform_2_i32(
+                self.bitrev_log2_size_loc.as_ref(),
+                stages_x as i32,
+                stages_y as i32,
             );
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             cur = bitrev_dst;
@@ -641,10 +668,6 @@ impl FftFilter {
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, None);
-            // Re-enable scissor test for egui if it was enabled
-            if scissor_enabled {
-                gl.enable(glow::SCISSOR_TEST);
-            }
         }
 
         self.output_tex
@@ -729,6 +752,43 @@ mod tests {
     #[test]
     fn test_fft_output_uses_high_precision_texture() {
         assert_eq!(fft_output_texture_internal_format(), glow::RGBA16F);
+        assert_eq!(fft_complex_texture_internal_format(), glow::RG32F);
+        assert_eq!(fft_complex_texture_format(), glow::RG);
+    }
+
+    #[test]
+    fn test_constant_step_bit_reverse_matches_reference() {
+        fn bit_reverse_loop(mut x: u32, bits: u32) -> u32 {
+            let mut result = 0u32;
+            for _ in 0..bits {
+                result = (result << 1) | (x & 1);
+                x >>= 1;
+            }
+            result
+        }
+
+        fn bit_reverse_mask(mut x: u32, bits: u32) -> u32 {
+            if bits == 0 {
+                return 0;
+            }
+            x = ((x & 0x5555_5555) << 1) | ((x >> 1) & 0x5555_5555);
+            x = ((x & 0x3333_3333) << 2) | ((x >> 2) & 0x3333_3333);
+            x = ((x & 0x0F0F_0F0F) << 4) | ((x >> 4) & 0x0F0F_0F0F);
+            x = ((x & 0x00FF_00FF) << 8) | ((x >> 8) & 0x00FF_00FF);
+            let rev32 = (x << 16) | (x >> 16);
+            rev32 >> (32 - bits)
+        }
+
+        for bits in 0..=12 {
+            let limit = 1u32 << bits;
+            for idx in 0..limit {
+                assert_eq!(
+                    bit_reverse_mask(idx, bits),
+                    bit_reverse_loop(idx, bits),
+                    "Mismatch at idx={idx}, bits={bits}"
+                );
+            }
+        }
     }
 
     #[test]

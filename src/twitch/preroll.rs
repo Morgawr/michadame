@@ -7,8 +7,8 @@
 //! - Provides fade out / fade in transition parameters to seamlessly transition to the live feed
 
 use crate::replay::AudioTap;
-use crate::video::decoder::{copy_frame_tightly, renderable_pixel_format};
-use crate::video::player::{create_audio_resampler, probe_video_file, resample_audio_frame};
+use crate::video::decoder::normalize_decoded_video_frame;
+use crate::video::player::{create_audio_resampler, probe_video_file, resample_audio_frame_into};
 use crate::video::types::{ColorRange, RawFrame};
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender};
@@ -217,11 +217,25 @@ impl PrerollPlayer {
         t < t_mid
     }
 
-    /// Polls new decoded frames from the worker thread.
-    pub fn poll_frame(&mut self) -> Option<Arc<RawFrame>> {
+    /// Drains any newly decoded frames from the worker thread, updating `self.latest_frame`
+    /// and returning `Some` only when at least one new frame arrived since the last poll.
+    pub fn try_recv_latest_frame(&mut self) -> Option<Arc<RawFrame>> {
+        let mut got_new = false;
         while let Ok(frame) = self.frame_rx.try_recv() {
             self.latest_frame = Some(frame);
+            got_new = true;
         }
+        if got_new {
+            self.latest_frame.clone()
+        } else {
+            None
+        }
+    }
+
+    /// Polls new decoded frames from the worker thread.
+    #[allow(dead_code)]
+    pub fn poll_frame(&mut self) -> Option<Arc<RawFrame>> {
+        let _ = self.try_recv_latest_frame();
         self.latest_frame.clone()
     }
 
@@ -235,6 +249,8 @@ impl PrerollPlayer {
         if let Some(handle) = self.thread_handle.take() {
             let _ = handle.join();
         }
+        self.latest_frame = None;
+        while self.frame_rx.try_recv().is_ok() {}
     }
 }
 
@@ -274,16 +290,8 @@ fn run_preroll_worker(
         .context("Failed to create video decoder")?;
     video_decoder.set_threading(ffmpeg_next::codec::threading::Config::default());
 
-    let output_format = renderable_pixel_format(video_decoder.format());
-    let mut scaler = ffmpeg_next::software::scaling::context::Context::get(
-        video_decoder.format(),
-        video_decoder.width(),
-        video_decoder.height(),
-        output_format,
-        video_decoder.width(),
-        video_decoder.height(),
-        ffmpeg_next::software::scaling::flag::Flags::BILINEAR,
-    )?;
+    let mut scaler: Option<ffmpeg_next::software::scaling::context::Context> = None;
+    let mut active_scaler_filter = 0u8;
 
     // Check for optional audio stream
     let audio_info = ictx
@@ -347,6 +355,8 @@ fn run_preroll_worker(
     let mut decoded_video = ffmpeg_next::frame::Video::empty();
     let mut normalized_video = ffmpeg_next::frame::Video::empty();
     let mut decoded_audio = ffmpeg_next::frame::Audio::empty();
+    let mut resampled_audio = ffmpeg_next::frame::Audio::empty();
+    let mut resampled_capacity: usize = 0;
 
     for (stream, packet) in ictx.packets() {
         if stop_requested.load(Ordering::Relaxed) {
@@ -414,20 +424,28 @@ fn run_preroll_worker(
                         audio_tap.set_broadcast_preroll_active(false);
                     }
 
-                    if scaler.run(&decoded_video, &mut normalized_video).is_ok() {
-                        if let Ok(data) = copy_frame_tightly(&normalized_video) {
-                            let raw_frame = Arc::new(RawFrame {
-                                captured_at: crate::replay::now_us(),
-                                rate: crate::replay::config::Rate::new(60, 1),
-                                width: normalized_video.width(),
-                                height: normalized_video.height(),
-                                data,
-                                format: normalized_video.format(),
-                                color_range: ColorRange::Limited,
-                            });
-                            let _ = frame_tx.try_send(raw_frame);
-                            repaint();
-                        }
+                    if let Ok(Some((width, height, format, data))) = normalize_decoded_video_frame(
+                        &decoded_video,
+                        &mut normalized_video,
+                        &mut scaler,
+                        &mut active_scaler_filter,
+                        0,
+                    ) {
+                        let color_range = match decoded_video.color_range() {
+                            ffmpeg_next::color::Range::JPEG => ColorRange::Full,
+                            _ => ColorRange::Limited,
+                        };
+                        let raw_frame = Arc::new(RawFrame {
+                            captured_at: crate::replay::now_us(),
+                            rate: crate::replay::config::Rate::new(60, 1),
+                            width,
+                            height,
+                            data,
+                            format,
+                            color_range,
+                        });
+                        let _ = frame_tx.try_send(raw_frame);
+                        repaint();
                     }
 
                     position_us.store(frame_pts_us.min(total_us), Ordering::Relaxed);
@@ -440,8 +458,13 @@ fn run_preroll_worker(
                         if stop_requested.load(Ordering::Relaxed) {
                             break;
                         }
-                        if let Some(resampled) = resample_audio_frame(rsm, &decoded_audio) {
-                            let frames = resampled.samples();
+                        if resample_audio_frame_into(
+                            rsm,
+                            &decoded_audio,
+                            &mut resampled_audio,
+                            &mut resampled_capacity,
+                        ) {
+                            let frames = resampled_audio.samples();
                             let samples_count = frames * 2; // stereo
                             if samples_count > 0 {
                                 let fallback_pts_us =
@@ -483,9 +506,6 @@ fn run_preroll_worker(
                                     continue;
                                 }
 
-                                let plane = resampled.plane::<f32>(0);
-                                let mut samples = plane[..samples_count.min(plane.len())].to_vec();
-
                                 let vol = match mode {
                                     RollMode::Preroll => {
                                         // Fade pre-roll audio volume out during transition first half
@@ -508,15 +528,18 @@ fn run_preroll_worker(
                                     }
                                 };
 
+                                let plane = resampled_audio.plane_mut::<f32>(0);
+                                let valid_len = samples_count.min(plane.len());
+                                let samples = &mut plane[..valid_len];
                                 if vol < 0.999 {
-                                    for s in &mut samples {
+                                    for s in samples.iter_mut() {
                                         *s *= vol;
                                     }
                                 }
 
                                 if preroll_audio_active {
                                     audio_tap.submit_preroll_audio(
-                                        &samples,
+                                        samples,
                                         48000,
                                         2,
                                         start_epoch_us + audio_pts_us,
@@ -527,7 +550,7 @@ fn run_preroll_worker(
                                 if let Some(ref sink) = local_sink {
                                     sink.set_volume(audio_tap.game_volume().clamp(0.0, 1.0));
                                     if vol > 0.001 {
-                                        sink.append(SamplesBuffer::new(2, 48000, samples));
+                                        sink.append(SamplesBuffer::new(2, 48000, samples.to_vec()));
                                     }
                                 }
                             }
@@ -700,5 +723,101 @@ mod tests {
         };
 
         assert!((player.remaining_secs() - 10.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_preroll_frame_pool_and_audio_resampler_buffer_reuse() {
+        ffmpeg_next::init().unwrap();
+
+        // 1. Pooled video frame buffer reuse (>= MIN_POOLED_FRAME_BYTES: 320x240 YUV420P = 115,200 B)
+        let mut decoded =
+            ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::YUV420P, 320, 240);
+        decoded.data_mut(0).fill(0x55);
+        decoded.data_mut(1).fill(0x80);
+        decoded.data_mut(2).fill(0x80);
+        let mut normalized = ffmpeg_next::frame::Video::empty();
+        let mut scaler = None;
+        let mut active_filter = 0u8;
+
+        let (w1, h1, fmt1, data1) = normalize_decoded_video_frame(
+            &decoded,
+            &mut normalized,
+            &mut scaler,
+            &mut active_filter,
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            scaler.is_none(),
+            "Renderable YUV420P preroll frames must bypass swscale"
+        );
+        let ptr1 = data1.as_ptr();
+        let raw1 = RawFrame {
+            captured_at: 0,
+            rate: crate::replay::config::Rate::new(60, 1),
+            width: w1,
+            height: h1,
+            data: data1,
+            format: fmt1,
+            color_range: ColorRange::Limited,
+        };
+        // Dropping `raw1` returns its backing `Vec<u8>` to the global frame buffer pool.
+        drop(raw1);
+
+        let (_, _, _, data2) = normalize_decoded_video_frame(
+            &decoded,
+            &mut normalized,
+            &mut scaler,
+            &mut active_filter,
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            data2.as_ptr(),
+            ptr1,
+            "Subsequent preroll frames must reuse the recycled pooled buffer"
+        );
+        crate::video::types::recycle_frame_buffer(data2);
+
+        // 2. Reusable audio resampler output buffer (`resample_audio_frame_into`)
+        let mut rsm = create_audio_resampler(
+            ffmpeg_next::format::Sample::F32(ffmpeg_next::format::sample::Type::Planar),
+            ffmpeg_next::ChannelLayout::STEREO,
+            44_100,
+        )
+        .expect("create 44.1kHz -> 48kHz resampler");
+        let mut in_audio = ffmpeg_next::frame::Audio::new(
+            ffmpeg_next::format::Sample::F32(ffmpeg_next::format::sample::Type::Planar),
+            1024,
+            ffmpeg_next::ChannelLayout::STEREO,
+        );
+        in_audio.set_rate(44_100);
+        in_audio.plane_mut::<f32>(0).fill(0.25);
+        in_audio.plane_mut::<f32>(1).fill(-0.25);
+
+        let mut resampled_audio = ffmpeg_next::frame::Audio::empty();
+        let mut resampled_capacity = 0usize;
+        assert!(resample_audio_frame_into(
+            &mut rsm,
+            &in_audio,
+            &mut resampled_audio,
+            &mut resampled_capacity,
+        ));
+        let audio_ptr = resampled_audio.data(0).as_ptr();
+        let audio_cap = resampled_capacity;
+        assert!(audio_cap >= 2048);
+
+        for _ in 0..8 {
+            assert!(resample_audio_frame_into(
+                &mut rsm,
+                &in_audio,
+                &mut resampled_audio,
+                &mut resampled_capacity,
+            ));
+            assert_eq!(resampled_audio.data(0).as_ptr(), audio_ptr);
+            assert_eq!(resampled_capacity, audio_cap);
+        }
     }
 }

@@ -85,26 +85,70 @@ impl FreqDatabase {
         Ok(())
     }
 
+    fn persist_metadata_kv(&self, key: &str, value: &str) {
+        if self
+            .conn
+            .execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?1, ?2)",
+                params![key, value],
+            )
+            .is_ok()
+        {
+            return;
+        }
+        if let Ok(file) = self.conn.query_row(
+            "SELECT file FROM pragma_database_list WHERE name = 'main'",
+            [],
+            |r| r.get::<_, String>(0),
+        ) {
+            if !file.is_empty() {
+                if let Ok(rw_conn) = Connection::open(&file) {
+                    let _ = rw_conn.busy_timeout(std::time::Duration::from_millis(250));
+                    let _ = rw_conn.execute(
+                        "INSERT OR REPLACE INTO metadata (key, value) VALUES (?1, ?2)",
+                        params![key, value],
+                    );
+                }
+            }
+        }
+    }
+
     /// Loads the stored dictionary metadata from the `metadata` table.
     pub fn get_metadata(&self) -> Result<DictMetadata> {
-        let mut stmt = self.conn.prepare("SELECT key, value FROM metadata")?;
-        let rows = stmt.query_map([], |row| {
-            let key: String = row.get(0)?;
-            let value: String = row.get(1)?;
-            Ok((key, value))
-        })?;
-
         let mut map: HashMap<String, String> = HashMap::new();
-        for r in rows {
-            if let Ok((k, v)) = r {
-                map.insert(k, v);
+        {
+            let mut stmt = self
+                .conn
+                .prepare_cached("SELECT key, value FROM metadata")?;
+            let rows = stmt.query_map([], |row| {
+                let key: String = row.get(0)?;
+                let value: String = row.get(1)?;
+                Ok((key, value))
+            })?;
+
+            for r in rows {
+                if let Ok((k, v)) = r {
+                    map.insert(k, v);
+                }
             }
         }
 
-        let total_entries: usize = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM frequencies", [], |r| r.get(0))
-            .unwrap_or(0);
+        let total_entries = match map
+            .remove("total_entries")
+            .and_then(|v| v.trim().parse::<usize>().ok())
+        {
+            Some(n) => n,
+            None => {
+                let count: usize = self
+                    .conn
+                    .query_row("SELECT COUNT(*) FROM frequencies", [], |r| r.get(0))
+                    .unwrap_or(0);
+                if count > 0 {
+                    self.persist_metadata_kv("total_entries", &count.to_string());
+                }
+                count
+            }
+        };
 
         Ok(DictMetadata {
             title: map
@@ -131,23 +175,34 @@ impl FreqDatabase {
         let clean_reading = reading.trim();
         let clean_term = term.trim();
 
-        let kana_variants = |s: &str| -> Vec<String> {
-            let mut v = vec![s.to_string()];
-            for alt in [katakana_to_hiragana(s), hiragana_to_katakana(s)] {
-                if !v.contains(&alt) {
-                    v.push(alt);
-                }
-            }
-            v
-        };
-        let terms = kana_variants(clean_term);
+        fn alt_kana_variants(s: &str) -> [Option<String>; 2] {
+            let has_kata = s.chars().any(|c| (0x30A1..=0x30F6).contains(&(c as u32)));
+            let has_hira = s.chars().any(|c| (0x3041..=0x3096).contains(&(c as u32)));
+            let hira = has_kata.then(|| katakana_to_hiragana(s));
+            let kata = has_hira
+                .then(|| hiragana_to_katakana(s))
+                .filter(|k| hira.as_deref() != Some(k.as_str()));
+            [hira, kata]
+        }
 
         // 1. Specific reading: exact (term, reading) match only, with kana normalization.
         if !clean_reading.is_empty() {
-            let readings = kana_variants(clean_reading);
-            for t in &terms {
-                for r in &readings {
-                    if let Some(freq) = self.query_single_term_reading(t, r) {
+            if let Some(freq) = self.query_single_term_reading(clean_term, clean_reading) {
+                return Some(freq);
+            }
+            let term_alts = alt_kana_variants(clean_term);
+            let reading_alts = alt_kana_variants(clean_reading);
+            for r_alt in reading_alts.iter().flatten() {
+                if let Some(freq) = self.query_single_term_reading(clean_term, r_alt) {
+                    return Some(freq);
+                }
+            }
+            for t_alt in term_alts.iter().flatten() {
+                if let Some(freq) = self.query_single_term_reading(t_alt, clean_reading) {
+                    return Some(freq);
+                }
+                for r_alt in reading_alts.iter().flatten() {
+                    if let Some(freq) = self.query_single_term_reading(t_alt, r_alt) {
                         return Some(freq);
                     }
                 }
@@ -156,7 +211,14 @@ impl FreqDatabase {
         }
 
         // 2. No reading given: accept any reading of the term.
-        terms.iter().find_map(|t| self.query_term_any_reading(t))
+        if let Some(freq) = self.query_term_any_reading(clean_term) {
+            return Some(freq);
+        }
+        let term_alts = alt_kana_variants(clean_term);
+        term_alts
+            .iter()
+            .flatten()
+            .find_map(|t_alt| self.query_term_any_reading(t_alt))
     }
 
     fn query_single_term_reading(&self, term: &str, reading: &str) -> Option<TermFrequency> {
@@ -435,6 +497,11 @@ impl FreqDatabase {
                     "Frequency dictionary archive contained zero valid frequency entries"
                 );
             }
+
+            conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES ('total_entries', ?1)",
+                params![total_inserted.to_string()],
+            )?;
 
             // 4. Build indexes
             progress_cb("Building frequency indexes...", 0.93);
@@ -891,5 +958,58 @@ mod tests {
         assert!(db_after.get_frequency("食べる", "たべる").is_none());
         let f_new = db_after.get_frequency("走る", "はしる").unwrap();
         assert_eq!(f_new.rank, 88);
+    }
+
+    #[test]
+    fn test_freq_total_entries_persisted_and_backfilled_in_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("freq_meta.zip");
+        let db_path = dir.path().join("freq_meta.db");
+
+        write_test_zip(
+            &zip_path,
+            &[
+                (
+                    "index.json",
+                    r#"{"title":"Meta Jiten","revision":"2026.11.01","format":3}"#,
+                ),
+                (
+                    "term_meta_bank_1.json",
+                    r#"[["私","freq",23],["食べる","freq",150],["走る","freq",88]]"#,
+                ),
+            ],
+        );
+
+        FreqDatabase::build_from_zip(&zip_path, &db_path, |_, _| {}).unwrap();
+
+        let stored: String = Connection::open(&db_path)
+            .unwrap()
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'total_entries'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "3");
+
+        // Simulate legacy DB missing `total_entries`: read-only `FreqDatabase::open` + `get_metadata`
+        // falls back to `COUNT(*)` once and backfills `total_entries` on disk.
+        Connection::open(&db_path)
+            .unwrap()
+            .execute("DELETE FROM metadata WHERE key = 'total_entries'", [])
+            .unwrap();
+
+        let ro_db = FreqDatabase::open(&db_path).unwrap();
+        assert_eq!(ro_db.get_metadata().unwrap().total_entries, 3);
+
+        let backfilled: String = Connection::open(&db_path)
+            .unwrap()
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'total_entries'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(backfilled, "3");
     }
 }

@@ -87,6 +87,9 @@ impl AppState {
             Arc::new(move || repaint_context.request_repaint());
         let notify_video_event = Arc::clone(&request_repaint);
 
+        let allow_hwdec = self.hardware.video_hwdec;
+        crate::video::player::set_default_video_hwdec(allow_hwdec);
+
         let video_config = video::decoder::VideoThreadConfig {
             queue_drops: self.hardware.video_queue_drops.clone(),
             device,
@@ -95,6 +98,7 @@ impl AppState {
             framerate,
             scaler_filter,
             color_range,
+            allow_hwdec,
             stop_requested,
             request_repaint,
         };
@@ -224,7 +228,8 @@ impl AppState {
     }
 
     pub fn stop_stream(&mut self, ctx: &egui::Context) {
-        ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+        self.ui.reset_cursor_state_cache();
+        self.ui.set_cursor_grab(ctx, egui::CursorGrab::None);
         ctx.set_cursor_icon(egui::CursorIcon::Default);
         if self.steam_deck.is_none() && self.ui.is_fullscreen {
             self.ui.is_fullscreen = false;
@@ -340,6 +345,12 @@ impl AppState {
                             client.send_key(code, false);
                         }
                     }
+                    crate::steam_deck::release_forwarded_modifiers(
+                        client,
+                        &mut deck.forwarded_modifiers_mask,
+                    );
+                } else {
+                    deck.forwarded_modifiers_mask = 0;
                 }
                 hook.release_all_inputs();
                 deck.mouse_buttons = [false; 3];
@@ -387,23 +398,430 @@ impl AppState {
         ));
     }
 
-    pub fn open_gamescope_script_dialog(&mut self, ctx: &egui::Context) {
+    fn spawn_file_dialog<F>(&mut self, ctx: &egui::Context, picker: F)
+    where
+        F: FnOnce() -> Option<crate::app::models::AsyncFileDialogResult> + Send + 'static,
+    {
+        if self
+            .ui
+            .file_dialog_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let in_flight = Arc::clone(&self.ui.file_dialog_in_flight);
         let (tx, rx) = crossbeam_channel::bounded(1);
-        self.gamescope_script_dialog_receiver = Some(rx);
+        self.file_dialog_receiver = Some(rx);
         let ctx_clone = ctx.clone();
-        let _ = std::thread::Builder::new()
-            .name("gamescope-script-picker".to_string())
+        let spawned = std::thread::Builder::new()
+            .name("file-dialog".to_string())
             .spawn(move || {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Shell scripts", &["sh"])
-                    .add_filter("All files", &["*"])
-                    .set_title("Select Gamescope Launcher Script")
-                    .pick_file()
-                {
-                    let _ = tx.send(path);
-                    ctx_clone.request_repaint();
+                struct ResetInFlight(Arc<AtomicBool>);
+                impl Drop for ResetInFlight {
+                    fn drop(&mut self) {
+                        self.0.store(false, Ordering::Release);
+                    }
+                }
+                let _guard = ResetInFlight(in_flight);
+                if let Some(res) = picker() {
+                    let _ = tx.send(res);
+                }
+                ctx_clone.request_repaint();
+            });
+        if spawned.is_err() {
+            self.ui
+                .file_dialog_in_flight
+                .store(false, Ordering::Release);
+            self.file_dialog_receiver = None;
+        }
+    }
+
+    pub fn open_gamescope_script_dialog(&mut self, ctx: &egui::Context) {
+        self.spawn_file_dialog(ctx, || {
+            rfd::FileDialog::new()
+                .add_filter("Shell scripts", &["sh"])
+                .add_filter("All files", &["*"])
+                .set_title("Select Gamescope Launcher Script")
+                .pick_file()
+                .map(crate::app::models::AsyncFileDialogResult::GamescopeScript)
+        });
+    }
+
+    pub fn open_pitch_dict_dialog(&mut self, ctx: &egui::Context) {
+        self.spawn_file_dialog(ctx, || {
+            rfd::FileDialog::new()
+                .add_filter("Yomitan Dictionary (.zip)", &["zip"])
+                .set_title("Import Pitch Accent Dictionary")
+                .pick_file()
+                .map(crate::app::models::AsyncFileDialogResult::PitchDictZip)
+        });
+    }
+
+    pub fn poll_async_file_dialogs(&mut self, ctx: &egui::Context) -> bool {
+        let Some(picked) = self
+            .file_dialog_receiver
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        else {
+            return false;
+        };
+        self.file_dialog_receiver = None;
+        match picked {
+            crate::app::models::AsyncFileDialogResult::VideoFile(path) => {
+                self.start_video_file(&path, ctx);
+            }
+            crate::app::models::AsyncFileDialogResult::GamescopeScript(path) => {
+                self.gamescope_launcher_script = path.to_string_lossy().to_string();
+                crate::config::save_config(self);
+                crate::config::save_global_hardware_config(self);
+            }
+            crate::app::models::AsyncFileDialogResult::PitchDictZip(path) => {
+                self.dict.trigger_pitch_import(path);
+            }
+            crate::app::models::AsyncFileDialogResult::Pc98Media(slot, path) => {
+                self.apply_picked_pc98_media(slot, path, Some(ctx.clone()));
+            }
+            crate::app::models::AsyncFileDialogResult::Pc88Media(slot, path) => {
+                self.apply_picked_pc88_media(slot, path, Some(ctx.clone()));
+            }
+        }
+        true
+    }
+
+    pub fn start_async_usb_reset(&mut self, notify_ctx: Option<egui::Context>, is_startup: bool) {
+        if self.usb_reset_in_progress {
+            return;
+        }
+        let Some(device_id) = self.hardware.selected_usb_device.clone() else {
+            return;
+        };
+        self.usb_reset_in_progress = true;
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.usb_reset_receiver = Some(rx);
+        let spawned = std::thread::Builder::new()
+            .name("usb-reset".to_string())
+            .spawn(move || {
+                let res = devices::usb::reset_usb_device(&device_id).map_err(|e| e.to_string());
+                let _ = tx.send((is_startup, res));
+                if let Some(ctx) = notify_ctx {
+                    ctx.request_repaint();
                 }
             });
+        if let Err(e) = spawned {
+            self.usb_reset_in_progress = false;
+            self.usb_reset_receiver = None;
+            self.error(format!("Failed to spawn USB reset worker: {e}"));
+        }
+    }
+
+    pub fn request_capture_formats_probe(
+        &mut self,
+        notify_ctx: Option<egui::Context>,
+        announce: bool,
+    ) {
+        let active_prof = self.profiles.get(&self.active_profile).cloned();
+        let base_cfg = self.loaded_config_base.clone();
+        let saved_fourcc = active_prof
+            .as_ref()
+            .and_then(|p| p.video_format_fourcc.clone())
+            .or_else(|| {
+                base_cfg
+                    .as_ref()
+                    .and_then(|c| c.profiles.get(&c.active_profile))
+                    .and_then(|p| p.video_format_fourcc.clone())
+            });
+        let saved_res = active_prof
+            .as_ref()
+            .and_then(|p| p.video_resolution)
+            .or_else(|| base_cfg.as_ref().and_then(|c| c.video_resolution));
+        let saved_fps = active_prof
+            .as_ref()
+            .and_then(|p| p.video_framerate)
+            .or_else(|| base_cfg.as_ref().and_then(|c| c.video_framerate));
+        self.spawn_capture_formats_probe(saved_fourcc, saved_res, saved_fps, notify_ctx, announce);
+    }
+
+    pub fn request_capture_formats_probe_with_cfg(
+        &mut self,
+        cfg: &crate::config::MichadameConfig,
+        notify_ctx: Option<egui::Context>,
+        announce: bool,
+    ) {
+        let active_prof = cfg.profiles.get(&cfg.active_profile);
+        let saved_fourcc = active_prof.and_then(|p| p.video_format_fourcc.clone());
+        let saved_res = active_prof
+            .and_then(|p| p.video_resolution)
+            .or(cfg.video_resolution);
+        let saved_fps = active_prof
+            .and_then(|p| p.video_framerate)
+            .or(cfg.video_framerate);
+        self.spawn_capture_formats_probe(saved_fourcc, saved_res, saved_fps, notify_ctx, announce);
+    }
+
+    fn spawn_capture_formats_probe(
+        &mut self,
+        saved_fourcc: Option<String>,
+        saved_res: Option<(u32, u32)>,
+        saved_fps: Option<u32>,
+        notify_ctx: Option<egui::Context>,
+        announce: bool,
+    ) {
+        self.hardware.supported_formats.clear();
+        self.hardware.selected_format_index = 0;
+        self.hardware.selected_resolution = (0, 0);
+        let dev = self.hardware.selected_video_device.clone();
+        if dev.is_empty() {
+            self.capture_format_probing = false;
+            return;
+        }
+        self.capture_format_probe_gen = self.capture_format_probe_gen.wrapping_add(1);
+        let generation = self.capture_format_probe_gen;
+        self.capture_format_probing = true;
+        let tx = self.v4l2_format_probe_tx.clone();
+        let target = crate::app::models::V4l2FormatProbeTarget::Capture {
+            saved_fourcc,
+            saved_res,
+            saved_fps,
+            announce,
+        };
+        let spawned = std::thread::Builder::new()
+            .name("v4l2-format-probe".to_string())
+            .spawn(move || {
+                let formats = devices::video::find_video_formats(&dev).map_err(|e| e.to_string());
+                let _ = tx.send(crate::app::models::V4l2FormatProbeResult {
+                    generation,
+                    device: dev,
+                    target,
+                    formats,
+                });
+                if let Some(ctx) = notify_ctx {
+                    ctx.request_repaint();
+                }
+            });
+        if let Err(e) = spawned {
+            self.capture_format_probing = false;
+            if announce {
+                self.error(format!("Failed to spawn format scanner: {e}"));
+            }
+        }
+    }
+
+    pub fn request_webcam_formats_probe(
+        &mut self,
+        notify_ctx: Option<egui::Context>,
+        select_first_defaults: bool,
+        announce_err: bool,
+    ) {
+        let Some(dev) = self.webcam.config.device.clone() else {
+            self.webcam_format_probing = false;
+            return;
+        };
+        self.webcam.formats_probed_for_device = Some(dev.clone());
+        self.webcam_format_probe_gen = self.webcam_format_probe_gen.wrapping_add(1);
+        let generation = self.webcam_format_probe_gen;
+        self.webcam_format_probing = true;
+        let tx = self.v4l2_format_probe_tx.clone();
+        let target = crate::app::models::V4l2FormatProbeTarget::Webcam {
+            select_first_defaults,
+            announce_err,
+        };
+        let spawned = std::thread::Builder::new()
+            .name("webcam-format-probe".to_string())
+            .spawn(move || {
+                let formats = devices::video::find_video_formats(&dev).map_err(|e| e.to_string());
+                let _ = tx.send(crate::app::models::V4l2FormatProbeResult {
+                    generation,
+                    device: dev,
+                    target,
+                    formats,
+                });
+                if let Some(ctx) = notify_ctx {
+                    ctx.request_repaint();
+                }
+            });
+        if let Err(e) = spawned {
+            self.webcam_format_probing = false;
+            if announce_err {
+                self.error(format!("Failed to spawn webcam format scanner: {e}"));
+            }
+        }
+    }
+
+    pub fn poll_async_hardware_tasks(&mut self, ctx: &egui::Context) -> bool {
+        let mut handled = false;
+
+        if let Some(rx) = &self.usb_reset_receiver {
+            match rx.try_recv() {
+                Ok((is_startup, res)) => {
+                    self.usb_reset_in_progress = false;
+                    self.usb_reset_receiver = None;
+                    let msg = match (is_startup, res) {
+                        (true, Ok(())) => {
+                            tracing::info!("USB device reset on startup as requested.");
+                            "Auto-reset USB device successfully.".to_string()
+                        }
+                        (true, Err(e)) => format!("Failed to auto-reset USB: {e}"),
+                        (false, Ok(())) => "USB device reset successfully.".to_string(),
+                        (false, Err(e)) => format!("Failed to reset USB: {e}"),
+                    };
+                    self.info(msg);
+                    handled = true;
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    self.usb_reset_in_progress = false;
+                    self.usb_reset_receiver = None;
+                }
+            }
+        }
+
+        let mut probe_results = Vec::new();
+        while let Ok(res) = self.v4l2_format_probe_rx.try_recv() {
+            probe_results.push(res);
+        }
+        for res in probe_results {
+            match res.target {
+                crate::app::models::V4l2FormatProbeTarget::Capture {
+                    saved_fourcc,
+                    saved_res,
+                    saved_fps,
+                    announce,
+                } => {
+                    if res.generation != self.capture_format_probe_gen
+                        || res.device != self.hardware.selected_video_device
+                    {
+                        continue;
+                    }
+                    self.capture_format_probing = false;
+                    handled = true;
+                    match res.formats {
+                        Ok(formats) => {
+                            if announce {
+                                self.info(format!(
+                                    "Found {} formats for {}.",
+                                    formats.len(),
+                                    res.device
+                                ));
+                            }
+                            self.hardware.supported_formats = formats;
+                            if let Some(first_res) = self
+                                .hardware
+                                .supported_formats
+                                .first()
+                                .and_then(|f| f.resolutions.first())
+                            {
+                                self.hardware.selected_resolution =
+                                    (first_res.width, first_res.height);
+                                self.hardware.selected_framerate =
+                                    first_res.framerates.first().copied().unwrap_or(0);
+                            }
+                            let prof = self.profiles.get(&self.active_profile);
+                            let eff_fourcc = prof
+                                .and_then(|p| p.video_format_fourcc.as_ref())
+                                .or(saved_fourcc.as_ref());
+                            let eff_res = prof.and_then(|p| p.video_resolution).or(saved_res);
+                            let eff_fps = prof.and_then(|p| p.video_framerate).or(saved_fps);
+                            if let Some(fourcc) = eff_fourcc {
+                                if let Some(idx) = self
+                                    .hardware
+                                    .supported_formats
+                                    .iter()
+                                    .position(|f| f.fourcc == *fourcc)
+                                {
+                                    self.hardware.selected_format_index = idx;
+                                    if let Some(first_res) =
+                                        self.hardware.supported_formats[idx].resolutions.first()
+                                    {
+                                        self.hardware.selected_resolution =
+                                            (first_res.width, first_res.height);
+                                        self.hardware.selected_framerate =
+                                            first_res.framerates.first().copied().unwrap_or(0);
+                                    }
+                                    if let Some(r) = eff_res {
+                                        if let Some(res_info) = self.hardware.supported_formats[idx]
+                                            .resolutions
+                                            .iter()
+                                            .find(|ri| (ri.width, ri.height) == r)
+                                        {
+                                            self.hardware.selected_resolution = r;
+                                            self.hardware.selected_framerate =
+                                                res_info.framerates.first().copied().unwrap_or(0);
+                                            if let Some(fps) = eff_fps {
+                                                if res_info.framerates.contains(&fps) {
+                                                    self.hardware.selected_framerate = fps;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            if announce {
+                                self.error(format!("Failed to scan formats: {e}"));
+                            }
+                        }
+                    }
+                }
+                crate::app::models::V4l2FormatProbeTarget::Webcam {
+                    select_first_defaults,
+                    announce_err,
+                } => {
+                    if res.generation != self.webcam_format_probe_gen
+                        || self.webcam.config.device.as_deref() != Some(res.device.as_str())
+                    {
+                        continue;
+                    }
+                    self.webcam_format_probing = false;
+                    handled = true;
+                    match res.formats {
+                        Ok(formats) => {
+                            self.webcam.supported_formats = formats;
+                            if select_first_defaults {
+                                if let Some(first_fmt) = self.webcam.supported_formats.first() {
+                                    self.webcam.config.format_fourcc =
+                                        Some(first_fmt.fourcc.clone());
+                                    if let Some(first_res) = first_fmt.resolutions.first() {
+                                        self.webcam.config.resolution =
+                                            Some((first_res.width, first_res.height));
+                                        self.webcam.config.framerate =
+                                            first_res.framerates.first().copied();
+                                    }
+                                }
+                                crate::config::save_config(self);
+                                crate::config::save_global_hardware_config(self);
+                                if self.webcam.config.enabled {
+                                    self.sync_webcam_stream(Some(ctx));
+                                }
+                            } else {
+                                if let Some(saved_fourcc) = &self.webcam.config.format_fourcc {
+                                    if let Some(idx) = self
+                                        .webcam
+                                        .supported_formats
+                                        .iter()
+                                        .position(|f| f.fourcc == *saved_fourcc)
+                                    {
+                                        self.webcam.selected_format_index = idx;
+                                    }
+                                }
+                                if self.webcam.config.enabled && self.webcam.active_stream.is_none()
+                                {
+                                    self.sync_webcam_stream(Some(ctx));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            if announce_err {
+                                self.error(format!("Failed to scan webcam formats: {e}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        handled
     }
 
     pub fn start_gamescope_hook(&mut self, ctx: &egui::Context) {
@@ -526,21 +944,11 @@ impl AppState {
             }
         };
 
-        // 4. Initialize X11 cursor monitor for automatic camera capture
-        let x11_cursor_monitor = if let Some(disp) = if self.steam_deck.is_some() {
+        // 4. Initialize X11 cursor monitor for automatic camera capture off the UI thread
+        let x11_cursor_monitor = if self.steam_deck.is_some() {
             None
         } else {
-            crate::gamescope::x11_cursor::find_gamescope_x_display()
-        } {
-            tracing::info!("Found Gamescope X11 display: {disp}, starting cursor monitor");
-            crate::gamescope::x11_cursor::GamescopeX11CursorMonitor::start(&disp)
-        } else {
-            if self.steam_deck.is_none() {
-                tracing::warn!(
-                    "Gamescope X11 display not detected; automatic cursor capture disabled"
-                );
-            }
-            None
+            Some(crate::gamescope::x11_cursor::GamescopeX11CursorMonitor::start_auto())
         };
 
         let initial_resolution = if self.steam_deck.is_some() {
@@ -592,11 +1000,31 @@ impl AppState {
         }
         const MAX_DMA_RETRIES: u32 = 15;
         const DMA_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+        const CURSOR_RETRY_INTERVAL: std::time::Duration = crate::gamescope::CURSOR_RETRY_COOLDOWN;
 
         let mut should_give_up = None;
         if let Some(hook) = &mut self.gamescope_hook {
             if !hook.is_active {
                 return;
+            }
+            if hook
+                .x11_cursor_monitor
+                .as_ref()
+                .is_some_and(|m| m.is_disconnected())
+            {
+                hook.x11_cursor_monitor = None;
+                hook.cursor_texture = None;
+            }
+            if hook.x11_cursor_monitor.is_none() {
+                let now = std::time::Instant::now();
+                let ready = hook.last_cursor_retry.map_or(true, |last| {
+                    now.duration_since(last) >= CURSOR_RETRY_INTERVAL
+                });
+                if ready {
+                    hook.last_cursor_retry = Some(now);
+                    hook.x11_cursor_monitor =
+                        Some(crate::gamescope::x11_cursor::GamescopeX11CursorMonitor::start_auto());
+                }
             }
             if let Some(dma) = &hook.dma_handle {
                 if dma.frames_imported() > 0 {
@@ -768,6 +1196,13 @@ impl AppState {
             }
         };
 
+        if self.webcam_format_probing
+            && self.webcam.supported_formats.is_empty()
+            && self.webcam.config.format_fourcc.is_none()
+        {
+            return;
+        }
+
         if let Some(ref saved_fourcc) = self.webcam.config.format_fourcc {
             if let Some(idx) = self
                 .webcam
@@ -818,6 +1253,7 @@ impl AppState {
         self.webcam.latest_frame = None;
 
         let (tx, rx) = crossbeam_channel::bounded(1);
+        let drop_rx = rx.clone();
         self.webcam.frame_receiver = Some(rx);
 
         let repaint_ctx = ctx.cloned();
@@ -833,6 +1269,7 @@ impl AppState {
             resolution,
             framerate,
             tx,
+            drop_rx,
             request_repaint,
             prev_thread,
         ) {
@@ -852,15 +1289,9 @@ impl AppState {
         }
         self.stop_stream_resources();
 
-        // Probe video file container for native dimensions, duration, and framerate
-        let probe = crate::video::player::probe_video_file(path).ok();
-        let (file_width, file_height, file_duration, file_framerate) = if let Some(ref p) = probe {
-            (p.width, p.height, p.duration_secs, p.framerate)
-        } else {
-            (640, 480, 0.0, 30.0)
-        };
-
-        // Stash current normal profile and capture card parameters
+        // Stash current normal profile and capture card parameters.
+        // Container metadata (dimensions, duration, framerate) is probed asynchronously
+        // on the video player worker thread and delivered via `PlayerEvent::Started`.
         let current_normal = crate::config::build_profile_from_state(self);
         self.profiles
             .insert(self.active_profile.clone(), current_normal);
@@ -871,15 +1302,9 @@ impl AppState {
         // Apply dedicated video profile (starts with default settings or previously saved video profile)
         crate::config::apply_profile_to_state(self, &self.video_profile.clone());
 
-        // Base rendering resolution on the actual resolution of the file itself
-        if file_width > 0 && file_height > 0 {
-            self.hardware.selected_resolution = (file_width, file_height);
-            self.hardware.selected_framerate = (file_framerate.round() as u32).max(1);
-            let new_size = egui::vec2(file_width as f32, file_height as f32);
-            ctx.send_viewport_cmd_to(
-                egui::ViewportId::ROOT,
-                egui::ViewportCommand::InnerSize(new_size),
-            );
+        if self.hardware.selected_resolution.0 == 0 || self.hardware.selected_resolution.1 == 0 {
+            self.hardware.selected_resolution = (640, 480);
+            self.hardware.selected_framerate = 30;
         }
 
         let (frame_tx, frame_rx) = crossbeam_channel::bounded(2);
@@ -921,13 +1346,16 @@ impl AppState {
             master_volume: self.effective_local_volume(),
         };
 
+        let allow_hwdec = self.hardware.video_hwdec;
+        crate::video::player::set_default_video_hwdec(allow_hwdec);
+
         let pos_clone = Arc::clone(&position_us);
         let paused_clone = Arc::clone(&is_paused);
         let eof_clone = Arc::clone(&is_eof);
 
         let event_tx_clone = event_tx.clone();
         let handle = thread::spawn(move || {
-            let result = crate::video::player::video_file_thread_main(
+            let result = crate::video::player::video_file_thread_main_with_hwdec(
                 frame_tx,
                 event_tx_clone.clone(),
                 cmd_rx,
@@ -935,6 +1363,7 @@ impl AppState {
                 paused_clone,
                 eof_clone,
                 config,
+                allow_hwdec,
             );
             match result {
                 Ok(()) => {
@@ -951,7 +1380,7 @@ impl AppState {
 
         self.video_player = Some(crate::app::models::VideoPlayerState {
             file_path: path.to_path_buf(),
-            duration_secs: file_duration,
+            duration_secs: 0.0,
             current_position_secs: 0.0,
             is_paused: false,
             is_eof: false,
@@ -962,8 +1391,8 @@ impl AppState {
             is_paused_shared: is_paused,
             is_eof_shared: is_eof,
             stop_requested,
-            file_width,
-            file_height,
+            file_width: 0,
+            file_height: 0,
             player_thread: Some(handle),
         });
 
@@ -977,28 +1406,20 @@ impl AppState {
         if self.steam_deck.is_some() {
             return;
         }
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        self.video_file_dialog_receiver = Some(rx);
-        let ctx_clone = ctx.clone();
-        let _ = std::thread::Builder::new()
-            .name("video-file-picker".to_string())
-            .spawn(move || {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter(
-                        "Video files",
-                        &[
-                            "mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "m4v", "ts", "mpg",
-                            "mpeg", "vob", "ogv", "3gp",
-                        ],
-                    )
-                    .add_filter("All files", &["*"])
-                    .set_title("Open Video File")
-                    .pick_file()
-                {
-                    let _ = tx.send(path);
-                    ctx_clone.request_repaint();
-                }
-            });
+        self.spawn_file_dialog(ctx, || {
+            rfd::FileDialog::new()
+                .add_filter(
+                    "Video files",
+                    &[
+                        "mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "m4v", "ts", "mpg",
+                        "mpeg", "vob", "ogv", "3gp",
+                    ],
+                )
+                .add_filter("All files", &["*"])
+                .set_title("Open Video File")
+                .pick_file()
+                .map(crate::app::models::AsyncFileDialogResult::VideoFile)
+        });
     }
 
     pub fn handle_video_file_player_events(&mut self, ctx: &egui::Context) -> bool {
@@ -1248,80 +1669,96 @@ impl AppState {
         self.latest_frame = None;
     }
 
+    fn apply_picked_pc98_media(
+        &mut self,
+        slot: crate::pc98::Pc98MediaSlot,
+        raw_path: std::path::PathBuf,
+        notify_ctx: Option<egui::Context>,
+    ) {
+        if slot == crate::pc98::Pc98MediaSlot::GamesDir {
+            self.pc98.config.games_dir = raw_path.to_string_lossy().to_string();
+            if let Err(e) = self.pc98.start_background_library_scan(notify_ctx) {
+                self.error(format!("Failed to scan PC-98 games folder: {e}"));
+            }
+            crate::config::save_config(self);
+        } else {
+            let path = raw_path;
+            let path_str = path.to_string_lossy().to_string();
+            match slot {
+                crate::pc98::Pc98MediaSlot::Fdd1 => {
+                    self.pc98.config.fdd1_path = path_str;
+                    self.pc98.send_command(crate::pc98::Pc98Command::MountFdd {
+                        drive: 0,
+                        path: Some(path),
+                    });
+                }
+                crate::pc98::Pc98MediaSlot::Fdd2 => {
+                    self.pc98.config.fdd2_path = path_str;
+                    self.pc98.send_command(crate::pc98::Pc98Command::MountFdd {
+                        drive: 1,
+                        path: Some(path),
+                    });
+                }
+                crate::pc98::Pc98MediaSlot::Hdd1 => {
+                    self.pc98.config.hdd1_path = path_str;
+                    if self.pc98.is_active {
+                        self.info("HDD1 updated. Reboot PC-98 mode to apply HDD changes.");
+                    }
+                }
+                crate::pc98::Pc98MediaSlot::Hdd2 => {
+                    self.pc98.config.hdd2_path = path_str;
+                    if self.pc98.is_active {
+                        self.info("HDD2 updated. Reboot PC-98 mode to apply HDD changes.");
+                    }
+                }
+                crate::pc98::Pc98MediaSlot::CdRom => {
+                    self.pc98.config.cdrom_path = path_str;
+                    if self.pc98.is_active {
+                        self.info("CD-ROM updated. Reboot PC-98 mode to apply CD-ROM changes.");
+                    }
+                }
+                crate::pc98::Pc98MediaSlot::DosHdd => {
+                    self.pc98.config.dos_hdd_path = path_str.clone();
+                    if let Some(sel_idx) = self
+                        .pc98
+                        .games_list
+                        .iter()
+                        .position(|g| g.id == self.pc98.config.selected_game)
+                    {
+                        if self.pc98.games_list[sel_idx].boot_mode.requires_dos_hdd() {
+                            self.pc98.config.hdd1_path = path_str;
+                        }
+                    }
+                    self.info("Updated base bootable MS-DOS hard disk image.");
+                }
+                crate::pc98::Pc98MediaSlot::GamesDir => {}
+            }
+            crate::config::save_config(self);
+        }
+    }
+
     pub fn handle_pc98_events(&mut self, ctx: &egui::Context) -> bool {
         let mut handled = false;
-        if let Some(rx) = &self.pc98.file_picker_rx {
-            if let Ok((slot, raw_path)) = rx.try_recv() {
-                if slot == crate::pc98::Pc98MediaSlot::GamesDir {
-                    self.pc98.config.games_dir = raw_path.to_string_lossy().to_string();
-                    match self.pc98.refresh_games_list() {
-                        Ok(count) => {
-                            self.info(format!("Scanned PC-98 games folder: found {count} games."));
-                        }
-                        Err(e) => {
-                            self.error(format!("Failed to scan PC-98 games folder: {e}"));
-                        }
-                    }
-                    crate::config::save_config(self);
-                    handled = true;
-                } else {
-                    let path = raw_path;
-                    let path_str = path.to_string_lossy().to_string();
-                    match slot {
-                        crate::pc98::Pc98MediaSlot::Fdd1 => {
-                            self.pc98.config.fdd1_path = path_str.clone();
-                            self.pc98.send_command(crate::pc98::Pc98Command::MountFdd {
-                                drive: 0,
-                                path: Some(path),
-                            });
-                        }
-                        crate::pc98::Pc98MediaSlot::Fdd2 => {
-                            self.pc98.config.fdd2_path = path_str.clone();
-                            self.pc98.send_command(crate::pc98::Pc98Command::MountFdd {
-                                drive: 1,
-                                path: Some(path),
-                            });
-                        }
-                        crate::pc98::Pc98MediaSlot::Hdd1 => {
-                            self.pc98.config.hdd1_path = path_str;
-                            if self.pc98.is_active {
-                                self.info("HDD1 updated. Reboot PC-98 mode to apply HDD changes.");
-                            }
-                        }
-                        crate::pc98::Pc98MediaSlot::Hdd2 => {
-                            self.pc98.config.hdd2_path = path_str;
-                            if self.pc98.is_active {
-                                self.info("HDD2 updated. Reboot PC-98 mode to apply HDD changes.");
-                            }
-                        }
-                        crate::pc98::Pc98MediaSlot::CdRom => {
-                            self.pc98.config.cdrom_path = path_str;
-                            if self.pc98.is_active {
-                                self.info(
-                                    "CD-ROM updated. Reboot PC-98 mode to apply CD-ROM changes.",
-                                );
-                            }
-                        }
-                        crate::pc98::Pc98MediaSlot::DosHdd => {
-                            self.pc98.config.dos_hdd_path = path_str.clone();
-                            if let Some(sel_idx) = self
-                                .pc98
-                                .games_list
-                                .iter()
-                                .position(|g| g.id == self.pc98.config.selected_game)
-                            {
-                                if self.pc98.games_list[sel_idx].boot_mode.requires_dos_hdd() {
-                                    self.pc98.config.hdd1_path = path_str;
-                                }
-                            }
-                            self.info("Updated base bootable MS-DOS hard disk image.");
-                        }
-                        crate::pc98::Pc98MediaSlot::GamesDir => {}
-                    }
-                    crate::config::save_config(self);
-                    handled = true;
+        if let Some(scan_res) = self.pc98.poll_library_scan() {
+            match scan_res {
+                Ok(count) => {
+                    self.info(format!("Scanned PC-98 games folder: found {count} games."));
+                }
+                Err(e) => {
+                    self.error(format!("Failed to scan PC-98 games folder: {e}"));
                 }
             }
+            handled = true;
+        }
+
+        if let Some(picked) = self
+            .pc98
+            .file_picker_rx
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        {
+            self.apply_picked_pc98_media(picked.0, picked.1, Some(ctx.clone()));
+            handled = true;
         }
 
         while let Some(rx) = self.pc98.event_rx.as_ref() {
@@ -1380,9 +1817,8 @@ impl AppState {
                     self.info(msg);
                 }
                 crate::pc98::Pc98Event::Failed(err) => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(
-                        egui::CursorGrab::None,
-                    ));
+                    self.ui.reset_cursor_state_cache();
+                    self.ui.set_cursor_grab(ctx, egui::CursorGrab::None);
                     ctx.set_cursor_icon(egui::CursorIcon::Default);
                     self.fullscreen_toggle_frame_count = None;
                     if self.steam_deck.is_none() {
@@ -1408,9 +1844,9 @@ impl AppState {
         slot: crate::pc98::Pc98MediaSlot,
         ctx: &egui::Context,
     ) {
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        self.pc98.file_picker_rx = Some(rx);
         if let Some(deck) = &mut self.steam_deck {
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            self.pc98.file_picker_rx = Some(rx);
             deck.file_picker = Some(crate::ui::file_picker::FilePicker::new(
                 "Select PC-98 media or games folder",
                 std::path::Path::new(&self.pc98.config.games_dir),
@@ -1422,58 +1858,52 @@ impl AppState {
             ));
             return;
         }
-        let ctx_clone = ctx.clone();
-        let _ = std::thread::Builder::new()
-            .name("pc98-media-picker".to_string())
-            .spawn(move || {
-                let picked = match slot {
-                    crate::pc98::Pc98MediaSlot::GamesDir => rfd::FileDialog::new()
-                        .set_title("Select PC-98 Root Games Directory")
-                        .pick_folder(),
-                    crate::pc98::Pc98MediaSlot::Fdd1 | crate::pc98::Pc98MediaSlot::Fdd2 => {
-                        rfd::FileDialog::new()
-                            .add_filter(
-                                "PC-98 Floppy Disk Images (.d88/.fdi/.hdm/.nfd)",
-                                &[
-                                    "d88", "88d", "fdi", "hdm", "xdf", "dup", "2hd", "tfd", "nfd",
-                                    "flp", "fdd", "fim", "bin",
-                                ],
-                            )
-                            .add_filter("All files", &["*"])
-                            .set_title("Select PC-98 Floppy Disk Image")
-                            .pick_file()
-                    }
-                    crate::pc98::Pc98MediaSlot::Hdd1
-                    | crate::pc98::Pc98MediaSlot::Hdd2
-                    | crate::pc98::Pc98MediaSlot::DosHdd => {
-                        let title = if slot == crate::pc98::Pc98MediaSlot::DosHdd {
-                            "Select Base Bootable MS-DOS Hard Disk Image"
-                        } else {
-                            "Select PC-98 Hard Disk Image"
-                        };
-                        rfd::FileDialog::new()
-                            .add_filter(
-                                "PC-98 Hard Disk Images (.hdi/.nhd/.thd)",
-                                &["hdi", "thd", "nhd", "vhd", "slh", "hdn"],
-                            )
-                            .add_filter("All files", &["*"])
-                            .set_title(title)
-                            .pick_file()
-                    }
-                    crate::pc98::Pc98MediaSlot::CdRom => rfd::FileDialog::new()
+        self.spawn_file_dialog(ctx, move || {
+            let picked = match slot {
+                crate::pc98::Pc98MediaSlot::GamesDir => rfd::FileDialog::new()
+                    .set_title("Select PC-98 Root Games Directory")
+                    .pick_folder(),
+                crate::pc98::Pc98MediaSlot::Fdd1 | crate::pc98::Pc98MediaSlot::Fdd2 => {
+                    rfd::FileDialog::new()
                         .add_filter(
-                            "CD-ROM Images (.cue/.ccd/.iso)",
-                            &["cue", "ccd", "cdm", "mds", "nrg", "iso"],
+                            "PC-98 Floppy Disk Images (.d88/.fdi/.hdm/.nfd)",
+                            &[
+                                "d88", "88d", "fdi", "hdm", "xdf", "dup", "2hd", "tfd", "nfd",
+                                "flp", "fdd", "fim", "bin",
+                            ],
                         )
                         .add_filter("All files", &["*"])
-                        .set_title("Select PC-98 CD-ROM Image")
-                        .pick_file(),
-                };
-                if let Some(path) = picked {
-                    let _ = tx.send((slot, path));
-                    ctx_clone.request_repaint();
+                        .set_title("Select PC-98 Floppy Disk Image")
+                        .pick_file()
                 }
-            });
+                crate::pc98::Pc98MediaSlot::Hdd1
+                | crate::pc98::Pc98MediaSlot::Hdd2
+                | crate::pc98::Pc98MediaSlot::DosHdd => {
+                    let title = if slot == crate::pc98::Pc98MediaSlot::DosHdd {
+                        "Select Base Bootable MS-DOS Hard Disk Image"
+                    } else {
+                        "Select PC-98 Hard Disk Image"
+                    };
+                    rfd::FileDialog::new()
+                        .add_filter(
+                            "PC-98 Hard Disk Images (.hdi/.nhd/.thd)",
+                            &["hdi", "thd", "nhd", "vhd", "slh", "hdn"],
+                        )
+                        .add_filter("All files", &["*"])
+                        .set_title(title)
+                        .pick_file()
+                }
+                crate::pc98::Pc98MediaSlot::CdRom => rfd::FileDialog::new()
+                    .add_filter(
+                        "CD-ROM Images (.cue/.ccd/.iso)",
+                        &["cue", "ccd", "cdm", "mds", "nrg", "iso"],
+                    )
+                    .add_filter("All files", &["*"])
+                    .set_title("Select PC-98 CD-ROM Image")
+                    .pick_file(),
+            };
+            picked.map(|path| crate::app::models::AsyncFileDialogResult::Pc98Media(slot, path))
+        });
     }
 
     pub fn start_pc88_mode(&mut self, ctx: &egui::Context) {
@@ -1615,54 +2045,70 @@ impl AppState {
         self.latest_frame = None;
     }
 
+    fn apply_picked_pc88_media(
+        &mut self,
+        slot: crate::pc88::Pc88MediaSlot,
+        raw_path: std::path::PathBuf,
+        notify_ctx: Option<egui::Context>,
+    ) {
+        if slot == crate::pc88::Pc88MediaSlot::GamesDir {
+            self.pc88.config.games_dir = raw_path.to_string_lossy().to_string();
+            if let Err(e) = self.pc88.start_background_library_scan(notify_ctx) {
+                self.error(format!("Failed to scan PC-88 games folder: {e}"));
+            }
+            crate::config::save_config(self);
+        } else {
+            let path = raw_path;
+            let path_str = path.to_string_lossy().to_string();
+            match slot {
+                crate::pc88::Pc88MediaSlot::Fdd1 => {
+                    self.pc88.config.fdd1_path = path_str;
+                    self.pc88.send_command(crate::pc88::Pc88Command::MountFdd {
+                        drive: 0,
+                        path: Some(path),
+                    });
+                }
+                crate::pc88::Pc88MediaSlot::Fdd2 => {
+                    self.pc88.config.fdd2_path = path_str;
+                    self.pc88.send_command(crate::pc88::Pc88Command::MountFdd {
+                        drive: 1,
+                        path: Some(path),
+                    });
+                }
+                crate::pc88::Pc88MediaSlot::Tape => {
+                    self.pc88.config.tape_path = path_str;
+                    if self.pc88.is_active {
+                        self.info("Tape image updated. Reboot PC-88 mode to apply tape changes.");
+                    }
+                }
+                crate::pc88::Pc88MediaSlot::GamesDir => {}
+            }
+            crate::config::save_config(self);
+        }
+    }
+
     pub fn handle_pc88_events(&mut self, ctx: &egui::Context) -> bool {
         let mut handled = false;
-        if let Some(rx) = &self.pc88.file_picker_rx {
-            if let Ok((slot, raw_path)) = rx.try_recv() {
-                if slot == crate::pc88::Pc88MediaSlot::GamesDir {
-                    self.pc88.config.games_dir = raw_path.to_string_lossy().to_string();
-                    match self.pc88.refresh_games_list() {
-                        Ok(count) => {
-                            self.info(format!("Scanned PC-88 games folder: found {count} games."));
-                        }
-                        Err(e) => {
-                            self.error(format!("Failed to scan PC-88 games folder: {e}"));
-                        }
-                    }
-                    crate::config::save_config(self);
-                    handled = true;
-                } else {
-                    let path = raw_path;
-                    let path_str = path.to_string_lossy().to_string();
-                    match slot {
-                        crate::pc88::Pc88MediaSlot::Fdd1 => {
-                            self.pc88.config.fdd1_path = path_str.clone();
-                            self.pc88.send_command(crate::pc88::Pc88Command::MountFdd {
-                                drive: 0,
-                                path: Some(path),
-                            });
-                        }
-                        crate::pc88::Pc88MediaSlot::Fdd2 => {
-                            self.pc88.config.fdd2_path = path_str.clone();
-                            self.pc88.send_command(crate::pc88::Pc88Command::MountFdd {
-                                drive: 1,
-                                path: Some(path),
-                            });
-                        }
-                        crate::pc88::Pc88MediaSlot::Tape => {
-                            self.pc88.config.tape_path = path_str;
-                            if self.pc88.is_active {
-                                self.info(
-                                    "Tape image updated. Reboot PC-88 mode to apply tape changes.",
-                                );
-                            }
-                        }
-                        crate::pc88::Pc88MediaSlot::GamesDir => {}
-                    }
-                    crate::config::save_config(self);
-                    handled = true;
+        if let Some(scan_res) = self.pc88.poll_library_scan() {
+            match scan_res {
+                Ok(count) => {
+                    self.info(format!("Scanned PC-88 games folder: found {count} games."));
+                }
+                Err(e) => {
+                    self.error(format!("Failed to scan PC-88 games folder: {e}"));
                 }
             }
+            handled = true;
+        }
+
+        if let Some(picked) = self
+            .pc88
+            .file_picker_rx
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        {
+            self.apply_picked_pc88_media(picked.0, picked.1, Some(ctx.clone()));
+            handled = true;
         }
 
         while let Some(rx) = self.pc88.event_rx.as_ref() {
@@ -1721,9 +2167,8 @@ impl AppState {
                     self.info(msg);
                 }
                 crate::pc88::Pc88Event::Failed(err) => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(
-                        egui::CursorGrab::None,
-                    ));
+                    self.ui.reset_cursor_state_cache();
+                    self.ui.set_cursor_grab(ctx, egui::CursorGrab::None);
                     ctx.set_cursor_icon(egui::CursorIcon::Default);
                     self.fullscreen_toggle_frame_count = None;
                     if self.steam_deck.is_none() {
@@ -1749,9 +2194,9 @@ impl AppState {
         slot: crate::pc88::Pc88MediaSlot,
         ctx: &egui::Context,
     ) {
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        self.pc88.file_picker_rx = Some(rx);
         if let Some(deck) = &mut self.steam_deck {
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            self.pc88.file_picker_rx = Some(rx);
             deck.file_picker = Some(crate::ui::file_picker::FilePicker::new(
                 "Select PC-88 media or games folder",
                 std::path::Path::new(&self.pc88.config.games_dir),
@@ -1763,35 +2208,29 @@ impl AppState {
             ));
             return;
         }
-        let ctx_clone = ctx.clone();
-        let _ = std::thread::Builder::new()
-            .name("pc88-media-picker".to_string())
-            .spawn(move || {
-                let picked = match slot {
-                    crate::pc88::Pc88MediaSlot::GamesDir => rfd::FileDialog::new()
-                        .set_title("Select PC-88 Root Games Directory")
-                        .pick_folder(),
-                    crate::pc88::Pc88MediaSlot::Fdd1 | crate::pc88::Pc88MediaSlot::Fdd2 => {
-                        rfd::FileDialog::new()
-                            .add_filter(
-                                "PC-88 Floppy Disk Images (.d88/.88d)",
-                                &["d88", "88d", "d77", "2d"],
-                            )
-                            .add_filter("All files", &["*"])
-                            .set_title("Select PC-88 Floppy Disk Image")
-                            .pick_file()
-                    }
-                    crate::pc88::Pc88MediaSlot::Tape => rfd::FileDialog::new()
-                        .add_filter("PC-88 Tape Images (.t88/.cmt)", &["t88", "cmt"])
+        self.spawn_file_dialog(ctx, move || {
+            let picked = match slot {
+                crate::pc88::Pc88MediaSlot::GamesDir => rfd::FileDialog::new()
+                    .set_title("Select PC-88 Root Games Directory")
+                    .pick_folder(),
+                crate::pc88::Pc88MediaSlot::Fdd1 | crate::pc88::Pc88MediaSlot::Fdd2 => {
+                    rfd::FileDialog::new()
+                        .add_filter(
+                            "PC-88 Floppy Disk Images (.d88/.88d)",
+                            &["d88", "88d", "d77", "2d"],
+                        )
                         .add_filter("All files", &["*"])
-                        .set_title("Select PC-88 Tape Image")
-                        .pick_file(),
-                };
-                if let Some(path) = picked {
-                    let _ = tx.send((slot, path));
-                    ctx_clone.request_repaint();
+                        .set_title("Select PC-88 Floppy Disk Image")
+                        .pick_file()
                 }
-            });
+                crate::pc88::Pc88MediaSlot::Tape => rfd::FileDialog::new()
+                    .add_filter("PC-88 Tape Images (.t88/.cmt)", &["t88", "cmt"])
+                    .add_filter("All files", &["*"])
+                    .set_title("Select PC-88 Tape Image")
+                    .pick_file(),
+            };
+            picked.map(|path| crate::app::models::AsyncFileDialogResult::Pc88Media(slot, path))
+        });
     }
 }
 
@@ -2168,5 +2607,82 @@ mod tests {
         assert_eq!(state.hardware.selected_framerate, 60);
         assert_eq!(state.crt.hard_scan, -10.0);
         assert_eq!(state.video.brightness, 1.3);
+    }
+
+    #[test]
+    fn test_async_hardware_probe_generation_filtering_and_dialog_polling() {
+        let mut state = AppState::default();
+        let ctx = egui::Context::default();
+
+        // 1. Verify stale V4L2 probe generation is ignored while matching generation restores saved format
+        state.hardware.selected_video_device = "/dev/video2".to_string();
+        state.capture_format_probe_gen = 3;
+        state.capture_format_probing = true;
+
+        let stale_fmt = crate::video::types::VideoFormat {
+            fourcc: "YUYV".to_string(),
+            description: "YUYV".to_string(),
+            resolutions: vec![crate::video::types::Resolution {
+                width: 640,
+                height: 480,
+                framerates: vec![30],
+            }],
+        };
+        let fresh_fmt = crate::video::types::VideoFormat {
+            fourcc: "MJPG".to_string(),
+            description: "Motion-JPEG".to_string(),
+            resolutions: vec![crate::video::types::Resolution {
+                width: 1920,
+                height: 1080,
+                framerates: vec![30, 60],
+            }],
+        };
+
+        state
+            .v4l2_format_probe_tx
+            .send(crate::app::models::V4l2FormatProbeResult {
+                generation: 2,
+                device: "/dev/video2".to_string(),
+                target: crate::app::models::V4l2FormatProbeTarget::Capture {
+                    saved_fourcc: None,
+                    saved_res: None,
+                    saved_fps: None,
+                    announce: false,
+                },
+                formats: Ok(vec![stale_fmt]),
+            })
+            .unwrap();
+        assert!(!state.poll_async_hardware_tasks(&ctx));
+        assert!(state.capture_format_probing);
+        assert!(state.hardware.supported_formats.is_empty());
+
+        state
+            .v4l2_format_probe_tx
+            .send(crate::app::models::V4l2FormatProbeResult {
+                generation: 3,
+                device: "/dev/video2".to_string(),
+                target: crate::app::models::V4l2FormatProbeTarget::Capture {
+                    saved_fourcc: Some("MJPG".to_string()),
+                    saved_res: Some((1920, 1080)),
+                    saved_fps: Some(60),
+                    announce: false,
+                },
+                formats: Ok(vec![fresh_fmt]),
+            })
+            .unwrap();
+        assert!(state.poll_async_hardware_tasks(&ctx));
+        assert!(!state.capture_format_probing);
+        assert_eq!(state.hardware.supported_formats.len(), 1);
+        assert_eq!(state.hardware.selected_resolution, (1920, 1080));
+        assert_eq!(state.hardware.selected_framerate, 60);
+
+        // 2. Verify USB reset async completion clears in-progress flag
+        let (usb_tx, usb_rx) = crossbeam_channel::bounded(1);
+        state.usb_reset_in_progress = true;
+        state.usb_reset_receiver = Some(usb_rx);
+        usb_tx.send((false, Ok(()))).unwrap();
+        assert!(state.poll_async_hardware_tasks(&ctx));
+        assert!(!state.usb_reset_in_progress);
+        assert!(state.usb_reset_receiver.is_none());
     }
 }

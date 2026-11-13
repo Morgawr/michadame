@@ -407,6 +407,29 @@ impl LiveVideoEncoder {
             }
         }
     }
+
+    fn flush(&mut self) -> Result<Vec<Packet>> {
+        let encoder = match self {
+            Self::Software { encoder, .. } => encoder,
+            Self::Hardware { encoder, .. } => encoder,
+        };
+        match encoder.send_eof() {
+            Ok(()) | Err(ff::Error::Eof) => {}
+            Err(ff::Error::Other { errno }) if errno == libc::EINVAL => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        }
+        let mut packets = Vec::new();
+        loop {
+            let mut packet = Packet::empty();
+            match encoder.receive_packet(&mut packet) {
+                Ok(()) => packets.push(packet),
+                Err(ff::Error::Other { errno }) if errno == libc::EAGAIN => break,
+                Err(ff::Error::Eof) => break,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(packets)
+    }
 }
 
 unsafe fn convert_rgba_to_frame(
@@ -506,10 +529,26 @@ impl LiveAudioEncoder {
         loop {
             let mut packet = Packet::empty();
             match self.encoder.receive_packet(&mut packet) {
-                Ok(()) => {
-                    packet.rescale_ts((1, 48000), (1, 1000));
-                    packets.push(packet);
-                }
+                Ok(()) => packets.push(packet),
+                Err(ff::Error::Other { errno }) if errno == libc::EAGAIN => break,
+                Err(ff::Error::Eof) => break,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(packets)
+    }
+
+    fn flush(&mut self) -> Result<Vec<Packet>> {
+        match self.encoder.send_eof() {
+            Ok(()) | Err(ff::Error::Eof) => {}
+            Err(ff::Error::Other { errno }) if errno == libc::EINVAL => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        }
+        let mut packets = Vec::new();
+        loop {
+            let mut packet = Packet::empty();
+            match self.encoder.receive_packet(&mut packet) {
+                Ok(()) => packets.push(packet),
                 Err(ff::Error::Other { errno }) if errno == libc::EAGAIN => break,
                 Err(ff::Error::Eof) => break,
                 Err(e) => return Err(e.into()),
@@ -520,21 +559,33 @@ impl LiveAudioEncoder {
 }
 
 const DEFAULT_RTMP_IO_TIMEOUT: Duration = Duration::from_secs(10);
+const RTMP_STOP_GRACE_TIMEOUT: Duration = Duration::from_millis(500);
+const RTMP_PACKET_QUEUE_CAPACITY: usize = 180;
 
 struct RtmpInterruptState {
     stop_requested: Arc<AtomicBool>,
+    connected: AtomicBool,
     origin: Instant,
     /// Monotonic deadline in nanoseconds since `origin` (`0` = no active per-op deadline).
     deadline_ns: AtomicU64,
+    /// Grace deadline latched once `stop_requested` fires on an established connection so
+    /// `write_trailer()` finishes cleanly on healthy sockets while aborting wedged writes.
+    stop_deadline_ns: AtomicU64,
 }
 
 impl RtmpInterruptState {
     fn new(stop_requested: Arc<AtomicBool>) -> Self {
         Self {
             stop_requested,
+            connected: AtomicBool::new(false),
             origin: Instant::now(),
             deadline_ns: AtomicU64::new(0),
+            stop_deadline_ns: AtomicU64::new(0),
         }
+    }
+
+    fn mark_connected(&self) {
+        self.connected.store(true, Ordering::Release);
     }
 
     fn set_deadline(&self, timeout: Duration) {
@@ -549,15 +600,32 @@ impl RtmpInterruptState {
     }
 
     fn should_interrupt(&self) -> bool {
+        let now_ns = self.origin.elapsed().as_nanos() as u64;
         if self.stop_requested.load(Ordering::Acquire) {
-            return true;
-        }
-        let deadline = self.deadline_ns.load(Ordering::Acquire);
-        if deadline != 0 {
-            let now_ns = self.origin.elapsed().as_nanos() as u64;
-            if now_ns >= deadline {
+            if !self.connected.load(Ordering::Acquire) {
                 return true;
             }
+            let mut stop_dl = self.stop_deadline_ns.load(Ordering::Acquire);
+            if stop_dl == 0 {
+                let grace_ns = RTMP_STOP_GRACE_TIMEOUT.as_nanos() as u64;
+                let candidate = now_ns.saturating_add(grace_ns).max(1);
+                stop_dl = match self.stop_deadline_ns.compare_exchange(
+                    0,
+                    candidate,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => candidate,
+                    Err(existing) => existing,
+                };
+            }
+            if now_ns >= stop_dl {
+                return true;
+            }
+        }
+        let deadline = self.deadline_ns.load(Ordering::Acquire);
+        if deadline != 0 && now_ns >= deadline {
+            return true;
         }
         false
     }
@@ -650,6 +718,7 @@ pub struct BroadcastHandle {
     pub stop: Arc<AtomicBool>,
     pub video_tx: Sender<VideoFrame>,
     pub video_free_rx: Receiver<Vec<u8>>,
+    pub video_free_tx: Sender<Vec<u8>>,
     audio_tap: Arc<crate::replay::AudioTap>,
     done_rx: Option<Receiver<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -667,26 +736,74 @@ impl BroadcastHandle {
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Release);
         self.audio_tap.unregister_broadcast_routes();
-        if let Some(rx) = self.done_rx.take() {
-            let _ = rx.recv_timeout(Duration::from_secs(3));
+        {
+            let mut st = self.status.lock().unwrap();
+            if !matches!(*st, BroadcastStatus::Error(_)) {
+                *st = BroadcastStatus::Offline;
+            }
         }
+        let done_rx = self.done_rx.take();
         if let Some(t) = self.thread.take() {
+            let pair = std::sync::Arc::new(std::sync::Mutex::new(Some((done_rx, t))));
+            let pair_bg = std::sync::Arc::clone(&pair);
             if std::thread::Builder::new()
                 .name("twitch-broadcast-stop".into())
                 .spawn(move || {
-                    let _ = t.join();
+                    if let Ok(mut guard) = pair_bg.lock() {
+                        if let Some((done_rx, t)) = guard.take() {
+                            if let Some(rx) = done_rx {
+                                let _ = rx.recv_timeout(Duration::from_secs(3));
+                            }
+                            let _ = t.join();
+                        }
+                    }
                 })
                 .is_err()
             {
-                // Fallback if OS thread creation fails
+                if let Ok(mut guard) = pair.lock() {
+                    if let Some((done_rx, t)) = guard.take() {
+                        if let Some(rx) = done_rx {
+                            let _ = rx.recv_timeout(Duration::from_secs(3));
+                        }
+                        let _ = t.join();
+                    }
+                }
             }
         }
     }
 
     #[cfg(test)]
+    pub(crate) fn stop_and_wait(&mut self, timeout: Duration) -> bool {
+        self.stop.store(true, Ordering::Release);
+        self.audio_tap.unregister_broadcast_routes();
+        {
+            let mut st = self.status.lock().unwrap();
+            if !matches!(*st, BroadcastStatus::Error(_)) {
+                *st = BroadcastStatus::Offline;
+            }
+        }
+        let completed = self
+            .done_rx
+            .take()
+            .is_none_or(|rx| rx.recv_timeout(timeout).is_ok());
+        if let Some(t) = self.thread.take() {
+            if completed {
+                let _ = t.join();
+            } else {
+                let _ = std::thread::Builder::new()
+                    .name("twitch-broadcast-stop".into())
+                    .spawn(move || {
+                        let _ = t.join();
+                    });
+            }
+        }
+        completed
+    }
+
+    #[cfg(test)]
     pub fn mock_live(audio_tap: Arc<crate::replay::AudioTap>) -> Self {
         let (video_tx, _video_rx) = crossbeam_channel::unbounded();
-        let (_free_tx, video_free_rx) = crossbeam_channel::unbounded();
+        let (video_free_tx, video_free_rx) = crossbeam_channel::unbounded();
         Self {
             status: Arc::new(Mutex::new(BroadcastStatus::Live {
                 started_at: Instant::now(),
@@ -695,6 +812,7 @@ impl BroadcastHandle {
             stop: Arc::new(AtomicBool::new(false)),
             video_tx,
             video_free_rx,
+            video_free_tx,
             audio_tap,
             done_rx: None,
             thread: None,
@@ -802,7 +920,6 @@ fn start_broadcast_with_timeout(
             let result = run_broadcast_loop(
                 worker_config,
                 vrx,
-                vfree_tx,
                 game_rx,
                 game_free_tx,
                 mic_rx,
@@ -823,7 +940,10 @@ fn start_broadcast_with_timeout(
                     *worker_status.lock().unwrap() = BroadcastStatus::Error(format!("{e:#}"));
                 }
                 _ => {
-                    *worker_status.lock().unwrap() = BroadcastStatus::Offline;
+                    let mut st = worker_status.lock().unwrap();
+                    if !matches!(*st, BroadcastStatus::Error(_)) {
+                        *st = BroadcastStatus::Offline;
+                    }
                 }
             }
             let _ = done_tx.send(());
@@ -835,17 +955,176 @@ fn start_broadcast_with_timeout(
         stop,
         video_tx: vtx,
         video_free_rx: vfree_rx,
+        video_free_tx: vfree_tx,
         audio_tap,
         done_rx: Some(done_rx),
         thread: Some(thread),
     })
 }
 
+#[derive(Clone, Copy)]
+enum RtmpMediaKind {
+    Video { fallback_pts: i64 },
+    Audio,
+}
+
+struct QueuedRtmpPacket {
+    kind: RtmpMediaKind,
+    in_time_base: Rational,
+    packet: Packet,
+}
+
+fn enqueue_rtmp_packet(
+    pkt_tx: &Sender<QueuedRtmpPacket>,
+    item: QueuedRtmpPacket,
+    stop: &AtomicBool,
+    writer_failed: &AtomicBool,
+) -> bool {
+    let mut pending = item;
+    while !stop.load(Ordering::Acquire) && !writer_failed.load(Ordering::Acquire) {
+        match pkt_tx.send_timeout(pending, Duration::from_millis(20)) {
+            Ok(()) => return true,
+            Err(crossbeam_channel::SendTimeoutError::Timeout(returned)) => {
+                pending = returned;
+            }
+            Err(crossbeam_channel::SendTimeoutError::Disconnected(_)) => return false,
+        }
+    }
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_rtmp_writer(
+    url: String,
+    video_params: codec::Parameters,
+    audio_params: codec::Parameters,
+    pkt_rx: Receiver<QueuedRtmpPacket>,
+    status: Arc<Mutex<BroadcastStatus>>,
+    metrics: Arc<BroadcastMetrics>,
+    stop: Arc<AtomicBool>,
+    io_timeout: Duration,
+) -> Result<()> {
+    // `interrupt_state` is declared before `output` so it strictly outlives `output`
+    // (including `avio_closep` inside `Drop for Output`).
+    let interrupt_state = Box::new(RtmpInterruptState::new(stop.clone()));
+    let mut output = open_rtmp_flv_output(&url, &interrupt_state, io_timeout)?;
+
+    {
+        let mut v_stream = output.add_stream(encoder::find(video_params.id()))?;
+        v_stream.set_parameters(video_params);
+        v_stream.set_time_base((1, 1000)); // FLV standard 1ms timebase
+
+        let mut a_stream = output.add_stream(encoder::find(audio_params.id()))?;
+        a_stream.set_parameters(audio_params);
+        a_stream.set_time_base((1, 1000));
+    }
+
+    let mut muxer_opts = ff::Dictionary::new();
+    muxer_opts.set("flvflags", "no_duration_filesize");
+    interrupt_state.set_deadline(io_timeout);
+    let header_res = output.write_header_with(muxer_opts);
+    interrupt_state.clear_deadline();
+    header_res.context("Failed to connect or send stream header to Twitch ingest")?;
+
+    interrupt_state.mark_connected();
+    if !stop.load(Ordering::Acquire) {
+        *status.lock().unwrap() = BroadcastStatus::Live {
+            started_at: Instant::now(),
+        };
+    }
+
+    let video_out_tb = output
+        .stream(0)
+        .map(|s| s.time_base())
+        .unwrap_or(Rational(1, 1000));
+    let audio_out_tb = output
+        .stream(1)
+        .map(|s| s.time_base())
+        .unwrap_or(Rational(1, 1000));
+
+    let mut last_video_mux_dts: i64 = -1;
+    let mut last_audio_mux_dts: i64 = -1;
+    let mut last_stat_time = Instant::now();
+    let mut video_packets_this_sec = 0u32;
+    let mut bytes_this_sec = 0u64;
+
+    while let Ok(QueuedRtmpPacket {
+        kind,
+        in_time_base,
+        mut packet,
+    }) = pkt_rx.recv()
+    {
+        match kind {
+            RtmpMediaKind::Video { fallback_pts } => {
+                if in_time_base != video_out_tb {
+                    packet.rescale_ts(in_time_base, video_out_tb);
+                }
+                let dts = packet
+                    .dts()
+                    .unwrap_or(fallback_pts)
+                    .max(last_video_mux_dts + 1);
+                let pts = packet.pts().unwrap_or(fallback_pts).max(dts);
+                last_video_mux_dts = dts;
+                packet.set_stream(0);
+                packet.set_position(-1);
+                packet.set_pts(Some(pts));
+                packet.set_dts(Some(dts));
+            }
+            RtmpMediaKind::Audio => {
+                if in_time_base != audio_out_tb {
+                    packet.rescale_ts(in_time_base, audio_out_tb);
+                }
+                let dts = packet.dts().unwrap_or(0).max(0).max(last_audio_mux_dts + 1);
+                let pts = packet.pts().unwrap_or(dts).max(dts);
+                last_audio_mux_dts = dts;
+                packet.set_stream(1);
+                packet.set_position(-1);
+                packet.set_pts(Some(pts));
+                packet.set_dts(Some(dts));
+            }
+        }
+
+        let pkt_bytes = packet.size() as u64;
+        write_packet_with_deadline(&mut packet, &mut output, &interrupt_state, io_timeout)?;
+        bytes_this_sec += pkt_bytes;
+        if matches!(kind, RtmpMediaKind::Video { .. }) {
+            video_packets_this_sec += 1;
+            metrics.frames_sent.fetch_add(1, Ordering::Relaxed);
+        }
+
+        if last_stat_time.elapsed() >= Duration::from_secs(1) {
+            let elapsed = last_stat_time.elapsed().as_secs_f32();
+            let fps = ((video_packets_this_sec as f32 / elapsed) * 10.0).round() as u32;
+            let kbps = ((bytes_this_sec as f32 * 8.0 / 1000.0) / elapsed).round() as u32;
+            metrics.current_fps.store(fps, Ordering::Relaxed);
+            metrics.current_bitrate_kbps.store(kbps, Ordering::Relaxed);
+            metrics
+                .bytes_sent
+                .fetch_add(bytes_this_sec, Ordering::Relaxed);
+            video_packets_this_sec = 0;
+            bytes_this_sec = 0;
+            last_stat_time = Instant::now();
+        }
+    }
+
+    if bytes_this_sec > 0 {
+        metrics
+            .bytes_sent
+            .fetch_add(bytes_this_sec, Ordering::Relaxed);
+    }
+
+    interrupt_state.set_deadline(RTMP_STOP_GRACE_TIMEOUT);
+    let _ = output.write_trailer();
+    interrupt_state.clear_deadline();
+    drop(output);
+    drop(interrupt_state);
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_broadcast_loop(
     config: BroadcastConfig,
     video_rx: Receiver<VideoFrame>,
-    video_free_tx: Sender<Vec<u8>>,
     game_rx: Receiver<AudioBlock>,
     game_free_tx: Sender<AudioBlock>,
     mic_rx: Receiver<AudioBlock>,
@@ -881,76 +1160,92 @@ fn run_broadcast_loop(
         format!("{}/{}", base, config.stream_key.trim())
     };
 
-    // `interrupt_state` is declared before `output` so it strictly outlives `output`
-    // (including `avio_closep` inside `Drop for Output`).
-    let interrupt_state = Box::new(RtmpInterruptState::new(stop.clone()));
-    let mut output = open_rtmp_flv_output(&url, &interrupt_state, io_timeout)?;
+    let (pkt_tx, pkt_rx) = bounded::<QueuedRtmpPacket>(RTMP_PACKET_QUEUE_CAPACITY);
+    let writer_failed = Arc::new(AtomicBool::new(false));
+    let writer_error: Arc<Mutex<Option<anyhow::Error>>> = Arc::new(Mutex::new(None));
 
-    {
-        let mut v_stream = output.add_stream(encoder::find(video_encoder.parameters().id()))?;
-        v_stream.set_parameters(video_encoder.parameters());
-        v_stream.set_time_base((1, 1000)); // FLV standard 1ms timebase
+    let writer_status = status.clone();
+    let writer_metrics = metrics.clone();
+    let writer_stop = stop.clone();
+    let writer_failed_flag = writer_failed.clone();
+    let writer_error_slot = writer_error.clone();
+    let video_params = video_encoder.parameters();
+    let audio_params = audio_encoder.parameters();
 
-        let mut a_stream = output.add_stream(encoder::find(audio_encoder.parameters().id()))?;
-        a_stream.set_parameters(audio_encoder.parameters());
-        a_stream.set_time_base((1, 1000));
-    }
-
-    let mut muxer_opts = ff::Dictionary::new();
-    muxer_opts.set("flvflags", "no_duration_filesize");
-    interrupt_state.set_deadline(io_timeout);
-    let header_res = output.write_header_with(muxer_opts);
-    interrupt_state.clear_deadline();
-    header_res.context("Failed to connect or send stream header to Twitch ingest")?;
-
-    let started_at = Instant::now();
-    *status.lock().unwrap() = BroadcastStatus::Live { started_at };
-
-    let mut audio_clock = AudioClock::new();
-    let mut mic_clock = AudioClock::new();
-    let mut mixer = TimelineMixer::new();
-
-    let mut last_audio_sample_pts: Option<i64> = None;
-    let mut last_audio_mux_dts: i64 = -1;
-    let mut last_video_mux_dts: i64 = -1;
-    let mut last_stat_time = Instant::now();
-    let mut frames_this_sec = 0u32;
-    let mut bytes_this_sec = 0u64;
+    let writer_thread = std::thread::Builder::new()
+        .name("twitch-rtmp-writer".into())
+        .spawn(move || {
+            if let Err(err) = run_rtmp_writer(
+                url,
+                video_params,
+                audio_params,
+                pkt_rx,
+                writer_status,
+                writer_metrics,
+                writer_stop,
+                io_timeout,
+            ) {
+                *writer_error_slot.lock().unwrap() = Some(err);
+                writer_failed_flag.store(true, Ordering::Release);
+            }
+        })
+        .context("Failed to spawn twitch-rtmp-writer thread")?;
 
     let start_epoch = first_frame.at;
-
-    // Process the first frame
     let first_pts = 0i64;
-    let pkts = video_encoder.encode(
+    let first_encode_res = video_encoder.encode(
         &first_frame.rgba,
         first_frame.width,
         first_frame.height,
         first_pts,
-    )?;
-    for mut pkt in pkts {
-        let dts = pkt.dts().unwrap_or(first_pts).max(last_video_mux_dts + 1);
-        let pkt_pts = pkt.pts().unwrap_or(first_pts).max(dts);
-        last_video_mux_dts = dts;
-        pkt.set_stream(0);
-        pkt.set_position(-1);
-        pkt.set_pts(Some(pkt_pts));
-        pkt.set_dts(Some(dts));
-        bytes_this_sec += pkt.size() as u64;
-        write_packet_with_deadline(&mut pkt, &mut output, &interrupt_state, io_timeout)?;
-    }
-    let _ = video_free_tx.send(first_frame.rgba);
-    frames_this_sec += 1;
-    let mut last_video_pts = 0i64;
+    );
+    // Drop `first_frame` immediately so its SharedFrameBytes returns to its pool without waiting
+    // for the broadcast session to end.
+    drop(first_frame);
 
-    while !stop.load(Ordering::Acquire) {
+    let first_pkts = match first_encode_res {
+        Ok(pkts) => pkts,
+        Err(err) => {
+            drop(pkt_tx);
+            let _ = writer_thread.join();
+            return Err(err);
+        }
+    };
+    for pkt in first_pkts {
+        if !enqueue_rtmp_packet(
+            &pkt_tx,
+            QueuedRtmpPacket {
+                kind: RtmpMediaKind::Video {
+                    fallback_pts: first_pts,
+                },
+                in_time_base: Rational(1, 1000),
+                packet: pkt,
+            },
+            stop,
+            &writer_failed,
+        ) {
+            break;
+        }
+    }
+
+    let mut audio_clock = AudioClock::new();
+    let mut mic_clock = AudioClock::new();
+    let mut mixer = TimelineMixer::new();
+    let mut audio_scratch = Vec::with_capacity(1024);
+
+    let mut last_audio_sample_pts: Option<i64> = None;
+    let mut last_video_pts = 0i64;
+    let mut loop_result: Result<()> = Ok(());
+
+    'encode_loop: while !stop.load(Ordering::Acquire) && !writer_failed.load(Ordering::Acquire) {
         // Drain incoming audio from game
         while let Ok(block) = game_rx.try_recv() {
             let _ = audio_clock.append_recovering(&block, start_epoch);
             let _ = game_free_tx.send(block);
         }
         let vol = audio_tap.game_volume();
-        while let Some((sample_idx, samples)) = audio_clock.take() {
-            mixer.push(MixSource::Game, sample_idx, &samples, vol);
+        while let Some(sample_idx) = audio_clock.take_into(&mut audio_scratch) {
+            mixer.push(MixSource::Game, sample_idx, &audio_scratch, vol);
         }
 
         // Drain incoming audio from mic
@@ -958,28 +1253,38 @@ fn run_broadcast_loop(
             let _ = mic_clock.append_recovering(&block, start_epoch);
             let _ = mic_free_tx.send(block);
         }
-        while let Some((sample_idx, samples)) = mic_clock.take() {
-            mixer.push(MixSource::Mic, sample_idx, &samples, 1.0);
+        while let Some(sample_idx) = mic_clock.take_into(&mut audio_scratch) {
+            mixer.push(MixSource::Mic, sample_idx, &audio_scratch, 1.0);
         }
 
         // Encode mixed 48kHz stereo audio frames
-        while let Some((sample_idx, samples)) = mixer.take() {
+        while let Some(sample_idx) = mixer.take_into(&mut audio_scratch) {
             let sample_pts = match last_audio_sample_pts {
                 Some(prev) => sample_idx.max(prev + 1024),
                 None => sample_idx.max(0),
             };
             last_audio_sample_pts = Some(sample_pts);
-            let pkts = audio_encoder.encode(&samples, sample_pts)?;
-            for mut pkt in pkts {
-                let dts = pkt.dts().unwrap_or(0).max(0).max(last_audio_mux_dts + 1);
-                let pts = pkt.pts().unwrap_or(dts).max(dts);
-                last_audio_mux_dts = dts;
-                pkt.set_stream(1);
-                pkt.set_position(-1);
-                pkt.set_pts(Some(pts));
-                pkt.set_dts(Some(dts));
-                bytes_this_sec += pkt.size() as u64;
-                write_packet_with_deadline(&mut pkt, &mut output, &interrupt_state, io_timeout)?;
+            match audio_encoder.encode(&audio_scratch, sample_pts) {
+                Ok(pkts) => {
+                    for pkt in pkts {
+                        if !enqueue_rtmp_packet(
+                            &pkt_tx,
+                            QueuedRtmpPacket {
+                                kind: RtmpMediaKind::Audio,
+                                in_time_base: Rational(1, 48000),
+                                packet: pkt,
+                            },
+                            stop,
+                            &writer_failed,
+                        ) {
+                            break 'encode_loop;
+                        }
+                    }
+                }
+                Err(err) => {
+                    loop_result = Err(err);
+                    break 'encode_loop;
+                }
             }
         }
 
@@ -989,51 +1294,66 @@ fn run_broadcast_loop(
                 let frame_ms = ((frame.at - start_epoch) as f64 / 1000.0).round() as i64;
                 let pts = frame_ms.max(last_video_pts + 1);
                 last_video_pts = pts;
-                let pkts = video_encoder.encode(&frame.rgba, frame.width, frame.height, pts)?;
-                for mut pkt in pkts {
-                    let dts = pkt.dts().unwrap_or(pts).max(last_video_mux_dts + 1);
-                    let pkt_pts = pkt.pts().unwrap_or(pts).max(dts);
-                    last_video_mux_dts = dts;
-                    pkt.set_stream(0);
-                    pkt.set_position(-1);
-                    pkt.set_pts(Some(pkt_pts));
-                    pkt.set_dts(Some(dts));
-                    bytes_this_sec += pkt.size() as u64;
-                    write_packet_with_deadline(
-                        &mut pkt,
-                        &mut output,
-                        &interrupt_state,
-                        io_timeout,
-                    )?;
+                let encode_res = video_encoder.encode(&frame.rgba, frame.width, frame.height, pts);
+                drop(frame);
+                match encode_res {
+                    Ok(pkts) => {
+                        for pkt in pkts {
+                            if !enqueue_rtmp_packet(
+                                &pkt_tx,
+                                QueuedRtmpPacket {
+                                    kind: RtmpMediaKind::Video { fallback_pts: pts },
+                                    in_time_base: Rational(1, 1000),
+                                    packet: pkt,
+                                },
+                                stop,
+                                &writer_failed,
+                            ) {
+                                break 'encode_loop;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        loop_result = Err(err);
+                        break 'encode_loop;
+                    }
                 }
-                let _ = video_free_tx.send(frame.rgba);
-                frames_this_sec += 1;
-                metrics.frames_sent.fetch_add(1, Ordering::Relaxed);
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         }
+    }
 
-        // Update 1-second metrics
-        if last_stat_time.elapsed() >= Duration::from_secs(1) {
-            let elapsed = last_stat_time.elapsed().as_secs_f32();
-            let fps = ((frames_this_sec as f32 / elapsed) * 10.0).round() as u32;
-            let kbps = ((bytes_this_sec as f32 * 8.0 / 1000.0) / elapsed).round() as u32;
-            metrics.current_fps.store(fps, Ordering::Relaxed);
-            metrics.current_bitrate_kbps.store(kbps, Ordering::Relaxed);
-            metrics
-                .bytes_sent
-                .fetch_add(bytes_this_sec, Ordering::Relaxed);
-            frames_this_sec = 0;
-            bytes_this_sec = 0;
-            last_stat_time = Instant::now();
+    if loop_result.is_ok() && !writer_failed.load(Ordering::Acquire) {
+        if let Ok(pkts) = video_encoder.flush() {
+            for pkt in pkts {
+                let _ = pkt_tx.try_send(QueuedRtmpPacket {
+                    kind: RtmpMediaKind::Video {
+                        fallback_pts: last_video_pts + 1,
+                    },
+                    in_time_base: Rational(1, 1000),
+                    packet: pkt,
+                });
+            }
+        }
+        if let Ok(pkts) = audio_encoder.flush() {
+            for pkt in pkts {
+                let _ = pkt_tx.try_send(QueuedRtmpPacket {
+                    kind: RtmpMediaKind::Audio,
+                    in_time_base: Rational(1, 48000),
+                    packet: pkt,
+                });
+            }
         }
     }
 
-    interrupt_state.set_deadline(Duration::from_millis(500));
-    let _ = output.write_trailer();
-    drop(output);
-    drop(interrupt_state);
+    drop(pkt_tx);
+    let _ = writer_thread.join();
+
+    loop_result?;
+    if let Some(err) = writer_error.lock().unwrap().take() {
+        return Err(err);
+    }
     Ok(())
 }
 
@@ -1186,10 +1506,14 @@ mod tests {
         // Send first video frame so worker enters `open_rtmp_flv_output` (`avio_open2`)
         let mut rgba = handle.video_free_rx.recv().expect("get free frame buffer");
         rgba.resize(64 * 64 * 4, 0);
+        let shared = crate::replay::SharedFrameBytes::from_broadcast_pool(
+            rgba,
+            handle.video_free_tx.clone(),
+        );
         handle
             .video_tx
             .send(VideoFrame {
-                rgba,
+                rgba: shared,
                 width: 64,
                 height: 64,
                 at: 0,
@@ -1203,7 +1527,10 @@ mod tests {
 
         // Stop the broadcast while `avio_open2` is blocked on the stalled RTMP handshake
         let stop_start = Instant::now();
-        handle.stop();
+        assert!(
+            handle.stop_and_wait(Duration::from_secs(1)),
+            "Broadcast worker failed to interrupt stalled RTMP handshake within 1s"
+        );
         let stop_elapsed = stop_start.elapsed();
 
         assert!(
@@ -1245,10 +1572,14 @@ mod tests {
 
         let mut rgba = handle.video_free_rx.recv().expect("get free frame buffer");
         rgba.resize(64 * 64 * 4, 0);
+        let shared = crate::replay::SharedFrameBytes::from_broadcast_pool(
+            rgba,
+            handle.video_free_tx.clone(),
+        );
         handle
             .video_tx
             .send(VideoFrame {
-                rgba,
+                rgba: shared,
                 width: 64,
                 height: 64,
                 at: 0,
@@ -1275,5 +1606,145 @@ mod tests {
         handle.stop();
         let _ = release_server_tx.send(());
         let _ = server_thread.join();
+    }
+
+    #[test]
+    fn test_broadcast_stop_returns_immediately_without_blocking_ui_thread() {
+        let tap = Arc::new(crate::replay::AudioTap::default());
+        let (video_tx, _video_rx) = crossbeam_channel::bounded(3);
+        let (video_free_tx, video_free_rx) = crossbeam_channel::bounded(4);
+        let (done_tx, done_rx) = crossbeam_channel::bounded::<()>(1);
+        let (release_tx, release_rx) = crossbeam_channel::bounded::<()>(1);
+
+        let worker_thread = std::thread::spawn(move || {
+            let _ = release_rx.recv_timeout(Duration::from_millis(500));
+            let _ = done_tx.send(());
+        });
+
+        let mut handle = BroadcastHandle {
+            status: Arc::new(Mutex::new(BroadcastStatus::Live {
+                started_at: Instant::now(),
+            })),
+            metrics: Arc::new(BroadcastMetrics::default()),
+            stop: Arc::new(AtomicBool::new(false)),
+            video_tx,
+            video_free_rx,
+            video_free_tx,
+            audio_tap: tap,
+            done_rx: Some(done_rx),
+            thread: Some(worker_thread),
+        };
+
+        let start = Instant::now();
+        handle.stop();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "BroadcastHandle::stop() must not block the UI thread on done_rx, took {:?}",
+            elapsed
+        );
+        assert!(handle.stop.load(Ordering::Acquire));
+        assert_eq!(handle.status(), BroadcastStatus::Offline);
+
+        let _ = release_tx.send(());
+    }
+
+    #[test]
+    fn test_dedicated_rtmp_writer_thread_muxes_av_and_writes_clean_flv_trailer() {
+        ff::init().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let flv_name = "rtmp_writer_test.flv";
+        let flv_path = temp_dir.path().join(flv_name);
+
+        let config = BroadcastConfig {
+            video_bitrate_kbps: 800,
+            audio_bitrate_kbps: 128,
+            video_encoder: StreamingVideoEncoder::SoftwareX264,
+            encoder_preset: "ultrafast".to_string(),
+            ingest_server: temp_dir.path().to_str().unwrap().to_string(),
+            stream_key: flv_name.to_string(),
+            render_device: String::new(),
+        };
+        let tap = Arc::new(crate::replay::AudioTap::default());
+        let mut handle = start_broadcast(config, tap.clone()).expect("start broadcast to flv");
+
+        let epoch = 1_000_000i64;
+        for i in 0..8i64 {
+            let at = epoch + i * 16_667;
+            let mut rgba = handle
+                .video_free_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("checkout broadcast frame buffer");
+            rgba.resize(64 * 64 * 4, (i as u8).wrapping_mul(25));
+            let shared = crate::replay::SharedFrameBytes::from_broadcast_pool(
+                rgba,
+                handle.video_free_tx.clone(),
+            );
+            handle
+                .video_tx
+                .send(VideoFrame {
+                    rgba: shared,
+                    width: 64,
+                    height: 64,
+                    at,
+                    generation: 0,
+                })
+                .expect("send video frame");
+
+            // Submit 20ms of stereo 48kHz audio per video tick
+            let pcm = vec![0.25f32; 960 * 2];
+            tap.submit(&pcm, 48000, 2, at);
+            std::thread::sleep(Duration::from_millis(8));
+        }
+
+        let wait_live = Instant::now();
+        while wait_live.elapsed() < Duration::from_secs(2) {
+            if handle.metrics.frames_sent.load(Ordering::Relaxed) >= 4 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            handle.stop_and_wait(Duration::from_secs(3)),
+            "Broadcast pipeline should flush encoders and join twitch-rtmp-writer cleanly"
+        );
+        assert!(handle.metrics.bytes_sent.load(Ordering::Relaxed) > 0);
+        assert!(handle.metrics.frames_sent.load(Ordering::Relaxed) >= 4);
+
+        let mut ictx = format::input(&flv_path).expect("open muxed FLV file");
+        let v_idx = ictx
+            .streams()
+            .best(ff::media::Type::Video)
+            .expect("FLV has video stream")
+            .index();
+        let a_idx = ictx
+            .streams()
+            .best(ff::media::Type::Audio)
+            .expect("FLV has audio stream")
+            .index();
+
+        let mut video_pkts = 0usize;
+        let mut audio_pkts = 0usize;
+        let mut prev_v_dts = -1i64;
+        for (stream, pkt) in ictx.packets() {
+            if stream.index() == v_idx {
+                let dts = pkt.dts().unwrap_or(0);
+                assert!(dts > prev_v_dts, "Video DTS must be strictly monotonic");
+                prev_v_dts = dts;
+                video_pkts += 1;
+            } else if stream.index() == a_idx {
+                audio_pkts += 1;
+            }
+        }
+        assert!(
+            video_pkts >= 4,
+            "Expected >= 4 video packets, got {video_pkts}"
+        );
+        assert!(
+            audio_pkts >= 2,
+            "Expected >= 2 audio packets, got {audio_pkts}"
+        );
     }
 }

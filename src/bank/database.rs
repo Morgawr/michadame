@@ -25,6 +25,13 @@ pub struct BankEntryMeta {
     pub twitch_clip_url: Option<String>,
 }
 
+impl BankEntryMeta {
+    /// Lowercased copy of `self.tag` for allocation-free substring filtering.
+    pub fn compute_tag_lower(&self) -> Option<String> {
+        self.tag.as_deref().map(str::to_lowercase)
+    }
+}
+
 /// A fully-prepared entry ready to be inserted.
 #[derive(Clone, Debug, Default)]
 pub struct NewBankEntry {
@@ -79,7 +86,19 @@ impl BankDatabase {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
+        let existed_on_disk = path.exists();
         let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
+        if existed_on_disk && Self::has_column(&conn, "mined_words", "screenshot")? {
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+            let mut bak = path.as_os_str().to_os_string();
+            bak.push(".pre_media_split.bak");
+            let bak_path = Path::new(&bak);
+            if !bak_path.exists() {
+                std::fs::copy(path, bak_path).with_context(|| {
+                    format!("backing up {} to {}", path.display(), bak_path.display())
+                })?;
+            }
+        }
         Self::from_conn(conn)
     }
 
@@ -89,51 +108,185 @@ impl BankDatabase {
         Self::from_conn(Connection::open_in_memory()?)
     }
 
-    fn from_conn(conn: Connection) -> Result<Self> {
-        let _ = conn.pragma_update(None, "journal_mode", "WAL");
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS mined_words (
-                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                 created_at       INTEGER NOT NULL,
-                 term             TEXT NOT NULL,
-                 reading          TEXT NOT NULL,
-                 definition_text  TEXT NOT NULL,
-                 definition_json  TEXT NOT NULL,
-                 sentence         TEXT NOT NULL,
-                 word_start       INTEGER NOT NULL,
-                 word_end         INTEGER NOT NULL,
-                 source_text      TEXT NOT NULL,
-                 screenshot       BLOB,
-                 thumbnail        BLOB
-             );
-             CREATE INDEX IF NOT EXISTS idx_mined_words_created
-                 ON mined_words(created_at DESC);",
-        )?;
-        // Migration: databases created before tags were introduced lack the column.
-        let has_tag = conn
-            .prepare("SELECT 1 FROM pragma_table_info('mined_words') WHERE name = 'tag'")?
-            .exists([])?;
-        if !has_tag {
+    fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+        let sql = format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1");
+        Ok(conn.prepare(&sql)?.exists(params![column])?)
+    }
+
+    fn migrate_legacy_inline_media(conn: &Connection) -> Result<()> {
+        if !Self::has_column(conn, "mined_words", "tag")? {
             conn.execute_batch("ALTER TABLE mined_words ADD COLUMN tag TEXT;")?;
         }
-        // Migration: databases created before twitch_clip_url was introduced lack the column.
-        let has_clip = conn
-            .prepare(
-                "SELECT 1 FROM pragma_table_info('mined_words') WHERE name = 'twitch_clip_url'",
-            )?
-            .exists([])?;
-        if !has_clip {
+        if !Self::has_column(conn, "mined_words", "twitch_clip_url")? {
             conn.execute_batch("ALTER TABLE mined_words ADD COLUMN twitch_clip_url TEXT;")?;
         }
-        let has_request_id = conn
-            .prepare("SELECT 1 FROM pragma_table_info('mined_words') WHERE name = 'request_id'")?
-            .exists([])?;
-        if !has_request_id {
+        if !Self::has_column(conn, "mined_words", "request_id")? {
             conn.execute_batch("ALTER TABLE mined_words ADD COLUMN request_id INTEGER;")?;
         }
+
+        conn.execute_batch("BEGIN IMMEDIATE;")?;
+        let mig_res = (|| -> Result<()> {
+            let prev_seq: Option<i64> = conn
+                .query_row(
+                    "SELECT seq FROM sqlite_sequence WHERE name = 'mined_words'",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()
+                .unwrap_or(None);
+
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS mined_word_media (
+                     word_id    INTEGER PRIMARY KEY,
+                     screenshot BLOB,
+                     thumbnail  BLOB
+                 );
+                 INSERT OR REPLACE INTO mined_word_media (word_id, screenshot, thumbnail)
+                 SELECT id, screenshot, thumbnail
+                 FROM mined_words
+                 WHERE screenshot IS NOT NULL OR thumbnail IS NOT NULL;
+                 DROP TABLE IF EXISTS mined_words_v2;
+                 CREATE TABLE mined_words_v2 (
+                     id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                     created_at       INTEGER NOT NULL,
+                     term             TEXT NOT NULL,
+                     reading          TEXT NOT NULL,
+                     definition_text  TEXT NOT NULL,
+                     definition_json  TEXT NOT NULL,
+                     sentence         TEXT NOT NULL,
+                     word_start       INTEGER NOT NULL,
+                     word_end         INTEGER NOT NULL,
+                     source_text      TEXT NOT NULL,
+                     has_screenshot   INTEGER NOT NULL DEFAULT 0,
+                     tag              TEXT,
+                     twitch_clip_url  TEXT,
+                     request_id       INTEGER,
+                     sequence         INTEGER
+                 );
+                 INSERT INTO mined_words_v2 (
+                     id, created_at, term, reading, definition_text, definition_json,
+                     sentence, word_start, word_end, source_text, has_screenshot,
+                     tag, twitch_clip_url, request_id, sequence
+                 )
+                 SELECT
+                     id, created_at, term, reading, definition_text, definition_json,
+                     sentence, word_start, word_end, source_text,
+                     CASE WHEN screenshot IS NOT NULL THEN 1 ELSE 0 END,
+                     tag, twitch_clip_url, request_id, NULL
+                 FROM mined_words;
+                 DROP TABLE mined_words;
+                 ALTER TABLE mined_words_v2 RENAME TO mined_words;
+                 CREATE INDEX IF NOT EXISTS idx_mined_words_created_id
+                     ON mined_words(created_at DESC, id DESC);
+                 CREATE INDEX IF NOT EXISTS idx_mined_words_tag
+                     ON mined_words(tag);
+                 CREATE INDEX IF NOT EXISTS idx_mined_words_request_id
+                     ON mined_words(request_id);",
+            )?;
+
+            if let Some(seq) = prev_seq {
+                let current_seq: Option<i64> = conn
+                    .query_row(
+                        "SELECT seq FROM sqlite_sequence WHERE name = 'mined_words'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                match current_seq {
+                    Some(cur) if cur < seq => {
+                        conn.execute(
+                            "UPDATE sqlite_sequence SET seq = ?1 WHERE name = 'mined_words'",
+                            params![seq],
+                        )?;
+                    }
+                    None => {
+                        conn.execute(
+                            "INSERT INTO sqlite_sequence (name, seq) VALUES ('mined_words', ?1)",
+                            params![seq],
+                        )?;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        })();
+
+        match mig_res {
+            Ok(()) => {
+                conn.execute_batch("COMMIT;")?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                Err(e)
+            }
+        }
+    }
+
+    fn from_conn(conn: Connection) -> Result<Self> {
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+        let _ = conn.pragma_update(None, "temp_store", "MEMORY");
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+
         conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_mined_words_tag ON mined_words(tag);
+            "CREATE TABLE IF NOT EXISTS bank_metadata (
+                 key   TEXT PRIMARY KEY,
+                 value TEXT NOT NULL
+             );",
+        )?;
+
+        if Self::has_column(&conn, "mined_words", "screenshot")? {
+            Self::migrate_legacy_inline_media(&conn)?;
+        } else {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS mined_words (
+                     id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                     created_at       INTEGER NOT NULL,
+                     term             TEXT NOT NULL,
+                     reading          TEXT NOT NULL,
+                     definition_text  TEXT NOT NULL,
+                     definition_json  TEXT NOT NULL,
+                     sentence         TEXT NOT NULL,
+                     word_start       INTEGER NOT NULL,
+                     word_end         INTEGER NOT NULL,
+                     source_text      TEXT NOT NULL,
+                     has_screenshot   INTEGER NOT NULL DEFAULT 0,
+                     tag              TEXT,
+                     twitch_clip_url  TEXT,
+                     request_id       INTEGER,
+                     sequence         INTEGER
+                 );
+                 CREATE TABLE IF NOT EXISTS mined_word_media (
+                     word_id    INTEGER PRIMARY KEY,
+                     screenshot BLOB,
+                     thumbnail  BLOB
+                 );",
+            )?;
+            if !Self::has_column(&conn, "mined_words", "has_screenshot")? {
+                conn.execute_batch(
+                    "ALTER TABLE mined_words ADD COLUMN has_screenshot INTEGER NOT NULL DEFAULT 0;",
+                )?;
+            }
+            if !Self::has_column(&conn, "mined_words", "tag")? {
+                conn.execute_batch("ALTER TABLE mined_words ADD COLUMN tag TEXT;")?;
+            }
+            if !Self::has_column(&conn, "mined_words", "twitch_clip_url")? {
+                conn.execute_batch("ALTER TABLE mined_words ADD COLUMN twitch_clip_url TEXT;")?;
+            }
+            if !Self::has_column(&conn, "mined_words", "request_id")? {
+                conn.execute_batch("ALTER TABLE mined_words ADD COLUMN request_id INTEGER;")?;
+            }
+            if !Self::has_column(&conn, "mined_words", "sequence")? {
+                conn.execute_batch("ALTER TABLE mined_words ADD COLUMN sequence INTEGER;")?;
+            }
+        }
+
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_mined_words_created;
+             CREATE INDEX IF NOT EXISTS idx_mined_words_created_id
+                 ON mined_words(created_at DESC, id DESC);
+             CREATE INDEX IF NOT EXISTS idx_mined_words_tag ON mined_words(tag);
              CREATE INDEX IF NOT EXISTS idx_mined_words_request_id ON mined_words(request_id);
              CREATE TABLE IF NOT EXISTS custom_names (
                  id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -152,9 +305,13 @@ impl BankDatabase {
 
     /// Inserts an entry and returns its listing metadata.
     pub fn insert(&self, entry: &NewBankEntry) -> Result<BankEntryMeta> {
-        self.conn.execute(
+        let sequence = super::extract_sequence_from_json(&entry.definition_json);
+        let has_screenshot = i64::from(entry.screenshot.is_some());
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO mined_words (created_at, term, reading, definition_text, definition_json,
-                 sentence, word_start, word_end, source_text, screenshot, thumbnail, tag, twitch_clip_url, request_id)
+                 sentence, word_start, word_end, source_text, has_screenshot, tag, twitch_clip_url,
+                 request_id, sequence)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 entry.created_at,
@@ -166,15 +323,24 @@ impl BankDatabase {
                 entry.word_range.0 as i64,
                 entry.word_range.1 as i64,
                 entry.source_text,
-                entry.screenshot,
-                entry.thumbnail,
+                has_screenshot,
                 entry.tag,
                 entry.twitch_clip_url,
                 entry.request_id,
+                sequence,
             ],
         )?;
+        let id = tx.last_insert_rowid();
+        if entry.screenshot.is_some() || entry.thumbnail.is_some() {
+            tx.execute(
+                "INSERT INTO mined_word_media (word_id, screenshot, thumbnail)
+                 VALUES (?1, ?2, ?3)",
+                params![id, entry.screenshot, entry.thumbnail],
+            )?;
+        }
+        tx.commit()?;
         Ok(BankEntryMeta {
-            id: self.conn.last_insert_rowid(),
+            id,
             created_at: entry.created_at,
             term: entry.term.clone(),
             reading: entry.reading.clone(),
@@ -189,14 +355,24 @@ impl BankDatabase {
     }
 
     /// Lists all entries, most recent first.
+    #[cfg(test)]
     pub fn list_meta(&self) -> Result<Vec<BankEntryMeta>> {
-        let mut stmt = self.conn.prepare(
+        Ok(self
+            .list_meta_with_sequences()?
+            .into_iter()
+            .map(|(meta, _)| meta)
+            .collect())
+    }
+
+    /// Lists all entries along with their cached `sequence` column (`None` for un-backfilled legacy rows).
+    pub(crate) fn list_meta_with_sequences(&self) -> Result<Vec<(BankEntryMeta, Option<i64>)>> {
+        let mut stmt = self.conn.prepare_cached(
             "SELECT id, created_at, term, reading, definition_text, sentence, word_start, word_end,
-                    screenshot IS NOT NULL, definition_json, tag, twitch_clip_url
+                    has_screenshot != 0, definition_json, tag, twitch_clip_url, sequence
              FROM mined_words ORDER BY created_at DESC, id DESC",
         )?;
         let rows = stmt.query_map([], |row| {
-            Ok(BankEntryMeta {
+            let meta = BankEntryMeta {
                 id: row.get(0)?,
                 created_at: row.get(1)?,
                 term: row.get(2)?,
@@ -211,9 +387,47 @@ impl BankDatabase {
                 definition_json: row.get(9)?,
                 tag: row.get(10)?,
                 twitch_clip_url: row.get(11)?,
-            })
+            };
+            let sequence: Option<i64> = row.get(12)?;
+            Ok((meta, sequence))
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Batch-updates the cached `sequence` column for existing entries.
+    pub(crate) fn update_sequences(&self, updates: &[(i64, i64)]) -> Result<()> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt =
+                tx.prepare_cached("UPDATE mined_words SET sequence = ?1 WHERE id = ?2")?;
+            for (id, sequence) in updates {
+                stmt.execute(params![sequence, id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn get_meta_value(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM bank_metadata WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn set_meta_value(&self, key: &str, val: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO bank_metadata (key, value) VALUES (?1, ?2)",
+            params![key, val],
+        )?;
+        Ok(())
     }
 
     pub fn thumbnail(&self, id: i64) -> Result<Option<Vec<u8>>> {
@@ -225,10 +439,14 @@ impl BankDatabase {
     }
 
     fn blob(&self, id: i64, column: &str) -> Result<Option<Vec<u8>>> {
-        let sql = format!("SELECT {column} FROM mined_words WHERE id = ?1");
-        Ok(self
-            .conn
-            .query_row(&sql, params![id], |row| row.get::<_, Option<Vec<u8>>>(0))
+        let sql = match column {
+            "thumbnail" => "SELECT thumbnail FROM mined_word_media WHERE word_id = ?1",
+            "screenshot" => "SELECT screenshot FROM mined_word_media WHERE word_id = ?1",
+            _ => anyhow::bail!("invalid media column: {column}"),
+        };
+        let mut stmt = self.conn.prepare_cached(sql)?;
+        Ok(stmt
+            .query_row(params![id], |row| row.get::<_, Option<Vec<u8>>>(0))
             .optional()?
             .flatten())
     }
@@ -261,9 +479,9 @@ impl BankDatabase {
         request_id: i64,
         clip_url: &str,
     ) -> Result<Option<i64>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id FROM mined_words WHERE request_id = ?1 ORDER BY id DESC LIMIT 1")?;
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id FROM mined_words WHERE request_id = ?1 ORDER BY id DESC LIMIT 1",
+        )?;
         let id: Option<i64> = stmt
             .query_row(params![request_id], |row| row.get(0))
             .optional()?;
@@ -316,8 +534,13 @@ impl BankDatabase {
     }
 
     pub fn delete(&self, id: i64) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM mined_words WHERE id = ?1", params![id])?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM mined_word_media WHERE word_id = ?1",
+            params![id],
+        )?;
+        tx.execute("DELETE FROM mined_words WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -346,7 +569,7 @@ impl BankDatabase {
 
     /// Lists all custom names, most recently created first.
     pub fn list_custom_names(&self) -> Result<Vec<CustomNameEntry>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT id, created_at, kanji, furigana, source_tag, notes
              FROM custom_names ORDER BY created_at DESC, id DESC",
         )?;
@@ -559,9 +782,183 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("bank.db");
         let db = BankDatabase::open(&db_path).unwrap();
+        let sync_mode: i64 = db
+            .conn
+            .query_row("PRAGMA synchronous", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(sync_mode, 1, "PRAGMA synchronous should be NORMAL (1)");
+        let journal_mode: String = db
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert!(journal_mode.eq_ignore_ascii_case("wal"));
         let list = db.list_meta().unwrap();
         assert!(list.is_empty());
         let resolved = crate::bank::resolve_bank_directory();
         assert!(!resolved.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn legacy_inline_media_migrates_on_disk_with_backup_and_preserves_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("legacy_bank.db");
+
+        // 1. Seed a legacy on-disk WAL database with inline screenshot/thumbnail BLOBs
+        //    and a deleted trailing row to test AUTOINCREMENT sequence preservation.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let _ = conn.pragma_update(None, "journal_mode", "WAL");
+            conn.execute_batch(
+                "CREATE TABLE mined_words (
+                     id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                     created_at       INTEGER NOT NULL,
+                     term             TEXT NOT NULL,
+                     reading          TEXT NOT NULL,
+                     definition_text  TEXT NOT NULL,
+                     definition_json  TEXT NOT NULL,
+                     sentence         TEXT NOT NULL,
+                     word_start       INTEGER NOT NULL,
+                     word_end         INTEGER NOT NULL,
+                     source_text      TEXT NOT NULL,
+                     screenshot       BLOB,
+                     thumbnail        BLOB,
+                     tag              TEXT,
+                     twitch_clip_url  TEXT,
+                     request_id       INTEGER
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO mined_words (created_at, term, reading, definition_text, definition_json,
+                     sentence, word_start, word_end, source_text, screenshot, thumbnail, tag, twitch_clip_url, request_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    1_000i64,
+                    "猫",
+                    "ねこ",
+                    "cat",
+                    r#"{"sequence":101}"#,
+                    "猫がいる。",
+                    0i64,
+                    1i64,
+                    "猫がいる。",
+                    vec![10u8, 20, 30],
+                    vec![40u8, 50],
+                    Some("Game 1"),
+                    Some("https://clips.twitch.tv/LegacyCat"),
+                    11i64,
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO mined_words (created_at, term, reading, definition_text, definition_json,
+                     sentence, word_start, word_end, source_text, screenshot, thumbnail, tag, twitch_clip_url, request_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, NULL, NULL, ?10)",
+                params![
+                    2_000i64,
+                    "犬",
+                    "いぬ",
+                    "dog",
+                    r#"{"sequence":202}"#,
+                    "犬がいる。",
+                    0i64,
+                    1i64,
+                    "犬がいる。",
+                    12i64,
+                ],
+            )
+            .unwrap();
+            // Insert id = 3 and delete it so sqlite_sequence = 3 while MAX(id) = 2
+            conn.execute(
+                "INSERT INTO mined_words (created_at, term, reading, definition_text, definition_json,
+                     sentence, word_start, word_end, source_text)
+                 VALUES (3000, '鳥', 'とり', 'bird', '[]', '鳥だ', 0, 1, '鳥だ')",
+                [],
+            )
+            .unwrap();
+            conn.execute("DELETE FROM mined_words WHERE id = 3", [])
+                .unwrap();
+        }
+
+        // 2. Open via BankDatabase::open -> should checkpoint, create .pre_media_split.bak, and migrate
+        let db = BankDatabase::open(&db_path).unwrap();
+
+        let bak_path = dir.path().join("legacy_bank.db.pre_media_split.bak");
+        assert!(
+            bak_path.exists(),
+            "backup file {:?} should be created before table rebuild",
+            bak_path
+        );
+
+        // Verify backup still has the original legacy inline schema & data
+        {
+            let bak_conn = Connection::open(&bak_path).unwrap();
+            assert!(BankDatabase::has_column(&bak_conn, "mined_words", "screenshot").unwrap());
+            let bak_shot: Vec<u8> = bak_conn
+                .query_row("SELECT screenshot FROM mined_words WHERE id = 1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(bak_shot, vec![10u8, 20, 30]);
+        }
+
+        // Verify migrated schema no longer has inline BLOB columns on mined_words
+        assert!(!BankDatabase::has_column(&db.conn, "mined_words", "screenshot").unwrap());
+        assert!(!BankDatabase::has_column(&db.conn, "mined_words", "thumbnail").unwrap());
+        assert!(BankDatabase::has_column(&db.conn, "mined_words", "has_screenshot").unwrap());
+        assert!(BankDatabase::has_column(&db.conn, "mined_words", "sequence").unwrap());
+
+        // Verify list_meta, screenshot, thumbnail
+        let list = db.list_meta().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, 2);
+        assert_eq!(list[0].term, "犬");
+        assert!(!list[0].has_screenshot);
+        assert_eq!(list[1].id, 1);
+        assert_eq!(list[1].term, "猫");
+        assert!(list[1].has_screenshot);
+        assert_eq!(list[1].tag.as_deref(), Some("Game 1"));
+        assert_eq!(
+            list[1].twitch_clip_url.as_deref(),
+            Some("https://clips.twitch.tv/LegacyCat")
+        );
+
+        assert_eq!(db.screenshot(1).unwrap(), Some(vec![10u8, 20, 30]));
+        assert_eq!(db.thumbnail(1).unwrap(), Some(vec![40u8, 50]));
+        assert_eq!(db.screenshot(2).unwrap(), None);
+        assert_eq!(db.thumbnail(2).unwrap(), None);
+
+        // Verify AUTOINCREMENT ID continues after deleted id = 3 (new entry gets id = 4)
+        let inserted = db
+            .insert(&NewBankEntry {
+                definition_json: r#"{"sequence":404}"#.into(),
+                ..entry("魚", 4_000, true)
+            })
+            .unwrap();
+        assert_eq!(inserted.id, 4);
+        assert_eq!(db.screenshot(4).unwrap(), Some(vec![1, 2, 3]));
+
+        // Verify sequence extraction on insert and update_sequences on migrated rows
+        let with_seqs = db.list_meta_with_sequences().unwrap();
+        assert_eq!(with_seqs[0].0.id, 4);
+        assert_eq!(with_seqs[0].1, Some(404));
+        assert_eq!(with_seqs[1].1, None);
+        assert_eq!(with_seqs[2].1, None);
+        db.update_sequences(&[(1, 101), (2, 202)]).unwrap();
+        let with_seqs = db.list_meta_with_sequences().unwrap();
+        assert_eq!(with_seqs[1].1, Some(202));
+        assert_eq!(with_seqs[2].1, Some(101));
+
+        // Verify delete removes both mined_words and mined_word_media rows
+        db.delete(1).unwrap();
+        assert_eq!(db.screenshot(1).unwrap(), None);
+        assert_eq!(db.thumbnail(1).unwrap(), None);
+        let media_exists: bool = db
+            .conn
+            .prepare("SELECT 1 FROM mined_word_media WHERE word_id = 1")
+            .unwrap()
+            .exists([])
+            .unwrap();
+        assert!(!media_exists);
     }
 }

@@ -103,6 +103,141 @@ impl Pc98SearchIndex {
     }
 }
 
+/// Pre-normalized representation of a single whitespace-delimited search query token,
+/// hoisted outside the per-game scoring loop so multi-script conversions run once per query.
+#[derive(Debug, Clone)]
+pub struct PreparedToken {
+    compact: String,
+    hira: String,
+    roma: String,
+    roma_short: String,
+    roma_short_char_len: usize,
+    roma_short_is_ascii: bool,
+    skel: String,
+}
+
+impl PreparedToken {
+    fn from_norm_token(raw_tok: &str) -> Self {
+        let compact = strip_spaces_and_punct(raw_tok);
+        if compact.is_empty() {
+            return Self {
+                compact,
+                hira: String::new(),
+                roma: String::new(),
+                roma_short: String::new(),
+                roma_short_char_len: 0,
+                roma_short_is_ascii: true,
+                skel: String::new(),
+            };
+        }
+
+        let hira_raw = kanji_to_hiragana(raw_tok);
+        let hira = strip_spaces_and_punct(&hira_raw);
+        let roma_spaced = hiragana_to_romaji(&hira_raw, false);
+        let en_expanded = expand_english_words_to_romaji(&roma_spaced);
+        let roma = strip_spaces_and_punct(&en_expanded);
+        let roma_short = collapse_long_vowels(&roma);
+        let roma_short_char_len = roma_short.chars().count();
+        let roma_short_is_ascii = roma_short.is_ascii();
+        let skel = phonetic_skeleton(&en_expanded);
+
+        Self {
+            compact,
+            hira,
+            roma,
+            roma_short,
+            roma_short_char_len,
+            roma_short_is_ascii,
+            skel,
+        }
+    }
+}
+
+/// Precomputed query state (normalized tokens, Romaji/Hiragana/Katakana conversions,
+/// vowel-collapsed forms, phonetic skeletons, and contiguous phrase forms) shared across
+/// all candidate games during `filter_and_rank_games`.
+#[derive(Debug, Clone)]
+pub struct PreparedQuery {
+    tokens: Vec<PreparedToken>,
+    joined_compact: String,
+    joined_short: String,
+}
+
+impl PreparedQuery {
+    pub fn new(query: &str) -> Self {
+        let norm_query = normalize_text(query);
+        let raw_tokens: Vec<&str> = norm_query
+            .split_whitespace()
+            .filter(|t| !t.is_empty())
+            .collect();
+        if raw_tokens.is_empty() {
+            return Self {
+                tokens: Vec::new(),
+                joined_compact: String::new(),
+                joined_short: String::new(),
+            };
+        }
+
+        let tokens = raw_tokens
+            .iter()
+            .map(|&t| PreparedToken::from_norm_token(t))
+            .collect();
+
+        let (joined_compact, joined_short) = if raw_tokens.len() > 1 {
+            let joined_en_roma = expand_english_words_to_romaji(&norm_query);
+            let jc = strip_spaces_and_punct(&joined_en_roma);
+            let js = collapse_long_vowels(&jc);
+            (jc, js)
+        } else {
+            (String::new(), String::new())
+        };
+
+        Self {
+            tokens,
+            joined_compact,
+            joined_short,
+        }
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.tokens.is_empty()
+    }
+
+    /// Scores `idx` against this pre-normalized query, reusing `dp_buf` for any
+    /// Damerau-Levenshtein edit-distance calculations.
+    pub fn score_index_with_buf(
+        &self,
+        idx: &Pc98SearchIndex,
+        dp_buf: &mut Vec<usize>,
+    ) -> Option<i32> {
+        if self.tokens.is_empty() {
+            return Some(0);
+        }
+
+        let mut total_score: i32 = 0;
+
+        for tok in &self.tokens {
+            let tok_score = score_prepared_token(idx, tok, dp_buf)?;
+            total_score += tok_score;
+        }
+
+        // Bonus when a multi-token query matches contiguously as a phrase in romaji or normalized title
+        if self.tokens.len() > 1 && !self.joined_compact.is_empty() {
+            if idx.norm_title_compact.contains(&self.joined_compact)
+                || idx.romaji_hepburn.contains(&self.joined_compact)
+                || idx.romaji_short.contains(&self.joined_short)
+            {
+                total_score += 450;
+            }
+        }
+
+        // Slight tie-breaker preference for shorter titles when match quality is otherwise equal
+        let len_penalty = (idx.norm_title_compact.len() as i32).min(60);
+        Some((total_score - len_penalty).max(1))
+    }
+}
+
 /// Filters and ranks `games` against `query`, returning indices into `games`.
 /// When `query` is empty or whitespace, returns all indices `0..games.len()` in library order.
 /// When `query` is non-empty, returns matching indices sorted by descending relevance score.
@@ -112,10 +247,20 @@ pub fn filter_and_rank_games(games: &[Pc98GameEntry], query: &str) -> Vec<usize>
         return (0..games.len()).collect();
     }
 
+    let prepared = PreparedQuery::new(trimmed);
+    if prepared.is_empty() {
+        return (0..games.len()).collect();
+    }
+
+    let mut dp_buf = Vec::new();
     let mut scored: Vec<(usize, i32)> = games
         .iter()
         .enumerate()
-        .filter_map(|(idx, game)| match_game_score(game, trimmed).map(|s| (idx, s)))
+        .filter_map(|(idx, game)| {
+            prepared
+                .score_index_with_buf(&game.search_index, &mut dp_buf)
+                .map(|s| (idx, s))
+        })
         .collect();
 
     scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -129,70 +274,35 @@ pub fn match_game_score(game: &Pc98GameEntry, query: &str) -> Option<i32> {
 
 /// Computes a fuzzy match score (`Some(score > 0)`) if `idx` matches `query`, or `None` if it does not.
 pub fn match_search_index_score(idx: &Pc98SearchIndex, query: &str) -> Option<i32> {
-    let norm_query = normalize_text(query);
-    let tokens: Vec<&str> = norm_query
-        .split_whitespace()
-        .filter(|t| !t.is_empty())
-        .collect();
-    if tokens.is_empty() {
-        return Some(0);
-    }
-
-    let mut total_score: i32 = 0;
-
-    for &raw_tok in &tokens {
-        let tok_score = score_single_token(idx, raw_tok)?;
-        total_score += tok_score;
-    }
-
-    // Bonus when a multi-token query matches contiguously as a phrase in romaji or normalized title
-    if tokens.len() > 1 {
-        let joined_en_roma = expand_english_words_to_romaji(&norm_query);
-        let joined_compact = strip_spaces_and_punct(&joined_en_roma);
-        let joined_short = collapse_long_vowels(&joined_compact);
-        if !joined_compact.is_empty() {
-            if idx.norm_title_compact.contains(&joined_compact)
-                || idx.romaji_hepburn.contains(&joined_compact)
-                || idx.romaji_short.contains(&joined_short)
-            {
-                total_score += 450;
-            }
-        }
-    }
-
-    // Slight tie-breaker preference for shorter titles when match quality is otherwise equal
-    let len_penalty = (idx.norm_title_compact.len() as i32).min(60);
-    Some((total_score - len_penalty).max(1))
+    let prepared = PreparedQuery::new(query);
+    let mut dp_buf = Vec::new();
+    prepared.score_index_with_buf(idx, &mut dp_buf)
 }
 
-fn score_single_token(idx: &Pc98SearchIndex, raw_tok: &str) -> Option<i32> {
-    let tok_compact = strip_spaces_and_punct(raw_tok);
-    if tok_compact.is_empty() {
+fn score_prepared_token(
+    idx: &Pc98SearchIndex,
+    tok: &PreparedToken,
+    dp_buf: &mut Vec<usize>,
+) -> Option<i32> {
+    if tok.compact.is_empty() {
         return Some(1);
     }
-
-    let tok_hira = strip_spaces_and_punct(&kanji_to_hiragana(raw_tok));
-    let tok_roma_spaced = hiragana_to_romaji(&kanji_to_hiragana(raw_tok), false);
-    let tok_en_expanded = expand_english_words_to_romaji(&tok_roma_spaced);
-    let tok_roma = strip_spaces_and_punct(&tok_en_expanded);
-    let tok_roma_short = collapse_long_vowels(&tok_roma);
-    let tok_skel = phonetic_skeleton(&tok_en_expanded);
 
     let mut best: i32 = 0;
 
     // 1. Direct normalized title / Hiragana title match
-    if let Some(pos) = idx.norm_title_compact.find(&tok_compact) {
+    if let Some(pos) = idx.norm_title_compact.find(&tok.compact) {
         let mut s = 1400 - (pos as i32) * 4;
         if pos == 0 {
             s += 300;
-            if idx.norm_title_compact.len() == tok_compact.len() {
+            if idx.norm_title_compact.len() == tok.compact.len() {
                 s += 300;
             }
         }
         best = best.max(s.max(900));
     }
-    if !tok_hira.is_empty() {
-        if let Some(pos) = idx.hira_title_compact.find(&tok_hira) {
+    if !tok.hira.is_empty() {
+        if let Some(pos) = idx.hira_title_compact.find(&tok.hira) {
             let mut s = 1380 - (pos as i32) * 4;
             if pos == 0 {
                 s += 280;
@@ -202,9 +312,9 @@ fn score_single_token(idx: &Pc98SearchIndex, raw_tok: &str) -> Option<i32> {
     }
 
     // 2. Romaji match (Hepburn, Kunrei, and Long-Vowel-Collapsed Short Romaji)
-    if !tok_roma.is_empty() {
+    if !tok.roma.is_empty() {
         for target in [&idx.romaji_hepburn, &idx.romaji_kunrei] {
-            if let Some(pos) = target.find(&tok_roma) {
+            if let Some(pos) = target.find(&tok.roma) {
                 let mut s = 1300 - (pos as i32) * 4;
                 if pos == 0 {
                     s += 250;
@@ -213,9 +323,9 @@ fn score_single_token(idx: &Pc98SearchIndex, raw_tok: &str) -> Option<i32> {
             }
         }
     }
-    if !tok_roma_short.is_empty() {
+    if !tok.roma_short.is_empty() {
         for target in [&idx.romaji_short, &idx.romaji_hepburn, &idx.romaji_kunrei] {
-            if let Some(pos) = target.find(&tok_roma_short) {
+            if let Some(pos) = target.find(&tok.roma_short) {
                 let mut s = 1220 - (pos as i32) * 4;
                 if pos == 0 {
                     s += 220;
@@ -226,15 +336,15 @@ fn score_single_token(idx: &Pc98SearchIndex, raw_tok: &str) -> Option<i32> {
     }
 
     // 3. Category & Disk Filename stem match (e.g. "touhou", "wizbcf", "dokyu", "san4")
-    for candidate in [&tok_compact, &tok_hira, &tok_roma, &tok_roma_short] {
+    for candidate in [&tok.compact, &tok.hira, &tok.roma, &tok.roma_short] {
         if !candidate.is_empty() && idx.extra_blob.contains(candidate.as_str()) {
             best = best.max(750);
         }
     }
 
     // 4. English-to-Katakana phonetic consonant skeleton match (for tokens with >= 3 skeleton chars)
-    if tok_skel.len() >= 3 && !idx.skeleton_title.is_empty() {
-        if let Some(pos) = idx.skeleton_title.find(&tok_skel) {
+    if tok.skel.len() >= 3 && !idx.skeleton_title.is_empty() {
+        if let Some(pos) = idx.skeleton_title.find(&tok.skel) {
             let mut s = 680 - (pos as i32) * 5;
             if pos == 0 {
                 s += 120;
@@ -248,22 +358,21 @@ fn score_single_token(idx: &Pc98SearchIndex, raw_tok: &str) -> Option<i32> {
     }
 
     // 5. Typo-tolerant edit distance match (Damerau-Levenshtein <= 1 for len >= 4, <= 2 for len >= 7)
-    let char_len = tok_roma_short.chars().count();
-    if char_len >= 4 && tok_roma_short.is_ascii() {
-        let max_dist = if char_len >= 7 { 2 } else { 1 };
+    if tok.roma_short_char_len >= 4 && tok.roma_short_is_ascii {
+        let max_dist = if tok.roma_short_char_len >= 7 { 2 } else { 1 };
         for word in &idx.words {
             if !word.is_ascii() {
                 continue;
             }
-            if word.len().abs_diff(tok_roma_short.len()) <= max_dist {
-                let d = damerau_levenshtein(&tok_roma_short, word);
+            if word.len().abs_diff(tok.roma_short.len()) <= max_dist {
+                let d = damerau_levenshtein_with_buf(&tok.roma_short, word, dp_buf);
                 if d <= max_dist {
                     best = best.max(540 - (d as i32) * 80);
                 }
-            } else if word.len() > tok_roma_short.len() {
+            } else if word.len() > tok.roma_short.len() {
                 // Check prefix of longer compound word
-                let prefix_len = tok_roma_short.len();
-                let d = damerau_levenshtein(&tok_roma_short, &word[..prefix_len]);
+                let prefix_len = tok.roma_short.len();
+                let d = damerau_levenshtein_with_buf(&tok.roma_short, &word[..prefix_len], dp_buf);
                 if d <= 1 {
                     best = best.max(500);
                 }
@@ -276,9 +385,9 @@ fn score_single_token(idx: &Pc98SearchIndex, raw_tok: &str) -> Option<i32> {
     }
 
     // 6. Subsequence fuzzy match (fzf-style) for abbreviations (e.g. "wiz6", "ultuw", "eam2")
-    if tok_roma_short.len() >= 3 && tok_roma_short.is_ascii() {
-        if let Some(sub_score) = subsequence_fuzzy_score(&tok_roma_short, &idx.romaji_short)
-            .or_else(|| subsequence_fuzzy_score(&tok_compact, &idx.norm_title_compact))
+    if tok.roma_short.len() >= 3 && tok.roma_short_is_ascii {
+        if let Some(sub_score) = subsequence_fuzzy_score(&tok.roma_short, &idx.romaji_short)
+            .or_else(|| subsequence_fuzzy_score(&tok.compact, &idx.norm_title_compact))
         {
             return Some(sub_score);
         }
@@ -1125,75 +1234,169 @@ fn lookup_english_loanword(word: &str) -> Option<&'static str> {
 
 /// Builds a phonetic consonant+digit skeleton so English loanwords and Japanese Romaji
 /// match even when epenthetic vowels (`a, i, u, e, o`) or `l/r`, `b/v`, `c/k/s` differ.
+/// Runs single-pass over a stack byte buffer into a single `String::with_capacity(...)`.
 pub fn phonetic_skeleton(input: &str) -> String {
-    let expanded = expand_english_words_to_romaji(input);
-    let mut s = String::with_capacity(expanded.len());
-    for ch in expanded.chars() {
-        if ch.is_ascii_alphanumeric() {
-            s.push(ch.to_ascii_lowercase());
+    let in_bytes = input.as_bytes();
+    let mut stack_buf = [0u8; 256];
+    let mut heap_buf: Vec<u8> = Vec::new();
+    let mut len = 0usize;
+
+    let push_byte = |b: u8, stack: &mut [u8; 256], heap: &mut Vec<u8>, len: &mut usize| {
+        if heap.is_empty() {
+            if *len < stack.len() {
+                stack[*len] = b;
+                *len += 1;
+            } else {
+                heap.reserve(in_bytes.len().saturating_add(16).max(320));
+                heap.extend_from_slice(&stack[..*len]);
+                heap.push(b);
+                *len += 1;
+            }
+        } else {
+            heap.push(b);
+            *len += 1;
+        }
+    };
+
+    let mut pos = 0;
+    while pos < in_bytes.len() {
+        let b = in_bytes[pos];
+        if b.is_ascii_alphabetic() {
+            let start = pos;
+            while pos < in_bytes.len() && in_bytes[pos].is_ascii_alphabetic() {
+                pos += 1;
+            }
+            let word = &input[start..pos];
+            if let Some(mapped) = lookup_english_loanword(word) {
+                for &mb in mapped.as_bytes() {
+                    push_byte(mb, &mut stack_buf, &mut heap_buf, &mut len);
+                }
+            } else {
+                for &wb in word.as_bytes() {
+                    push_byte(
+                        wb.to_ascii_lowercase(),
+                        &mut stack_buf,
+                        &mut heap_buf,
+                        &mut len,
+                    );
+                }
+            }
+        } else if b.is_ascii_digit() {
+            push_byte(b, &mut stack_buf, &mut heap_buf, &mut len);
+            pos += 1;
+        } else {
+            pos += 1;
         }
     }
-    if s.is_empty() {
-        return s;
+
+    if len == 0 {
+        return String::new();
     }
 
-    for (pat, rep) in [
-        ("ph", "f"),
-        ("dge", "j"),
-        ("tch", "c"),
-        ("sh", "s"),
-        ("ch", "c"),
-        ("th", "s"),
-        ("ts", "t"),
-        ("ck", "k"),
-        ("qu", "k"),
-        ("x", "ks"),
-        ("ce", "se"),
-        ("ci", "si"),
-        ("cy", "sy"),
-        ("wi", "ui"),
-        ("we", "ue"),
-        ("wo", "uo"),
-    ] {
-        s = s.replace(pat, rep);
-    }
+    let buf: &[u8] = if heap_buf.is_empty() {
+        &stack_buf[..len]
+    } else {
+        &heap_buf[..len]
+    };
 
-    let mapped: Vec<u8> = s
-        .bytes()
-        .map(|b| match b {
+    let mut skel = String::with_capacity(len);
+    let mut prev_dedup = 0u8;
+    let mut last_skel = 0u8;
+
+    let mut emit = |raw_b: u8| {
+        let b = match raw_b {
             b'c' | b'q' => b'k',
             b'l' => b'r',
             b'v' => b'b',
             b'z' => b's',
             other => other,
-        })
-        .collect();
-
-    // Collapse adjacent identical consonants before vowel stripping
-    let mut dedup = Vec::with_capacity(mapped.len());
-    for &b in &mapped {
-        if dedup.last().copied() != Some(b) {
-            dedup.push(b);
+        };
+        if b == prev_dedup {
+            return;
         }
-    }
-
-    // Keep the very first character (even if a vowel), strip subsequent vowels, and collapse repeats
-    let mut skel = String::with_capacity(dedup.len());
-    for (idx, &b) in dedup.iter().enumerate() {
+        let is_first = prev_dedup == 0;
+        prev_dedup = b;
         let is_vowel = matches!(b, b'a' | b'i' | b'u' | b'e' | b'o' | b'y');
-        if idx == 0 || !is_vowel {
-            let ch = b as char;
-            if skel.chars().last() != Some(ch) {
-                skel.push(ch);
+        if (is_first || !is_vowel) && last_skel != b {
+            skel.push(b as char);
+            last_skel = b;
+        }
+    };
+
+    let mut i = 0;
+    while i < buf.len() {
+        let rem = &buf[i..];
+        if rem.starts_with(b"dge") {
+            emit(b'j');
+            i += 3;
+        } else if rem.starts_with(b"tch") {
+            i += 3;
+            if buf.get(i) == Some(&b'h') {
+                i += 1;
             }
+            if matches!(buf.get(i), Some(b'e' | b'i' | b'y')) {
+                emit(b's');
+            } else {
+                emit(b'k');
+            }
+        } else if rem.starts_with(b"ph") {
+            emit(b'f');
+            i += 2;
+        } else if rem.starts_with(b"sh") {
+            emit(b's');
+            i += 2;
+        } else if rem.starts_with(b"ch") {
+            i += 2;
+            if matches!(buf.get(i), Some(b'e' | b'i' | b'y')) {
+                emit(b's');
+            } else {
+                emit(b'k');
+            }
+        } else if rem.starts_with(b"th") {
+            emit(b's');
+            i += 2;
+        } else if rem.starts_with(b"tsh") || rem.starts_with(b"tth") {
+            emit(b't');
+            i += 3;
+        } else if rem.starts_with(b"ts") {
+            emit(b't');
+            i += 2;
+        } else if rem.starts_with(b"ck") || rem.starts_with(b"qu") {
+            emit(b'k');
+            i += 2;
+        } else if rem[0] == b'x' {
+            emit(b'k');
+            emit(b's');
+            i += 1;
+        } else if rem[0] == b'c' {
+            i += 1;
+            if matches!(buf.get(i), Some(b'e' | b'i' | b'y')) {
+                emit(b's');
+            } else {
+                emit(b'k');
+            }
+        } else if rem[0] == b'w' && matches!(rem.get(1), Some(b'i' | b'e' | b'o')) {
+            emit(b'u');
+            i += 1;
+        } else {
+            emit(rem[0]);
+            i += 1;
         }
     }
+
     skel
 }
 
 /// Computes optimal Damerau-Levenshtein distance (insertions, deletions, substitutions,
 /// and adjacent transpositions) between two ASCII strings.
 pub fn damerau_levenshtein(a: &str, b: &str) -> usize {
+    let mut scratch = Vec::new();
+    damerau_levenshtein_with_buf(a, b, &mut scratch)
+}
+
+/// Computes optimal string-alignment Damerau-Levenshtein distance reusing `scratch`
+/// (3 rotating rows of length `b.len() + 1`) so repeated candidate comparisons do zero allocations.
+pub fn damerau_levenshtein_with_buf(a: &str, b: &str, scratch: &mut Vec<usize>) -> usize {
     let a_bytes = a.as_bytes();
     let b_bytes = b.as_bytes();
     let m = a_bytes.len();
@@ -1206,20 +1409,25 @@ pub fn damerau_levenshtein(a: &str, b: &str) -> usize {
     }
 
     let width = n + 1;
-    let mut dp = vec![0usize; (m + 1) * width];
-    for i in 0..=m {
-        dp[i * width] = i;
+    let needed = 3 * width;
+    if scratch.len() < needed {
+        scratch.resize(needed, 0);
     }
-    for j in 0..=n {
-        dp[j] = j;
+
+    let (mut prev2, rest) = scratch[..needed].split_at_mut(width);
+    let (mut prev1, mut curr) = rest.split_at_mut(width);
+
+    for (j, slot) in prev1.iter_mut().enumerate() {
+        *slot = j;
     }
 
     for i in 1..=m {
+        curr[0] = i;
         for j in 1..=n {
             let cost = usize::from(a_bytes[i - 1] != b_bytes[j - 1]);
-            let del = dp[(i - 1) * width + j] + 1;
-            let ins = dp[i * width + (j - 1)] + 1;
-            let sub = dp[(i - 1) * width + (j - 1)] + cost;
+            let del = prev1[j] + 1;
+            let ins = curr[j - 1] + 1;
+            let sub = prev1[j - 1] + cost;
             let mut val = del.min(ins).min(sub);
 
             if i > 1
@@ -1227,13 +1435,15 @@ pub fn damerau_levenshtein(a: &str, b: &str) -> usize {
                 && a_bytes[i - 1] == b_bytes[j - 2]
                 && a_bytes[i - 2] == b_bytes[j - 1]
             {
-                val = val.min(dp[(i - 2) * width + (j - 2)] + 1);
+                val = val.min(prev2[j - 2] + 1);
             }
-            dp[i * width + j] = val;
+            curr[j] = val;
         }
+        std::mem::swap(&mut prev2, &mut prev1);
+        std::mem::swap(&mut prev1, &mut curr);
     }
 
-    dp[m * width + n]
+    prev1[n]
 }
 
 /// Computes an `fzf`-style subsequence match score if all characters of `needle` appear in order
@@ -1404,5 +1614,226 @@ mod tests {
             games[r[0]].title,
             "Ｗｉｚａｒｄｒｙ６　Ｂａｎｅ　Ｏｆ　Ｔｈｅ　Ｃｏｓｍｉｃ　Ｆｏｒｇｅ"
         );
+    }
+
+    fn reference_multipass_phonetic_skeleton(input: &str) -> String {
+        let expanded = expand_english_words_to_romaji(input);
+        let mut s = String::with_capacity(expanded.len());
+        for ch in expanded.chars() {
+            if ch.is_ascii_alphanumeric() {
+                s.push(ch.to_ascii_lowercase());
+            }
+        }
+        if s.is_empty() {
+            return s;
+        }
+        for (pat, rep) in [
+            ("ph", "f"),
+            ("dge", "j"),
+            ("tch", "c"),
+            ("sh", "s"),
+            ("ch", "c"),
+            ("th", "s"),
+            ("ts", "t"),
+            ("ck", "k"),
+            ("qu", "k"),
+            ("x", "ks"),
+            ("ce", "se"),
+            ("ci", "si"),
+            ("cy", "sy"),
+            ("wi", "ui"),
+            ("we", "ue"),
+            ("wo", "uo"),
+        ] {
+            s = s.replace(pat, rep);
+        }
+        let mapped: Vec<u8> = s
+            .bytes()
+            .map(|b| match b {
+                b'c' | b'q' => b'k',
+                b'l' => b'r',
+                b'v' => b'b',
+                b'z' => b's',
+                other => other,
+            })
+            .collect();
+        let mut dedup = Vec::with_capacity(mapped.len());
+        for &b in &mapped {
+            if dedup.last().copied() != Some(b) {
+                dedup.push(b);
+            }
+        }
+        let mut skel = String::with_capacity(dedup.len());
+        for (idx, &b) in dedup.iter().enumerate() {
+            let is_vowel = matches!(b, b'a' | b'i' | b'u' | b'e' | b'o' | b'y');
+            if idx == 0 || !is_vowel {
+                let ch = b as char;
+                if skel.chars().last() != Some(ch) {
+                    skel.push(ch);
+                }
+            }
+        }
+        skel
+    }
+
+    fn reference_2d_damerau_levenshtein(a: &str, b: &str) -> usize {
+        let a_bytes = a.as_bytes();
+        let b_bytes = b.as_bytes();
+        let m = a_bytes.len();
+        let n = b_bytes.len();
+        if m == 0 {
+            return n;
+        }
+        if n == 0 {
+            return m;
+        }
+        let width = n + 1;
+        let mut dp = vec![0usize; (m + 1) * width];
+        for i in 0..=m {
+            dp[i * width] = i;
+        }
+        for j in 0..=n {
+            dp[j] = j;
+        }
+        for i in 1..=m {
+            for j in 1..=n {
+                let cost = usize::from(a_bytes[i - 1] != b_bytes[j - 1]);
+                let mut val = (dp[(i - 1) * width + j] + 1)
+                    .min(dp[i * width + (j - 1)] + 1)
+                    .min(dp[(i - 1) * width + (j - 1)] + cost);
+                if i > 1
+                    && j > 1
+                    && a_bytes[i - 1] == b_bytes[j - 2]
+                    && a_bytes[i - 2] == b_bytes[j - 1]
+                {
+                    val = val.min(dp[(i - 2) * width + (j - 2)] + 1);
+                }
+                dp[i * width + j] = val;
+            }
+        }
+        dp[m * width + n]
+    }
+
+    #[test]
+    fn test_single_pass_phonetic_skeleton_matches_multipass_reference() {
+        let long_input = "wizardry6 phantasmagoria bridge witch xanadu queen ".repeat(8);
+        let samples = [
+            "",
+            "   ---   ",
+            "wizardry6",
+            "Wizardry 6: Bane of the Cosmic Forge",
+            "kitchen",
+            "kicchin",
+            "witch",
+            "uicchi",
+            "bridge",
+            "phantasy star",
+            "chronicle",
+            "queen quest",
+            "xanadu",
+            "cyber",
+            "centurion",
+            "cinder",
+            "window",
+            "wedding",
+            "world",
+            "wisp",
+            "tsukihime",
+            "tsh",
+            "tth",
+            "uuto",
+            "aiueo",
+            "koko",
+            "uccello",
+            long_input.as_str(),
+        ];
+
+        for sample in samples {
+            assert_eq!(
+                phonetic_skeleton(sample),
+                reference_multipass_phonetic_skeleton(sample),
+                "phonetic_skeleton mismatch for input {sample:?}"
+            );
+        }
+
+        for &(_, reading) in KANJI_WORDS.iter().take(200) {
+            let roma = hiragana_to_romaji(reading, false);
+            assert_eq!(
+                phonetic_skeleton(&roma),
+                reference_multipass_phonetic_skeleton(&roma),
+                "phonetic_skeleton mismatch for romaji {roma:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_reused_dp_buffer_matches_2d_damerau_levenshtein_and_prepared_query() {
+        let pairs = [
+            ("", ""),
+            ("", "wizardry"),
+            ("wizardry", ""),
+            ("a", "b"),
+            ("ab", "ba"),
+            ("wizadry", "wizardry"),
+            ("brandish", "bradnish"),
+            ("sangokushi", "sangokusi"),
+            ("policenauts", "policenuats"),
+            ("dokyusei", "doukyuusei"),
+            ("rusty", "rasty"),
+            ("sorcerian", "socerian"),
+            ("xanadu", "xandau"),
+        ];
+
+        let mut shared_buf = Vec::new();
+        for (a, b) in pairs {
+            let expected = reference_2d_damerau_levenshtein(a, b);
+            assert_eq!(
+                damerau_levenshtein_with_buf(a, b, &mut shared_buf),
+                expected,
+                "forward mismatch for ({a:?}, {b:?})"
+            );
+            assert_eq!(
+                damerau_levenshtein_with_buf(b, a, &mut shared_buf),
+                reference_2d_damerau_levenshtein(b, a),
+                "reverse mismatch for ({b:?}, {a:?})"
+            );
+        }
+
+        let games = vec![
+            dummy_game("うきうきアイランド", Some("う"), "Ukiukiia.FDI"),
+            dummy_game(
+                "Ｗｉｚａｒｄｒｙ６　Ｂａｎｅ　Ｏｆ　Ｔｈｅ　Ｃｏｓｍｉｃ　Ｆｏｒｇｅ",
+                Some("う"),
+                "WIZBCF_A.D88",
+            ),
+            dummy_game("ブランディッシュ２", Some("ふ"), "BR2_A.HDI"),
+            dummy_game("同級生２", Some("と"), "DOKYU2.HDI"),
+            dummy_game("ポリスノーツ", Some("ほ"), "PN_CD.CUE"),
+        ];
+
+        for query in [
+            "wizadry 6",
+            "bradnish 2",
+            "policenuats",
+            "ukiuki island",
+            "doukyuusei 2",
+            "   ",
+        ] {
+            let ranked = filter_and_rank_games(&games, query);
+            let trimmed = query.trim();
+            if trimmed.is_empty() {
+                assert_eq!(ranked, (0..games.len()).collect::<Vec<_>>());
+            } else {
+                let prepared = PreparedQuery::new(trimmed);
+                let mut buf = Vec::new();
+                for (i, g) in games.iter().enumerate() {
+                    assert_eq!(
+                        prepared.score_index_with_buf(&g.search_index, &mut buf),
+                        match_game_score(g, trimmed),
+                        "PreparedQuery score mismatch on game {i} for query {query:?}"
+                    );
+                }
+            }
+        }
     }
 }

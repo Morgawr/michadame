@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -18,14 +18,16 @@ pub struct DictDatabase {
     pub generation: u64,
     /// Particle-swap index for expressions (built lazily in the background).
     particle_index: Arc<RwLock<Option<Arc<ParticleIndex>>>>,
+    db_path: Option<PathBuf>,
 }
 
 impl DictDatabase {
-    fn from_conn(conn: Connection) -> Self {
+    fn from_conn(conn: Connection, db_path: Option<PathBuf>) -> Self {
         Self {
             conn,
             generation: DB_GENERATION.fetch_add(1, Ordering::Relaxed),
             particle_index: Arc::new(RwLock::new(None)),
+            db_path,
         }
     }
 
@@ -33,18 +35,18 @@ impl DictDatabase {
     /// Also kicks off a background build of the particle-swap index using a separate
     /// read-only connection so the UI thread is never blocked.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let conn = Self::open_read_only_conn(path.as_ref())?;
-        let db = Self::from_conn(conn);
+        let path_buf = path.as_ref().to_path_buf();
+        let conn = Self::open_read_only_conn(&path_buf)?;
+        let db = Self::from_conn(conn, Some(path_buf.clone()));
         super::lookup::invalidate_scan_cache();
 
         let slot = db.particle_index.clone();
-        let path_buf = path.as_ref().to_path_buf();
         std::thread::Builder::new()
             .name("dict-particle-index".into())
             .spawn(move || {
                 let started = std::time::Instant::now();
                 let result = Self::open_read_only_conn(&path_buf)
-                    .map(Self::from_conn)
+                    .map(|bg_conn| Self::from_conn(bg_conn, Some(path_buf.clone())))
                     .and_then(|bg_db| ParticleIndex::build(&bg_db));
                 match result {
                     Ok(index) => {
@@ -81,9 +83,12 @@ impl DictDatabase {
 
     /// Creates or connects to a dictionary SQLite database for reading/writing.
     pub fn open_or_create<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let conn = Connection::open(path).context("Failed to open/create dictionary database")?;
+        let path_ref = path.as_ref();
+        let conn =
+            Connection::open(path_ref).context("Failed to open/create dictionary database")?;
         Self::init_schema(&conn)?;
-        Ok(Self::from_conn(conn))
+        let db_path = (path_ref != Path::new(":memory:")).then(|| path_ref.to_path_buf());
+        Ok(Self::from_conn(conn, db_path))
     }
 
     /// Returns the particle-swap index if it has finished building.
@@ -117,6 +122,10 @@ impl DictDatabase {
                 sequence INT,
                 term_tags TEXT
             );
+            CREATE TABLE IF NOT EXISTS particle_expressions (
+                term TEXT NOT NULL,
+                reading TEXT NOT NULL
+            );
             ",
         )?;
         Ok(())
@@ -138,26 +147,113 @@ impl DictDatabase {
         Ok(())
     }
 
+    fn persist_metadata_kv(&self, key: &str, value: &str) {
+        if self
+            .conn
+            .execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?1, ?2)",
+                params![key, value],
+            )
+            .is_ok()
+        {
+            return;
+        }
+        if let Some(path) = &self.db_path {
+            if let Ok(rw_conn) = Connection::open(path) {
+                let _ = rw_conn.busy_timeout(std::time::Duration::from_millis(250));
+                let _ = rw_conn.execute(
+                    "INSERT OR REPLACE INTO metadata (key, value) VALUES (?1, ?2)",
+                    params![key, value],
+                );
+            }
+        }
+    }
+
+    pub(crate) fn persist_particle_expressions(&self, pairs: &[(String, String)]) {
+        fn write_to_conn(conn: &Connection, pairs: &[(String, String)]) -> rusqlite::Result<()> {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS metadata (
+                     key TEXT PRIMARY KEY,
+                     value TEXT
+                 );
+                 CREATE TABLE IF NOT EXISTS particle_expressions (
+                     term TEXT NOT NULL,
+                     reading TEXT NOT NULL
+                 );",
+            )?;
+            let already_ready: Option<String> = tx
+                .query_row(
+                    "SELECT value FROM metadata WHERE key = 'particle_expressions_ready'",
+                    [],
+                    |r| r.get(0),
+                )
+                .ok();
+            if already_ready.as_deref() == Some("1") {
+                return Ok(());
+            }
+            tx.execute("DELETE FROM particle_expressions", [])?;
+            {
+                let mut stmt =
+                    tx.prepare("INSERT INTO particle_expressions (term, reading) VALUES (?1, ?2)")?;
+                for (term, reading) in pairs {
+                    stmt.execute(params![term, reading])?;
+                }
+            }
+            tx.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES ('particle_expressions_ready', '1')",
+                [],
+            )?;
+            tx.commit()
+        }
+
+        if write_to_conn(&self.conn, pairs).is_ok() {
+            return;
+        }
+        if let Some(path) = &self.db_path {
+            if let Ok(rw_conn) = Connection::open(path) {
+                let _ = rw_conn.busy_timeout(std::time::Duration::from_secs(5));
+                let _ = write_to_conn(&rw_conn, pairs);
+            }
+        }
+    }
+
     /// Loads the stored dictionary metadata from the `metadata` table.
     pub fn get_metadata(&self) -> Result<DictMetadata> {
-        let mut stmt = self.conn.prepare("SELECT key, value FROM metadata")?;
-        let rows = stmt.query_map([], |row| {
-            let key: String = row.get(0)?;
-            let value: String = row.get(1)?;
-            Ok((key, value))
-        })?;
-
         let mut map: HashMap<String, String> = HashMap::new();
-        for r in rows {
-            if let Ok((k, v)) = r {
-                map.insert(k, v);
+        {
+            let mut stmt = self
+                .conn
+                .prepare_cached("SELECT key, value FROM metadata")?;
+            let rows = stmt.query_map([], |row| {
+                let key: String = row.get(0)?;
+                let value: String = row.get(1)?;
+                Ok((key, value))
+            })?;
+
+            for r in rows {
+                if let Ok((k, v)) = r {
+                    map.insert(k, v);
+                }
             }
         }
 
-        let total_entries: usize = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM terms", [], |r| r.get(0))
-            .unwrap_or(0);
+        let total_entries = match map
+            .remove("total_entries")
+            .and_then(|v| v.trim().parse::<usize>().ok())
+        {
+            Some(n) => n,
+            None => {
+                let count: usize = self
+                    .conn
+                    .query_row("SELECT COUNT(*) FROM terms", [], |r| r.get(0))
+                    .unwrap_or(0);
+                if count > 0 {
+                    self.persist_metadata_kv("total_entries", &count.to_string());
+                }
+                count
+            }
+        };
 
         Ok(DictMetadata {
             title: map
@@ -199,12 +295,7 @@ impl DictDatabase {
             while let Some(row) = rows.next()? {
                 let term: String = row.get(0)?;
                 let reading: String = row.get(1)?;
-                let definition_tags: Option<String> = row.get(2)?;
                 let rules: String = row.get(3)?;
-                let score: f64 = row.get(4)?;
-                let glossary_raw: String = row.get(5)?;
-                let sequence: i64 = row.get(6)?;
-                let term_tags: Option<String> = row.get(7)?;
 
                 // If term was deinflected, verify rule compatibility
                 if candidate.rules != 0 {
@@ -221,10 +312,18 @@ impl DictDatabase {
                     continue;
                 }
 
+                let sequence: i64 = row.get(6)?;
                 let key = (term.clone(), reading.clone(), sequence);
                 if !seen_keys.insert(key) {
                     continue;
                 }
+
+                // Only read multi-KB `glossary` overflow pages and metadata columns once the row
+                // has passed rule, mixed-kana, and duplicate-sequence checks.
+                let definition_tags: Option<String> = row.get(2)?;
+                let score: f64 = row.get(4)?;
+                let glossary_raw: String = row.get(5)?;
+                let term_tags: Option<String> = row.get(7)?;
 
                 // Parse glossary elements
                 let glossary = parse_glossary_json(&glossary_raw);
@@ -400,6 +499,8 @@ impl DictDatabase {
             let mut total_inserted = 0usize;
             let mut insert_batch: Vec<(String, String, String, String, f64, String, i64, String)> =
                 Vec::with_capacity(5000);
+            let mut particle_expr_seen: HashSet<(String, String)> = HashSet::new();
+            let mut particle_expr_pairs: Vec<(String, String)> = Vec::new();
 
             for (idx, name) in term_bank_names.iter().enumerate() {
                 let progress = 0.05 + 0.85 * (idx as f32 / total_banks as f32);
@@ -422,6 +523,15 @@ impl DictDatabase {
 
                 for (row_idx, item) in arr.iter().enumerate() {
                     let row = parse_and_validate_term_row(item, name, row_idx)?;
+                    if (super::particles::has_interior_swappable_particle(&row.0)
+                        || super::particles::has_interior_swappable_particle(&row.1))
+                        && row.5.contains("\"code\":\"exp\"")
+                    {
+                        let pair = (row.0.clone(), row.1.clone());
+                        if particle_expr_seen.insert(pair.clone()) {
+                            particle_expr_pairs.push(pair);
+                        }
+                    }
                     insert_batch.push(row);
                     total_inserted += 1;
 
@@ -437,6 +547,27 @@ impl DictDatabase {
 
             if total_inserted == 0 {
                 anyhow::bail!("Dictionary archive contains zero valid term entries");
+            }
+
+            {
+                let tx = conn.transaction()?;
+                {
+                    let mut stmt = tx.prepare(
+                        "INSERT INTO particle_expressions (term, reading) VALUES (?1, ?2)",
+                    )?;
+                    for (term, reading) in &particle_expr_pairs {
+                        stmt.execute(params![term, reading])?;
+                    }
+                }
+                tx.execute(
+                    "INSERT OR REPLACE INTO metadata (key, value) VALUES ('total_entries', ?1)",
+                    params![total_inserted.to_string()],
+                )?;
+                tx.execute(
+                    "INSERT OR REPLACE INTO metadata (key, value) VALUES ('particle_expressions_ready', '1')",
+                    [],
+                )?;
+                tx.commit()?;
             }
 
             // 4. Build indexes
@@ -1140,5 +1271,58 @@ mod tests {
             .unwrap();
         assert_eq!(new_res.len(), 1);
         assert_eq!(new_res[0].term, "走る");
+    }
+
+    #[test]
+    fn test_total_entries_persisted_and_backfilled_in_metadata() {
+        let dir = tempdir().unwrap();
+        let zip_path = dir.path().join("dict_meta.zip");
+        let db_path = dir.path().join("dict_meta.db");
+
+        write_test_zip(
+            &zip_path,
+            &[
+                (
+                    "index.json",
+                    r#"{"title":"Meta Dict","revision":"2026.11.01","format":3}"#,
+                ),
+                (
+                    "term_bank_1.json",
+                    r#"[["走る","はしる","v5r","v5",180.0,["to run"],1,""],["読む","よむ","v5m","v5",190.0,["to read"],2,""],["書く","かく","v5k","v5",170.0,["to write"],3,""]]"#,
+                ),
+            ],
+        );
+
+        DictDatabase::build_database_from_zip(&zip_path, &db_path, |_, _| {}).unwrap();
+
+        let stored: String = Connection::open(&db_path)
+            .unwrap()
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'total_entries'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "3");
+
+        // Simulate a legacy DB without `total_entries` opened via read-only `DictDatabase::open`:
+        // `get_metadata` must fall back to `COUNT(*)` once and persist `total_entries` to disk.
+        Connection::open(&db_path)
+            .unwrap()
+            .execute("DELETE FROM metadata WHERE key = 'total_entries'", [])
+            .unwrap();
+
+        let ro_db = DictDatabase::open(&db_path).unwrap();
+        assert_eq!(ro_db.get_metadata().unwrap().total_entries, 3);
+
+        let backfilled: String = Connection::open(&db_path)
+            .unwrap()
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'total_entries'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(backfilled, "3");
     }
 }

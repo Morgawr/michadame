@@ -25,6 +25,7 @@ pub fn canonicalize_tag(input: &str, known: &[String]) -> Option<String> {
 /// True if `tag` belongs to the filter `query`: a case-insensitive substring match, so
 /// "Final Fantasy" matches "Final Fantasy 7" and "Final Fantasy 8". An empty query
 /// matches everything (including untagged words).
+#[allow(dead_code)]
 pub fn tag_matches_filter(tag: Option<&str>, query: &str) -> bool {
     let query = query.trim();
     if query.is_empty() {

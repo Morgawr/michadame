@@ -5,7 +5,7 @@
 // Dynamic threshold: only block frequencies whose magnitude exceeds the threshold.
 
 in vec2 v_tc;
-out vec4 fragColor;
+out vec2 fragColor;
 
 uniform sampler2D fft_texture;
 uniform sampler2D mask_texture;
@@ -25,7 +25,7 @@ void main() {
 
     // If mask says "pass" (1.0), always pass through
     if (mask > 0.5) {
-        fragColor = vec4(fft_val, 0.0, 1.0);
+        fragColor = fft_val;
         return;
     }
 
@@ -41,9 +41,9 @@ void main() {
     // threshold=1: only block the very brightest peaks
     if (viz >= mask_threshold) {
         // Block: zero out this frequency
-        fragColor = vec4(0.0, 0.0, 0.0, 1.0);
+        fragColor = vec2(0.0);
     } else {
         // Below threshold: pass through even though mask says block
-        fragColor = vec4(fft_val, 0.0, 1.0);
+        fragColor = fft_val;
     }
 }

@@ -2,14 +2,16 @@ use super::params::HaloShaderParams;
 use super::programs::*;
 use eframe::glow::{self, HasContext};
 
+const BORDER_H_SRC: &str = include_str!("../shaders/fs_halo_border_h.glsl");
+
 pub struct HaloRenderer {
     linearize_prog: glow::Program,
     glow_h_prog: glow::Program,
     glow_v_prog: glow::Program,
     bloom_h_prog: glow::Program,
     bloom_v_prog: glow::Program,
-    scanlines_prog: glow::Program,
     composite_prog: glow::Program,
+    border_h_prog: glow::Program,
     final_prog: glow::Program,
 
     glow_h_source_size_loc: Option<glow::UniformLocation>,
@@ -17,22 +19,16 @@ pub struct HaloRenderer {
     bloom_h_source_size_loc: Option<glow::UniformLocation>,
     bloom_v_source_size_loc: Option<glow::UniformLocation>,
 
-    scanlines_output_res_loc: Option<glow::UniformLocation>,
-    scanlines_source_size_loc: Option<glow::UniformLocation>,
-    scanlines_horizontal_stretch_loc: Option<glow::UniformLocation>,
-    scanlines_halo_zoom_loc: Option<glow::UniformLocation>,
-    scanlines_beam_min_loc: Option<glow::UniformLocation>,
-    scanlines_beam_max_loc: Option<glow::UniformLocation>,
-    scanlines_beam_size_loc: Option<glow::UniformLocation>,
-    scanlines_h_sharp_loc: Option<glow::UniformLocation>,
-    scanlines_corner_size_loc: Option<glow::UniformLocation>,
-    scanlines_curvature_loc: Option<glow::UniformLocation>,
-    scanlines_border_crop_loc: Option<glow::UniformLocation>,
-
     composite_output_res_loc: Option<glow::UniformLocation>,
     composite_source_size_loc: Option<glow::UniformLocation>,
     composite_horizontal_stretch_loc: Option<glow::UniformLocation>,
     composite_halo_zoom_loc: Option<glow::UniformLocation>,
+    composite_beam_min_loc: Option<glow::UniformLocation>,
+    composite_beam_max_loc: Option<glow::UniformLocation>,
+    composite_beam_size_loc: Option<glow::UniformLocation>,
+    composite_h_sharp_loc: Option<glow::UniformLocation>,
+    composite_corner_size_loc: Option<glow::UniformLocation>,
+    composite_border_crop_loc: Option<glow::UniformLocation>,
     composite_brightboost_loc: Option<glow::UniformLocation>,
     composite_brightboost1_loc: Option<glow::UniformLocation>,
     composite_glow_loc: Option<glow::UniformLocation>,
@@ -49,6 +45,10 @@ pub struct HaloRenderer {
     composite_curvature_loc: Option<glow::UniformLocation>,
     composite_vibrance_loc: Option<glow::UniformLocation>,
 
+    border_h_output_res_loc: Option<glow::UniformLocation>,
+    border_h_source_size_loc: Option<glow::UniformLocation>,
+    border_h_horizontal_stretch_loc: Option<glow::UniformLocation>,
+
     final_output_res_loc: Option<glow::UniformLocation>,
     final_source_size_loc: Option<glow::UniformLocation>,
     final_horizontal_stretch_loc: Option<glow::UniformLocation>,
@@ -64,6 +64,13 @@ pub struct HaloRenderer {
 
     last_input_size: (u32, u32),
     last_output_size: (u32, u32),
+    last_source_tex: Option<glow::Texture>,
+    last_source_captured_at: Option<i64>,
+    last_in_size: (u32, u32),
+    last_raw_input_res: (u32, u32),
+    last_allow_preupscale: bool,
+    glow_valid: bool,
+    bloom_valid: bool,
 }
 
 impl HaloRenderer {
@@ -74,8 +81,8 @@ impl HaloRenderer {
             let glow_v_prog = compile_program(gl, VS_SRC, FS_HALO_GLOW_V);
             let bloom_h_prog = compile_program(gl, VS_SRC, FS_HALO_BLOOM_H);
             let bloom_v_prog = compile_program(gl, VS_SRC, FS_HALO_BLOOM_V);
-            let scanlines_prog = compile_program(gl, VS_SRC, FS_HALO_SCANLINES);
             let composite_prog = compile_program(gl, VS_SRC, FS_HALO_COMPOSITE);
+            let border_h_prog = compile_program(gl, VS_SRC, BORDER_H_SRC);
             let final_prog = compile_program(gl, VS_SRC, FS_HALO_FINAL);
 
             // Sampler units
@@ -114,38 +121,37 @@ impl HaloRenderer {
                 0,
             );
 
-            gl.use_program(Some(scanlines_prog));
-            gl.uniform_1_i32(
-                gl.get_uniform_location(scanlines_prog, "LinearizePass")
-                    .as_ref(),
-                0,
-            );
-
             gl.use_program(Some(composite_prog));
-            gl.uniform_1_i32(
-                gl.get_uniform_location(composite_prog, "ScanlinesPass")
-                    .as_ref(),
-                0,
-            );
             gl.uniform_1_i32(
                 gl.get_uniform_location(composite_prog, "LinearizePass")
                     .as_ref(),
-                1,
+                0,
             );
             gl.uniform_1_i32(
                 gl.get_uniform_location(composite_prog, "GlowPass").as_ref(),
-                2,
+                1,
             );
             gl.uniform_1_i32(
                 gl.get_uniform_location(composite_prog, "BloomPass")
                     .as_ref(),
-                3,
+                2,
+            );
+
+            gl.use_program(Some(border_h_prog));
+            gl.uniform_1_i32(
+                gl.get_uniform_location(border_h_prog, "DeconvPass")
+                    .as_ref(),
+                0,
             );
 
             gl.use_program(Some(final_prog));
             gl.uniform_1_i32(
                 gl.get_uniform_location(final_prog, "DeconvPass").as_ref(),
                 0,
+            );
+            gl.uniform_1_i32(
+                gl.get_uniform_location(final_prog, "BorderHPass").as_ref(),
+                1,
             );
             gl.use_program(None);
 
@@ -155,28 +161,19 @@ impl HaloRenderer {
             let bloom_h_source_size_loc = gl.get_uniform_location(bloom_h_prog, "SourceSize");
             let bloom_v_source_size_loc = gl.get_uniform_location(bloom_v_prog, "SourceSize");
 
-            // Scanlines uniform locations
-            let scanlines_output_res_loc =
-                gl.get_uniform_location(scanlines_prog, "outputResolution");
-            let scanlines_source_size_loc = gl.get_uniform_location(scanlines_prog, "SourceSize");
-            let scanlines_horizontal_stretch_loc =
-                gl.get_uniform_location(scanlines_prog, "horizontal_stretch");
-            let scanlines_halo_zoom_loc = gl.get_uniform_location(scanlines_prog, "halo_zoom");
-            let scanlines_beam_min_loc = gl.get_uniform_location(scanlines_prog, "beam_min");
-            let scanlines_beam_max_loc = gl.get_uniform_location(scanlines_prog, "beam_max");
-            let scanlines_beam_size_loc = gl.get_uniform_location(scanlines_prog, "beam_size");
-            let scanlines_h_sharp_loc = gl.get_uniform_location(scanlines_prog, "h_sharp");
-            let scanlines_corner_size_loc = gl.get_uniform_location(scanlines_prog, "corner_size");
-            let scanlines_curvature_loc = gl.get_uniform_location(scanlines_prog, "curvature");
-            let scanlines_border_crop_loc = gl.get_uniform_location(scanlines_prog, "border_crop");
-
-            // Composite uniform locations
+            // Fused Composite (Scanlines + Mask + Bloom/Glow) uniform locations
             let composite_output_res_loc =
                 gl.get_uniform_location(composite_prog, "outputResolution");
             let composite_source_size_loc = gl.get_uniform_location(composite_prog, "SourceSize");
             let composite_horizontal_stretch_loc =
                 gl.get_uniform_location(composite_prog, "horizontal_stretch");
             let composite_halo_zoom_loc = gl.get_uniform_location(composite_prog, "halo_zoom");
+            let composite_beam_min_loc = gl.get_uniform_location(composite_prog, "beam_min");
+            let composite_beam_max_loc = gl.get_uniform_location(composite_prog, "beam_max");
+            let composite_beam_size_loc = gl.get_uniform_location(composite_prog, "beam_size");
+            let composite_h_sharp_loc = gl.get_uniform_location(composite_prog, "h_sharp");
+            let composite_corner_size_loc = gl.get_uniform_location(composite_prog, "corner_size");
+            let composite_border_crop_loc = gl.get_uniform_location(composite_prog, "border_crop");
             let composite_brightboost_loc = gl.get_uniform_location(composite_prog, "brightboost");
             let composite_brightboost1_loc =
                 gl.get_uniform_location(composite_prog, "brightboost1");
@@ -193,6 +190,13 @@ impl HaloRenderer {
             let composite_smoothmask_loc = gl.get_uniform_location(composite_prog, "smoothmask");
             let composite_curvature_loc = gl.get_uniform_location(composite_prog, "curvature");
             let composite_vibrance_loc = gl.get_uniform_location(composite_prog, "vibrance");
+
+            // Separable Border Halo Horizontal uniform locations
+            let border_h_output_res_loc =
+                gl.get_uniform_location(border_h_prog, "outputResolution");
+            let border_h_source_size_loc = gl.get_uniform_location(border_h_prog, "SourceSize");
+            let border_h_horizontal_stretch_loc =
+                gl.get_uniform_location(border_h_prog, "horizontal_stretch");
 
             // Final uniform locations
             let final_output_res_loc = gl.get_uniform_location(final_prog, "outputResolution");
@@ -267,8 +271,8 @@ impl HaloRenderer {
                 glow_v_prog,
                 bloom_h_prog,
                 bloom_v_prog,
-                scanlines_prog,
                 composite_prog,
+                border_h_prog,
                 final_prog,
 
                 glow_h_source_size_loc,
@@ -276,22 +280,16 @@ impl HaloRenderer {
                 bloom_h_source_size_loc,
                 bloom_v_source_size_loc,
 
-                scanlines_output_res_loc,
-                scanlines_source_size_loc,
-                scanlines_horizontal_stretch_loc,
-                scanlines_halo_zoom_loc,
-                scanlines_beam_min_loc,
-                scanlines_beam_max_loc,
-                scanlines_beam_size_loc,
-                scanlines_h_sharp_loc,
-                scanlines_corner_size_loc,
-                scanlines_curvature_loc,
-                scanlines_border_crop_loc,
-
                 composite_output_res_loc,
                 composite_source_size_loc,
                 composite_horizontal_stretch_loc,
                 composite_halo_zoom_loc,
+                composite_beam_min_loc,
+                composite_beam_max_loc,
+                composite_beam_size_loc,
+                composite_h_sharp_loc,
+                composite_corner_size_loc,
+                composite_border_crop_loc,
                 composite_brightboost_loc,
                 composite_brightboost1_loc,
                 composite_glow_loc,
@@ -308,6 +306,10 @@ impl HaloRenderer {
                 composite_curvature_loc,
                 composite_vibrance_loc,
 
+                border_h_output_res_loc,
+                border_h_source_size_loc,
+                border_h_horizontal_stretch_loc,
+
                 final_output_res_loc,
                 final_source_size_loc,
                 final_horizontal_stretch_loc,
@@ -323,19 +325,26 @@ impl HaloRenderer {
 
                 last_input_size: (0, 0),
                 last_output_size: (0, 0),
+                last_source_tex: None,
+                last_source_captured_at: None,
+                last_in_size: (0, 0),
+                last_raw_input_res: (0, 0),
+                last_allow_preupscale: false,
+                glow_valid: false,
+                bloom_valid: false,
             }
         }
     }
 
-    pub unsafe fn setup_framebuffers(
-        &mut self,
+    unsafe fn allocate_fbo_range(
+        &self,
         gl: &glow::Context,
-        input_size: (u32, u32),
-        output_size: (u32, u32),
+        range: std::ops::RangeInclusive<usize>,
+        size: (u32, u32),
     ) {
-        for (i, &texture) in self.textures.iter().enumerate() {
-            let (w, h) = if i <= 4 { input_size } else { output_size };
-
+        let (w, h) = (size.0.max(1), size.1.max(1));
+        for i in range {
+            let texture = self.textures[i];
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
@@ -383,6 +392,23 @@ impl HaloRenderer {
         gl.bind_framebuffer(glow::FRAMEBUFFER, None);
     }
 
+    #[allow(dead_code)]
+    pub unsafe fn setup_framebuffers(
+        &mut self,
+        gl: &glow::Context,
+        input_size: (u32, u32),
+        output_size: (u32, u32),
+    ) {
+        self.allocate_fbo_range(gl, 0..=4, input_size);
+        self.allocate_fbo_range(gl, 5..=6, output_size);
+        self.last_input_size = input_size;
+        self.last_output_size = output_size;
+        self.last_source_tex = None;
+        self.last_source_captured_at = None;
+        self.glow_valid = false;
+        self.bloom_valid = false;
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn paint(
         &mut self,
@@ -399,151 +425,137 @@ impl HaloRenderer {
         let out_w = (output_size.0 as u32).max(1);
         let out_h = (output_size.1 as u32).max(1);
 
-        if self.last_input_size != (in_w, in_h) || self.last_output_size != (out_w, out_h) {
-            self.setup_framebuffers(gl, (in_w, in_h), (out_w, out_h));
+        if self.last_input_size != (in_w, in_h) {
+            self.allocate_fbo_range(gl, 0..=4, (in_w, in_h));
             self.last_input_size = (in_w, in_h);
+            self.last_source_tex = None;
+            self.last_source_captured_at = None;
+            self.glow_valid = false;
+            self.bloom_valid = false;
+        }
+        if self.last_output_size != (out_w, out_h) {
+            self.allocate_fbo_range(gl, 5..=6, (out_w, out_h));
             self.last_output_size = (out_w, out_h);
         }
 
+        gl.disable(glow::SCISSOR_TEST);
         gl.bind_vertex_array(Some(self.vertex_array));
 
+        let source_cache_hit = matches!(params.source_captured_at, Some(ts) if ts > 0)
+            && self.last_source_tex == Some(input_texture)
+            && self.last_source_captured_at == params.source_captured_at
+            && self.last_in_size == (in_w, in_h)
+            && self.last_raw_input_res == input_res
+            && self.last_allow_preupscale == allow_bilinear_preupscale;
+
         // Pass 0: Linearize / Clamping (with hardware bilinear pre-upscale to 1080p for sub-1080p sources)
-        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[0]));
-        gl.viewport(0, 0, in_w as i32, in_h as i32);
-        gl.use_program(Some(self.linearize_prog));
-        gl.active_texture(glow::TEXTURE0);
-        gl.bind_texture(glow::TEXTURE_2D, Some(input_texture));
-        let force_linear =
-            allow_bilinear_preupscale && (in_w != input_res.0 || in_h != input_res.1);
-        let (prev_min_filter, prev_mag_filter) = if force_linear {
-            let min_f = gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER);
-            let mag_f = gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER);
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MIN_FILTER,
-                glow::LINEAR as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MAG_FILTER,
-                glow::LINEAR as i32,
-            );
-            (min_f, mag_f)
-        } else {
-            (0, 0)
-        };
-        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-        if force_linear {
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, prev_min_filter);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, prev_mag_filter);
+        if !source_cache_hit {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[0]));
+            gl.viewport(0, 0, in_w as i32, in_h as i32);
+            gl.use_program(Some(self.linearize_prog));
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(input_texture));
+            let force_linear =
+                allow_bilinear_preupscale && (in_w != input_res.0 || in_h != input_res.1);
+            let (prev_min_filter, prev_mag_filter) = if force_linear {
+                let min_f = gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER);
+                let mag_f = gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER);
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MIN_FILTER,
+                    glow::LINEAR as i32,
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MAG_FILTER,
+                    glow::LINEAR as i32,
+                );
+                (min_f, mag_f)
+            } else {
+                (0, 0)
+            };
+            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            if force_linear {
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, prev_min_filter);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, prev_mag_filter);
+            }
+
+            self.last_source_tex = Some(input_texture);
+            self.last_source_captured_at = params.source_captured_at;
+            self.last_in_size = (in_w, in_h);
+            self.last_raw_input_res = input_res;
+            self.last_allow_preupscale = allow_bilinear_preupscale;
+            self.glow_valid = false;
+            self.bloom_valid = false;
         }
 
-        // Pass 1: Glow Horizontal
-        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[1]));
-        gl.viewport(0, 0, in_w as i32, in_h as i32);
-        gl.use_program(Some(self.glow_h_prog));
-        gl.uniform_2_f32(
-            self.glow_h_source_size_loc.as_ref(),
-            in_w as f32,
-            in_h as f32,
-        );
-        gl.active_texture(glow::TEXTURE0);
-        gl.bind_texture(glow::TEXTURE_2D, Some(self.textures[0]));
-        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        // Passes 1 & 2: Full-Resolution Glow (skipped when glow strength <= 0.01 or cached)
+        if params.glow.abs() > 0.01 && !self.glow_valid {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[1]));
+            gl.viewport(0, 0, in_w as i32, in_h as i32);
+            gl.use_program(Some(self.glow_h_prog));
+            gl.uniform_2_f32(
+                self.glow_h_source_size_loc.as_ref(),
+                in_w as f32,
+                in_h as f32,
+            );
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.textures[0]));
+            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-        // Pass 2: Glow Vertical
-        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[2]));
-        gl.viewport(0, 0, in_w as i32, in_h as i32);
-        gl.use_program(Some(self.glow_v_prog));
-        gl.uniform_2_f32(
-            self.glow_v_source_size_loc.as_ref(),
-            in_w as f32,
-            in_h as f32,
-        );
-        gl.active_texture(glow::TEXTURE0);
-        gl.bind_texture(glow::TEXTURE_2D, Some(self.textures[1]));
-        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[2]));
+            gl.viewport(0, 0, in_w as i32, in_h as i32);
+            gl.use_program(Some(self.glow_v_prog));
+            gl.uniform_2_f32(
+                self.glow_v_source_size_loc.as_ref(),
+                in_w as f32,
+                in_h as f32,
+            );
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.textures[1]));
+            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-        // Pass 3: Bloom Horizontal
-        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[3]));
-        gl.viewport(0, 0, in_w as i32, in_h as i32);
-        gl.use_program(Some(self.bloom_h_prog));
-        gl.uniform_2_f32(
-            self.bloom_h_source_size_loc.as_ref(),
-            in_w as f32,
-            in_h as f32,
-        );
-        gl.active_texture(glow::TEXTURE0);
-        gl.bind_texture(glow::TEXTURE_2D, Some(self.textures[0]));
-        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.glow_valid = true;
+        }
 
-        // Pass 4: Bloom Vertical
-        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[4]));
-        gl.viewport(0, 0, in_w as i32, in_h as i32);
-        gl.use_program(Some(self.bloom_v_prog));
-        gl.uniform_2_f32(
-            self.bloom_v_source_size_loc.as_ref(),
-            in_w as f32,
-            in_h as f32,
-        );
-        gl.active_texture(glow::TEXTURE0);
-        gl.bind_texture(glow::TEXTURE_2D, Some(self.textures[3]));
-        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        // Passes 3 & 4: Full-Resolution Bloom (skipped when bloom & halation <= 0.01 or cached)
+        if (params.bloom.abs() > 0.01 || params.halation.abs() > 0.01) && !self.bloom_valid {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[3]));
+            gl.viewport(0, 0, in_w as i32, in_h as i32);
+            gl.use_program(Some(self.bloom_h_prog));
+            gl.uniform_2_f32(
+                self.bloom_h_source_size_loc.as_ref(),
+                in_w as f32,
+                in_h as f32,
+            );
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.textures[0]));
+            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-        // Pass 5: Scanlines
-        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[5]));
-        gl.viewport(0, 0, out_w as i32, out_h as i32);
-        gl.clear_color(0.0, 0.0, 0.0, 0.0);
-        gl.clear(glow::COLOR_BUFFER_BIT);
-        gl.use_program(Some(self.scanlines_prog));
-        gl.active_texture(glow::TEXTURE0);
-        gl.bind_texture(glow::TEXTURE_2D, Some(self.textures[0]));
-        gl.uniform_2_f32(
-            self.scanlines_output_res_loc.as_ref(),
-            out_w as f32,
-            out_h as f32,
-        );
-        gl.uniform_2_f32(
-            self.scanlines_source_size_loc.as_ref(),
-            in_w as f32,
-            in_h as f32,
-        );
-        gl.uniform_1_f32(
-            self.scanlines_horizontal_stretch_loc.as_ref(),
-            params.horizontal_stretch,
-        );
-        gl.uniform_1_f32(self.scanlines_halo_zoom_loc.as_ref(), params.halo_zoom);
-        gl.uniform_1_f32(self.scanlines_beam_min_loc.as_ref(), params.beam_min);
-        gl.uniform_1_f32(self.scanlines_beam_max_loc.as_ref(), params.beam_max);
-        gl.uniform_1_f32(self.scanlines_beam_size_loc.as_ref(), params.beam_size);
-        gl.uniform_1_f32(self.scanlines_h_sharp_loc.as_ref(), params.h_sharp);
-        gl.uniform_1_f32(self.scanlines_corner_size_loc.as_ref(), params.corner_size);
-        gl.uniform_1_i32(
-            self.scanlines_curvature_loc.as_ref(),
-            if params.curvature { 1 } else { 0 },
-        );
-        gl.uniform_4_f32(
-            self.scanlines_border_crop_loc.as_ref(),
-            params.border_crop[0],
-            params.border_crop[1],
-            params.border_crop[2],
-            params.border_crop[3],
-        );
-        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[4]));
+            gl.viewport(0, 0, in_w as i32, in_h as i32);
+            gl.use_program(Some(self.bloom_v_prog));
+            gl.uniform_2_f32(
+                self.bloom_v_source_size_loc.as_ref(),
+                in_w as f32,
+                in_h as f32,
+            );
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.textures[3]));
+            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-        // Pass 6: Composite
+            self.bloom_valid = true;
+        }
+
+        // Pass 5: Fused Scanlines + Mask + Bloom/Glow Composite (`self.fbos[6]` at full `out_w x out_h`)
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[6]));
         gl.viewport(0, 0, out_w as i32, out_h as i32);
-        gl.clear_color(0.0, 0.0, 0.0, 0.0);
-        gl.clear(glow::COLOR_BUFFER_BIT);
         gl.use_program(Some(self.composite_prog));
         gl.active_texture(glow::TEXTURE0);
-        gl.bind_texture(glow::TEXTURE_2D, Some(self.textures[5]));
-        gl.active_texture(glow::TEXTURE1);
         gl.bind_texture(glow::TEXTURE_2D, Some(self.textures[0]));
-        gl.active_texture(glow::TEXTURE2);
+        gl.active_texture(glow::TEXTURE1);
         gl.bind_texture(glow::TEXTURE_2D, Some(self.textures[2]));
-        gl.active_texture(glow::TEXTURE3);
+        gl.active_texture(glow::TEXTURE2);
         gl.bind_texture(glow::TEXTURE_2D, Some(self.textures[4]));
 
         gl.uniform_2_f32(
@@ -561,6 +573,18 @@ impl HaloRenderer {
             params.horizontal_stretch,
         );
         gl.uniform_1_f32(self.composite_halo_zoom_loc.as_ref(), params.halo_zoom);
+        gl.uniform_1_f32(self.composite_beam_min_loc.as_ref(), params.beam_min);
+        gl.uniform_1_f32(self.composite_beam_max_loc.as_ref(), params.beam_max);
+        gl.uniform_1_f32(self.composite_beam_size_loc.as_ref(), params.beam_size);
+        gl.uniform_1_f32(self.composite_h_sharp_loc.as_ref(), params.h_sharp);
+        gl.uniform_1_f32(self.composite_corner_size_loc.as_ref(), params.corner_size);
+        gl.uniform_4_f32(
+            self.composite_border_crop_loc.as_ref(),
+            params.border_crop[0],
+            params.border_crop[1],
+            params.border_crop[2],
+            params.border_crop[3],
+        );
         gl.uniform_1_f32(self.composite_brightboost_loc.as_ref(), params.brightboost);
         gl.uniform_1_f32(
             self.composite_brightboost1_loc.as_ref(),
@@ -584,12 +608,38 @@ impl HaloRenderer {
         gl.uniform_1_f32(self.composite_vibrance_loc.as_ref(), params.vibrance);
         gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-        // Pass 7: Final (Edge Halo, Dithering, Output)
+        // Pass 6: Full-Resolution Separable Border Halo Horizontal (`self.fbos[5]` at `out_w x out_h`)
+        if params.halo_intensity > 0.01 {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbos[5]));
+            gl.viewport(0, 0, out_w as i32, out_h as i32);
+            gl.use_program(Some(self.border_h_prog));
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.textures[6]));
+            gl.uniform_2_f32(
+                self.border_h_output_res_loc.as_ref(),
+                out_w as f32,
+                out_h as f32,
+            );
+            gl.uniform_2_f32(
+                self.border_h_source_size_loc.as_ref(),
+                in_w as f32,
+                in_h as f32,
+            );
+            gl.uniform_1_f32(
+                self.border_h_horizontal_stretch_loc.as_ref(),
+                params.horizontal_stretch,
+            );
+            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        }
+
+        // Pass 7: Final (Separable Vertical Border Halo, Dithering, Output -> `target_fbo`)
         gl.bind_framebuffer(glow::FRAMEBUFFER, target_fbo);
         gl.viewport(0, 0, out_w as i32, out_h as i32);
         gl.use_program(Some(self.final_prog));
         gl.active_texture(glow::TEXTURE0);
         gl.bind_texture(glow::TEXTURE_2D, Some(self.textures[6]));
+        gl.active_texture(glow::TEXTURE1);
+        gl.bind_texture(glow::TEXTURE_2D, Some(self.textures[5]));
         gl.uniform_2_f32(
             self.final_output_res_loc.as_ref(),
             out_w as f32,
@@ -628,8 +678,6 @@ impl HaloRenderer {
         gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
         // Reset state
-        gl.active_texture(glow::TEXTURE3);
-        gl.bind_texture(glow::TEXTURE_2D, None);
         gl.active_texture(glow::TEXTURE2);
         gl.bind_texture(glow::TEXTURE_2D, None);
         gl.active_texture(glow::TEXTURE1);
@@ -646,8 +694,8 @@ impl HaloRenderer {
             gl.delete_program(self.glow_v_prog);
             gl.delete_program(self.bloom_h_prog);
             gl.delete_program(self.bloom_v_prog);
-            gl.delete_program(self.scanlines_prog);
             gl.delete_program(self.composite_prog);
+            gl.delete_program(self.border_h_prog);
             gl.delete_program(self.final_prog);
 
             gl.delete_vertex_array(self.vertex_array);
@@ -665,7 +713,7 @@ impl HaloRenderer {
 
 /// Computes the working resolution for Halo's Linearize/Glow/Bloom/Scanline passes.
 /// Sub-1080p sources (such as PC-98 640x400 or SD 640x480) are bilinearly pre-upscaled to
-/// 1080p equivalent height (e.g. 1728x1080 for 640x400) so `fs_halo_scanlines.glsl`
+/// 1080p equivalent height (e.g. 1728x1080 for 640x400) so `fs_halo_composite.glsl`
 /// does not collapse 400 lines down to 200 or snap horizontal text edges to coarse 640px texels.
 pub fn halo_working_resolution(
     input_res: (u32, u32),

@@ -1,22 +1,70 @@
-use crate::video::types::VideoFormat;
+use crate::video::decoder::monotonic_nanos;
+use crate::video::types::{checkout_frame_buffer, recycle_frame_buffer, VideoFormat};
 use anyhow::{anyhow, Context, Result};
 use std::ffi::{c_void, CString};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    Arc,
 };
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const WEBCAM_OPEN_ATTEMPTS: u8 = 10;
 const WEBCAM_OPEN_RETRY_DELAY: Duration = Duration::from_millis(150);
 const WEBCAM_STALL_TIMEOUT: Duration = Duration::from_secs(2);
+pub const DEFAULT_WEBCAM_MAX_WIDTH: u32 = 960;
+pub const DEFAULT_WEBCAM_MAX_HEIGHT: u32 = 540;
+const MIN_WEBCAM_SCALE_DIM: u32 = 64;
+
+static WEBCAM_TARGET_WIDTH: AtomicU32 = AtomicU32::new(DEFAULT_WEBCAM_MAX_WIDTH);
+static WEBCAM_TARGET_HEIGHT: AtomicU32 = AtomicU32::new(DEFAULT_WEBCAM_MAX_HEIGHT);
+
+pub fn set_webcam_target_dimensions(width: u32, height: u32) {
+    let qw = width
+        .div_ceil(32)
+        .saturating_mul(32)
+        .clamp(MIN_WEBCAM_SCALE_DIM, DEFAULT_WEBCAM_MAX_WIDTH);
+    let qh = height
+        .div_ceil(32)
+        .saturating_mul(32)
+        .clamp(MIN_WEBCAM_SCALE_DIM, DEFAULT_WEBCAM_MAX_HEIGHT);
+    WEBCAM_TARGET_WIDTH.store(qw, Ordering::Relaxed);
+    WEBCAM_TARGET_HEIGHT.store(qh, Ordering::Relaxed);
+}
+
+pub(crate) fn compute_bounded_pip_dimensions(
+    src_w: u32,
+    src_h: u32,
+    max_w: u32,
+    max_h: u32,
+) -> (u32, u32) {
+    if src_w == 0 || src_h == 0 || max_w == 0 || max_h == 0 {
+        return (src_w, src_h);
+    }
+    if src_w <= max_w && src_h <= max_h {
+        return (src_w, src_h);
+    }
+    let scale = (max_w as f64 / src_w as f64).min(max_h as f64 / src_h as f64);
+    let out_w = (((src_w as f64 * scale).round() as u32) & !1)
+        .max(2)
+        .min(src_w);
+    let out_h = (((src_h as f64 * scale).round() as u32) & !1)
+        .max(2)
+        .min(src_h);
+    (out_w, out_h)
+}
 
 #[derive(Clone, Debug)]
 pub struct WebcamFrame {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+}
+
+impl Drop for WebcamFrame {
+    fn drop(&mut self) {
+        recycle_frame_buffer(std::mem::take(&mut self.rgba));
+    }
 }
 
 pub struct WebcamStreamHandle {
@@ -58,28 +106,25 @@ fn reap_webcam_thread(handle: thread::JoinHandle<()>) {
 
 struct WebcamInterruptState {
     stop_requested: Arc<AtomicBool>,
-    last_progress: Mutex<Instant>,
+    last_progress_ns: AtomicU64,
 }
 
 impl WebcamInterruptState {
     fn new(stop_requested: Arc<AtomicBool>) -> Self {
         Self {
             stop_requested,
-            last_progress: Mutex::new(Instant::now()),
+            last_progress_ns: AtomicU64::new(monotonic_nanos()),
         }
     }
 
     fn mark_progress(&self) {
-        if let Ok(mut last_progress) = self.last_progress.lock() {
-            *last_progress = Instant::now();
-        }
+        self.last_progress_ns
+            .store(monotonic_nanos(), Ordering::Relaxed);
     }
 
     fn timed_out(&self) -> bool {
-        self.last_progress
-            .lock()
-            .map(|last_progress| last_progress.elapsed() >= WEBCAM_STALL_TIMEOUT)
-            .unwrap_or(true)
+        let last_ns = self.last_progress_ns.load(Ordering::Relaxed);
+        monotonic_nanos().saturating_sub(last_ns) >= WEBCAM_STALL_TIMEOUT.as_nanos() as u64
     }
 }
 
@@ -146,12 +191,30 @@ fn open_webcam_input(
     }
 }
 
+pub(crate) fn send_latest_webcam_frame(
+    frame_sender: &crossbeam_channel::Sender<Arc<WebcamFrame>>,
+    frame_drop_rx: &crossbeam_channel::Receiver<Arc<WebcamFrame>>,
+    mut frame: Arc<WebcamFrame>,
+) -> bool {
+    loop {
+        match frame_sender.try_send(frame) {
+            Ok(()) => return true,
+            Err(crossbeam_channel::TrySendError::Full(returned)) => {
+                frame = returned;
+                let _ = frame_drop_rx.try_recv();
+            }
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => return false,
+        }
+    }
+}
+
 pub fn start_webcam_stream(
     device: &str,
     format: VideoFormat,
     resolution: (u32, u32),
     framerate: u32,
     frame_sender: crossbeam_channel::Sender<Arc<WebcamFrame>>,
+    frame_drop_rx: crossbeam_channel::Receiver<Arc<WebcamFrame>>,
     request_repaint: Arc<dyn Fn() + Send + Sync>,
     prev_thread: Option<thread::JoinHandle<()>>,
 ) -> Result<WebcamStreamHandle> {
@@ -176,6 +239,7 @@ pub fn start_webcam_stream(
                 resolution,
                 framerate,
                 &frame_sender,
+                &frame_drop_rx,
                 &request_repaint,
                 &stop_clone,
             ) {
@@ -198,12 +262,14 @@ pub fn start_webcam_stream(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_webcam_worker(
     device: &str,
     format: &VideoFormat,
     resolution: (u32, u32),
     framerate: u32,
     frame_sender: &crossbeam_channel::Sender<Arc<WebcamFrame>>,
+    frame_drop_rx: &crossbeam_channel::Receiver<Arc<WebcamFrame>>,
     request_repaint: &Arc<dyn Fn() + Send + Sync>,
     stop_requested: &Arc<AtomicBool>,
 ) -> Result<()> {
@@ -294,10 +360,18 @@ fn run_webcam_worker(
                     continue;
                 }
 
+                let (dst_w, dst_h) = compute_bounded_pip_dimensions(
+                    decoded_frame.width(),
+                    decoded_frame.height(),
+                    WEBCAM_TARGET_WIDTH.load(Ordering::Relaxed),
+                    WEBCAM_TARGET_HEIGHT.load(Ordering::Relaxed),
+                );
                 let needs_reinit = scaler.as_ref().is_none_or(|s| {
                     decoded_frame.width() != s.input().width
                         || decoded_frame.height() != s.input().height
                         || decoded_frame.format() != s.input().format
+                        || dst_w != s.output().width
+                        || dst_h != s.output().height
                 });
                 if needs_reinit {
                     match ffmpeg_next::software::scaling::context::Context::get(
@@ -305,8 +379,8 @@ fn run_webcam_worker(
                         decoded_frame.width(),
                         decoded_frame.height(),
                         ffmpeg_next::format::Pixel::RGBA,
-                        decoded_frame.width(),
-                        decoded_frame.height(),
+                        dst_w,
+                        dst_h,
                         ffmpeg_next::software::scaling::flag::Flags::FAST_BILINEAR,
                     ) {
                         Ok(new_scaler) => scaler = Some(new_scaler),
@@ -326,14 +400,31 @@ fn run_webcam_worker(
                         let h = rgba_frame.height();
                         let stride = rgba_frame.stride(0);
                         let row_bytes = (w * 4) as usize;
+                        let total_bytes = row_bytes * h as usize;
                         let plane_data = rgba_frame.data(0);
 
-                        let mut tight_rgba = Vec::with_capacity(row_bytes * h as usize);
-                        for y in 0..h as usize {
-                            let start = y * stride;
-                            let end = start + row_bytes;
-                            if let Some(row) = plane_data.get(start..end) {
-                                tight_rgba.extend_from_slice(row);
+                        let mut tight_rgba = checkout_frame_buffer(total_bytes);
+                        if stride == row_bytes {
+                            let Some(src) = plane_data.get(..total_bytes) else {
+                                continue;
+                            };
+                            tight_rgba.copy_from_slice(src);
+                        } else {
+                            let mut copy_ok = true;
+                            for y in 0..h as usize {
+                                let start = y * stride;
+                                let end = start + row_bytes;
+                                if let Some(row) = plane_data.get(start..end) {
+                                    let dst_start = y * row_bytes;
+                                    tight_rgba[dst_start..dst_start + row_bytes]
+                                        .copy_from_slice(row);
+                                } else {
+                                    copy_ok = false;
+                                    break;
+                                }
+                            }
+                            if !copy_ok {
+                                continue;
                             }
                         }
 
@@ -343,8 +434,10 @@ fn run_webcam_worker(
                             rgba: tight_rgba,
                         });
 
-                        // Drop oldest if UI thread hasn't picked it up yet
-                        let _ = frame_sender.try_send(frame);
+                        // Drain stale queued frame if full so UI always displays the newest frame
+                        if !send_latest_webcam_frame(frame_sender, frame_drop_rx, frame) {
+                            return Ok(());
+                        }
                         request_repaint();
                     }
                 }
@@ -418,5 +511,68 @@ mod tests {
         assert!(extracted.is_some());
         assert!(handle.thread_handle.is_none());
         extracted.unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn test_webcam_interrupt_honors_stop_and_timeout() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let state = WebcamInterruptState::new(Arc::clone(&stop));
+        assert_eq!(
+            unsafe {
+                webcam_interrupt_callback(&state as *const WebcamInterruptState as *mut c_void)
+            },
+            0
+        );
+
+        state.last_progress_ns.store(
+            monotonic_nanos() - WEBCAM_STALL_TIMEOUT.as_nanos() as u64,
+            Ordering::Relaxed,
+        );
+        assert!(state.timed_out());
+
+        state.mark_progress();
+        assert!(!state.timed_out());
+        stop.store(true, Ordering::Relaxed);
+        assert_eq!(
+            unsafe {
+                webcam_interrupt_callback(&state as *const WebcamInterruptState as *mut c_void)
+            },
+            1
+        );
+    }
+
+    #[test]
+    fn test_compute_bounded_pip_dimensions_caps_4k_without_upscaling_small_inputs() {
+        assert_eq!(
+            compute_bounded_pip_dimensions(640, 480, 960, 540),
+            (640, 480)
+        );
+        assert_eq!(
+            compute_bounded_pip_dimensions(3840, 2160, 960, 540),
+            (960, 540)
+        );
+        let (w, h) = compute_bounded_pip_dimensions(1920, 1080, 320, 180);
+        assert_eq!((w, h), (320, 180));
+        assert_eq!(w % 2, 0);
+        assert_eq!(h % 2, 0);
+    }
+
+    #[test]
+    fn test_send_latest_webcam_frame_evicts_stale_frame_and_keeps_newest() {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        for seq in 1..=3u8 {
+            let mut buf = checkout_frame_buffer(96 * 1024);
+            buf[0] = seq;
+            let frame = Arc::new(WebcamFrame {
+                width: 160,
+                height: 150,
+                rgba: buf,
+            });
+            assert!(send_latest_webcam_frame(&tx, &rx, frame));
+        }
+
+        let latest = rx.try_recv().expect("latest frame must be present");
+        assert_eq!(latest.rgba[0], 3, "channel must retain the newest frame");
+        assert!(rx.try_recv().is_err());
     }
 }

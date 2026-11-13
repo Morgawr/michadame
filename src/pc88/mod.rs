@@ -190,6 +190,15 @@ pub enum Pc88Event {
     Stopped,
 }
 
+pub struct Pc88LibraryScanResult {
+    pub generation: u64,
+    pub games_dir: String,
+    pub selected_game_floppies: Option<(String, Vec<PathBuf>, Vec<String>)>,
+    pub games: Result<Vec<Pc88GameEntry>, String>,
+}
+
+type CachedPc88GameKey = ([String; 5], (String, String));
+
 /// Runtime state of the PC-88 emulator subsystem stored on `AppState`.
 pub struct Pc88State {
     pub config: Pc88Config,
@@ -198,8 +207,14 @@ pub struct Pc88State {
     pub status_message: Option<String>,
     /// Discovered games inside `config.games_dir`.
     pub games_list: Vec<Pc88GameEntry>,
+    pub library_revision: u64,
+    pub is_scanning_library: bool,
+    pub scan_generation: u64,
+    pub library_scan_rx: Option<Receiver<Pc88LibraryScanResult>>,
     /// Live search filter string for the game library selector.
     pub game_filter: String,
+    cached_filter_result: Option<(u64, usize, String, Arc<[usize]>)>,
+    cached_game_key: Mutex<Option<CachedPc88GameKey>>,
     /// Floppy disk images belonging to the currently selected game (for quick live disk swapping).
     /// When a game uses multi-image `.d88` container(s), these are the materialized per-disk `.d88` slices.
     pub active_game_floppies: Vec<PathBuf>,
@@ -216,7 +231,7 @@ pub struct Pc88State {
     pub active_slot: u8,
     pub slots_cache: [Option<savestate::SaveStateMeta>; savestate::SAVE_SLOT_COUNT],
     pub slots_cache_game_key: String,
-    pub slot_textures: HashMap<(String, u8), egui::TextureHandle>,
+    pub slot_textures: HashMap<(String, u8), Option<egui::TextureHandle>>,
     pub pending_boot_load_slot: Option<u8>,
 }
 
@@ -228,7 +243,13 @@ impl Default for Pc88State {
             passthrough_enabled: true,
             status_message: None,
             games_list: Vec::new(),
+            library_revision: 0,
+            is_scanning_library: false,
+            scan_generation: 0,
+            library_scan_rx: None,
             game_filter: String::new(),
+            cached_filter_result: None,
+            cached_game_key: Mutex::new(None),
             active_game_floppies: Vec::new(),
             active_game_disk_labels: Vec::new(),
             command_tx: None,
@@ -247,19 +268,41 @@ impl Default for Pc88State {
     }
 }
 
+fn resolve_entry_floppies(entry: &Pc88GameEntry) -> (Vec<PathBuf>, Vec<String>) {
+    library::materialize_game_floppies(entry).unwrap_or_else(|_| {
+        let names = entry
+            .floppies
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                format!(
+                    "[{}] {}",
+                    i + 1,
+                    p.file_name().and_then(|s| s.to_str()).unwrap_or("disk")
+                )
+            })
+            .collect();
+        (entry.floppies.clone(), names)
+    })
+}
+
 impl Pc88State {
     /// Rescans `config.games_dir` and populates `games_list`.
     pub fn refresh_games_list(&mut self) -> anyhow::Result<usize> {
+        self.is_scanning_library = false;
+        self.library_scan_rx = None;
         let dir = self.config.games_dir.trim();
         if dir.is_empty() {
             self.games_list.clear();
             self.active_game_floppies.clear();
             self.active_game_disk_labels.clear();
+            self.library_revision = self.library_revision.wrapping_add(1);
             return Ok(0);
         }
         let entries = library::scan_games_directory(std::path::Path::new(dir))?;
         let count = entries.len();
         self.games_list = entries;
+        self.library_revision = self.library_revision.wrapping_add(1);
 
         if !self.config.selected_game.is_empty() {
             if let Some(entry) = self
@@ -268,27 +311,152 @@ impl Pc88State {
                 .find(|g| g.id == self.config.selected_game)
                 .cloned()
             {
-                let (floppies, labels) =
-                    library::materialize_game_floppies(&entry).unwrap_or_else(|_| {
-                        let names = entry
-                            .floppies
-                            .iter()
-                            .enumerate()
-                            .map(|(i, p)| {
-                                format!(
-                                    "[{}] {}",
-                                    i + 1,
-                                    p.file_name().and_then(|s| s.to_str()).unwrap_or("disk")
-                                )
-                            })
-                            .collect();
-                        (entry.floppies.clone(), names)
-                    });
+                let (floppies, labels) = resolve_entry_floppies(&entry);
                 self.active_game_floppies = floppies;
                 self.active_game_disk_labels = labels;
             }
         }
         Ok(count)
+    }
+
+    /// Spawns a background `"pc88-library-scan"` thread to scan `config.games_dir` without
+    /// blocking the UI thread. Poll completion via `poll_library_scan()`.
+    pub fn start_background_library_scan(
+        &mut self,
+        notify_ctx: Option<egui::Context>,
+    ) -> Result<(), String> {
+        let dir_str = self.config.games_dir.trim().to_string();
+        if dir_str.is_empty() {
+            self.games_list.clear();
+            self.active_game_floppies.clear();
+            self.active_game_disk_labels.clear();
+            self.library_revision = self.library_revision.wrapping_add(1);
+            self.is_scanning_library = false;
+            self.library_scan_rx = None;
+            return Err("Please specify a PC-88 root games directory first.".to_string());
+        }
+
+        self.scan_generation = self.scan_generation.wrapping_add(1);
+        let generation = self.scan_generation;
+        let selected_game = self.config.selected_game.clone();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.library_scan_rx = Some(rx);
+        self.is_scanning_library = true;
+
+        let games_dir_clone = dir_str.clone();
+        let spawn_res = std::thread::Builder::new()
+            .name("pc88-library-scan".to_string())
+            .spawn(move || {
+                let scan_res =
+                    library::scan_games_directory(std::path::Path::new(&games_dir_clone))
+                        .map_err(|e| format!("{e:#}"));
+                let selected_game_floppies = match &scan_res {
+                    Ok(entries) if !selected_game.is_empty() => {
+                        entries.iter().find(|g| g.id == selected_game).map(|entry| {
+                            let (floppies, labels) = resolve_entry_floppies(entry);
+                            (selected_game, floppies, labels)
+                        })
+                    }
+                    _ => None,
+                };
+                let _ = tx.send(Pc88LibraryScanResult {
+                    generation,
+                    games_dir: games_dir_clone,
+                    selected_game_floppies,
+                    games: scan_res,
+                });
+                if let Some(ctx) = notify_ctx {
+                    ctx.request_repaint();
+                }
+            });
+
+        if let Err(e) = spawn_res {
+            self.is_scanning_library = false;
+            self.library_scan_rx = None;
+            return Err(format!("Failed to spawn PC-88 library scanner: {e}"));
+        }
+        Ok(())
+    }
+
+    /// Polls any in-flight background library scan and applies the discovered games if ready.
+    pub fn poll_library_scan(&mut self) -> Option<Result<usize, String>> {
+        let rx = self.library_scan_rx.as_ref()?;
+        match rx.try_recv() {
+            Ok(result) => {
+                self.library_scan_rx = None;
+                if result.generation != self.scan_generation
+                    || self.config.games_dir.trim() != result.games_dir
+                {
+                    return None;
+                }
+                self.is_scanning_library = false;
+                match result.games {
+                    Ok(entries) => {
+                        let count = entries.len();
+                        self.games_list = entries;
+                        self.library_revision = self.library_revision.wrapping_add(1);
+                        if !self.config.selected_game.is_empty() {
+                            if let Some((sel_id, floppies, labels)) = result.selected_game_floppies
+                            {
+                                if sel_id == self.config.selected_game {
+                                    self.active_game_floppies = floppies;
+                                    self.active_game_disk_labels = labels;
+                                } else if let Some(entry) = self
+                                    .games_list
+                                    .iter()
+                                    .find(|g| g.id == self.config.selected_game)
+                                    .cloned()
+                                {
+                                    let (floppies, labels) = resolve_entry_floppies(&entry);
+                                    self.active_game_floppies = floppies;
+                                    self.active_game_disk_labels = labels;
+                                }
+                            } else if let Some(entry) = self
+                                .games_list
+                                .iter()
+                                .find(|g| g.id == self.config.selected_game)
+                                .cloned()
+                            {
+                                let (floppies, labels) = resolve_entry_floppies(&entry);
+                                self.active_game_floppies = floppies;
+                                self.active_game_disk_labels = labels;
+                            }
+                        }
+                        Some(Ok(count))
+                    }
+                    Err(e) => Some(Err(e)),
+                }
+            }
+            Err(crossbeam_channel::TryRecvError::Empty) => None,
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                self.library_scan_rx = None;
+                self.is_scanning_library = false;
+                None
+            }
+        }
+    }
+
+    /// Returns the ranked game indices matching `self.game_filter`, cached by
+    /// `(library_revision, games_list.len(), game_filter)` so unchanged search text
+    /// does zero re-scoring across steady-state UI frames.
+    pub fn filtered_game_indices(&mut self) -> Arc<[usize]> {
+        if let Some((rev, len, ref q, ref indices)) = self.cached_filter_result {
+            if rev == self.library_revision
+                && len == self.games_list.len()
+                && q == &self.game_filter
+            {
+                return Arc::clone(indices);
+            }
+        }
+        let ranked: Arc<[usize]> =
+            library::filter_and_rank_games(&self.games_list, &self.game_filter).into();
+        self.cached_filter_result = Some((
+            self.library_revision,
+            self.games_list.len(),
+            self.game_filter.clone(),
+            Arc::clone(&ranked),
+        ));
+        ranked
     }
 
     /// Applies the media files of the selected game entry to `config` (FDD1, FDD2, Tape)
@@ -365,6 +533,30 @@ impl Pc88State {
     }
 
     pub fn current_game_key(&self) -> (String, String) {
+        if let Ok(mut guard) = self.cached_game_key.lock() {
+            if let Some((ref inputs, ref cached)) = *guard {
+                if inputs[0] == self.config.games_dir
+                    && inputs[1] == self.config.selected_game
+                    && inputs[2] == self.config.fdd1_path
+                    && inputs[3] == self.config.tape_path
+                    && inputs[4] == self.config.fdd2_path
+                {
+                    return cached.clone();
+                }
+            }
+            let computed = savestate::derive_pc88_game_key(&self.config);
+            *guard = Some((
+                [
+                    self.config.games_dir.clone(),
+                    self.config.selected_game.clone(),
+                    self.config.fdd1_path.clone(),
+                    self.config.tape_path.clone(),
+                    self.config.fdd2_path.clone(),
+                ],
+                computed.clone(),
+            ));
+            return computed;
+        }
         savestate::derive_pc88_game_key(&self.config)
     }
 
@@ -389,5 +581,55 @@ impl Pc88State {
         let next = (zero_based + delta).rem_euclid(count);
         self.active_slot = (next + 1) as u8;
         self.active_slot
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pc88_current_game_key_and_filtered_indices_caching() {
+        let mut state = Pc88State::default();
+        let default_key = state.current_game_key();
+
+        state.config.fdd1_path = "/tmp/ys1_disk_a.d88".to_string();
+        let ys_key = state.current_game_key();
+        assert_ne!(default_key, ys_key);
+        assert_eq!(state.current_game_key(), ys_key);
+
+        state.config.fdd1_path = "/tmp/xanadu_disk_a.d88".to_string();
+        assert_ne!(state.current_game_key(), ys_key);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let gdir = tmp.path().join("Ys");
+        std::fs::create_dir_all(&gdir).unwrap();
+        std::fs::write(gdir.join("ys_a.d88"), vec![0u8; 1024]).unwrap();
+
+        state.config.games_dir = tmp.path().to_string_lossy().to_string();
+        state.start_background_library_scan(None).unwrap();
+        assert!(state.is_scanning_library);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut completed = None;
+        while std::time::Instant::now() < deadline {
+            if let Some(res) = state.poll_library_scan() {
+                completed = Some(res);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(completed, Some(Ok(1)));
+        assert!(!state.is_scanning_library);
+        assert_eq!(state.library_revision, 1);
+
+        let idx1 = state.filtered_game_indices();
+        let idx2 = state.filtered_game_indices();
+        assert!(Arc::ptr_eq(&idx1, &idx2));
+
+        state.game_filter = "ys".to_string();
+        let idx3 = state.filtered_game_indices();
+        assert!(!Arc::ptr_eq(&idx1, &idx3));
+        assert_eq!(&*idx3, &[0]);
     }
 }

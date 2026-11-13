@@ -33,17 +33,19 @@ fn main() -> Result<(), eframe::Error> {
         std::env::remove_var("WAYLAND_DISPLAY");
     }
 
-    // --- Load Icon ---
+    // --- Load Icon & App Logo Once ---
     let icon = image::load_from_memory(include_bytes!("../assets/logo.png"))
         .expect("Failed to load application icon")
         .to_rgba8();
     let (icon_width, icon_height) = icon.dimensions();
+    let icon_rgba = icon.into_raw();
+    let logo_rgba = icon_rgba.clone();
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([640.0, 480.0]) // Default starting size for the video window
         .with_min_inner_size([320.0, 240.0])
         .with_icon(egui::IconData {
-            rgba: icon.into_raw(),
+            rgba: icon_rgba,
             width: icon_width,
             height: icon_height,
         });
@@ -112,7 +114,11 @@ fn main() -> Result<(), eframe::Error> {
             ]);
 
         cc.egui_ctx.set_fonts(fonts);
-        Box::new(app::init_app_state(cc, steam_deck)) as Box<dyn eframe::App>
+        Box::new(app::init_app_state_with_logo(
+            cc,
+            steam_deck,
+            Some((icon_width, icon_height, logo_rgba)),
+        )) as Box<dyn eframe::App>
     };
 
     let res = eframe::run_native("Michadame Viewer", options, Box::new(creator));

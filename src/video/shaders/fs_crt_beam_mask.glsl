@@ -248,7 +248,7 @@ void main() {
 
     // Linear-light glass halation / phosphor glow (commutes with Talbot-Plateau sum)
     if (halation > 0.001) {
-        vec2 texel = 1.0 / max(outputResolution * scale, vec2(1.0));
+        vec2 texel = 1.0 / max(vec2(textureSize(beam_texture, 0)), vec2(1.0));
         vec2 r1 = texel * 2.5;
         vec2 r2 = texel * 6.0;
         vec3 glow_sum = color * 0.20;

@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const CIPD_PACKAGE: &str = "chromium/third_party/screen-ai/linux";
 pub const CIPD_RESOLVE_URL: &str =
@@ -22,6 +22,24 @@ pub const CIPD_DOWNLOAD_URL: &str =
 pub const DEFAULT_MAX_DIMENSION: u32 = 2048;
 
 static STAGING_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// Fast-path readiness flag set to `true` once `SCREEN_AI_RUNTIME` has initialized its native
+/// library and model callbacks in this process. Steady-state UI frames perform a single
+/// `Ordering::Relaxed` atomic load instead of statting model files or parsing `manifest.json`.
+pub static SCREEN_AI_READY_PINNED: AtomicBool = AtomicBool::new(false);
+
+const SCREEN_AI_INSTALL_CACHE_TTL: Duration = Duration::from_secs(2);
+static SCREEN_AI_INSTALL_CACHE: OnceLock<Mutex<Option<(PathBuf, Instant, bool)>>> = OnceLock::new();
+
+fn screen_ai_install_cache() -> &'static Mutex<Option<(PathBuf, Instant, bool)>> {
+    SCREEN_AI_INSTALL_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+pub fn invalidate_screen_ai_install_cache() {
+    if let Ok(mut guard) = screen_ai_install_cache().lock() {
+        *guard = None;
+    }
+}
 
 /// Metadata describing an installed or remote Chrome Screen AI OCR package.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -247,8 +265,7 @@ pub fn validate_staged_screen_ai_dir(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Returns true if the Chrome Screen AI shared library and model manifest are present and valid on disk.
-pub fn is_screen_ai_installed(dir: &Path) -> bool {
+fn is_screen_ai_installed_uncached(dir: &Path) -> bool {
     let active_dir = resolve_active_version_dir(dir);
     if validate_staged_screen_ai_dir(&active_dir).is_ok() {
         return true;
@@ -257,6 +274,63 @@ pub fn is_screen_ai_installed(dir: &Path) -> bool {
         return validate_staged_screen_ai_dir(dir).is_ok();
     }
     false
+}
+
+fn is_screen_ai_installed_cached(dir: &Path) -> bool {
+    let now = Instant::now();
+    if let Ok(guard) = screen_ai_install_cache().lock() {
+        if let Some((ref cached_dir, checked_at, result)) = *guard {
+            if cached_dir == dir
+                && now.saturating_duration_since(checked_at) < SCREEN_AI_INSTALL_CACHE_TTL
+            {
+                return result;
+            }
+        }
+    }
+    let installed = is_screen_ai_installed_uncached(dir);
+    if let Ok(mut guard) = screen_ai_install_cache().lock() {
+        *guard = Some((dir.to_path_buf(), now, installed));
+    }
+    installed
+}
+
+/// Fast-path readiness check for Chrome Screen AI: returns `true` via a single `Ordering::Relaxed`
+/// atomic load once `SCREEN_AI_RUNTIME` is initialized, falling back to `is_screen_ai_installed`.
+#[inline]
+pub fn is_screen_ai_ready(dir: &Path) -> bool {
+    if SCREEN_AI_READY_PINNED.load(Ordering::Relaxed) {
+        #[cfg(not(test))]
+        {
+            return true;
+        }
+        #[cfg(test)]
+        if active_pinned_matches_dir(dir) {
+            return true;
+        }
+    }
+    is_screen_ai_installed(dir)
+}
+
+/// Returns true if the Chrome Screen AI shared library and model manifest are present and valid on disk.
+pub fn is_screen_ai_installed(dir: &Path) -> bool {
+    if SCREEN_AI_READY_PINNED.load(Ordering::Relaxed) {
+        #[cfg(not(test))]
+        {
+            return true;
+        }
+        #[cfg(test)]
+        if active_pinned_matches_dir(dir) {
+            return true;
+        }
+    }
+    #[cfg(not(test))]
+    {
+        is_screen_ai_installed_cached(dir)
+    }
+    #[cfg(test)]
+    {
+        is_screen_ai_installed_uncached(dir)
+    }
 }
 
 /// Loads installed `ScreenAiMetadata` from `dir/metadata.json` (or the active version directory)
@@ -325,6 +399,7 @@ pub fn save_installed_metadata(dir: &Path, meta: &ScreenAiMetadata) -> Result<()
             let _ = write_file_atomically(&active_dir.join(".cipd_version"), &cipd_bytes);
         }
     }
+    invalidate_screen_ai_install_cache();
     Ok(())
 }
 
@@ -878,6 +953,7 @@ where
 
     // Only update ACTIVE_MODEL_DIR if no native runtime is currently pinned in this process.
     update_active_model_dir_if_unpinned(&final_version_dir);
+    invalidate_screen_ai_install_cache();
 
     Ok(final_version_dir)
 }
@@ -1025,6 +1101,18 @@ fn active_pinned_runtime_dir() -> Option<PathBuf> {
         .and_then(|g| g.as_ref().map(|p| p.runtime_dir.clone()))
 }
 
+#[cfg(test)]
+fn active_pinned_matches_dir(dir: &Path) -> bool {
+    pinned_runtime_state_lock()
+        .read()
+        .ok()
+        .and_then(|g| {
+            g.as_ref()
+                .map(|p| p.base_dir == dir || p.runtime_dir == dir)
+        })
+        .unwrap_or(false)
+}
+
 fn update_active_model_dir_if_unpinned(dir: &Path) {
     if active_pinned_runtime_dir().is_some() {
         return;
@@ -1125,6 +1213,8 @@ pub fn pin_runtime_to_installed_version(model_dir: &Path) -> Result<ActiveRuntim
 /// Clears the pinned runtime state (used to simulate process restart in tests).
 #[allow(dead_code)]
 pub fn reset_pinned_runtime_state() {
+    SCREEN_AI_READY_PINNED.store(false, Ordering::Release);
+    invalidate_screen_ai_install_cache();
     if let Ok(mut pin_guard) = pinned_runtime_state_lock().write() {
         *pin_guard = None;
     }
@@ -1170,11 +1260,29 @@ extern "C" fn get_file_content_cb(
         );
         return;
     };
-    if let Ok(bytes) = std::fs::read(full_path) {
-        let to_copy = bytes.len().min(buffer_size as usize);
-        unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), content_buffer, to_copy);
-        }
+    let Ok(mut file) = std::fs::File::open(&full_path) else {
+        tracing::warn!(
+            "Failed to open Screen AI model file {}",
+            full_path.display()
+        );
+        return;
+    };
+    let file_size = file
+        .metadata()
+        .map(|m| (m.len() as usize).min(buffer_size as usize))
+        .unwrap_or(buffer_size as usize);
+    if file_size == 0 {
+        return;
+    }
+    // SAFETY: `content_buffer` is non-null and points to at least `buffer_size` writable bytes
+    // allocated by `libchromescreenai.so` following `get_file_content_size_cb`, and `file_size <= buffer_size`.
+    let dst = unsafe { std::slice::from_raw_parts_mut(content_buffer as *mut u8, file_size) };
+    if let Err(e) = file.read_exact(dst) {
+        tracing::warn!(
+            "Failed to read Screen AI model file {}: {}",
+            full_path.display(),
+            e
+        );
     }
 }
 
@@ -1286,6 +1394,7 @@ fn ensure_runtime_loaded_and_initialized(
             runtime.initialized = true;
         }
     }
+    SCREEN_AI_READY_PINNED.store(true, Ordering::Release);
 
     Ok(runtime.max_dimension)
 }
@@ -1438,21 +1547,108 @@ pub fn convert_and_scale_gl_rgba_to_bgra(
         return;
     }
 
+    // Fast 2x2 integer box downscaler when halving both axes (e.g. 4096x2048 -> 2048x1024).
+    if src_w_usize == dst_w_usize * 2 && src_h_usize == dst_h_usize * 2 {
+        let src_stride = src_w_usize * 4;
+        let dst_stride = dst_w_usize * 4;
+        for dst_y in 0..dst_h_usize {
+            let top_y0 = dst_y * 2;
+            let gl_y0 = src_h_usize - 1 - top_y0;
+            let gl_y1 = gl_y0 - 1;
+            let row0 = &raw_rgba[gl_y0 * src_stride..(gl_y0 + 1) * src_stride];
+            let row1 = &raw_rgba[gl_y1 * src_stride..(gl_y1 + 1) * src_stride];
+            let dst_row = &mut out_bgra[dst_y * dst_stride..(dst_y + 1) * dst_stride];
+
+            for (dst_x, dst_px) in dst_row.chunks_exact_mut(4).enumerate() {
+                let x0 = dst_x * 8;
+                let r = (row0[x0] as u32
+                    + row0[x0 + 4] as u32
+                    + row1[x0] as u32
+                    + row1[x0 + 4] as u32
+                    + 2)
+                    >> 2;
+                let g = (row0[x0 + 1] as u32
+                    + row0[x0 + 5] as u32
+                    + row1[x0 + 1] as u32
+                    + row1[x0 + 5] as u32
+                    + 2)
+                    >> 2;
+                let b = (row0[x0 + 2] as u32
+                    + row0[x0 + 6] as u32
+                    + row1[x0 + 2] as u32
+                    + row1[x0 + 6] as u32
+                    + 2)
+                    >> 2;
+                dst_px[0] = b as u8;
+                dst_px[1] = g as u8;
+                dst_px[2] = r as u8;
+                dst_px[3] = 255;
+            }
+        }
+        return;
+    }
+
+    // Precompute horizontal 24.8 fixed-point bilinear sample offsets & weights once per frame.
+    let src_stride = src_w_usize * 4;
+    let dst_stride = dst_w_usize * 4;
+    let max_x_fp = ((src_w_usize.saturating_sub(1)) as i64) * 256;
+    let mut x_samples: Vec<(usize, usize, u32)> = Vec::with_capacity(dst_w_usize);
+    for dst_x in 0..dst_w_usize {
+        let coord_fp = (((dst_x as i64 * 2 + 1) * src_w_usize as i64 * 128) / dst_w_usize as i64
+            - 128)
+            .clamp(0, max_x_fp) as usize;
+        let x0 = coord_fp >> 8;
+        let wx = (coord_fp & 0xFF) as u32;
+        let x1 = (x0 + 1).min(src_w_usize - 1);
+        x_samples.push((x0 * 4, x1 * 4, wx));
+    }
+
+    let max_y_fp = ((src_h_usize.saturating_sub(1)) as i64) * 256;
     for dst_y in 0..dst_h_usize {
-        let flipped_y = (dst_y * src_h_usize) / dst_h_usize;
-        let src_y = src_h_usize - 1 - flipped_y;
-        let src_row_offset = src_y * src_w_usize * 4;
-        let dst_row_offset = dst_y * dst_w_usize * 4;
+        let coord_y_fp = (((dst_y as i64 * 2 + 1) * src_h_usize as i64 * 128) / dst_h_usize as i64
+            - 128)
+            .clamp(0, max_y_fp) as usize;
+        let top_y0 = coord_y_fp >> 8;
+        let wy = (coord_y_fp & 0xFF) as u32;
+        let top_y1 = (top_y0 + 1).min(src_h_usize - 1);
+        let inv_wy = 256 - wy;
 
-        for dst_x in 0..dst_w_usize {
-            let src_x = (dst_x * src_w_usize) / dst_w_usize;
-            let src_idx = src_row_offset + src_x * 4;
-            let dst_idx = dst_row_offset + dst_x * 4;
+        let gl_y0 = src_h_usize - 1 - top_y0;
+        let gl_y1 = src_h_usize - 1 - top_y1;
+        let row0 = &raw_rgba[gl_y0 * src_stride..(gl_y0 + 1) * src_stride];
+        let row1 = &raw_rgba[gl_y1 * src_stride..(gl_y1 + 1) * src_stride];
+        let dst_row = &mut out_bgra[dst_y * dst_stride..(dst_y + 1) * dst_stride];
 
-            out_bgra[dst_idx] = raw_rgba[src_idx + 2]; // B
-            out_bgra[dst_idx + 1] = raw_rgba[src_idx + 1]; // G
-            out_bgra[dst_idx + 2] = raw_rgba[src_idx]; // R
-            out_bgra[dst_idx + 3] = 255; // A
+        for (&(x0_off, x1_off, wx), dst_px) in x_samples.iter().zip(dst_row.chunks_exact_mut(4)) {
+            let inv_wx = 256 - wx;
+            let w00 = inv_wx * inv_wy;
+            let w10 = wx * inv_wy;
+            let w01 = inv_wx * wy;
+            let w11 = wx * wy;
+
+            let r = (row0[x0_off] as u32 * w00
+                + row0[x1_off] as u32 * w10
+                + row1[x0_off] as u32 * w01
+                + row1[x1_off] as u32 * w11
+                + 32768)
+                >> 16;
+            let g = (row0[x0_off + 1] as u32 * w00
+                + row0[x1_off + 1] as u32 * w10
+                + row1[x0_off + 1] as u32 * w01
+                + row1[x1_off + 1] as u32 * w11
+                + 32768)
+                >> 16;
+            let b = (row0[x0_off + 2] as u32 * w00
+                + row0[x1_off + 2] as u32 * w10
+                + row1[x0_off + 2] as u32 * w01
+                + row1[x1_off + 2] as u32 * w11
+                + 32768)
+                >> 16;
+
+            dst_px[0] = b as u8;
+            dst_px[1] = g as u8;
+            dst_px[2] = r as u8;
+            dst_px[3] = 255;
         }
     }
 }
@@ -2336,10 +2532,19 @@ mod tests {
         assert_v1_intact(&target_dir);
     }
 
+    fn pinned_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static PINNED_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        PINNED_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn test_pinned_runtime_isolation_across_versioned_update() {
         use std::ffi::CString;
 
+        let _lock = pinned_test_guard();
         let tmp_dir = tempfile::tempdir().unwrap();
         let target_dir = tmp_dir.path().join("screen_ai");
 
@@ -2490,5 +2695,105 @@ mod tests {
         );
         let boxes = group_lines_into_blocks(&lines, 0.6);
         assert!(!boxes.is_empty());
+    }
+
+    #[test]
+    fn test_screen_ai_ready_pinned_fast_path_and_ttl_cache() {
+        use std::ffi::CString;
+
+        let _lock = pinned_test_guard();
+        reset_pinned_runtime_state();
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let target_dir = tmp_dir.path().join("screen_ai");
+        assert!(!is_screen_ai_installed_cached(&target_dir));
+        assert!(!is_screen_ai_ready(&target_dir));
+
+        // Installing an archive invalidates the negative TTL cache immediately.
+        let zip_path = tmp_dir.path().join("pkg.zip");
+        write_screen_ai_test_zip(
+            &zip_path,
+            &[
+                ("resources/libchromescreenai.so", b"\x7fELF-fastpath-so"),
+                ("resources/files_list_ocr.txt", b"gocr/model.tflite\n"),
+                ("resources/gocr/model.tflite", b"weights-0123456789abcdef"),
+            ],
+        );
+        let meta = ScreenAiMetadata {
+            version: "153.10".to_string(),
+            instance_digest: "deadbeef1234".to_string(),
+        };
+        install_screen_ai_archive(&zip_path, &target_dir, &meta, &|_, _| {}).unwrap();
+        assert!(is_screen_ai_installed_cached(&target_dir));
+        assert!(is_screen_ai_ready(&target_dir));
+
+        // Pin runtime and test zero-double-copy `get_file_content_cb` (full & clamped buffer sizes).
+        let _pin = pin_runtime_to_installed_version(&target_dir).unwrap();
+        let c_rel = CString::new("gocr/model.tflite").unwrap();
+        let sz = get_file_content_size_cb(c_rel.as_ptr());
+        assert_eq!(sz as usize, b"weights-0123456789abcdef".len());
+
+        let mut full_buf = vec![0xAAu8; sz as usize];
+        get_file_content_cb(c_rel.as_ptr(), sz, full_buf.as_mut_ptr());
+        assert_eq!(&full_buf[..], b"weights-0123456789abcdef");
+
+        let mut partial_buf = vec![0xBBu8; 8];
+        get_file_content_cb(c_rel.as_ptr(), 7, partial_buf.as_mut_ptr());
+        assert_eq!(&partial_buf[..7], b"weights");
+        assert_eq!(partial_buf[7], 0xBB);
+
+        // Once SCREEN_AI_READY_PINNED is set, readiness for the pinned dir short-circuits without stat,
+        // while an unrelated empty custom dir in tests still reports false.
+        SCREEN_AI_READY_PINNED.store(true, Ordering::Release);
+        assert!(is_screen_ai_ready(&target_dir));
+        assert!(is_screen_ai_installed(&target_dir));
+
+        let other_dir = tmp_dir.path().join("other_missing");
+        assert!(!is_screen_ai_installed(&other_dir));
+
+        reset_pinned_runtime_state();
+        assert!(!SCREEN_AI_READY_PINNED.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn test_convert_and_scale_gl_rgba_to_bgra_fast_box_and_bilinear_downscale() {
+        // 1. Exact 2x2 box downscale (4x4 GL RGBA -> 2x2 top-down BGRA)
+        let mut gl_4x4 = vec![0u8; 4 * 4 * 4];
+        // Set top-left 2x2 block in image space (which is GL rows y=2 and y=3, cols x=0..1)
+        // to 4 distinct RGBA values whose average is R=50, G=100, B=150.
+        let set_gl_px = |buf: &mut [u8], w: usize, x: usize, gl_y: usize, rgba: [u8; 4]| {
+            let idx = (gl_y * w + x) * 4;
+            buf[idx..idx + 4].copy_from_slice(&rgba);
+        };
+        set_gl_px(&mut gl_4x4, 4, 0, 3, [20, 80, 120, 255]);
+        set_gl_px(&mut gl_4x4, 4, 1, 3, [40, 90, 140, 255]);
+        set_gl_px(&mut gl_4x4, 4, 0, 2, [60, 110, 160, 255]);
+        set_gl_px(&mut gl_4x4, 4, 1, 2, [80, 120, 180, 255]);
+        // Bottom-right 2x2 block in image space (GL rows y=0 and y=1, cols x=2..3) = solid [200, 40, 10, 255]
+        for gl_y in 0..=1 {
+            for x in 2..=3 {
+                set_gl_px(&mut gl_4x4, 4, x, gl_y, [200, 40, 10, 128]);
+            }
+        }
+
+        let mut out_2x2 = Vec::new();
+        convert_and_scale_gl_rgba_to_bgra(&gl_4x4, 4, 4, 2, 2, &mut out_2x2);
+        assert_eq!(out_2x2.len(), 2 * 2 * 4);
+        // Top-left pixel (idx 0..4) in BGRA = [150, 100, 50, 255]
+        assert_eq!(&out_2x2[0..4], &[150, 100, 50, 255]);
+        // Bottom-right pixel (idx 12..16) in BGRA = [10, 40, 200, 255]
+        assert_eq!(&out_2x2[12..16], &[10, 40, 200, 255]);
+
+        // 2. Non-power-of-two >2048p fixed-point bilinear downscale (e.g. 6x6 -> 4x4, and 3840x2160 -> 2048x1152 uniform check)
+        let mut gl_uniform = vec![0u8; 60 * 36 * 4];
+        for px in gl_uniform.chunks_exact_mut(4) {
+            px.copy_from_slice(&[33, 77, 199, 255]);
+        }
+        let mut out_scaled = Vec::new();
+        convert_and_scale_gl_rgba_to_bgra(&gl_uniform, 60, 36, 32, 19, &mut out_scaled);
+        assert_eq!(out_scaled.len(), 32 * 19 * 4);
+        for px in out_scaled.chunks_exact(4) {
+            assert_eq!(px, &[199, 77, 33, 255]);
+        }
     }
 }

@@ -5,27 +5,25 @@ out vec4 out_color;
 uniform sampler2D video_texture;
 uniform vec2 SourceSize;
 
-const float SIZEH = 6.0;
-const float SIGMA_H = 1.20;
-const float invsqrsigma = 1.0 / (2.0 * SIGMA_H * SIGMA_H);
-
-float gaussian(float x) {
-    return exp(-x * x * invsqrsigma);
-}
+// Normalized Gaussian weights (SIZEH = 6, SIGMA_H = 1.20) paired for GL_LINEAR 1:1 texels:
+const float W0  = 0.33245174;
+const float W12 = 0.31782403;
+const float O12 = 1.26082854;
+const float W34 = 0.01589214;
+const float O34 = 3.08087216;
+const float W56 = 0.00005770;
+const float O56 = 5.02147019;
 
 void main() {
-    float f = fract(SourceSize.x * v_tc.x);
-    f = 0.5 - f;
-    vec2 tex = vec2((floor(SourceSize.x * v_tc.x) + 0.5) / SourceSize.x, v_tc.y);
-    vec3 color = vec3(0.0);
-    vec2 dx = vec2(1.0 / SourceSize.x, 0.0);
+    float inv_w = 1.0 / SourceSize.x;
+    vec2 d12 = vec2(O12 * inv_w, 0.0);
+    vec2 d34 = vec2(O34 * inv_w, 0.0);
+    vec2 d56 = vec2(O56 * inv_w, 0.0);
 
-    float wsum = 0.0;
-    for (float n = -SIZEH; n <= SIZEH; n += 1.0) {
-        vec3 pixel = texture(video_texture, tex + n * dx).rgb;
-        float w = gaussian(n + f);
-        color += w * pixel;
-        wsum += w;
-    }
-    out_color = vec4(color / wsum, 1.0);
+    vec3 color = texture(video_texture, v_tc).rgb * W0;
+    color += (texture(video_texture, v_tc - d12).rgb + texture(video_texture, v_tc + d12).rgb) * W12;
+    color += (texture(video_texture, v_tc - d34).rgb + texture(video_texture, v_tc + d34).rgb) * W34;
+    color += (texture(video_texture, v_tc - d56).rgb + texture(video_texture, v_tc + d56).rgb) * W56;
+
+    out_color = vec4(color, 1.0);
 }

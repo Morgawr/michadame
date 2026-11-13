@@ -14,8 +14,14 @@ pub enum SelectedFilterTab {
 pub fn draw_mic_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     let mut changed = false;
 
-    // Repaint while Audio & Mic tab is active to smoothly animate the live dB meter
-    ui.ctx().request_repaint_after(Duration::from_millis(16));
+    // Repaint while Audio & Mic tab has an active stream or decaying meter
+    let mic_meters_active = (state.mic.config.enabled && state.mic.active_stream.is_some())
+        || state.hardware.live_mic_peak > 0.001
+        || state.has_active_av_source()
+        || state.hardware.live_audio_peak > 0.001;
+    if mic_meters_active {
+        ui.ctx().request_repaint_after(Duration::from_millis(16));
+    }
 
     // --- Unified Microphone Input, Volume, Live Monitor & Filters ---
     technical_group(ui, "Microphone & Voice Filters:", |ui| {

@@ -181,6 +181,9 @@ pub fn draw_shaders_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 .checkbox(&mut state.video.fft_filter_enabled, "FFT Mask Filter")
                 .changed()
             {
+                if state.video.fft_filter_enabled {
+                    state.fft_masks_scanned_res = None;
+                }
                 crate::config::save_config(state);
                 changed = true;
             }
@@ -220,6 +223,7 @@ pub fn draw_shaders_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                 state.fft_mask_save_name = canonical_name.clone();
                                 state.fft_available_masks =
                                     crate::config::fft_masks::list_masks_for_resolution(stream_res);
+                                state.fft_masks_scanned_res = Some(stream_res);
                                 crate::config::persistence::sync_active_profile_in_state(state);
                                 crate::config::save_config(state);
                                 changed = true;
@@ -229,9 +233,10 @@ pub fn draw_shaders_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         }
                     }
 
-                    if state.fft_available_masks.is_empty() {
+                    if state.fft_masks_scanned_res != Some(stream_res) {
                         state.fft_available_masks =
                             crate::config::fft_masks::list_masks_for_resolution(stream_res);
+                        state.fft_masks_scanned_res = Some(stream_res);
                     }
 
                     if !state.fft_available_masks.is_empty() {
@@ -2314,9 +2319,14 @@ pub fn draw_special_fx_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     let mut changed = false;
     let mut ar_changed = false;
 
-    // Keep live meter bars refreshing smoothly while viewing Special FX
-    ui.ctx()
-        .request_repaint_after(std::time::Duration::from_millis(16));
+    // Keep live meter bars refreshing smoothly only while an audio/video source or meter is active
+    let special_fx_meters_active = state.has_active_av_source()
+        || state.hardware.live_audio_peak > 0.001
+        || state.audio_reactive_runtime.has_active_energy(0.001);
+    if special_fx_meters_active {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(16));
+    }
 
     state.audio_reactive.ensure_builtin_presets();
 

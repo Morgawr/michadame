@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use rodio::{Sink, Source};
+use crossbeam_channel::TryRecvError;
+use rodio::Source;
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
@@ -399,50 +400,120 @@ impl MicDspPipeline {
     }
 }
 
-/// Source for Rodio monitor playback reading from an rtrb lock-free ring buffer
+const MONITOR_BATCH_SAMPLES: usize = 512;
+
+/// Source for Rodio monitor playback reading from an rtrb lock-free ring buffer.
 struct MicMonitorSource {
     consumer: Consumer<f32>,
+    read_buf: [f32; MONITOR_BATCH_SAMPLES],
+    read_pos: usize,
+    read_len: usize,
     stop: Arc<AtomicBool>,
+    source_stop: Arc<AtomicBool>,
+    muted: Arc<AtomicBool>,
+    volume_bits: Arc<AtomicU32>,
     channels: u16,
     sample_rate: u32,
-    pending_right: Option<f32>,
+}
+
+impl MicMonitorSource {
+    fn new(
+        consumer: Consumer<f32>,
+        stop: Arc<AtomicBool>,
+        source_stop: Arc<AtomicBool>,
+        muted: Arc<AtomicBool>,
+        volume_bits: Arc<AtomicU32>,
+        channels: u16,
+        sample_rate: u32,
+    ) -> Self {
+        Self {
+            consumer,
+            read_buf: [0.0; MONITOR_BATCH_SAMPLES],
+            read_pos: 0,
+            read_len: 0,
+            stop,
+            source_stop,
+            muted,
+            volume_bits,
+            channels,
+            sample_rate,
+        }
+    }
+
+    #[inline]
+    fn scale_sample(&self, sample: f32) -> f32 {
+        if self.muted.load(Ordering::Relaxed) {
+            0.0
+        } else {
+            sample * f32::from_bits(self.volume_bits.load(Ordering::Relaxed))
+        }
+    }
 }
 
 impl Iterator for MicMonitorSource {
     type Item = f32;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(right) = self.pending_right.take() {
-            return Some(right);
+        if self.read_pos < self.read_len {
+            let sample = self.read_buf[self.read_pos];
+            self.read_pos += 1;
+            return Some(self.scale_sample(sample));
         }
-        if self.consumer.slots() >= 2 {
-            if let (Ok(left), Ok(right)) = (self.consumer.pop(), self.consumer.pop()) {
-                self.pending_right = Some(right);
-                return Some(left);
+        self.read_pos = 0;
+        self.read_len = 0;
+
+        if self.stop.load(Ordering::Relaxed) || self.source_stop.load(Ordering::Relaxed) {
+            return None;
+        }
+
+        let available_even = (self.consumer.slots() & !1).min(MONITOR_BATCH_SAMPLES);
+        if available_even >= 2 {
+            if let Ok(chunk) = self.consumer.read_chunk(available_even) {
+                let (first, second) = chunk.as_slices();
+                let first_len = first.len();
+                let second_len = second.len();
+                self.read_buf[..first_len].copy_from_slice(first);
+                if second_len > 0 {
+                    self.read_buf[first_len..first_len + second_len].copy_from_slice(second);
+                }
+                chunk.commit_all();
+                self.read_len = first_len + second_len;
+                self.read_pos = 1;
+                return Some(self.scale_sample(self.read_buf[0]));
             }
         }
-        if self.stop.load(Ordering::Relaxed) || self.consumer.is_abandoned() {
-            None
-        } else {
-            self.pending_right = Some(0.0);
-            Some(0.0)
+
+        if self.consumer.is_abandoned() {
+            return None;
         }
+
+        // Underrun: emit an intact silent stereo pair so L/R channel phase never shifts.
+        self.read_buf[0] = 0.0;
+        self.read_buf[1] = 0.0;
+        self.read_len = 2;
+        self.read_pos = 1;
+        Some(0.0)
     }
 }
 
 impl Source for MicMonitorSource {
+    #[inline]
     fn current_frame_len(&self) -> Option<usize> {
-        Some((self.consumer.slots() & !1) + usize::from(self.pending_right.is_some()))
+        None
     }
 
+    #[inline]
     fn channels(&self) -> u16 {
         self.channels
     }
 
+    #[inline]
     fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
 
+    #[inline]
     fn total_duration(&self) -> Option<Duration> {
         None
     }
@@ -506,12 +577,15 @@ fn push_monitor_stereo(
 struct MonitorPlayback {
     _guard: crate::devices::audio::SharedPlaybackGuard,
     _handle: rodio::OutputStreamHandle,
-    sink: Sink,
+    source_stop: Arc<AtomicBool>,
+    muted: Arc<AtomicBool>,
+    #[allow(dead_code)]
+    volume_bits: Arc<AtomicU32>,
 }
 
 impl Drop for MonitorPlayback {
     fn drop(&mut self) {
-        self.sink.stop();
+        self.source_stop.store(true, Ordering::Relaxed);
     }
 }
 
@@ -619,27 +693,34 @@ pub fn start_mic_stream(
 
 fn initialize_monitor_playback(stop: &Arc<AtomicBool>) -> Result<(MonitorPlayback, Producer<f32>)> {
     let (guard, handle) = crate::devices::audio::initialize_rodio_playback()?;
-    let sink = Sink::try_new(&handle).context("Failed to create monitor rodio sink")?;
-    sink.set_volume(1.0);
 
     // 48 kHz stereo ring buffer (~150 ms capacity)
     let ring_size = (48000.0 * 2.0 * 0.15) as usize;
     let (producer, consumer) = RingBuffer::<f32>::new(ring_size);
+    let source_stop = Arc::new(AtomicBool::new(false));
+    let muted = Arc::new(AtomicBool::new(false));
+    let volume_bits = Arc::new(AtomicU32::new(1.0f32.to_bits()));
 
-    let source = MicMonitorSource {
+    let source = MicMonitorSource::new(
         consumer,
-        stop: Arc::clone(stop),
-        channels: 2,
-        sample_rate: 48000,
-        pending_right: None,
-    };
-    sink.append(source);
+        Arc::clone(stop),
+        Arc::clone(&source_stop),
+        Arc::clone(&muted),
+        Arc::clone(&volume_bits),
+        2,
+        48000,
+    );
+    handle
+        .play_raw(source)
+        .context("Failed to start monitor rodio raw stream")?;
 
     Ok((
         MonitorPlayback {
             _guard: guard,
             _handle: handle,
-            sink,
+            source_stop,
+            muted,
+            volume_bits,
         },
         producer,
     ))
@@ -675,6 +756,27 @@ fn run_mic_capture_worker(
 
     while !stop.load(Ordering::Relaxed) {
         replay.mark_mic_discontinuity();
+
+        // Ensure monitor playback is initialized BEFORE opening ALSA PCM so stream setup
+        // never stalls active ALSA capture reads.
+        let initial_loop_cfg = config.read().map(|c| c.clone()).unwrap_or_default();
+        if initial_loop_cfg.monitor && monitor_producer.is_none() {
+            match initialize_monitor_playback(&stop) {
+                Ok((playback, prod)) => {
+                    playback.muted.store(
+                        !initial_loop_cfg.enabled || !initial_loop_cfg.monitor,
+                        Ordering::Relaxed,
+                    );
+                    if let Ok(mut guard) = monitor_guard.lock() {
+                        *guard = Some(playback);
+                    }
+                    *monitor_producer = Some(prod);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to initialize mic monitor audio output: {}", e);
+                }
+            }
+        }
 
         // Open ALSA PCM device
         let pcm = match PCM::new(device_name, Direction::Capture, true) {
@@ -782,6 +884,9 @@ fn run_mic_capture_worker(
         let mut monitor_resample_phase = 0.0f64;
         let mut monitor_prev_frame = [0.0f32; 2];
         let mut last_monitor_init_attempt: Option<Instant> = None;
+        let mut pending_monitor_init_rx: Option<
+            crossbeam_channel::Receiver<Result<(MonitorPlayback, Producer<f32>)>>,
+        > = None;
 
         // Capture loop
         while !stop.load(Ordering::Relaxed) {
@@ -866,29 +971,60 @@ fn run_mic_capture_worker(
 
                     is_clipping.store(max_abs >= 0.999, Ordering::Relaxed);
 
-                    // Submit to monitor if enabled; lazily attach/detach shared Rodio sink
+                    // Submit to monitor if enabled; initialize asynchronously if toggled on mid-stream
+                    // so the ALSA capture thread never stalls on PipeWire/Rodio stream creation.
                     if cfg.monitor {
-                        if monitor_producer.is_none() {
+                        if let Some(rx) = pending_monitor_init_rx.as_ref() {
+                            match rx.try_recv() {
+                                Ok(Ok((playback, prod))) => {
+                                    playback
+                                        .muted
+                                        .store(!cfg.enabled || !cfg.monitor, Ordering::Relaxed);
+                                    if let Ok(mut guard) = monitor_guard.lock() {
+                                        *guard = Some(playback);
+                                    }
+                                    *monitor_producer = Some(prod);
+                                    monitor_resample_phase = 0.0;
+                                    monitor_prev_frame = [0.0; 2];
+                                    pending_monitor_init_rx = None;
+                                }
+                                Ok(Err(e)) => {
+                                    tracing::warn!(
+                                        "Failed to initialize mic monitor audio output: {}",
+                                        e
+                                    );
+                                    pending_monitor_init_rx = None;
+                                }
+                                Err(TryRecvError::Empty) => {}
+                                Err(TryRecvError::Disconnected) => {
+                                    pending_monitor_init_rx = None;
+                                }
+                            }
+                        } else if monitor_producer.is_none() {
                             let should_attempt = last_monitor_init_attempt
                                 .is_none_or(|t| t.elapsed() >= Duration::from_secs(1));
                             if should_attempt {
                                 last_monitor_init_attempt = Some(Instant::now());
-                                match initialize_monitor_playback(&stop) {
-                                    Ok((playback, prod)) => {
-                                        if let Ok(mut guard) = monitor_guard.lock() {
-                                            *guard = Some(playback);
-                                        }
-                                        *monitor_producer = Some(prod);
-                                        monitor_resample_phase = 0.0;
-                                        monitor_prev_frame = [0.0; 2];
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "Failed to initialize mic monitor audio output: {}",
-                                            e
-                                        );
-                                    }
+                                let (tx, rx) = crossbeam_channel::bounded(1);
+                                let stop_for_init = Arc::clone(&stop);
+                                if thread::Builder::new()
+                                    .name("michadame-mic-monitor-init".to_string())
+                                    .spawn(move || {
+                                        let _ =
+                                            tx.send(initialize_monitor_playback(&stop_for_init));
+                                    })
+                                    .is_ok()
+                                {
+                                    pending_monitor_init_rx = Some(rx);
                                 }
+                            }
+                        }
+
+                        if let Ok(guard) = monitor_guard.try_lock() {
+                            if let Some(playback) = guard.as_ref() {
+                                playback
+                                    .muted
+                                    .store(!cfg.enabled || !cfg.monitor, Ordering::Relaxed);
                             }
                         }
                         if let Some(prod) = monitor_producer {
@@ -901,7 +1037,8 @@ fn run_mic_capture_worker(
                                 &mut monitor_prev_frame,
                             );
                         }
-                    } else if monitor_producer.is_some() {
+                    } else if monitor_producer.is_some() || pending_monitor_init_rx.is_some() {
+                        pending_monitor_init_rx = None;
                         *monitor_producer = None;
                         if let Ok(mut guard) = monitor_guard.lock() {
                             *guard = None;
@@ -1035,18 +1172,24 @@ mod tests {
     #[test]
     fn test_mic_monitor_stereo_alignment_and_resampling() {
         let stop = Arc::new(AtomicBool::new(false));
+        let source_stop = Arc::new(AtomicBool::new(false));
+        let muted = Arc::new(AtomicBool::new(false));
+        let volume_bits = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let (mut prod, cons) = RingBuffer::<f32>::new(3); // Odd capacity (3 slots)
-        let mut source = MicMonitorSource {
-            consumer: cons,
-            stop: Arc::clone(&stop),
-            channels: 2,
-            sample_rate: 48000,
-            pending_right: None,
-        };
+        let mut source = MicMonitorSource::new(
+            cons,
+            Arc::clone(&stop),
+            Arc::clone(&source_stop),
+            Arc::clone(&muted),
+            Arc::clone(&volume_bits),
+            2,
+            48000,
+        );
+        assert_eq!(source.current_frame_len(), None);
 
         // Underrun emits a full (0.0, 0.0) stereo pair without shifting L/R phase.
         assert_eq!(source.next(), Some(0.0));
-        // Even if a stereo pair arrives mid-underrun, pending_right finishes the silent pair first.
+        // Even if a stereo pair arrives mid-underrun, read_buf finishes the silent pair first.
         let mut phase = 0.0;
         let mut prev = [0.0; 2];
         push_monitor_stereo(
@@ -1073,5 +1216,49 @@ mod tests {
         }
         assert_eq!(popped.len() % 2, 0);
         assert!(popped.len() >= 16);
+    }
+
+    #[test]
+    fn test_mic_monitor_batch_pop_volume_mute_and_stop() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let source_stop = Arc::new(AtomicBool::new(false));
+        let muted = Arc::new(AtomicBool::new(false));
+        let volume_bits = Arc::new(AtomicU32::new(0.5f32.to_bits()));
+        let (mut prod, cons) = RingBuffer::<f32>::new(2048);
+        let mut source = MicMonitorSource::new(
+            cons,
+            Arc::clone(&stop),
+            Arc::clone(&source_stop),
+            Arc::clone(&muted),
+            Arc::clone(&volume_bits),
+            2,
+            48000,
+        );
+        assert_eq!(source.current_frame_len(), None);
+
+        // Push 1200 samples (600 stereo pairs) > MONITOR_BATCH_SAMPLES (512)
+        for i in 0..1200 {
+            prod.push((i % 2 + 1) as f32 * 0.2).unwrap(); // 0.2, 0.4, ...
+        }
+
+        // First sample triggers a 512-sample batch pop and scales by 0.5
+        assert!((source.next().unwrap() - 0.1).abs() < 1e-6);
+        assert_eq!(source.read_len, MONITOR_BATCH_SAMPLES);
+        assert!((source.next().unwrap() - 0.2).abs() < 1e-6);
+
+        // Mute atomically zeroes samples immediately even mid-batch
+        muted.store(true, Ordering::Relaxed);
+        assert_eq!(source.next(), Some(0.0));
+        assert_eq!(source.next(), Some(0.0));
+        muted.store(false, Ordering::Relaxed);
+
+        // Drain the rest of the 1200 samples across multiple 512-sample batches
+        for _ in 4..1200 {
+            assert!(source.next().is_some());
+        }
+
+        // Stopping source_stop ends iteration cleanly with None
+        source_stop.store(true, Ordering::Relaxed);
+        assert_eq!(source.next(), None);
     }
 }
