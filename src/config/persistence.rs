@@ -387,6 +387,8 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
 }
 
 pub fn sync_active_profile_in_state(state: &mut AppState) {
+    state.webcam.config.sync_active_local_profile();
+    state.webcam.config.vtuber.sync_active_profile();
     let current_profile_data = build_profile_from_state(state);
     if state.video_player.is_some() {
         state.video_profile = current_profile_data;
@@ -533,7 +535,7 @@ fn populate_config_from_state(cfg: &mut MichadameConfig, state: &AppState) {
     cfg.selected_steam_game = state.selected_steam_game.clone();
     cfg.twitch = state.twitch.config.clone();
     cfg.mic = state.mic.config.clone();
-    cfg.webcam = state.webcam.config.clone();
+    cfg.webcam = state.webcam.config.synced_for_save();
     cfg.pc98 = state.pc98.config.clone();
     cfg.pc88 = state.pc88.config.clone();
     cfg.audio_reactive = state.audio_reactive.clone();
@@ -977,6 +979,11 @@ pub fn apply_hardware_devices_from_config(state: &mut AppState, cfg: &MichadameC
             state.request_webcam_formats_probe(None, false, false);
         }
     }
+    if let Some(tdev) = state.webcam.config.vtuber.tracking_device.clone() {
+        if state.hardware.video_devices.contains(&tdev) && !cfg!(test) {
+            state.request_vtuber_formats_probe(None, false, false);
+        }
+    }
 }
 
 pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
@@ -1114,6 +1121,7 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
         .set_reactive_listening(state.audio_reactive.enabled);
 
     state.webcam.config = cfg.webcam.clone();
+    state.webcam.config.ensure_profiles();
     if state.steam_deck.is_some() {
         crate::steam_deck::enforce_restrictions(state);
     }
@@ -2869,5 +2877,249 @@ crt_brightboost = 1.6
 
         drop(tx);
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_vtuber_webcam_config_roundtrip_toml_serialization() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vtuber_roundtrip.toml");
+
+        let mut state = AppState::default();
+        state.webcam.config.enabled = true;
+        state.webcam.config.source_mode = crate::config::WebcamSourceMode::VtuberAvatar;
+        state.webcam.config.vtuber = crate::config::VtuberConfig {
+            active_profile: crate::config::VTUBER_PROFILE_CUTOUT.to_string(),
+            model_path: Some("/tmp/avatar.vrm".to_string()),
+            tracking_device: Some("/dev/video2".to_string()),
+            tracking_format_fourcc: Some("MJPG".to_string()),
+            tracking_resolution: Some((1280, 720)),
+            tracking_framerate: Some(60),
+            display_style: crate::config::VtuberDisplayStyle::BorderlessCutout,
+            background_kind: crate::config::VtuberBackgroundKind::StaticImage,
+            background_color: [12, 34, 56, 255],
+            background_image_path: Some("/tmp/room_bg.png".to_string()),
+            camera_zoom: 1.35,
+            camera_offset_y: -0.08,
+            smoothing: 0.70,
+            blink_sensitivity: 1.25,
+            mouth_sensitivity: 1.40,
+            movement_scale: 0.90,
+            mirror_tracking: false,
+            mic_lipsync_assist: true,
+            neutral_head_quat: Some([0.0, 0.05, 0.0, 0.9987]),
+            framed_layout: crate::config::VtuberOverlayLayout {
+                pos_x_pct: 0.68,
+                pos_y_pct: 0.61,
+                width_pct: 0.27,
+                aspect_preset: crate::config::VtuberAspectPreset::Wide16x9,
+                cutout: crate::config::WebcamCutout {
+                    left: 10,
+                    right: 12,
+                    top: 6,
+                    bottom: 8,
+                },
+            },
+            cutout_layout: crate::config::VtuberOverlayLayout {
+                pos_x_pct: 0.79,
+                pos_y_pct: 0.44,
+                width_pct: 0.21,
+                aspect_preset: crate::config::VtuberAspectPreset::Portrait3x4,
+                cutout: crate::config::WebcamCutout {
+                    left: 20,
+                    right: 20,
+                    top: 0,
+                    bottom: 45,
+                },
+            },
+            profiles: std::collections::BTreeMap::new(),
+        };
+        state.webcam.config.ensure_profiles();
+        state.webcam.config.vtuber.sync_active_profile();
+
+        save_config_at(&path, &mut state).expect("TOML save with VtuberConfig must succeed");
+        let loaded_cfg: MichadameConfig =
+            confy::load_path(&path).expect("TOML reload with VtuberConfig must succeed");
+
+        let mut restored = AppState::default();
+        apply_config(&mut restored, &loaded_cfg);
+
+        assert!(restored.webcam.config.enabled);
+        assert_eq!(
+            restored.webcam.config.source_mode,
+            crate::config::WebcamSourceMode::VtuberAvatar
+        );
+        assert_eq!(restored.webcam.config.vtuber, state.webcam.config.vtuber);
+    }
+
+    #[test]
+    fn test_local_webcam_and_vtuber_profiles_stay_completely_independent_and_remember_cycles() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("webcam_vtuber_independence.toml");
+
+        let mut state = AppState::default();
+        state.webcam.config.ensure_profiles();
+        state.webcam.config.enabled = true;
+
+        // 1. Configure Local Webcam "Default" profile + a second "CloseUp" local profile
+        state.webcam.config.source_mode = crate::config::WebcamSourceMode::LocalCamera;
+        state.webcam.config.device = Some("/dev/video0".to_string());
+        state.webcam.config.resolution = Some((1920, 1080));
+        state.webcam.config.framerate = Some(60);
+        state.webcam.config.pos_x_pct = 0.11;
+        state.webcam.config.pos_y_pct = 0.22;
+        state.webcam.config.width_pct = 0.31;
+        state.webcam.config.cutout = crate::config::WebcamCutout {
+            left: 120,
+            right: 80,
+            top: 40,
+            bottom: 60,
+        };
+        state.webcam.config.sync_active_local_profile();
+
+        // Add "CloseUp" local profile and switch to it, then customize it
+        state.webcam.config.local_profiles.insert(
+            "CloseUp".to_string(),
+            state.webcam.config.snapshot_local_profile(),
+        );
+        assert!(state.webcam.config.switch_to_local_profile("CloseUp"));
+        state.webcam.config.pos_x_pct = 0.55;
+        state.webcam.config.width_pct = 0.18;
+        state.webcam.config.cutout.left = 300;
+        state.webcam.config.sync_active_local_profile();
+
+        // Switch back to "Default" local profile and verify "Default" stayed intact
+        assert!(state
+            .webcam
+            .config
+            .switch_to_local_profile(crate::config::DEFAULT_LOCAL_WEBCAM_PROFILE));
+        assert_eq!(
+            state.webcam.config.local_active_profile,
+            crate::config::DEFAULT_LOCAL_WEBCAM_PROFILE
+        );
+        assert_eq!(state.webcam.config.pos_x_pct, 0.11);
+        assert_eq!(state.webcam.config.width_pct, 0.31);
+        assert_eq!(state.webcam.config.cutout.left, 120);
+
+        // 2. Toggle to VTuber Avatar mode and customize BOTH "Framed Webcam" and "Borderless Cutout"
+        state.webcam.config.source_mode = crate::config::WebcamSourceMode::VtuberAvatar;
+        assert_eq!(
+            state.webcam.config.vtuber.active_profile,
+            crate::config::VTUBER_PROFILE_FRAMED
+        );
+        // Verify VTuber mode did NOT inherit Local Webcam's cutout/pos/size/device
+        assert_eq!(state.webcam.config.vtuber.tracking_device, None);
+        assert_eq!(state.webcam.config.vtuber.active_layout().cutout.left, 0);
+        assert_ne!(state.webcam.config.vtuber.active_layout().pos_x_pct, 0.11);
+
+        state
+            .webcam
+            .config
+            .vtuber
+            .propagate_initial_model_path("/models/hero.vrm");
+        state.webcam.config.vtuber.tracking_device = Some("/dev/video4".to_string());
+        state.webcam.config.vtuber.active_layout_mut().pos_x_pct = 0.64;
+        state.webcam.config.vtuber.active_layout_mut().width_pct = 0.26;
+        state.webcam.config.vtuber.active_layout_mut().cutout.right = 55;
+        state.webcam.config.vtuber.sync_active_profile();
+
+        // Switch to "Borderless Cutout" VTuber profile and customize it independently
+        assert!(state
+            .webcam
+            .config
+            .vtuber
+            .switch_to_profile(crate::config::VTUBER_PROFILE_CUTOUT));
+        assert_eq!(
+            state.webcam.config.vtuber.active_profile,
+            crate::config::VTUBER_PROFILE_CUTOUT
+        );
+        assert_eq!(
+            state.webcam.config.vtuber.display_style,
+            crate::config::VtuberDisplayStyle::BorderlessCutout
+        );
+        assert_eq!(
+            state.webcam.config.vtuber.model_path.as_deref(),
+            Some("/models/hero.vrm")
+        );
+        assert_eq!(state.webcam.config.vtuber.active_layout().cutout.right, 0);
+        state.webcam.config.vtuber.active_layout_mut().pos_x_pct = 0.81;
+        state.webcam.config.vtuber.active_layout_mut().pos_y_pct = 0.42;
+        state.webcam.config.vtuber.active_layout_mut().width_pct = 0.19;
+        state.webcam.config.vtuber.active_layout_mut().cutout.bottom = 90;
+        state.webcam.config.vtuber.sync_active_profile();
+
+        // 3. Persist to TOML, reload into fresh AppState, and verify BOTH Local Webcam profiles
+        //    and BOTH VTuber profiles were preserved without any cross-contamination!
+        save_config_at(&path, &mut state).expect("TOML save must succeed");
+        let loaded_cfg: MichadameConfig = confy::load_path(&path).expect("TOML load must succeed");
+        let mut restored = AppState::default();
+        apply_config(&mut restored, &loaded_cfg);
+
+        // Toggle back to Local Webcam: must still have /dev/video0, (0.11, 0.22), width 0.31, left=120
+        restored.webcam.config.source_mode = crate::config::WebcamSourceMode::LocalCamera;
+        assert_eq!(
+            restored.webcam.config.device.as_deref(),
+            Some("/dev/video0")
+        );
+        assert_eq!(restored.webcam.config.pos_x_pct, 0.11);
+        assert_eq!(restored.webcam.config.pos_y_pct, 0.22);
+        assert_eq!(restored.webcam.config.width_pct, 0.31);
+        assert_eq!(restored.webcam.config.cutout.left, 120);
+        assert_eq!(restored.webcam.config.cutout.bottom, 60);
+
+        // Cycle Local Webcam to "CloseUp": must remember 0.55, width 0.18, left=300
+        assert!(restored.webcam.config.switch_to_local_profile("CloseUp"));
+        assert_eq!(restored.webcam.config.pos_x_pct, 0.55);
+        assert_eq!(restored.webcam.config.width_pct, 0.18);
+        assert_eq!(restored.webcam.config.cutout.left, 300);
+
+        // Toggle back to VTuber Avatar: active is "Borderless Cutout" at (0.81, 0.42), bottom=90
+        restored.webcam.config.source_mode = crate::config::WebcamSourceMode::VtuberAvatar;
+        assert_eq!(
+            restored.webcam.config.vtuber.active_profile,
+            crate::config::VTUBER_PROFILE_CUTOUT
+        );
+        assert_eq!(
+            restored.webcam.config.vtuber.active_layout().pos_x_pct,
+            0.81
+        );
+        assert_eq!(
+            restored.webcam.config.vtuber.active_layout().pos_y_pct,
+            0.42
+        );
+        assert_eq!(
+            restored.webcam.config.vtuber.active_layout().width_pct,
+            0.19
+        );
+        assert_eq!(
+            restored.webcam.config.vtuber.active_layout().cutout.bottom,
+            90
+        );
+
+        // Switch VTuber back to "Framed Webcam": must remember /dev/video4, 0.64, width 0.26, right=55
+        assert!(restored
+            .webcam
+            .config
+            .vtuber
+            .switch_to_profile(crate::config::VTUBER_PROFILE_FRAMED));
+        assert_eq!(
+            restored.webcam.config.vtuber.active_profile,
+            crate::config::VTUBER_PROFILE_FRAMED
+        );
+        assert_eq!(
+            restored.webcam.config.vtuber.tracking_device.as_deref(),
+            Some("/dev/video4")
+        );
+        assert_eq!(
+            restored.webcam.config.vtuber.active_layout().pos_x_pct,
+            0.64
+        );
+        assert_eq!(
+            restored.webcam.config.vtuber.active_layout().width_pct,
+            0.26
+        );
+        assert_eq!(
+            restored.webcam.config.vtuber.active_layout().cutout.right,
+            55
+        );
     }
 }

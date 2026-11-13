@@ -1001,7 +1001,10 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
         {
             let new_enabled = !state.webcam.config.enabled;
             state.webcam.config.enabled = new_enabled;
-            if new_enabled && state.webcam.config.device.is_none() {
+            if new_enabled
+                && state.webcam.config.source_mode == crate::config::WebcamSourceMode::LocalCamera
+                && state.webcam.config.device.is_none()
+            {
                 state.webcam.config.device = state.hardware.video_devices.first().cloned();
                 if let Some(dev) = &state.webcam.config.device {
                     if let Ok(formats) = crate::devices::video::find_video_formats(dev) {
@@ -1017,6 +1020,7 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
                         }
                     }
                 }
+                state.webcam.config.sync_active_local_profile();
             }
             crate::config::save_config(state);
             crate::config::save_global_hardware_config(state);

@@ -226,6 +226,398 @@ impl Default for WebcamCutout {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum WebcamSourceMode {
+    #[default]
+    LocalCamera,
+    VtuberAvatar,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum VtuberDisplayStyle {
+    #[default]
+    FramedWebcam,
+    BorderlessCutout,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum VtuberBackgroundKind {
+    #[default]
+    #[serde(alias = "RetroBackdrop")]
+    SolidColor,
+    StaticImage,
+    Transparent,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum VtuberAspectPreset {
+    #[default]
+    Wide16x9,
+    Classic4x3,
+    Square1x1,
+    Portrait3x4,
+}
+
+impl VtuberAspectPreset {
+    pub const ALL: [Self; 4] = [
+        Self::Wide16x9,
+        Self::Classic4x3,
+        Self::Square1x1,
+        Self::Portrait3x4,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Wide16x9 => "16:9 Wide",
+            Self::Classic4x3 => "4:3 Classic",
+            Self::Square1x1 => "1:1 Square",
+            Self::Portrait3x4 => "3:4 Bust",
+        }
+    }
+
+    pub fn virtual_dimensions(self) -> (u32, u32) {
+        match self {
+            Self::Wide16x9 => (960, 540),
+            Self::Classic4x3 => (768, 576),
+            Self::Square1x1 => (640, 640),
+            Self::Portrait3x4 => (576, 768),
+        }
+    }
+}
+
+pub const DEFAULT_LOCAL_WEBCAM_PROFILE: &str = "Default";
+pub const VTUBER_PROFILE_FRAMED: &str = "Framed Webcam";
+pub const VTUBER_PROFILE_CUTOUT: &str = "Borderless Cutout";
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct LocalWebcamProfile {
+    pub device: Option<String>,
+    pub format_fourcc: Option<String>,
+    pub resolution: Option<(u32, u32)>,
+    pub framerate: Option<u32>,
+    pub pos_x_pct: f32,
+    pub pos_y_pct: f32,
+    pub width_pct: f32,
+    // Keep nested table after scalar fields for confy/TOML serialization.
+    pub cutout: WebcamCutout,
+}
+
+impl Default for LocalWebcamProfile {
+    fn default() -> Self {
+        Self {
+            device: None,
+            format_fourcc: None,
+            resolution: None,
+            framerate: None,
+            pos_x_pct: 0.72,
+            pos_y_pct: 0.65,
+            width_pct: 0.24,
+            cutout: WebcamCutout::default(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct VtuberOverlayLayout {
+    pub pos_x_pct: f32,
+    pub pos_y_pct: f32,
+    pub width_pct: f32,
+    pub aspect_preset: VtuberAspectPreset,
+    // Keep nested table after scalar fields for confy/TOML serialization.
+    pub cutout: WebcamCutout,
+}
+
+impl Default for VtuberOverlayLayout {
+    fn default() -> Self {
+        Self::default_framed()
+    }
+}
+
+impl VtuberOverlayLayout {
+    pub fn default_framed() -> Self {
+        Self {
+            pos_x_pct: 0.72,
+            pos_y_pct: 0.65,
+            width_pct: 0.24,
+            aspect_preset: VtuberAspectPreset::Wide16x9,
+            cutout: WebcamCutout::default(),
+        }
+    }
+
+    pub fn default_cutout() -> Self {
+        Self {
+            pos_x_pct: 0.76,
+            pos_y_pct: 0.48,
+            width_pct: 0.20,
+            aspect_preset: VtuberAspectPreset::Portrait3x4,
+            cutout: WebcamCutout::default(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct VtuberProfile {
+    pub model_path: Option<String>,
+    pub tracking_device: Option<String>,
+    pub tracking_format_fourcc: Option<String>,
+    pub tracking_resolution: Option<(u32, u32)>,
+    pub tracking_framerate: Option<u32>,
+    pub display_style: VtuberDisplayStyle,
+    pub background_kind: VtuberBackgroundKind,
+    pub background_color: [u8; 4],
+    pub background_image_path: Option<String>,
+    pub camera_zoom: f32,
+    pub camera_offset_y: f32,
+    pub smoothing: f32,
+    pub blink_sensitivity: f32,
+    pub mouth_sensitivity: f32,
+    pub movement_scale: f32,
+    pub mirror_tracking: bool,
+    pub mic_lipsync_assist: bool,
+    pub neutral_head_quat: Option<[f32; 4]>,
+    // Keep nested tables after scalar fields for confy/TOML serialization.
+    pub framed_layout: VtuberOverlayLayout,
+    pub cutout_layout: VtuberOverlayLayout,
+}
+
+impl Default for VtuberProfile {
+    fn default() -> Self {
+        Self::default_framed()
+    }
+}
+
+impl VtuberProfile {
+    pub fn default_framed() -> Self {
+        Self {
+            model_path: None,
+            tracking_device: None,
+            tracking_format_fourcc: None,
+            tracking_resolution: None,
+            tracking_framerate: None,
+            display_style: VtuberDisplayStyle::FramedWebcam,
+            background_kind: VtuberBackgroundKind::SolidColor,
+            background_color: [26, 24, 42, 255],
+            background_image_path: None,
+            camera_zoom: 1.0,
+            camera_offset_y: 0.0,
+            smoothing: 0.55,
+            blink_sensitivity: 1.0,
+            mouth_sensitivity: 1.15,
+            movement_scale: 1.0,
+            mirror_tracking: true,
+            mic_lipsync_assist: false,
+            neutral_head_quat: None,
+            framed_layout: VtuberOverlayLayout::default_framed(),
+            cutout_layout: VtuberOverlayLayout::default_cutout(),
+        }
+    }
+
+    pub fn default_cutout() -> Self {
+        Self {
+            display_style: VtuberDisplayStyle::BorderlessCutout,
+            camera_zoom: 1.05,
+            camera_offset_y: -0.02,
+            ..Self::default_framed()
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct VtuberConfig {
+    pub active_profile: String,
+    pub model_path: Option<String>,
+    pub tracking_device: Option<String>,
+    pub tracking_format_fourcc: Option<String>,
+    pub tracking_resolution: Option<(u32, u32)>,
+    pub tracking_framerate: Option<u32>,
+    pub display_style: VtuberDisplayStyle,
+    pub background_kind: VtuberBackgroundKind,
+    pub background_color: [u8; 4],
+    pub background_image_path: Option<String>,
+    pub camera_zoom: f32,
+    pub camera_offset_y: f32,
+    pub smoothing: f32,
+    pub blink_sensitivity: f32,
+    pub mouth_sensitivity: f32,
+    pub movement_scale: f32,
+    pub mirror_tracking: bool,
+    pub mic_lipsync_assist: bool,
+    pub neutral_head_quat: Option<[f32; 4]>,
+    // Keep nested tables/maps after scalar fields for confy/TOML serialization.
+    pub framed_layout: VtuberOverlayLayout,
+    pub cutout_layout: VtuberOverlayLayout,
+    pub profiles: BTreeMap<String, VtuberProfile>,
+}
+
+impl Default for VtuberConfig {
+    fn default() -> Self {
+        Self {
+            active_profile: VTUBER_PROFILE_FRAMED.to_string(),
+            model_path: None,
+            tracking_device: None,
+            tracking_format_fourcc: None,
+            tracking_resolution: None,
+            tracking_framerate: None,
+            display_style: VtuberDisplayStyle::FramedWebcam,
+            background_kind: VtuberBackgroundKind::SolidColor,
+            background_color: [26, 24, 42, 255],
+            background_image_path: None,
+            camera_zoom: 1.0,
+            camera_offset_y: 0.0,
+            smoothing: 0.55,
+            blink_sensitivity: 1.0,
+            mouth_sensitivity: 1.15,
+            movement_scale: 1.0,
+            mirror_tracking: true,
+            mic_lipsync_assist: false,
+            neutral_head_quat: None,
+            framed_layout: VtuberOverlayLayout::default_framed(),
+            cutout_layout: VtuberOverlayLayout::default_cutout(),
+            profiles: BTreeMap::new(),
+        }
+    }
+}
+
+impl VtuberConfig {
+    pub fn active_layout(&self) -> &VtuberOverlayLayout {
+        match self.display_style {
+            VtuberDisplayStyle::FramedWebcam => &self.framed_layout,
+            VtuberDisplayStyle::BorderlessCutout => &self.cutout_layout,
+        }
+    }
+
+    pub fn active_layout_mut(&mut self) -> &mut VtuberOverlayLayout {
+        match self.display_style {
+            VtuberDisplayStyle::FramedWebcam => &mut self.framed_layout,
+            VtuberDisplayStyle::BorderlessCutout => &mut self.cutout_layout,
+        }
+    }
+
+    pub fn snapshot_profile(&self) -> VtuberProfile {
+        VtuberProfile {
+            model_path: self.model_path.clone(),
+            tracking_device: self.tracking_device.clone(),
+            tracking_format_fourcc: self.tracking_format_fourcc.clone(),
+            tracking_resolution: self.tracking_resolution,
+            tracking_framerate: self.tracking_framerate,
+            display_style: self.display_style,
+            background_kind: self.background_kind,
+            background_color: self.background_color,
+            background_image_path: self.background_image_path.clone(),
+            camera_zoom: self.camera_zoom,
+            camera_offset_y: self.camera_offset_y,
+            smoothing: self.smoothing,
+            blink_sensitivity: self.blink_sensitivity,
+            mouth_sensitivity: self.mouth_sensitivity,
+            movement_scale: self.movement_scale,
+            mirror_tracking: self.mirror_tracking,
+            mic_lipsync_assist: self.mic_lipsync_assist,
+            neutral_head_quat: self.neutral_head_quat,
+            framed_layout: self.framed_layout.clone(),
+            cutout_layout: self.cutout_layout.clone(),
+        }
+    }
+
+    pub fn apply_profile(&mut self, p: &VtuberProfile) {
+        self.model_path = p.model_path.clone();
+        self.tracking_device = p.tracking_device.clone();
+        self.tracking_format_fourcc = p.tracking_format_fourcc.clone();
+        self.tracking_resolution = p.tracking_resolution;
+        self.tracking_framerate = p.tracking_framerate;
+        self.display_style = p.display_style;
+        self.background_kind = p.background_kind;
+        self.background_color = p.background_color;
+        self.background_image_path = p.background_image_path.clone();
+        self.camera_zoom = p.camera_zoom;
+        self.camera_offset_y = p.camera_offset_y;
+        self.smoothing = p.smoothing;
+        self.blink_sensitivity = p.blink_sensitivity;
+        self.mouth_sensitivity = p.mouth_sensitivity;
+        self.movement_scale = p.movement_scale;
+        self.mirror_tracking = p.mirror_tracking;
+        self.mic_lipsync_assist = p.mic_lipsync_assist;
+        self.neutral_head_quat = p.neutral_head_quat;
+        self.framed_layout = p.framed_layout.clone();
+        self.cutout_layout = p.cutout_layout.clone();
+    }
+
+    pub fn ensure_profiles(&mut self) {
+        if self.active_profile.trim().is_empty() {
+            self.active_profile = VTUBER_PROFILE_FRAMED.to_string();
+        }
+        if self.profiles.is_empty() {
+            let current = self.snapshot_profile();
+            self.profiles
+                .insert(self.active_profile.clone(), current.clone());
+            if !self.profiles.contains_key(VTUBER_PROFILE_FRAMED) {
+                let mut framed = VtuberProfile::default_framed();
+                framed.model_path = current.model_path.clone();
+                framed.tracking_device = current.tracking_device.clone();
+                framed.tracking_format_fourcc = current.tracking_format_fourcc.clone();
+                framed.tracking_resolution = current.tracking_resolution;
+                framed.tracking_framerate = current.tracking_framerate;
+                self.profiles
+                    .insert(VTUBER_PROFILE_FRAMED.to_string(), framed);
+            }
+            if !self.profiles.contains_key(VTUBER_PROFILE_CUTOUT) {
+                let mut cutout = VtuberProfile::default_cutout();
+                cutout.model_path = current.model_path;
+                cutout.tracking_device = current.tracking_device;
+                cutout.tracking_format_fourcc = current.tracking_format_fourcc;
+                cutout.tracking_resolution = current.tracking_resolution;
+                cutout.tracking_framerate = current.tracking_framerate;
+                self.profiles
+                    .insert(VTUBER_PROFILE_CUTOUT.to_string(), cutout);
+            }
+        } else if !self.profiles.contains_key(&self.active_profile) {
+            let fallback = if self.profiles.contains_key(VTUBER_PROFILE_FRAMED) {
+                VTUBER_PROFILE_FRAMED.to_string()
+            } else {
+                self.profiles.keys().next().unwrap().clone()
+            };
+            self.active_profile = fallback.clone();
+            if let Some(p) = self.profiles.get(&fallback).cloned() {
+                self.apply_profile(&p);
+            }
+        }
+    }
+
+    pub fn sync_active_profile(&mut self) {
+        self.ensure_profiles();
+        let snap = self.snapshot_profile();
+        self.profiles.insert(self.active_profile.clone(), snap);
+    }
+
+    pub fn switch_to_profile(&mut self, target_name: &str) -> bool {
+        self.ensure_profiles();
+        if self.active_profile == target_name {
+            return false;
+        }
+        let Some(target) = self.profiles.get(target_name).cloned() else {
+            return false;
+        };
+        self.sync_active_profile();
+        self.active_profile = target_name.to_string();
+        self.apply_profile(&target);
+        true
+    }
+
+    pub fn propagate_initial_model_path(&mut self, path: &str) {
+        self.ensure_profiles();
+        self.model_path = Some(path.to_string());
+        self.sync_active_profile();
+        for profile in self.profiles.values_mut() {
+            if profile.model_path.is_none() {
+                profile.model_path = Some(path.to_string());
+            }
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct WebcamConfig {
@@ -237,7 +629,20 @@ pub struct WebcamConfig {
     pub pos_x_pct: f32,
     pub pos_y_pct: f32,
     pub width_pct: f32,
+    #[serde(default)]
+    pub source_mode: WebcamSourceMode,
+    #[serde(default = "default_local_webcam_profile_name")]
+    pub local_active_profile: String,
+    // Keep nested tables/maps after scalar fields for confy/TOML serialization.
     pub cutout: WebcamCutout,
+    #[serde(default)]
+    pub local_profiles: BTreeMap<String, LocalWebcamProfile>,
+    #[serde(default)]
+    pub vtuber: VtuberConfig,
+}
+
+fn default_local_webcam_profile_name() -> String {
+    DEFAULT_LOCAL_WEBCAM_PROFILE.to_string()
 }
 
 impl Default for WebcamConfig {
@@ -251,8 +656,92 @@ impl Default for WebcamConfig {
             pos_x_pct: 0.72,
             pos_y_pct: 0.65,
             width_pct: 0.24,
+            source_mode: WebcamSourceMode::LocalCamera,
+            local_active_profile: DEFAULT_LOCAL_WEBCAM_PROFILE.to_string(),
             cutout: WebcamCutout::default(),
+            local_profiles: BTreeMap::new(),
+            vtuber: VtuberConfig::default(),
         }
+    }
+}
+
+impl WebcamConfig {
+    pub fn snapshot_local_profile(&self) -> LocalWebcamProfile {
+        LocalWebcamProfile {
+            device: self.device.clone(),
+            format_fourcc: self.format_fourcc.clone(),
+            resolution: self.resolution,
+            framerate: self.framerate,
+            pos_x_pct: self.pos_x_pct,
+            pos_y_pct: self.pos_y_pct,
+            width_pct: self.width_pct,
+            cutout: self.cutout.clone(),
+        }
+    }
+
+    pub fn apply_local_profile(&mut self, p: &LocalWebcamProfile) {
+        self.device = p.device.clone();
+        self.format_fourcc = p.format_fourcc.clone();
+        self.resolution = p.resolution;
+        self.framerate = p.framerate;
+        self.pos_x_pct = p.pos_x_pct;
+        self.pos_y_pct = p.pos_y_pct;
+        self.width_pct = p.width_pct;
+        self.cutout = p.cutout.clone();
+    }
+
+    pub fn ensure_profiles(&mut self) {
+        if self.local_active_profile.trim().is_empty() {
+            self.local_active_profile = DEFAULT_LOCAL_WEBCAM_PROFILE.to_string();
+        }
+        if self.local_profiles.is_empty() {
+            self.local_profiles.insert(
+                self.local_active_profile.clone(),
+                self.snapshot_local_profile(),
+            );
+        } else if !self.local_profiles.contains_key(&self.local_active_profile) {
+            let fallback = if self
+                .local_profiles
+                .contains_key(DEFAULT_LOCAL_WEBCAM_PROFILE)
+            {
+                DEFAULT_LOCAL_WEBCAM_PROFILE.to_string()
+            } else {
+                self.local_profiles.keys().next().unwrap().clone()
+            };
+            self.local_active_profile = fallback.clone();
+            if let Some(p) = self.local_profiles.get(&fallback).cloned() {
+                self.apply_local_profile(&p);
+            }
+        }
+        self.vtuber.ensure_profiles();
+    }
+
+    pub fn sync_active_local_profile(&mut self) {
+        self.ensure_profiles();
+        let snap = self.snapshot_local_profile();
+        self.local_profiles
+            .insert(self.local_active_profile.clone(), snap);
+    }
+
+    pub fn switch_to_local_profile(&mut self, target_name: &str) -> bool {
+        self.ensure_profiles();
+        if self.local_active_profile == target_name {
+            return false;
+        }
+        let Some(target) = self.local_profiles.get(target_name).cloned() else {
+            return false;
+        };
+        self.sync_active_local_profile();
+        self.local_active_profile = target_name.to_string();
+        self.apply_local_profile(&target);
+        true
+    }
+
+    pub fn synced_for_save(&self) -> Self {
+        let mut copy = self.clone();
+        copy.sync_active_local_profile();
+        copy.vtuber.sync_active_profile();
+        copy
     }
 }
 

@@ -14,6 +14,7 @@ mod steam_deck;
 mod twitch;
 mod ui;
 mod video;
+mod vtuber;
 
 use anyhow::Result;
 use eframe::egui;

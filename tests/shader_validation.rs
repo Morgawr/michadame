@@ -2,11 +2,20 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const EXPECTED_MIN_SHADERS: usize = 58;
+const EXPECTED_MIN_VTUBER_SHADERS: usize = 4;
 
 fn shaders_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("src")
         .join("video")
+        .join("shaders")
+}
+
+fn vtuber_shaders_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("vtuber")
+        .join("vrm")
         .join("shaders")
 }
 
@@ -136,6 +145,14 @@ fn test_glsl_shaders_compile() {
     assert!(
         total_count >= EXPECTED_MIN_SHADERS,
         "Expected at least {EXPECTED_MIN_SHADERS} validated shaders, found {total_count}"
+    );
+
+    let vtuber_dir = vtuber_shaders_dir();
+    let vtuber_count = validate_shaders_in_dir(&vtuber_dir, "glslangValidator")
+        .expect("VTuber shader validation failed");
+    assert!(
+        vtuber_count >= EXPECTED_MIN_VTUBER_SHADERS,
+        "Expected at least {EXPECTED_MIN_VTUBER_SHADERS} validated VTuber shaders, found {vtuber_count}"
     );
 }
 

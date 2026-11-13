@@ -366,86 +366,119 @@ fn run_webcam_worker(
                     WEBCAM_TARGET_WIDTH.load(Ordering::Relaxed),
                     WEBCAM_TARGET_HEIGHT.load(Ordering::Relaxed),
                 );
-                let needs_reinit = scaler.as_ref().is_none_or(|s| {
-                    decoded_frame.width() != s.input().width
-                        || decoded_frame.height() != s.input().height
-                        || decoded_frame.format() != s.input().format
-                        || dst_w != s.output().width
-                        || dst_h != s.output().height
-                });
-                if needs_reinit {
-                    match ffmpeg_next::software::scaling::context::Context::get(
-                        decoded_frame.format(),
-                        decoded_frame.width(),
-                        decoded_frame.height(),
-                        ffmpeg_next::format::Pixel::RGBA,
-                        dst_w,
-                        dst_h,
-                        ffmpeg_next::software::scaling::flag::Flags::FAST_BILINEAR,
-                    ) {
-                        Ok(new_scaler) => scaler = Some(new_scaler),
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to create scaler for webcam RGBA conversion: {}",
-                                e
-                            );
+                if scale_webcam_frame_to_rgba(
+                    &decoded_frame,
+                    dst_w,
+                    dst_h,
+                    &mut scaler,
+                    &mut rgba_frame,
+                ) {
+                    let w = rgba_frame.width();
+                    let h = rgba_frame.height();
+                    let stride = rgba_frame.stride(0);
+                    let row_bytes = (w * 4) as usize;
+                    let total_bytes = row_bytes * h as usize;
+                    let plane_data = rgba_frame.data(0);
+
+                    let mut tight_rgba = checkout_frame_buffer(total_bytes);
+                    if stride == row_bytes {
+                        let Some(src) = plane_data.get(..total_bytes) else {
+                            continue;
+                        };
+                        tight_rgba.copy_from_slice(src);
+                    } else {
+                        let mut copy_ok = true;
+                        for y in 0..h as usize {
+                            let start = y * stride;
+                            let end = start + row_bytes;
+                            if let Some(row) = plane_data.get(start..end) {
+                                let dst_start = y * row_bytes;
+                                tight_rgba[dst_start..dst_start + row_bytes].copy_from_slice(row);
+                            } else {
+                                copy_ok = false;
+                                break;
+                            }
+                        }
+                        if !copy_ok {
                             continue;
                         }
                     }
-                }
 
-                if let Some(ref mut active_scaler) = scaler {
-                    if active_scaler.run(&decoded_frame, &mut rgba_frame).is_ok() {
-                        let w = rgba_frame.width();
-                        let h = rgba_frame.height();
-                        let stride = rgba_frame.stride(0);
-                        let row_bytes = (w * 4) as usize;
-                        let total_bytes = row_bytes * h as usize;
-                        let plane_data = rgba_frame.data(0);
+                    let frame = Arc::new(WebcamFrame {
+                        width: w,
+                        height: h,
+                        rgba: tight_rgba,
+                    });
 
-                        let mut tight_rgba = checkout_frame_buffer(total_bytes);
-                        if stride == row_bytes {
-                            let Some(src) = plane_data.get(..total_bytes) else {
-                                continue;
-                            };
-                            tight_rgba.copy_from_slice(src);
-                        } else {
-                            let mut copy_ok = true;
-                            for y in 0..h as usize {
-                                let start = y * stride;
-                                let end = start + row_bytes;
-                                if let Some(row) = plane_data.get(start..end) {
-                                    let dst_start = y * row_bytes;
-                                    tight_rgba[dst_start..dst_start + row_bytes]
-                                        .copy_from_slice(row);
-                                } else {
-                                    copy_ok = false;
-                                    break;
-                                }
-                            }
-                            if !copy_ok {
-                                continue;
-                            }
-                        }
-
-                        let frame = Arc::new(WebcamFrame {
-                            width: w,
-                            height: h,
-                            rgba: tight_rgba,
-                        });
-
-                        // Drain stale queued frame if full so UI always displays the newest frame
-                        if !send_latest_webcam_frame(frame_sender, frame_drop_rx, frame) {
-                            return Ok(());
-                        }
-                        request_repaint();
+                    // Drain stale queued frame if full so UI always displays the newest frame
+                    if !send_latest_webcam_frame(frame_sender, frame_drop_rx, frame) {
+                        return Ok(());
                     }
+                    request_repaint();
                 }
             }
         }
     }
 
     Ok(())
+}
+
+fn scale_webcam_frame_to_rgba(
+    decoded_frame: &ffmpeg_next::frame::Video,
+    dst_w: u32,
+    dst_h: u32,
+    scaler: &mut Option<ffmpeg_next::software::scaling::context::Context>,
+    rgba_frame: &mut ffmpeg_next::frame::Video,
+) -> bool {
+    let needs_reinit = scaler.as_ref().is_none_or(|s| {
+        decoded_frame.width() != s.input().width
+            || decoded_frame.height() != s.input().height
+            || decoded_frame.format() != s.input().format
+            || dst_w != s.output().width
+            || dst_h != s.output().height
+    });
+    if needs_reinit {
+        match ffmpeg_next::software::scaling::context::Context::get(
+            decoded_frame.format(),
+            decoded_frame.width(),
+            decoded_frame.height(),
+            ffmpeg_next::format::Pixel::RGBA,
+            dst_w,
+            dst_h,
+            ffmpeg_next::software::scaling::flag::Flags::FAST_BILINEAR,
+        ) {
+            Ok(new_scaler) => {
+                *scaler = Some(new_scaler);
+                // Reset `rgba_frame` so `ffmpeg_next::software::scaling::Context::run` allocates
+                // a fresh buffer matching `(dst_w, dst_h)` instead of failing with `OutputChanged`.
+                *rgba_frame = ffmpeg_next::frame::Video::empty();
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create scaler for webcam RGBA conversion: {}", e);
+                return false;
+            }
+        }
+    }
+
+    if rgba_frame.width() != 0
+        && (rgba_frame.width() != dst_w
+            || rgba_frame.height() != dst_h
+            || rgba_frame.format() != ffmpeg_next::format::Pixel::RGBA)
+    {
+        *rgba_frame = ffmpeg_next::frame::Video::empty();
+    }
+
+    let Some(ref mut active_scaler) = scaler else {
+        return false;
+    };
+    match active_scaler.run(decoded_frame, rgba_frame) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!("Webcam sws_scale RGBA conversion failed: {}", e);
+            *rgba_frame = ffmpeg_next::frame::Video::empty();
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -574,5 +607,45 @@ mod tests {
         let latest = rx.try_recv().expect("latest frame must be present");
         assert_eq!(latest.rgba[0], 3, "channel must retain the newest frame");
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_dynamic_target_dimension_change_reinitializes_rgba_frame_without_freezing() {
+        let _ = ffmpeg_next::init();
+        let mut src =
+            ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::YUV420P, 1280, 720);
+        src.data_mut(0).fill(128);
+        src.data_mut(1).fill(128);
+        src.data_mut(2).fill(128);
+
+        let mut scaler = None;
+        let mut rgba_frame = ffmpeg_next::frame::Video::empty();
+
+        // Initial PiP target dimensions (e.g. cutout = 0)
+        assert!(scale_webcam_frame_to_rgba(
+            &src,
+            480,
+            270,
+            &mut scaler,
+            &mut rgba_frame,
+        ));
+        assert_eq!((rgba_frame.width(), rgba_frame.height()), (480, 270));
+
+        // User increases Cut Out (which increases desired_tex_w / desired_tex_h -> new dst_w/dst_h)
+        assert!(
+            scale_webcam_frame_to_rgba(&src, 640, 360, &mut scaler, &mut rgba_frame),
+            "changing target dimensions when applying Cut Out must not fail with OutputChanged"
+        );
+        assert_eq!((rgba_frame.width(), rgba_frame.height()), (640, 360));
+
+        // User shrinks overlay -> smaller dst_w/dst_h
+        assert!(scale_webcam_frame_to_rgba(
+            &src,
+            320,
+            180,
+            &mut scaler,
+            &mut rgba_frame,
+        ));
+        assert_eq!((rgba_frame.width(), rgba_frame.height()), (320, 180));
     }
 }

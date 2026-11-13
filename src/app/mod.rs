@@ -1427,10 +1427,12 @@ impl eframe::App for AppState {
             if let Some(fft) = self.fft_filter.as_ref() {
                 fft.lock().unwrap().destroy(gl);
             }
+            self.webcam.vtuber.gpu.lock().unwrap().destroy(gl);
         }
         self.stop_stream_resources();
         self.mic.active_stream = None;
         self.webcam.active_stream = None;
+        self.webcam.vtuber.stop_tracker();
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -1735,10 +1737,77 @@ impl eframe::App for AppState {
         repaint_requested |= self.poll_async_file_dialogs(ctx);
         repaint_requested |= self.poll_async_hardware_tasks(ctx);
 
+        if !beam_subframe_only {
+            if self.webcam.config.enabled
+                && self.webcam.config.source_mode == config::WebcamSourceMode::VtuberAvatar
+            {
+                self.webcam
+                    .vtuber
+                    .sync_assets_with_config(&self.webcam.config.vtuber, Some(ctx.clone()));
+            }
+            for note in self
+                .webcam
+                .vtuber
+                .poll_background_tasks(&self.webcam.config.vtuber)
+            {
+                match note {
+                    crate::vtuber::VtuberNotification::Info(m)
+                    | crate::vtuber::VtuberNotification::Success(m) => self.info(m),
+                    crate::vtuber::VtuberNotification::Error(m) => self.error(m),
+                }
+                repaint_requested = true;
+            }
+        }
+
         let dropped_file = ctx.input(|i| i.raw.dropped_files.first().and_then(|f| f.path.clone()));
         if let Some(path) = dropped_file.filter(|_| self.steam_deck.is_none()) {
-            self.start_video_file(&path, ctx);
-            repaint_requested = true;
+            let ext = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_ascii_lowercase());
+            let hover_pos = ctx.input(|i| i.pointer.hover_pos().or_else(|| i.pointer.latest_pos()));
+            let over_vtuber_rect = self
+                .webcam
+                .last_outer_rect
+                .zip(hover_pos)
+                .is_some_and(|(r, p)| r.contains(p));
+
+            if ext.as_deref() == Some("vrm") {
+                self.webcam.config.enabled = true;
+                self.webcam.config.source_mode = config::WebcamSourceMode::VtuberAvatar;
+                self.webcam
+                    .config
+                    .vtuber
+                    .propagate_initial_model_path(&path.to_string_lossy());
+                self.webcam
+                    .vtuber
+                    .sync_assets_with_config(&self.webcam.config.vtuber, Some(ctx.clone()));
+                config::save_config(self);
+                config::save_global_hardware_config(self);
+                self.sync_webcam_stream(Some(ctx));
+                repaint_requested = true;
+            } else if matches!(ext.as_deref(), Some("png" | "jpg" | "jpeg" | "webp"))
+                && self.webcam.config.enabled
+                && self.webcam.config.source_mode == config::WebcamSourceMode::VtuberAvatar
+                && (over_vtuber_rect || !self.ui.video_window_open)
+            {
+                self.webcam.config.vtuber.background_image_path =
+                    Some(path.to_string_lossy().to_string());
+                self.webcam.config.vtuber.background_kind =
+                    config::VtuberBackgroundKind::StaticImage;
+                self.webcam.config.vtuber.display_style = config::VtuberDisplayStyle::FramedWebcam;
+                self.webcam.config.vtuber.sync_active_profile();
+                self.webcam
+                    .vtuber
+                    .sync_assets_with_config(&self.webcam.config.vtuber, Some(ctx.clone()));
+                config::save_config(self);
+                config::save_global_hardware_config(self);
+                self.info("Updated VTuber background image.");
+                repaint_requested = true;
+            } else {
+                self.start_video_file(&path, ctx);
+                repaint_requested = true;
+            }
         }
 
         if let Some(rx) = &self.device_scan_receiver {
@@ -2051,6 +2120,7 @@ impl eframe::App for AppState {
                 || self.pc88.is_scanning_library
                 || self.capture_format_probing
                 || self.webcam_format_probing
+                || self.webcam.vtuber_format_probing
                 || self.usb_reset_in_progress
             {
                 ctx.request_repaint_after(std::time::Duration::from_millis(100));

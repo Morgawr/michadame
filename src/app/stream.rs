@@ -458,6 +458,37 @@ impl AppState {
         });
     }
 
+    pub fn open_vtuber_model_dialog(&mut self, ctx: &egui::Context) {
+        if self.steam_deck.is_some() {
+            return;
+        }
+        self.spawn_file_dialog(ctx, || {
+            rfd::FileDialog::new()
+                .add_filter("VRM 3D Avatar (.vrm)", &["vrm", "glb"])
+                .add_filter("All files", &["*"])
+                .set_title("Select VRM VTuber Model")
+                .pick_file()
+                .map(crate::app::models::AsyncFileDialogResult::VtuberModelFile)
+        });
+    }
+
+    pub fn open_vtuber_background_dialog(&mut self, ctx: &egui::Context) {
+        if self.steam_deck.is_some() {
+            return;
+        }
+        self.spawn_file_dialog(ctx, || {
+            rfd::FileDialog::new()
+                .add_filter(
+                    "Background Image (.png/.jpg/.webp)",
+                    &["png", "jpg", "jpeg", "webp"],
+                )
+                .add_filter("All files", &["*"])
+                .set_title("Select VTuber Background Image")
+                .pick_file()
+                .map(crate::app::models::AsyncFileDialogResult::VtuberBackgroundImage)
+        });
+    }
+
     pub fn poll_async_file_dialogs(&mut self, ctx: &egui::Context) -> bool {
         let Some(picked) = self
             .file_dialog_receiver
@@ -484,6 +515,29 @@ impl AppState {
             }
             crate::app::models::AsyncFileDialogResult::Pc88Media(slot, path) => {
                 self.apply_picked_pc88_media(slot, path, Some(ctx.clone()));
+            }
+            crate::app::models::AsyncFileDialogResult::VtuberModelFile(path) => {
+                self.webcam
+                    .config
+                    .vtuber
+                    .propagate_initial_model_path(&path.to_string_lossy());
+                self.webcam
+                    .vtuber
+                    .sync_assets_with_config(&self.webcam.config.vtuber, Some(ctx.clone()));
+                crate::config::save_config(self);
+                crate::config::save_global_hardware_config(self);
+            }
+            crate::app::models::AsyncFileDialogResult::VtuberBackgroundImage(path) => {
+                self.webcam.config.vtuber.background_image_path =
+                    Some(path.to_string_lossy().to_string());
+                self.webcam.config.vtuber.background_kind =
+                    crate::config::VtuberBackgroundKind::StaticImage;
+                self.webcam.config.vtuber.sync_active_profile();
+                self.webcam
+                    .vtuber
+                    .sync_assets_with_config(&self.webcam.config.vtuber, Some(ctx.clone()));
+                crate::config::save_config(self);
+                crate::config::save_global_hardware_config(self);
             }
         }
         true
@@ -648,6 +702,49 @@ impl AppState {
         }
     }
 
+    pub fn request_vtuber_formats_probe(
+        &mut self,
+        notify_ctx: Option<egui::Context>,
+        select_first_defaults: bool,
+        announce_err: bool,
+    ) {
+        let Some(dev) = self.webcam.config.vtuber.tracking_device.clone() else {
+            self.webcam.vtuber_format_probing = false;
+            return;
+        };
+        self.webcam.vtuber_formats_probed_for_device = Some(dev.clone());
+        self.webcam.vtuber_format_probe_gen = self.webcam.vtuber_format_probe_gen.wrapping_add(1);
+        let generation = self.webcam.vtuber_format_probe_gen;
+        self.webcam.vtuber_format_probing = true;
+        let tx = self.v4l2_format_probe_tx.clone();
+        let target = crate::app::models::V4l2FormatProbeTarget::VtuberTracker {
+            select_first_defaults,
+            announce_err,
+        };
+        let spawned = std::thread::Builder::new()
+            .name("vtuber-format-probe".to_string())
+            .spawn(move || {
+                let formats = devices::video::find_video_formats(&dev).map_err(|e| e.to_string());
+                let _ = tx.send(crate::app::models::V4l2FormatProbeResult {
+                    generation,
+                    device: dev,
+                    target,
+                    formats,
+                });
+                if let Some(ctx) = notify_ctx {
+                    ctx.request_repaint();
+                }
+            });
+        if let Err(e) = spawned {
+            self.webcam.vtuber_format_probing = false;
+            if announce_err {
+                self.error(format!(
+                    "Failed to spawn tracking camera format scanner: {e}"
+                ));
+            }
+        }
+    }
+
     pub fn poll_async_hardware_tasks(&mut self, ctx: &egui::Context) -> bool {
         let mut handled = false;
 
@@ -789,9 +886,13 @@ impl AppState {
                                             first_res.framerates.first().copied();
                                     }
                                 }
+                                self.webcam.config.sync_active_local_profile();
                                 crate::config::save_config(self);
                                 crate::config::save_global_hardware_config(self);
-                                if self.webcam.config.enabled {
+                                if self.webcam.config.enabled
+                                    && self.webcam.config.source_mode
+                                        == crate::config::WebcamSourceMode::LocalCamera
+                                {
                                     self.sync_webcam_stream(Some(ctx));
                                 }
                             } else {
@@ -805,7 +906,10 @@ impl AppState {
                                         self.webcam.selected_format_index = idx;
                                     }
                                 }
-                                if self.webcam.config.enabled && self.webcam.active_stream.is_none()
+                                if self.webcam.config.enabled
+                                    && self.webcam.config.source_mode
+                                        == crate::config::WebcamSourceMode::LocalCamera
+                                    && self.webcam.active_stream.is_none()
                                 {
                                     self.sync_webcam_stream(Some(ctx));
                                 }
@@ -814,6 +918,72 @@ impl AppState {
                         Err(e) => {
                             if announce_err {
                                 self.error(format!("Failed to scan webcam formats: {e}"));
+                            }
+                        }
+                    }
+                }
+                crate::app::models::V4l2FormatProbeTarget::VtuberTracker {
+                    select_first_defaults,
+                    announce_err,
+                } => {
+                    if res.generation != self.webcam.vtuber_format_probe_gen
+                        || self.webcam.config.vtuber.tracking_device.as_deref()
+                            != Some(res.device.as_str())
+                    {
+                        continue;
+                    }
+                    self.webcam.vtuber_format_probing = false;
+                    handled = true;
+                    match res.formats {
+                        Ok(formats) => {
+                            self.webcam.vtuber_supported_formats = formats;
+                            if select_first_defaults {
+                                if let Some(first_fmt) =
+                                    self.webcam.vtuber_supported_formats.first()
+                                {
+                                    self.webcam.config.vtuber.tracking_format_fourcc =
+                                        Some(first_fmt.fourcc.clone());
+                                    if let Some(first_res) = first_fmt.resolutions.first() {
+                                        self.webcam.config.vtuber.tracking_resolution =
+                                            Some((first_res.width, first_res.height));
+                                        self.webcam.config.vtuber.tracking_framerate =
+                                            first_res.framerates.first().copied();
+                                    }
+                                }
+                                self.webcam.config.vtuber.sync_active_profile();
+                                crate::config::save_config(self);
+                                crate::config::save_global_hardware_config(self);
+                                if self.webcam.config.enabled
+                                    && self.webcam.config.source_mode
+                                        == crate::config::WebcamSourceMode::VtuberAvatar
+                                {
+                                    self.sync_webcam_stream(Some(ctx));
+                                }
+                            } else {
+                                if let Some(saved_fourcc) =
+                                    &self.webcam.config.vtuber.tracking_format_fourcc
+                                {
+                                    if let Some(idx) = self
+                                        .webcam
+                                        .vtuber_supported_formats
+                                        .iter()
+                                        .position(|f| f.fourcc == *saved_fourcc)
+                                    {
+                                        self.webcam.vtuber_selected_format_index = idx;
+                                    }
+                                }
+                                if self.webcam.config.enabled
+                                    && self.webcam.config.source_mode
+                                        == crate::config::WebcamSourceMode::VtuberAvatar
+                                    && self.webcam.active_stream.is_none()
+                                {
+                                    self.sync_webcam_stream(Some(ctx));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            if announce_err {
+                                self.error(format!("Failed to scan tracking camera formats: {e}"));
                             }
                         }
                     }
@@ -1183,61 +1353,143 @@ impl AppState {
                 self.webcam.frame_receiver = None;
                 self.webcam.latest_frame = None;
             }
+            self.webcam.stream_routed_to_vtuber = false;
+            self.webcam.vtuber.stop_tracker();
             return;
         }
 
-        let device_name = match &self.webcam.config.device {
-            Some(dev) if !dev.is_empty() => dev.clone(),
-            _ => {
-                self.webcam.active_stream = None;
-                self.webcam.frame_receiver = None;
-                self.webcam.latest_frame = None;
+        let want_vtuber =
+            self.webcam.config.source_mode == crate::config::WebcamSourceMode::VtuberAvatar;
+        if want_vtuber {
+            self.webcam
+                .vtuber
+                .sync_assets_with_config(&self.webcam.config.vtuber, ctx.cloned());
+            crate::devices::webcam::set_webcam_target_dimensions(640, 480);
+        } else {
+            self.webcam.vtuber.stop_tracker();
+        }
+
+        let (device_name, format, resolution, framerate) = if want_vtuber {
+            let dev = match &self.webcam.config.vtuber.tracking_device {
+                Some(d) if !d.is_empty() => d.clone(),
+                _ => {
+                    self.webcam.active_stream = None;
+                    self.webcam.frame_receiver = None;
+                    self.webcam.latest_frame = None;
+                    self.webcam.stream_routed_to_vtuber = false;
+                    self.webcam.vtuber.stop_tracker();
+                    return;
+                }
+            };
+
+            if self.webcam.vtuber_format_probing
+                && self.webcam.vtuber_supported_formats.is_empty()
+                && self.webcam.config.vtuber.tracking_format_fourcc.is_none()
+            {
                 return;
             }
-        };
 
-        if self.webcam_format_probing
-            && self.webcam.supported_formats.is_empty()
-            && self.webcam.config.format_fourcc.is_none()
-        {
-            return;
-        }
+            if let Some(ref saved_fourcc) = self.webcam.config.vtuber.tracking_format_fourcc {
+                if let Some(idx) = self
+                    .webcam
+                    .vtuber_supported_formats
+                    .iter()
+                    .position(|f| &f.fourcc == saved_fourcc)
+                {
+                    self.webcam.vtuber_selected_format_index = idx;
+                }
+            }
 
-        if let Some(ref saved_fourcc) = self.webcam.config.format_fourcc {
-            if let Some(idx) = self
+            let fmt = if let Some(f) = self
+                .webcam
+                .vtuber_supported_formats
+                .get(self.webcam.vtuber_selected_format_index)
+            {
+                f.clone()
+            } else if let Some(ref saved_fourcc) = self.webcam.config.vtuber.tracking_format_fourcc
+            {
+                crate::video::types::VideoFormat {
+                    fourcc: saved_fourcc.clone(),
+                    description: saved_fourcc.clone(),
+                    resolutions: Vec::new(),
+                }
+            } else {
+                crate::video::types::VideoFormat::default()
+            };
+
+            let res = self
+                .webcam
+                .config
+                .vtuber
+                .tracking_resolution
+                .unwrap_or((640, 480));
+            let fps = self.webcam.config.vtuber.tracking_framerate.unwrap_or(30);
+            (dev, fmt, res, fps)
+        } else {
+            let dev = match &self.webcam.config.device {
+                Some(d) if !d.is_empty() => d.clone(),
+                _ => {
+                    self.webcam.active_stream = None;
+                    self.webcam.frame_receiver = None;
+                    self.webcam.latest_frame = None;
+                    self.webcam.stream_routed_to_vtuber = false;
+                    self.webcam.vtuber.stop_tracker();
+                    return;
+                }
+            };
+
+            if self.webcam_format_probing
+                && self.webcam.supported_formats.is_empty()
+                && self.webcam.config.format_fourcc.is_none()
+            {
+                return;
+            }
+
+            if let Some(ref saved_fourcc) = self.webcam.config.format_fourcc {
+                if let Some(idx) = self
+                    .webcam
+                    .supported_formats
+                    .iter()
+                    .position(|f| &f.fourcc == saved_fourcc)
+                {
+                    self.webcam.selected_format_index = idx;
+                }
+            }
+
+            let fmt = if let Some(f) = self
                 .webcam
                 .supported_formats
-                .iter()
-                .position(|f| &f.fourcc == saved_fourcc)
+                .get(self.webcam.selected_format_index)
             {
-                self.webcam.selected_format_index = idx;
-            }
-        }
+                f.clone()
+            } else if let Some(ref saved_fourcc) = self.webcam.config.format_fourcc {
+                crate::video::types::VideoFormat {
+                    fourcc: saved_fourcc.clone(),
+                    description: saved_fourcc.clone(),
+                    resolutions: Vec::new(),
+                }
+            } else {
+                crate::video::types::VideoFormat::default()
+            };
 
-        let format = if let Some(fmt) = self
-            .webcam
-            .supported_formats
-            .get(self.webcam.selected_format_index)
-        {
-            fmt.clone()
-        } else if let Some(ref saved_fourcc) = self.webcam.config.format_fourcc {
-            crate::video::types::VideoFormat {
-                fourcc: saved_fourcc.clone(),
-                description: saved_fourcc.clone(),
-                resolutions: Vec::new(),
-            }
-        } else {
-            crate::video::types::VideoFormat::default()
+            let res = self.webcam.config.resolution.unwrap_or((640, 480));
+            let fps = self.webcam.config.framerate.unwrap_or(30);
+            (dev, fmt, res, fps)
         };
 
-        let resolution = self.webcam.config.resolution.unwrap_or((640, 480));
-        let framerate = self.webcam.config.framerate.unwrap_or(30);
+        if want_vtuber {
+            if let Err(e) = self.webcam.vtuber.ensure_tracker_running(ctx.cloned()) {
+                self.error(format!("Failed to start VTuber face tracker: {e}"));
+                return;
+            }
+        }
 
         if let Some(stream) = &self.webcam.active_stream {
             if stream.device == device_name
                 && stream.format_fourcc == format.fourcc
                 && stream.resolution == resolution
                 && stream.framerate == framerate
+                && self.webcam.stream_routed_to_vtuber == want_vtuber
             {
                 return;
             }
@@ -1251,10 +1503,19 @@ impl AppState {
         self.webcam.active_stream = None;
         self.webcam.frame_receiver = None;
         self.webcam.latest_frame = None;
+        self.webcam.stream_routed_to_vtuber = false;
 
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        let drop_rx = rx.clone();
-        self.webcam.frame_receiver = Some(rx);
+        let (tx, drop_rx) = if want_vtuber {
+            let Some(tracker) = &self.webcam.vtuber.tracker_handle else {
+                return;
+            };
+            (tracker.frame_tx.clone(), tracker.frame_drop_rx.clone())
+        } else {
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            let drop_rx = rx.clone();
+            self.webcam.frame_receiver = Some(rx);
+            (tx, drop_rx)
+        };
 
         let repaint_ctx = ctx.cloned();
         let request_repaint: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
@@ -1274,8 +1535,15 @@ impl AppState {
             prev_thread,
         ) {
             Ok(handle) => {
-                self.info(format!("Webcam capture started for {device_name}."));
+                if want_vtuber {
+                    self.info(format!(
+                        "VTuber face tracking camera started ({device_name})."
+                    ));
+                } else {
+                    self.info(format!("Webcam capture started for {device_name}."));
+                }
                 self.webcam.active_stream = Some(handle);
+                self.webcam.stream_routed_to_vtuber = want_vtuber;
             }
             Err(e) => {
                 self.error(format!("Failed to start webcam ({device_name}): {e}"));
