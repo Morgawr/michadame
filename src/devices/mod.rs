@@ -4,6 +4,7 @@ pub mod filter_type;
 pub mod mic;
 pub mod usb;
 pub mod video;
+pub mod voice_changer;
 pub mod webcam;
 use anyhow::Result;
 

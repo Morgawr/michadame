@@ -337,6 +337,7 @@ fn persisted_desktop_features_cannot_activate_in_deck_mode() {
     let mut state = deck_state();
     let mut cfg = config::MichadameConfig::default();
     cfg.mic.enabled = true;
+    cfg.mic.voice_changer.enabled = true;
     cfg.webcam.enabled = true;
     cfg.twitch.channel = "example".into();
     cfg.twitch.chat_overlay_enabled = true;
@@ -344,6 +345,7 @@ fn persisted_desktop_features_cannot_activate_in_deck_mode() {
     cfg.reset_usb_on_startup = Some(true);
     config::apply_config(&mut state, &cfg);
     assert!(!state.mic.config.enabled);
+    assert!(!state.mic.config.voice_changer.enabled);
     assert!(!state.webcam.config.enabled);
     assert!(!state.twitch.config.chat_overlay_enabled);
     assert!(!state.twitch.config.niconico_enabled);

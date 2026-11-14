@@ -315,20 +315,55 @@ impl CompressorFilter {
 }
 
 pub struct MicDspPipeline {
+    sample_rate_hz: u32,
     gate: NoiseGateFilter,
+    pre_denoiser: Option<crate::devices::dsp_filter::RnnoiseStream>,
+    pre_denoiser_active: bool,
+    vc_bridge: Option<crate::devices::voice_changer::worker::VoiceChangerBridge>,
+    vc_telemetry: Arc<crate::devices::voice_changer::VoiceChangerTelemetry>,
     compressor: CompressorFilter,
 }
 
 impl MicDspPipeline {
+    #[allow(dead_code)]
     pub fn new(sample_rate: f32) -> Self {
+        Self::with_telemetry(
+            sample_rate,
+            Arc::new(crate::devices::voice_changer::VoiceChangerTelemetry::new()),
+        )
+    }
+
+    pub fn with_telemetry(
+        sample_rate: f32,
+        vc_telemetry: Arc<crate::devices::voice_changer::VoiceChangerTelemetry>,
+    ) -> Self {
         Self {
+            sample_rate_hz: sample_rate.round().max(8000.0) as u32,
             gate: NoiseGateFilter::new(sample_rate),
+            pre_denoiser: None,
+            pre_denoiser_active: false,
+            vc_bridge: None,
+            vc_telemetry,
             compressor: CompressorFilter::new(sample_rate),
         }
     }
 
+    /// Returns current algorithmic lookahead/chunk delay in frames at capture sample rate
+    /// (`0` when Voice Changer is disabled).
+    pub fn voice_changer_delay_frames(&self) -> i64 {
+        let Some(bridge) = &self.vc_bridge else {
+            return 0;
+        };
+        let rnnoise_delay = if self.pre_denoiser_active {
+            crate::devices::dsp_filter::RnnoiseStream::FRAME_SIZE as i64
+        } else {
+            0
+        };
+        bridge.delay_frames() as i64 + rnnoise_delay
+    }
+
     /// Process interleaved audio samples through the pipeline in order:
-    /// Raw Input -> Noise Gate -> Gain -> Compressor -> Master Volume
+    /// Raw Input -> Noise Gate -> [Optional Pre-Denoise] -> Gain -> [Optional Voice Changer] -> Compressor -> Master Volume
     pub fn process_interleaved(
         &mut self,
         samples: &mut [f32],
@@ -362,27 +397,54 @@ impl MicDspPipeline {
             );
         }
 
-        // Process frame by frame
-        for frame in samples.chunks_exact_mut(num_ch) {
-            // For multi-channel, compute max level to drive envelope consistently
-            let frame_max = frame.iter().fold(0.0f32, |acc, &s| acc.max(s.abs()));
-
-            // 1. Noise Gate
-            if config.noise_gate.enabled {
+        // Pre-Voice-Changer stage: 1. Noise Gate
+        if config.noise_gate.enabled {
+            for frame in samples.chunks_exact_mut(num_ch) {
+                let frame_max = frame.iter().fold(0.0f32, |acc, &s| acc.max(s.abs()));
                 let gate_gain = self.gate.compute_gain(frame_max);
                 for s in frame.iter_mut() {
                     *s *= gate_gain;
                 }
             }
+        }
 
-            // 2. Gain
-            if config.gain.enabled {
-                for s in frame.iter_mut() {
-                    *s *= gain_linear;
-                }
+        // Optional neural pre-cleaning (`nnnoiseless`) before feature extraction
+        if config.voice_changer.enabled && config.voice_changer.current.pre_denoise {
+            let denoiser = self.pre_denoiser.get_or_insert_with(|| {
+                crate::devices::dsp_filter::RnnoiseStream::with_buffer_size(1024)
+            });
+            denoiser.process_interleaved(samples, num_ch);
+            self.pre_denoiser_active = true;
+        } else {
+            self.pre_denoiser_active = false;
+            if !config.voice_changer.enabled {
+                self.pre_denoiser = None;
             }
+        }
 
-            // 3. Compressor
+        // 2. Input Gain
+        if config.gain.enabled {
+            for s in samples.iter_mut() {
+                *s *= gain_linear;
+            }
+        }
+
+        // 3. Real-Time Neural Voice Changer (zero-delay direct bypass when disabled)
+        if config.voice_changer.enabled {
+            let bridge = self.vc_bridge.get_or_insert_with(|| {
+                crate::devices::voice_changer::worker::VoiceChangerBridge::spawn(
+                    self.sample_rate_hz,
+                    &config.voice_changer,
+                    Arc::clone(&self.vc_telemetry),
+                )
+            });
+            bridge.process_interleaved(samples, num_ch, &config.voice_changer);
+        } else if self.vc_bridge.is_some() {
+            self.vc_bridge = None;
+        }
+
+        // Post-Voice-Changer stage: 4. Compressor & 5. Master Mic Volume
+        for frame in samples.chunks_exact_mut(num_ch) {
             if config.compressor.enabled {
                 let gated_gain_max = frame.iter().fold(0.0f32, |acc, &s| acc.max(s.abs()));
                 let comp_gain = self.compressor.compute_gain(gated_gain_max);
@@ -391,8 +453,7 @@ impl MicDspPipeline {
                 }
             }
 
-            // 4. Master Mic Volume (kept within full scale so the mic can never
-            // overdrive the replay mix or the monitor output)
+            // Kept within full scale so the mic can never overdrive the replay mix or monitor output
             for s in frame.iter_mut() {
                 *s = (*s * vol).clamp(-1.0, 1.0);
             }
@@ -637,6 +698,7 @@ pub fn start_mic_stream(
     current_level_db: Arc<AtomicU32>,
     peak_level_db: Arc<AtomicU32>,
     is_clipping: Arc<AtomicBool>,
+    vc_telemetry: Arc<crate::devices::voice_changer::VoiceChangerTelemetry>,
     replay: Arc<crate::replay::AudioTap>,
 ) -> Result<MicStreamHandle> {
     let stop = Arc::new(AtomicBool::new(false));
@@ -675,6 +737,7 @@ pub fn start_mic_stream(
                 level_clone,
                 peak_clone,
                 clipping_clone,
+                vc_telemetry,
                 &monitor_guard_clone,
                 &mut monitor_producer,
                 replay,
@@ -744,6 +807,7 @@ fn run_mic_capture_worker(
     current_level_db: Arc<AtomicU32>,
     peak_level_db: Arc<AtomicU32>,
     is_clipping: Arc<AtomicBool>,
+    vc_telemetry: Arc<crate::devices::voice_changer::VoiceChangerTelemetry>,
     monitor_guard: &Arc<std::sync::Mutex<Option<MonitorPlayback>>>,
     monitor_producer: &mut Option<Producer<f32>>,
     replay: Arc<crate::replay::AudioTap>,
@@ -859,7 +923,7 @@ fn run_mic_capture_worker(
             sample_format_str
         );
 
-        let mut pipeline = MicDspPipeline::new(rate as f32);
+        let mut pipeline = MicDspPipeline::with_telemetry(rate as f32, Arc::clone(&vc_telemetry));
         let buffer_samples = period_frames as usize * channels as usize;
         let mut f32_buf = vec![0.0f32; buffer_samples];
         // Conversion buffers and the config snapshot are reused across periods
@@ -1046,11 +1110,12 @@ fn run_mic_capture_worker(
                         last_monitor_init_attempt = None;
                     }
 
-                    // Submit to replay buffer
+                    // Submit to replay buffer (compensating for ALSA hardware + Voice Changer algorithmic delay)
                     if replay.is_enabled() {
                         let delay = pcm.delay().unwrap_or(0).max(0);
+                        let dsp_delay = pipeline.voice_changer_delay_frames();
                         let at = crate::replay::now_us()
-                            - (delay + frames as i64) * 1_000_000 / rate as i64;
+                            - (delay + frames as i64 + dsp_delay) * 1_000_000 / rate as i64;
                         replay.submit_mic(active_buf, rate, channels, at);
                     }
                 }
@@ -1260,5 +1325,71 @@ mod tests {
         // Stopping source_stop ends iteration cleanly with None
         source_stop.store(true, Ordering::Relaxed);
         assert_eq!(source.next(), None);
+    }
+
+    #[test]
+    fn test_mic_dsp_voice_changer_bypass_and_delay_compensation() {
+        let mut pipeline = MicDspPipeline::new(48_000.0);
+        let mut config = MicConfig::default();
+        config.noise_gate.enabled = false;
+        config.gain.enabled = false;
+        config.compressor.enabled = false;
+        config.volume = 1.0;
+
+        // Disabled -> zero delay and direct bypass
+        assert_eq!(pipeline.voice_changer_delay_frames(), 0);
+        let mut dry = vec![0.42f32; 128];
+        pipeline.process_interleaved(&mut dry, 1, &config);
+        assert!((dry[0] - 0.42).abs() < 1e-6);
+        assert_eq!(pipeline.voice_changer_delay_frames(), 0);
+
+        // Enabled with unready custom path -> reports nominal delay and passes delayed dry audio
+        config.voice_changer.enabled = true;
+        config.voice_changer.current.pre_denoise = false;
+        config.voice_changer.current.chunk_ms = 60;
+        config.voice_changer.current.dry_wet = 1.0;
+        config.voice_changer.current.model_kind = crate::config::VoiceModelKind::CustomOnnx;
+        config.voice_changer.current.custom_model_path =
+            "/nonexistent/michadame_test_voice.onnx".to_string();
+
+        let expected_vc_delay =
+            crate::devices::voice_changer::worker::compute_nominal_delay_frames(48_000, 60);
+        let total_test_frames = expected_vc_delay + 512;
+        let mut signal: Vec<f32> = (0..total_test_frames)
+            .map(|i| ((i as f32) * 0.05).sin() * 0.5)
+            .collect();
+        let orig = signal.clone();
+
+        pipeline.process_interleaved(&mut signal, 1, &config);
+        assert_eq!(
+            pipeline.voice_changer_delay_frames(),
+            expected_vc_delay as i64
+        );
+        // After `expected_vc_delay` frames, the phase-aligned dry fallback matches input
+        for i in 0..256 {
+            let got = signal[expected_vc_delay + i];
+            let exp = orig[i];
+            assert!(
+                (got - exp).abs() < 1e-5,
+                "Mismatch at delayed frame {i}: got {got}, expected {exp}"
+            );
+        }
+
+        // Enabling pre_denoise adds RnnoiseStream::FRAME_SIZE (480) to delay compensation
+        config.voice_changer.current.pre_denoise = true;
+        let mut block = vec![0.1f32; 512];
+        pipeline.process_interleaved(&mut block, 1, &config);
+        assert_eq!(
+            pipeline.voice_changer_delay_frames(),
+            expected_vc_delay as i64 + crate::devices::dsp_filter::RnnoiseStream::FRAME_SIZE as i64
+        );
+
+        // Disabling tears down bridge and resets delay compensation to 0
+        config.voice_changer.enabled = false;
+        let mut tail = vec![0.25f32; 64];
+        pipeline.process_interleaved(&mut tail, 1, &config);
+        assert_eq!(pipeline.voice_changer_delay_frames(), 0);
+        assert!(pipeline.vc_bridge.is_none());
+        assert!((tail[0] - 0.25).abs() < 1e-6);
     }
 }

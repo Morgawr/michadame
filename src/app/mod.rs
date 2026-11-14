@@ -1757,6 +1757,14 @@ impl eframe::App for AppState {
                 }
                 repaint_requested = true;
             }
+            for (is_err, msg) in self.mic.poll_vc_sync() {
+                if is_err {
+                    self.error(msg);
+                } else {
+                    self.info(msg);
+                }
+                repaint_requested = true;
+            }
         }
 
         let dropped_file = ctx.input(|i| i.raw.dropped_files.first().and_then(|f| f.path.clone()));

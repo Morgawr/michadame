@@ -180,6 +180,369 @@ impl Default for CompressorConfig {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum VoiceModelId {
+    #[default]
+    TsukuyomiChan,
+    Amitaro,
+    KikotoKurage,
+    KikotoMahiro,
+    TokinaShigure,
+}
+
+impl VoiceModelId {
+    pub const ALL: [Self; 5] = [
+        Self::TsukuyomiChan,
+        Self::Amitaro,
+        Self::KikotoKurage,
+        Self::KikotoMahiro,
+        Self::TokinaShigure,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::TsukuyomiChan => "Tsukuyomi-chan (Girl — Calm / Clear)",
+            Self::Amitaro => "Amitaro (Girl — Cute / Bright Anime)",
+            Self::KikotoKurage => "Kikoto Kurage (Girl — Soft / Gentle)",
+            Self::KikotoMahiro => "Kikoto Mahiro (Boyish / Androgynous)",
+            Self::TokinaShigure => "Tokina Shigure (Cool / Mature Male)",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::TsukuyomiChan => "Tsukuyomi-chan",
+            Self::Amitaro => "Amitaro",
+            Self::KikotoKurage => "Kikoto Kurage",
+            Self::KikotoMahiro => "Kikoto Mahiro",
+            Self::TokinaShigure => "Tokina Shigure",
+        }
+    }
+
+    pub fn filename(self) -> &'static str {
+        match self {
+            Self::TsukuyomiChan => "tsukuyomi_v2_40k_e100_float.onnx",
+            Self::Amitaro => "amitaro_v2_40k_e100_float.onnx",
+            Self::KikotoKurage => "kikoto_kurage_v2_40k_e100_float.onnx",
+            Self::KikotoMahiro => "kikoto_mahiro_v2_40k_float.onnx",
+            Self::TokinaShigure => "tokina_shigure_v2_40k_e100_float.onnx",
+        }
+    }
+
+    pub fn credit_notice(self) -> &'static str {
+        match self {
+            Self::TsukuyomiChan => {
+                "CV: Rei Yumesaki (Tsukuyomi-chan Corpus / Project Tsukuyomi-chan). Follow character terms when publishing."
+            }
+            Self::Amitaro => {
+                "Voice Material: Amitaro's Voice Material Workshop (amitaro.net). Follow workshop credit terms when publishing."
+            }
+            Self::KikotoKurage => {
+                "Character Voice: Kikoto Kurage (istoria). Follow character usage guidelines when streaming or publishing."
+            }
+            Self::KikotoMahiro => {
+                "Character Voice: Kikoto Mahiro (istoria). Follow character usage guidelines when streaming or publishing."
+            }
+            Self::TokinaShigure => {
+                "Character Voice: Tokina Shigure. Follow character usage guidelines when streaming or publishing."
+            }
+        }
+    }
+
+    pub fn default_pitch_shift(self) -> f32 {
+        match self {
+            Self::TsukuyomiChan | Self::Amitaro | Self::KikotoKurage => 12.0,
+            Self::KikotoMahiro => 6.0,
+            Self::TokinaShigure => -2.0,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum VoiceModelKind {
+    #[default]
+    BuiltIn,
+    CustomOnnx,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum VcExecutionProvider {
+    #[default]
+    AutoGpu,
+    WebGpuVulkan,
+    RocmMiGraphX,
+    Cuda,
+    CpuOnly,
+}
+
+impl VcExecutionProvider {
+    pub const ALL: [Self; 5] = [
+        Self::AutoGpu,
+        Self::WebGpuVulkan,
+        Self::RocmMiGraphX,
+        Self::Cuda,
+        Self::CpuOnly,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::AutoGpu => "Auto (GPU -> CPU Fallback)",
+            Self::WebGpuVulkan => "GPU — Vulkan / WebGPU",
+            Self::RocmMiGraphX => "GPU — AMD ROCm / MIGraphX",
+            Self::Cuda => "GPU — NVIDIA CUDA",
+            Self::CpuOnly => "CPU Only (Multi-Thread)",
+        }
+    }
+}
+
+pub const VOICE_CHANGER_DEFAULT_PRESET: &str = "Girl — Calm / Clear (Tsukuyomi)";
+pub const VALID_VC_CHUNK_MS: [u32; 4] = [40, 60, 80, 120];
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct VoiceChangerPreset {
+    // Keep all fields scalar for clean TOML table serialization.
+    pub model_kind: VoiceModelKind,
+    pub builtin_model: VoiceModelId,
+    pub custom_model_path: String,
+    pub pitch_shift_semitones: f32,
+    pub formant_shift_semitones: f32,
+    pub protect: f32,
+    pub silence_threshold_db: f32,
+    pub pre_denoise: bool,
+    pub chunk_ms: u32,
+    pub extra_context_ms: u32,
+    pub output_gain_db: f32,
+    pub dry_wet: f32,
+}
+
+impl Default for VoiceChangerPreset {
+    fn default() -> Self {
+        Self::preset_girl_calm_tsukuyomi()
+    }
+}
+
+fn sanitize_vc_f32(v: f32, default: f32, min: f32, max: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(min, max)
+    } else {
+        default
+    }
+}
+
+fn snap_vc_chunk_ms(ms: u32) -> u32 {
+    VALID_VC_CHUNK_MS
+        .into_iter()
+        .min_by_key(|&cand| cand.abs_diff(ms))
+        .unwrap_or(80)
+}
+
+impl VoiceChangerPreset {
+    pub fn preset_girl_calm_tsukuyomi() -> Self {
+        Self {
+            model_kind: VoiceModelKind::BuiltIn,
+            builtin_model: VoiceModelId::TsukuyomiChan,
+            custom_model_path: String::new(),
+            pitch_shift_semitones: VoiceModelId::TsukuyomiChan.default_pitch_shift(),
+            formant_shift_semitones: 0.3,
+            protect: 0.33,
+            silence_threshold_db: -52.0,
+            pre_denoise: true,
+            chunk_ms: 80,
+            extra_context_ms: 400,
+            output_gain_db: 0.0,
+            dry_wet: 1.0,
+        }
+    }
+
+    pub fn preset_girl_cute_amitaro() -> Self {
+        Self {
+            builtin_model: VoiceModelId::Amitaro,
+            pitch_shift_semitones: 12.0,
+            formant_shift_semitones: 0.8,
+            protect: 0.35,
+            ..Self::preset_girl_calm_tsukuyomi()
+        }
+    }
+
+    pub fn preset_girl_soft_kurage() -> Self {
+        Self {
+            builtin_model: VoiceModelId::KikotoKurage,
+            pitch_shift_semitones: 12.0,
+            formant_shift_semitones: 0.4,
+            protect: 0.36,
+            ..Self::preset_girl_calm_tsukuyomi()
+        }
+    }
+
+    pub fn preset_boyish_mahiro() -> Self {
+        Self {
+            builtin_model: VoiceModelId::KikotoMahiro,
+            pitch_shift_semitones: 6.0,
+            formant_shift_semitones: 0.0,
+            protect: 0.30,
+            ..Self::preset_girl_calm_tsukuyomi()
+        }
+    }
+
+    pub fn preset_cool_male_shigure() -> Self {
+        Self {
+            builtin_model: VoiceModelId::TokinaShigure,
+            pitch_shift_semitones: -2.0,
+            formant_shift_semitones: -0.4,
+            protect: 0.25,
+            ..Self::preset_girl_calm_tsukuyomi()
+        }
+    }
+
+    pub fn sanitized(&self) -> Self {
+        let extra = ((self.extra_context_ms.clamp(160, 800) + 10) / 20) * 20;
+        Self {
+            model_kind: self.model_kind,
+            builtin_model: self.builtin_model,
+            custom_model_path: self.custom_model_path.trim().to_string(),
+            pitch_shift_semitones: sanitize_vc_f32(self.pitch_shift_semitones, 12.0, -24.0, 24.0),
+            formant_shift_semitones: sanitize_vc_f32(self.formant_shift_semitones, 0.3, -4.0, 4.0),
+            protect: sanitize_vc_f32(self.protect, 0.33, 0.0, 0.5),
+            silence_threshold_db: sanitize_vc_f32(self.silence_threshold_db, -52.0, -70.0, -20.0),
+            pre_denoise: self.pre_denoise,
+            chunk_ms: snap_vc_chunk_ms(self.chunk_ms),
+            extra_context_ms: extra.clamp(160, 800),
+            output_gain_db: sanitize_vc_f32(self.output_gain_db, 0.0, -18.0, 18.0),
+            dry_wet: sanitize_vc_f32(self.dry_wet, 1.0, 0.0, 1.0),
+        }
+    }
+
+    pub fn builtin_preset_list() -> Vec<(&'static str, Self)> {
+        vec![
+            (
+                VOICE_CHANGER_DEFAULT_PRESET,
+                Self::preset_girl_calm_tsukuyomi(),
+            ),
+            (
+                "Girl — Cute Anime (Amitaro)",
+                Self::preset_girl_cute_amitaro(),
+            ),
+            (
+                "Girl — Soft / Gentle (Kurage)",
+                Self::preset_girl_soft_kurage(),
+            ),
+            (
+                "Boyish / Androgynous (Mahiro)",
+                Self::preset_boyish_mahiro(),
+            ),
+            (
+                "Cool / Mature Male (Shigure)",
+                Self::preset_cool_male_shigure(),
+            ),
+        ]
+    }
+
+    pub fn builtin_presets() -> BTreeMap<String, Self> {
+        Self::builtin_preset_list()
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect()
+    }
+
+    pub fn builtin_preset(name: &str) -> Option<Self> {
+        Self::builtin_preset_list()
+            .into_iter()
+            .find_map(|(k, v)| (k == name).then_some(v))
+    }
+
+    pub fn is_builtin_preset(name: &str) -> bool {
+        matches!(
+            name,
+            VOICE_CHANGER_DEFAULT_PRESET
+                | "Girl — Cute Anime (Amitaro)"
+                | "Girl — Soft / Gentle (Kurage)"
+                | "Boyish / Androgynous (Mahiro)"
+                | "Cool / Mature Male (Shigure)"
+        )
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct VoiceChangerConfig {
+    // Scalar fields MUST precede nested tables/maps for confy TOML serialization.
+    pub enabled: bool,
+    pub execution_provider: VcExecutionProvider,
+    pub active_preset: String,
+    pub current: VoiceChangerPreset,
+    pub presets: BTreeMap<String, VoiceChangerPreset>,
+}
+
+impl Default for VoiceChangerConfig {
+    fn default() -> Self {
+        let presets = VoiceChangerPreset::builtin_presets();
+        let active_preset = VOICE_CHANGER_DEFAULT_PRESET.to_string();
+        let current = presets.get(&active_preset).cloned().unwrap_or_default();
+        Self {
+            enabled: false,
+            execution_provider: VcExecutionProvider::AutoGpu,
+            active_preset,
+            current,
+            presets,
+        }
+    }
+}
+
+impl VoiceChangerConfig {
+    pub fn ensure_builtin_presets(&mut self) {
+        for (name, preset) in VoiceChangerPreset::builtin_presets() {
+            match self.presets.get_mut(&name) {
+                Some(existing) => {
+                    // Migrate unmodified initial v1 defaults (60ms chunk / 240ms context)
+                    let mut legacy_v1 = preset.clone();
+                    legacy_v1.chunk_ms = 60;
+                    legacy_v1.extra_context_ms = 240;
+                    if *existing == legacy_v1 {
+                        *existing = preset;
+                    }
+                }
+                None => {
+                    self.presets.insert(name, preset);
+                }
+            }
+        }
+        for preset in self.presets.values_mut() {
+            *preset = preset.sanitized();
+        }
+        if let Some(builtin) = VoiceChangerPreset::builtin_preset(&self.active_preset) {
+            let mut legacy_cur = builtin.clone();
+            legacy_cur.chunk_ms = 60;
+            legacy_cur.extra_context_ms = 240;
+            if self.current == legacy_cur {
+                self.current = builtin;
+            }
+        }
+        self.current = self.current.sanitized();
+        if self.active_preset.trim().is_empty() || !self.presets.contains_key(&self.active_preset) {
+            self.active_preset = VOICE_CHANGER_DEFAULT_PRESET.to_string();
+        }
+    }
+
+    pub fn apply_preset(&mut self, name: &str) -> bool {
+        self.ensure_builtin_presets();
+        if let Some(preset) = self.presets.get(name).cloned() {
+            let clean = preset.sanitized();
+            self.active_preset = name.to_string();
+            self.current = clean;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn sanitized(&self) -> Self {
+        let mut copy = self.clone();
+        copy.ensure_builtin_presets();
+        copy
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct MicConfig {
@@ -190,6 +553,7 @@ pub struct MicConfig {
     pub noise_gate: NoiseGateConfig,
     pub gain: GainConfig,
     pub compressor: CompressorConfig,
+    pub voice_changer: VoiceChangerConfig,
 }
 
 impl Default for MicConfig {
@@ -202,6 +566,7 @@ impl Default for MicConfig {
             noise_gate: NoiseGateConfig::default(),
             gain: GainConfig::default(),
             compressor: CompressorConfig::default(),
+            voice_changer: VoiceChangerConfig::default(),
         }
     }
 }

@@ -544,4 +544,80 @@ mod tests {
             .presets
             .contains_key("Arcade Woofer Punch"));
     }
+
+    #[test]
+    fn test_voice_changer_global_presets_toml_roundtrip_and_profile_independence() {
+        let mut cfg = MichadameConfig::default();
+        cfg.mic.voice_changer.enabled = true;
+        cfg.mic.voice_changer.execution_provider = VcExecutionProvider::WebGpuVulkan;
+        cfg.mic.voice_changer.active_preset = "Cute Anime Custom".to_string();
+
+        let mut custom = VoiceChangerPreset::preset_girl_cute_amitaro();
+        custom.pitch_shift_semitones = 11.5;
+        custom.formant_shift_semitones = 1.75;
+        custom.chunk_ms = 50;
+        custom.pre_denoise = true;
+        custom.output_gain_db = 2.5;
+        cfg.mic.voice_changer.current = custom.clone();
+        cfg.mic
+            .voice_changer
+            .presets
+            .insert("Cute Anime Custom".to_string(), custom.clone());
+
+        let path = std::env::temp_dir().join(format!(
+            "michadame-vc-roundtrip-{}-{}.toml",
+            std::process::id(),
+            crate::replay::now_us()
+        ));
+        store_config_atomic_at(&path, &cfg).expect("Failed to store config with voice_changer");
+        let loaded: MichadameConfig =
+            confy::load_path(&path).expect("Failed to load config with voice_changer");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("toml.bak"));
+
+        assert!(loaded.mic.voice_changer.enabled);
+        assert_eq!(
+            loaded.mic.voice_changer.execution_provider,
+            VcExecutionProvider::WebGpuVulkan
+        );
+        assert_eq!(loaded.mic.voice_changer.active_preset, "Cute Anime Custom");
+        assert_eq!(loaded.mic.voice_changer.current, custom);
+        assert_eq!(
+            loaded.mic.voice_changer.presets.get("Cute Anime Custom"),
+            Some(&custom)
+        );
+        assert!(loaded
+            .mic
+            .voice_changer
+            .presets
+            .contains_key("Girl — Soft / Gentle (Kurage)"));
+
+        // Verify capture/source profile switching (`Default` HDMI, Video, Gamescope, PC-98, PC-88)
+        // leaves global user Voice Changer settings and presets 100% untouched.
+        let mut state = crate::app::models::AppState::default();
+        apply_config(&mut state, &loaded);
+        let snapshot = state.mic.config.voice_changer.clone();
+
+        let mut hdmi_profile = Profile::default();
+        hdmi_profile.crt_hard_scan = Some(-8.0);
+        let mut video_profile = Profile::default();
+        video_profile.crt_hard_scan = Some(-10.0);
+        let mut gamescope_profile = Profile::default();
+        gamescope_profile.crt_hard_scan = Some(-6.0);
+        let mut pc98_profile = Profile::default();
+        pc98_profile.crt_hard_scan = Some(-12.0);
+        let mut pc88_profile = Profile::default();
+        pc88_profile.crt_hard_scan = Some(-14.0);
+
+        for profile in [
+            &hdmi_profile,
+            &video_profile,
+            &gamescope_profile,
+            &pc98_profile,
+            &pc88_profile,
+        ] {
+            apply_profile_to_state(&mut state, profile);
+            assert_eq!(state.mic.config.voice_changer, snapshot);
+        }
+    }
 }

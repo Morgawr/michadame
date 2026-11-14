@@ -535,6 +535,7 @@ fn populate_config_from_state(cfg: &mut MichadameConfig, state: &AppState) {
     cfg.selected_steam_game = state.selected_steam_game.clone();
     cfg.twitch = state.twitch.config.clone();
     cfg.mic = state.mic.config.clone();
+    cfg.mic.voice_changer = state.mic.config.voice_changer.sanitized();
     cfg.webcam = state.webcam.config.synced_for_save();
     cfg.pc98 = state.pc98.config.clone();
     cfg.pc88 = state.pc88.config.clone();
@@ -1076,6 +1077,7 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
         state.twitch.apply_config(cfg.twitch.clone());
     }
     state.mic.config = cfg.mic.clone();
+    state.mic.config.voice_changer.ensure_builtin_presets();
     state.halo_presets = cfg.halo_presets.clone();
     state.active_halo_preset = cfg.active_halo_preset.clone();
     state.ensure_halo_presets();

@@ -2115,6 +2115,14 @@ pub struct MicState {
     pub current_level_db: Arc<AtomicU32>,
     pub peak_level_db: Arc<AtomicU32>,
     pub is_clipping: Arc<AtomicBool>,
+    pub new_vc_preset_name: String,
+    pub vc_telemetry: Arc<crate::devices::voice_changer::VoiceChangerTelemetry>,
+    pub vc_sync_in_progress: bool,
+    pub vc_sync_target: Option<crate::devices::voice_changer::model_sync::VcSyncTarget>,
+    pub vc_sync_progress: Option<(String, f32)>,
+    pub vc_sync_error: Option<String>,
+    pub vc_sync_rx:
+        Option<crossbeam_channel::Receiver<crate::devices::voice_changer::model_sync::VcSyncEvent>>,
 }
 
 impl Default for MicState {
@@ -2125,7 +2133,123 @@ impl Default for MicState {
             current_level_db: Arc::new(AtomicU32::new((-100.0f32).to_bits())),
             peak_level_db: Arc::new(AtomicU32::new((-100.0f32).to_bits())),
             is_clipping: Arc::new(AtomicBool::new(false)),
+            new_vc_preset_name: String::new(),
+            vc_telemetry: Arc::new(crate::devices::voice_changer::VoiceChangerTelemetry::new()),
+            vc_sync_in_progress: false,
+            vc_sync_target: None,
+            vc_sync_progress: None,
+            vc_sync_error: None,
+            vc_sync_rx: None,
         }
+    }
+}
+
+impl MicState {
+    pub fn start_vc_download(
+        &mut self,
+        target: crate::devices::voice_changer::model_sync::VcSyncTarget,
+        repaint_ctx: Option<egui::Context>,
+    ) {
+        if self.vc_sync_in_progress {
+            return;
+        }
+        self.vc_sync_in_progress = true;
+        self.vc_sync_target = Some(target);
+        self.vc_sync_error = None;
+        self.vc_sync_progress = Some(("Connecting to model repository...".to_string(), 0.0));
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        self.vc_sync_rx = Some(rx);
+        let dir = crate::devices::voice_changer::model_sync::resolve_voice_changer_directory();
+
+        let _ = std::thread::Builder::new()
+            .name("vc-model-download".to_string())
+            .spawn(move || {
+                use crate::devices::voice_changer::model_sync::{
+                    download_and_install_base_engine, download_and_install_voice_model,
+                    VcSyncEvent, VcSyncTarget,
+                };
+                let tx_prog = tx.clone();
+                let ctx_prog = repaint_ctx.clone();
+                let res = match target {
+                    VcSyncTarget::BaseEngine => {
+                        download_and_install_base_engine(&dir, move |message, progress| {
+                            let _ = tx_prog.send(VcSyncEvent::Progress { message, progress });
+                            if let Some(ctx) = &ctx_prog {
+                                ctx.request_repaint();
+                            }
+                        })
+                    }
+                    VcSyncTarget::VoiceModel(model_id) => download_and_install_voice_model(
+                        &dir,
+                        model_id,
+                        move |message, progress| {
+                            let _ = tx_prog.send(VcSyncEvent::Progress { message, progress });
+                            if let Some(ctx) = &ctx_prog {
+                                ctx.request_repaint();
+                            }
+                        },
+                    ),
+                };
+                let _ = tx.send(VcSyncEvent::Finished {
+                    target,
+                    result: res,
+                });
+                if let Some(ctx) = repaint_ctx {
+                    ctx.request_repaint();
+                }
+            });
+    }
+
+    /// Polls background voice model download progress and returns `(is_error, toast_message)` notifications.
+    pub fn poll_vc_sync(&mut self) -> Vec<(bool, String)> {
+        use crate::devices::voice_changer::model_sync::{VcSyncEvent, VcSyncTarget};
+        let mut notes = Vec::new();
+        let mut clear_rx = false;
+        if let Some(rx) = &self.vc_sync_rx {
+            while let Ok(ev) = rx.try_recv() {
+                match ev {
+                    VcSyncEvent::Progress { message, progress } => {
+                        self.vc_sync_progress = Some((message, progress));
+                    }
+                    VcSyncEvent::Finished {
+                        target,
+                        result: Ok(()),
+                    } => {
+                        self.vc_sync_in_progress = false;
+                        self.vc_sync_target = None;
+                        self.vc_sync_progress = None;
+                        self.vc_sync_error = None;
+                        clear_rx = true;
+                        self.vc_telemetry.request_reload();
+                        let label = match target {
+                            VcSyncTarget::BaseEngine => {
+                                "Voice Changer ONNX engine & base models installed.".to_string()
+                            }
+                            VcSyncTarget::VoiceModel(m) => {
+                                format!("Voice model '{}' downloaded and ready.", m.short_label())
+                            }
+                        };
+                        notes.push((false, label));
+                    }
+                    VcSyncEvent::Finished {
+                        target: _,
+                        result: Err(err),
+                    } => {
+                        self.vc_sync_in_progress = false;
+                        self.vc_sync_target = None;
+                        self.vc_sync_progress = None;
+                        self.vc_sync_error = Some(err.clone());
+                        clear_rx = true;
+                        notes.push((true, format!("Voice Changer download failed: {err}")));
+                    }
+                }
+            }
+        }
+        if clear_rx {
+            self.vc_sync_rx = None;
+        }
+        notes
     }
 }
 

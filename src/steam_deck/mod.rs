@@ -155,6 +155,7 @@ pub fn enforce_restrictions(state: &mut AppState) {
     state.ui.reset_usb_on_startup = false;
     state.ui.studio_window_open = false;
     state.mic.config.enabled = false;
+    state.mic.config.voice_changer.enabled = false;
     state.webcam.config.enabled = false;
     state.twitch.apply_config(Default::default());
     state.twitch.config.chat_overlay_enabled = false;

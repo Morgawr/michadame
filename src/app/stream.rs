@@ -1333,6 +1333,7 @@ impl AppState {
             self.mic.current_level_db.clone(),
             self.mic.peak_level_db.clone(),
             self.mic.is_clipping.clone(),
+            self.mic.vc_telemetry.clone(),
             self.replay.audio.clone(),
         ) {
             Ok(handle) => {

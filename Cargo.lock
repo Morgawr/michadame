@@ -2608,6 +2608,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "libloading"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1832accd5a4ca2795ace4d05d15c4039be15b62d3b950eff99746a990e3cc10"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
+
+[[package]]
 name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2855,10 +2865,13 @@ dependencies = [
  "glam",
  "glob",
  "gltf",
+ "half",
  "image 0.25.9",
  "libc",
  "libloading 0.8.9",
+ "ndarray 0.17.2",
  "nnnoiseless",
+ "ort",
  "pkg-config",
  "prost 0.13.5",
  "rand 0.8.5",
@@ -2868,6 +2881,7 @@ dependencies = [
  "rtrb",
  "rusb",
  "rusqlite",
+ "rustfft",
  "rustls",
  "serde",
  "serde_json",
@@ -2934,6 +2948,21 @@ name = "ndarray"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "882ed72dce9365842bf196bdeedf5055305f11fc8c03dee7bb0194a6cad34841"
+dependencies = [
+ "matrixmultiply",
+ "num-complex",
+ "num-integer",
+ "num-traits",
+ "portable-atomic",
+ "portable-atomic-util",
+ "rawpointer",
+]
+
+[[package]]
+name = "ndarray"
+version = "0.17.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "520080814a7a6b4a6e9070823bb24b4531daac8c4627e08ba5de8c5ef2f2752d"
 dependencies = [
  "matrixmultiply",
  "num-complex",
@@ -3326,6 +3355,29 @@ checksum = "9aa2b01e1d916879f73a53d01d1d6cee68adbb31d6d9177a8cfce093cced1d50"
 dependencies = [
  "futures-core",
  "pin-project-lite",
+]
+
+[[package]]
+name = "ort"
+version = "2.0.0-rc.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7de3af33d24a745ffb8fab904b13478438d1cd52868e6f17735ef6e1f8bf133"
+dependencies = [
+ "half",
+ "libloading 0.9.1",
+ "ndarray 0.17.2",
+ "ort-sys",
+ "smallvec",
+ "tracing",
+]
+
+[[package]]
+name = "ort-sys"
+version = "2.0.0-rc.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7b497d21a8b6fbb4b5a544f8fadb77e801a09ae0add9e411d31c6f89e3c1e90"
+dependencies = [
+ "glob",
 ]
 
 [[package]]
@@ -4830,7 +4882,7 @@ dependencies = [
  "lazy_static",
  "log",
  "maplit",
- "ndarray",
+ "ndarray 0.16.1",
  "num-complex",
  "num-integer",
  "num-traits",
@@ -4855,7 +4907,7 @@ dependencies = [
  "itertools 0.12.1",
  "lazy_static",
  "maplit",
- "ndarray",
+ "ndarray 0.16.1",
  "nom 7.1.3",
  "num-integer",
  "num-traits",
