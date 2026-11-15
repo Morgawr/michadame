@@ -89,6 +89,7 @@ fn reap_alsa_capture_thread(handle: thread::JoinHandle<()>) {
 
 struct AudioCaptureProgress {
     last_sample_at: Instant,
+    session_started_at: Instant,
 }
 
 struct AlsaCapture {
@@ -101,13 +102,27 @@ struct AlsaCapture {
 
 impl AudioCaptureProgress {
     fn new() -> Self {
+        let now = Instant::now();
         Self {
-            last_sample_at: Instant::now(),
+            last_sample_at: now,
+            session_started_at: now,
         }
+    }
+
+    fn mark_session_started(&mut self) {
+        self.session_started_at = Instant::now();
     }
 
     fn mark_samples(&mut self) {
         self.last_sample_at = Instant::now();
+    }
+
+    /// Returns `true` when the current capture session has gone `session_timeout` without
+    /// receiving samples (measuring from the start of the session after a reopen so the first
+    /// `EAGAIN` doesn't immediately abort) or when total stall time hits `total_timeout`.
+    fn session_stalled(&self, session_timeout: Duration, total_timeout: Duration) -> bool {
+        self.last_sample_at.max(self.session_started_at).elapsed() >= session_timeout
+            || self.last_sample_at.elapsed() >= total_timeout
     }
 
     fn stalled_for(&self, timeout: Duration) -> bool {
@@ -1070,6 +1085,7 @@ where
     F: Fn(S) -> f32,
 {
     replay.mark_discontinuity();
+    capture_progress.mark_session_started();
     let initial_filter = replay.filter.read().map(|c| c.clone()).unwrap_or_default();
     let mut dsp = crate::devices::dsp_filter::LiveAudioDsp::new(&initial_filter, rate);
     let mut dc_blocker = DcBlocker::new(rate, channels);
@@ -1087,21 +1103,13 @@ where
             Ok(frames) => {
                 let sample_count = frames * channels as usize;
                 if sample_count == 0 {
-                    if capture_progress.stalled_for(ALSA_STALL_TIMEOUT) {
-                        return Err(anyhow!(
-                            "ALSA capture produced no samples for {:?}",
-                            ALSA_STALL_TIMEOUT
-                        ));
-                    }
-                    match pcm.wait(Some(ALSA_CAPTURE_POLL_TIMEOUT_MS)) {
-                        Ok(_) => {}
-                        Err(wait_error) => {
-                            replay.mark_discontinuity();
-                            dsp.reset();
-                            dc_blocker.reset();
-                            recover_alsa_capture(pcm, wait_error)?;
-                        }
-                    }
+                    wait_for_alsa_samples(
+                        pcm,
+                        capture_progress,
+                        replay,
+                        &mut dsp,
+                        &mut dc_blocker,
+                    )?;
                     continue;
                 }
                 capture_progress.mark_samples();
@@ -1146,21 +1154,7 @@ where
                 }
             }
             Err(error) if error.errno() == alsa::nix::errno::Errno::EAGAIN => {
-                if capture_progress.stalled_for(ALSA_STALL_TIMEOUT) {
-                    return Err(anyhow!(
-                        "ALSA capture produced no samples for {:?}",
-                        ALSA_STALL_TIMEOUT
-                    ));
-                }
-                match pcm.wait(Some(ALSA_CAPTURE_POLL_TIMEOUT_MS)) {
-                    Ok(_) => {}
-                    Err(wait_error) => {
-                        replay.mark_discontinuity();
-                        dsp.reset();
-                        dc_blocker.reset();
-                        recover_alsa_capture(pcm, wait_error)?;
-                    }
-                }
+                wait_for_alsa_samples(pcm, capture_progress, replay, &mut dsp, &mut dc_blocker)?;
             }
             Err(error) => {
                 replay.mark_discontinuity();
@@ -1171,6 +1165,28 @@ where
         }
     }
 
+    Ok(())
+}
+
+fn wait_for_alsa_samples(
+    pcm: &alsa::pcm::PCM,
+    capture_progress: &AudioCaptureProgress,
+    replay: &crate::replay::AudioTap,
+    dsp: &mut crate::devices::dsp_filter::LiveAudioDsp,
+    dc_blocker: &mut DcBlocker,
+) -> Result<()> {
+    if capture_progress.session_stalled(ALSA_STALL_TIMEOUT, ALSA_RECOVERY_TIMEOUT) {
+        return Err(anyhow!(
+            "ALSA capture produced no samples for {:?}",
+            ALSA_STALL_TIMEOUT
+        ));
+    }
+    if let Err(wait_error) = pcm.wait(Some(ALSA_CAPTURE_POLL_TIMEOUT_MS)) {
+        replay.mark_discontinuity();
+        dsp.reset();
+        dc_blocker.reset();
+        recover_alsa_capture(pcm, wait_error)?;
+    }
     Ok(())
 }
 
@@ -1540,12 +1556,42 @@ mod tests {
 
     #[test]
     fn audio_capture_progress_expires_and_recovers_on_real_samples() {
+        let expired = Instant::now() - ALSA_RECOVERY_TIMEOUT;
         let mut progress = AudioCaptureProgress {
-            last_sample_at: Instant::now() - ALSA_RECOVERY_TIMEOUT,
+            last_sample_at: expired,
+            session_started_at: expired,
         };
         assert!(progress.stalled_for(ALSA_RECOVERY_TIMEOUT));
 
         progress.mark_samples();
+        assert!(!progress.stalled_for(ALSA_RECOVERY_TIMEOUT));
+    }
+
+    #[test]
+    fn audio_capture_progress_allows_reopened_session_to_wait_within_recovery_budget() {
+        let stalled_at = Instant::now() - ALSA_STALL_TIMEOUT;
+        let mut progress = AudioCaptureProgress {
+            last_sample_at: stalled_at,
+            session_started_at: stalled_at,
+        };
+        assert!(progress.session_stalled(ALSA_STALL_TIMEOUT, ALSA_RECOVERY_TIMEOUT));
+        assert!(!progress.stalled_for(ALSA_RECOVERY_TIMEOUT));
+
+        // Reopening the ALSA device starts a new session wait window while preserving the
+        // overall recovery deadline from `last_sample_at`.
+        progress.mark_session_started();
+        assert!(!progress.session_stalled(ALSA_STALL_TIMEOUT, ALSA_RECOVERY_TIMEOUT));
+        assert!(!progress.stalled_for(ALSA_RECOVERY_TIMEOUT));
+
+        // Once the total recovery timeout elapses without any samples, the session stops
+        // immediately instead of overshooting by another full session stall window.
+        progress.last_sample_at = Instant::now() - ALSA_RECOVERY_TIMEOUT;
+        assert!(progress.session_stalled(ALSA_STALL_TIMEOUT, ALSA_RECOVERY_TIMEOUT));
+        assert!(progress.stalled_for(ALSA_RECOVERY_TIMEOUT));
+
+        // Receiving real samples clears both session and total stall conditions.
+        progress.mark_samples();
+        assert!(!progress.session_stalled(ALSA_STALL_TIMEOUT, ALSA_RECOVERY_TIMEOUT));
         assert!(!progress.stalled_for(ALSA_RECOVERY_TIMEOUT));
     }
 

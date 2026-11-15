@@ -50,17 +50,46 @@ struct VideoInterruptState {
 
 struct VideoFrameProgress {
     last_frame_at: Instant,
+    session_started_at: Instant,
 }
 
 impl VideoFrameProgress {
     fn new() -> Self {
+        let now = Instant::now();
         Self {
-            last_frame_at: Instant::now(),
+            last_frame_at: now,
+            session_started_at: now,
         }
+    }
+
+    fn mark_session_started(&mut self) {
+        self.session_started_at = Instant::now();
     }
 
     fn mark_frame(&mut self) {
         self.last_frame_at = Instant::now();
+    }
+
+    /// Returns `true` when the current capture session has gone `session_timeout` without
+    /// decoded frames (measuring from session start after a reopen so the first stalled read
+    /// doesn't immediately abort) or when total stall time hits `total_timeout`.
+    fn session_stalled(&self, session_timeout: Duration, total_timeout: Duration) -> bool {
+        self.last_frame_at.max(self.session_started_at).elapsed() >= session_timeout
+            || self.last_frame_at.elapsed() >= total_timeout
+    }
+
+    fn ensure_session_progress(
+        &self,
+        session_timeout: Duration,
+        total_timeout: Duration,
+    ) -> Result<()> {
+        if self.session_stalled(session_timeout, total_timeout) {
+            return Err(anyhow!(
+                "Video input produced no decoded frames for {:?}",
+                session_timeout
+            ));
+        }
+        Ok(())
     }
 
     fn stalled_for(&self, timeout: Duration) -> bool {
@@ -670,6 +699,7 @@ fn run_video_capture_session(
     let mut scaler: Option<ffmpeg_next::software::scaling::context::Context> = None;
     let mut decoded = ffmpeg_next::frame::Video::empty();
     let mut normalized = ffmpeg_next::frame::Video::empty();
+    frame_progress.mark_session_started();
     loop {
         if stop_requested.load(Ordering::Relaxed) {
             return Ok(());
@@ -684,12 +714,8 @@ fn run_video_capture_session(
             }
             Err(_) if stop_requested.load(Ordering::Relaxed) => return Ok(()),
             Err(ffmpeg_next::Error::Other { errno }) if errno == libc::EAGAIN => {
-                if frame_progress.stalled_for(VIDEO_STALL_TIMEOUT) {
-                    return Err(anyhow!(
-                        "Video input produced no decoded frames for {:?}",
-                        VIDEO_STALL_TIMEOUT
-                    ));
-                }
+                frame_progress
+                    .ensure_session_progress(VIDEO_STALL_TIMEOUT, VIDEO_RECOVERY_TIMEOUT)?;
                 thread::sleep(VIDEO_READ_RETRY_DELAY);
                 continue;
             }
@@ -697,12 +723,7 @@ fn run_video_capture_session(
         }
 
         if should_skip_v4l2_packet(&packet, video_stream_index) {
-            if frame_progress.stalled_for(VIDEO_STALL_TIMEOUT) {
-                return Err(anyhow!(
-                    "Video input produced no decoded frames for {:?}",
-                    VIDEO_STALL_TIMEOUT
-                ));
-            }
+            frame_progress.ensure_session_progress(VIDEO_STALL_TIMEOUT, VIDEO_RECOVERY_TIMEOUT)?;
             continue;
         }
 
@@ -712,7 +733,7 @@ fn run_video_capture_session(
                 packet_size = packet.size(),
                 "Skipping video packet rejected by decoder"
             );
-            if frame_progress.stalled_for(VIDEO_STALL_TIMEOUT) {
+            if frame_progress.session_stalled(VIDEO_STALL_TIMEOUT, VIDEO_RECOVERY_TIMEOUT) {
                 return Err(error).context("Failed to send packet to decoder");
             }
             continue;
@@ -780,12 +801,7 @@ fn run_video_capture_session(
 
         // Some failed capture devices continue dequeuing corrupt or empty packets. Packet I/O
         // is not useful progress: only a decoded frame proves that the stream is still alive.
-        if frame_progress.stalled_for(VIDEO_STALL_TIMEOUT) {
-            return Err(anyhow!(
-                "Video input produced no decoded frames for {:?}",
-                VIDEO_STALL_TIMEOUT
-            ));
-        }
+        frame_progress.ensure_session_progress(VIDEO_STALL_TIMEOUT, VIDEO_RECOVERY_TIMEOUT)?;
     }
 }
 
@@ -834,15 +850,35 @@ mod tests {
 
     #[test]
     fn decoded_frames_are_the_video_watchdog_progress_signal() {
+        let past = Instant::now() - VIDEO_STALL_TIMEOUT;
         let mut progress = VideoFrameProgress {
-            last_frame_at: Instant::now() - VIDEO_STALL_TIMEOUT,
+            last_frame_at: past,
+            session_started_at: past,
         };
         assert!(progress.stalled_for(VIDEO_STALL_TIMEOUT));
+        assert!(progress.session_stalled(VIDEO_STALL_TIMEOUT, VIDEO_RECOVERY_TIMEOUT));
 
         // Reading another packet must not reset this timestamp. Only successfully decoding a
         // frame does, which prevents corrupt packet traffic from hiding a dead capture stream.
         progress.mark_frame();
         assert!(!progress.stalled_for(VIDEO_STALL_TIMEOUT));
+        assert!(!progress.session_stalled(VIDEO_STALL_TIMEOUT, VIDEO_RECOVERY_TIMEOUT));
+    }
+
+    #[test]
+    fn video_frame_progress_allows_reopened_session_to_wait_within_recovery_budget() {
+        let stale_frame = Instant::now() - (VIDEO_STALL_TIMEOUT + Duration::from_millis(250));
+        let mut progress = VideoFrameProgress {
+            last_frame_at: stale_frame,
+            session_started_at: stale_frame,
+        };
+        assert!(progress.session_stalled(VIDEO_STALL_TIMEOUT, VIDEO_RECOVERY_TIMEOUT));
+
+        progress.mark_session_started();
+        assert!(!progress.session_stalled(VIDEO_STALL_TIMEOUT, VIDEO_RECOVERY_TIMEOUT));
+
+        progress.last_frame_at = Instant::now() - VIDEO_RECOVERY_TIMEOUT;
+        assert!(progress.session_stalled(VIDEO_STALL_TIMEOUT, VIDEO_RECOVERY_TIMEOUT));
     }
 
     #[test]
