@@ -119,7 +119,7 @@ pub fn draw_deck_button(
                 (
                     egui::Color32::from_rgb(22, 20, 20),
                     egui::Color32::from_rgb(60, 36, 36),
-                    1.2,
+                    1.2_f32,
                 )
             }
         };
@@ -139,7 +139,7 @@ pub fn draw_deck_button(
                     egui::pos2(rect.max.x - 8.0, rect.min.y + 2.0),
                 ],
                 egui::Stroke::new(
-                    1.0,
+                    1.0_f32,
                     egui::Color32::from_rgba_premultiplied(46, 204, 113, 100),
                 ),
             );
@@ -150,7 +150,7 @@ pub fn draw_deck_button(
                     egui::pos2(rect.max.x - 8.0, rect.min.y + 2.0),
                 ],
                 egui::Stroke::new(
-                    1.0,
+                    1.0_f32,
                     egui::Color32::from_rgba_premultiplied(255, 255, 255, 20),
                 ),
             );
@@ -178,17 +178,18 @@ pub fn draw_deck_button(
                     pts.push(egui::pos2(px, py));
                 }
                 for i in 0..pts.len() - 1 {
-                    painter.line_segment([pts[i], pts[i + 1]], egui::Stroke::new(2.2, icon_color));
+                    painter
+                        .line_segment([pts[i], pts[i + 1]], egui::Stroke::new(2.2_f32, icon_color));
                 }
                 // Arrowhead
                 let tip = pts[0];
                 painter.line_segment(
                     [tip, egui::pos2(tip.x - 4.5, tip.y - 5.0)],
-                    egui::Stroke::new(2.2, icon_color),
+                    egui::Stroke::new(2.2_f32, icon_color),
                 );
                 painter.line_segment(
                     [tip, egui::pos2(tip.x + 5.0, tip.y - 4.5)],
-                    egui::Stroke::new(2.2, icon_color),
+                    egui::Stroke::new(2.2_f32, icon_color),
                 );
                 // Center play triangle
                 let tri_pts = [
@@ -223,7 +224,7 @@ pub fn draw_deck_button(
                 for i in 0..cradle_pts.len() - 1 {
                     painter.line_segment(
                         [cradle_pts[i], cradle_pts[i + 1]],
-                        egui::Stroke::new(2.0, icon_color),
+                        egui::Stroke::new(2.0_f32, icon_color),
                     );
                 }
 
@@ -233,14 +234,14 @@ pub fn draw_deck_button(
                         egui::pos2(icon_center.x, icon_center.y + 5.5),
                         egui::pos2(icon_center.x, icon_center.y + 11.0),
                     ],
-                    egui::Stroke::new(2.0, icon_color),
+                    egui::Stroke::new(2.0_f32, icon_color),
                 );
                 painter.line_segment(
                     [
                         egui::pos2(icon_center.x - 6.5, icon_center.y + 11.0),
                         egui::pos2(icon_center.x + 6.5, icon_center.y + 11.0),
                     ],
-                    egui::Stroke::new(2.0, icon_color),
+                    egui::Stroke::new(2.0_f32, icon_color),
                 );
             }
             DeckButtonKind::ScrollingChat => {
@@ -252,7 +253,7 @@ pub fn draw_deck_button(
                 painter.rect_stroke(
                     bubble_rect,
                     egui::Rounding::same(3.0),
-                    egui::Stroke::new(2.0, icon_color),
+                    egui::Stroke::new(2.0_f32, icon_color),
                 );
 
                 // Bottom tail
@@ -273,14 +274,14 @@ pub fn draw_deck_button(
                         egui::pos2(icon_center.x - 7.0, icon_center.y - 4.5),
                         egui::pos2(icon_center.x + 3.0, icon_center.y - 4.5),
                     ],
-                    egui::Stroke::new(1.8, icon_color),
+                    egui::Stroke::new(1.8_f32, icon_color),
                 );
                 painter.line_segment(
                     [
                         egui::pos2(icon_center.x + 1.0, icon_center.y - 6.5),
                         egui::pos2(icon_center.x + 3.0, icon_center.y - 4.5),
                     ],
-                    egui::Stroke::new(1.8, icon_color),
+                    egui::Stroke::new(1.8_f32, icon_color),
                 );
 
                 painter.line_segment(
@@ -288,14 +289,14 @@ pub fn draw_deck_button(
                         egui::pos2(icon_center.x - 4.0, icon_center.y + 0.5),
                         egui::pos2(icon_center.x + 6.0, icon_center.y + 0.5),
                     ],
-                    egui::Stroke::new(1.8, icon_color),
+                    egui::Stroke::new(1.8_f32, icon_color),
                 );
                 painter.line_segment(
                     [
                         egui::pos2(icon_center.x + 4.0, icon_center.y - 1.5),
                         egui::pos2(icon_center.x + 6.0, icon_center.y + 0.5),
                     ],
-                    egui::Stroke::new(1.8, icon_color),
+                    egui::Stroke::new(1.8_f32, icon_color),
                 );
             }
             DeckButtonKind::Alerts => {
@@ -304,7 +305,7 @@ pub fn draw_deck_button(
                 painter.circle_stroke(
                     egui::pos2(icon_center.x, icon_center.y - 10.5),
                     2.2,
-                    egui::Stroke::new(1.8, icon_color),
+                    egui::Stroke::new(1.8_f32, icon_color),
                 );
 
                 // 2. Bell dome body
@@ -328,7 +329,7 @@ pub fn draw_deck_button(
                         egui::pos2(icon_center.x - 11.0, icon_center.y + 5.0),
                         egui::pos2(icon_center.x + 11.0, icon_center.y + 5.0),
                     ],
-                    egui::Stroke::new(2.2, icon_color),
+                    egui::Stroke::new(2.2_f32, icon_color),
                 );
 
                 // 4. Clapper bead at bottom
@@ -393,7 +394,7 @@ pub fn draw_deck_button(
                 painter.add(egui::Shape::convex_polygon(
                     left_page.to_vec(),
                     bg_color,
-                    egui::Stroke::new(1.8, icon_color),
+                    egui::Stroke::new(1.8_f32, icon_color),
                 ));
                 let right_page = [
                     egui::pos2(icon_center.x + 1.5, icon_center.y - 8.0),
@@ -404,42 +405,42 @@ pub fn draw_deck_button(
                 painter.add(egui::Shape::convex_polygon(
                     right_page.to_vec(),
                     bg_color,
-                    egui::Stroke::new(1.8, icon_color),
+                    egui::Stroke::new(1.8_f32, icon_color),
                 ));
                 painter.line_segment(
                     [
                         egui::pos2(icon_center.x, icon_center.y - 7.5),
                         egui::pos2(icon_center.x, icon_center.y + 9.5),
                     ],
-                    egui::Stroke::new(2.0, icon_color),
+                    egui::Stroke::new(2.0_f32, icon_color),
                 );
                 painter.line_segment(
                     [
                         egui::pos2(icon_center.x - 10.0, icon_center.y - 4.5),
                         egui::pos2(icon_center.x - 4.0, icon_center.y - 3.5),
                     ],
-                    egui::Stroke::new(1.4, icon_color),
+                    egui::Stroke::new(1.4_f32, icon_color),
                 );
                 painter.line_segment(
                     [
                         egui::pos2(icon_center.x - 10.0, icon_center.y + 0.5),
                         egui::pos2(icon_center.x - 4.0, icon_center.y + 1.5),
                     ],
-                    egui::Stroke::new(1.4, icon_color),
+                    egui::Stroke::new(1.4_f32, icon_color),
                 );
                 painter.line_segment(
                     [
                         egui::pos2(icon_center.x + 4.0, icon_center.y - 3.5),
                         egui::pos2(icon_center.x + 10.0, icon_center.y - 4.5),
                     ],
-                    egui::Stroke::new(1.4, icon_color),
+                    egui::Stroke::new(1.4_f32, icon_color),
                 );
                 painter.line_segment(
                     [
                         egui::pos2(icon_center.x + 4.0, icon_center.y + 1.5),
                         egui::pos2(icon_center.x + 10.0, icon_center.y + 0.5),
                     ],
-                    egui::Stroke::new(1.4, icon_color),
+                    egui::Stroke::new(1.4_f32, icon_color),
                 );
             }
         }
@@ -450,11 +451,11 @@ pub fn draw_deck_button(
             let slash_p2 = egui::pos2(icon_center.x + 15.0, icon_center.y + 15.0);
 
             // Dark background cutout stroke under the slash
-            painter.line_segment([slash_p1, slash_p2], egui::Stroke::new(4.5, bg_color));
+            painter.line_segment([slash_p1, slash_p2], egui::Stroke::new(4.5_f32, bg_color));
             // Bright red oblique bar on top
             painter.line_segment(
                 [slash_p1, slash_p2],
-                egui::Stroke::new(2.5, egui::Color32::from_rgb(231, 76, 60)),
+                egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(231, 76, 60)),
             );
         }
 
@@ -541,12 +542,12 @@ pub fn studio_mixer_slider(
         let (track_bg, track_stroke) = if enabled {
             (
                 egui::Color32::from_rgb(14, 14, 16),
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(45, 48, 54)),
+                egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(45, 48, 54)),
             )
         } else {
             (
                 egui::Color32::from_rgb(20, 20, 22),
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(32, 34, 38)),
+                egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(32, 34, 38)),
             )
         };
         painter.rect_filled(track_rect, egui::Rounding::same(2.0), track_bg);
@@ -558,10 +559,11 @@ pub fn studio_mixer_slider(
             let peak = live_peak.clamp(0.0, 1.0);
             let fill_w = (peak * inner_track.width()).min(inner_track.width());
 
-            let p_green_end = 0.70 * inner_track.width();
-            let p_orange_end = 0.88 * inner_track.width();
+            // Green: -60..-20 dBFS (40/60), Orange: -20..-9 dBFS (51/60), Red: -9..0 dBFS
+            let p_green_end = (40.0 / 60.0) * inner_track.width();
+            let p_orange_end = (51.0 / 60.0) * inner_track.width();
 
-            // Green segment (safe range: 0.0 .. 0.70)
+            // Green segment (safe range: -60 .. -20 dBFS)
             let green_w = fill_w.min(p_green_end);
             if green_w > 0.0 {
                 let r_green = egui::Rect::from_min_size(
@@ -603,20 +605,26 @@ pub fn studio_mixer_slider(
                 );
             }
 
-            // Subtle studio VU graduation marks (at -20dB / 70% and -9dB / 88%)
+            // Subtle studio VU graduation marks (at -20 dBFS and -9 dBFS on the -60..0 dBFS scale)
             painter.line_segment(
                 [
                     egui::pos2(inner_track.min.x + p_green_end, inner_track.min.y),
                     egui::pos2(inner_track.min.x + p_green_end, inner_track.max.y),
                 ],
-                egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(0, 0, 0, 160)),
+                egui::Stroke::new(
+                    1.0_f32,
+                    egui::Color32::from_rgba_premultiplied(0, 0, 0, 160),
+                ),
             );
             painter.line_segment(
                 [
                     egui::pos2(inner_track.min.x + p_orange_end, inner_track.min.y),
                     egui::pos2(inner_track.min.x + p_orange_end, inner_track.max.y),
                 ],
-                egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(0, 0, 0, 160)),
+                egui::Stroke::new(
+                    1.0_f32,
+                    egui::Color32::from_rgba_premultiplied(0, 0, 0, 160),
+                ),
             );
         }
 
@@ -637,9 +645,9 @@ pub fn studio_mixer_slider(
                 egui::Color32::from_rgb(58, 62, 70)
             };
             let cap_stroke = if is_active {
-                egui::Stroke::new(1.5, egui::Color32::from_rgb(215, 222, 235))
+                egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(215, 222, 235))
             } else {
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(135, 142, 155))
+                egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(135, 142, 155))
             };
 
             // Fader cap body
@@ -647,7 +655,7 @@ pub fn studio_mixer_slider(
             painter.rect_stroke(thumb_rect, egui::Rounding::same(2.0), cap_stroke);
 
             // Tactile horizontal ribbing notches on the fader cap
-            let rib_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(38, 41, 46));
+            let rib_stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(38, 41, 46));
             painter.line_segment(
                 [
                     egui::pos2(thumb_rect.min.x + 2.0, thumb_rect.center().y - 4.0),
@@ -669,12 +677,12 @@ pub fn studio_mixer_slider(
                     egui::pos2(thumb_center_x, thumb_rect.min.y + 2.0),
                     egui::pos2(thumb_center_x, thumb_rect.max.y - 2.0),
                 ],
-                egui::Stroke::new(2.0, egui::Color32::WHITE),
+                egui::Stroke::new(2.0_f32, egui::Color32::WHITE),
             );
         } else {
             // Disabled thumb styling: muted grey
             let cap_color = egui::Color32::from_rgb(36, 36, 38);
-            let cap_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(52, 52, 56));
+            let cap_stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(52, 52, 56));
             painter.rect_filled(thumb_rect, egui::Rounding::same(2.0), cap_color);
             painter.rect_stroke(thumb_rect, egui::Rounding::same(2.0), cap_stroke);
             painter.line_segment(
@@ -682,7 +690,7 @@ pub fn studio_mixer_slider(
                     egui::pos2(thumb_center_x, thumb_rect.min.y + 3.0),
                     egui::pos2(thumb_center_x, thumb_rect.max.y - 3.0),
                 ],
-                egui::Stroke::new(1.5, egui::Color32::from_rgb(68, 68, 72)),
+                egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(68, 68, 72)),
             );
         }
     }
@@ -760,6 +768,7 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
         || state.has_active_av_source()
         || (state.mic.config.enabled && state.mic.active_stream.is_some())
         || state.hardware.live_audio_peak > 0.001
+        || state.hardware.live_audio_db_peak > 0.001
         || state.hardware.live_mic_peak > 0.001;
     if studio_meters_active {
         ui.ctx().request_repaint_after(Duration::from_millis(16));
@@ -1125,7 +1134,7 @@ fn draw_studio_contents(state: &mut AppState, ui: &mut egui::Ui) -> bool {
         let item_gap = ui.spacing().item_spacing.x;
         let slider_width = (ui.available_width() - readout_width - item_gap).max(100.0);
         let mut vol = state.hardware.master_volume;
-        let peak = state.hardware.live_audio_peak;
+        let peak = state.hardware.live_audio_db_peak;
         let resp = studio_mixer_slider(ui, &mut vol, 0.0..=1.0, peak, true, slider_width);
         if resp.changed() {
             state.set_master_volume(vol);

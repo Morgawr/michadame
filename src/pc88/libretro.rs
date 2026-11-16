@@ -855,7 +855,7 @@ unsafe extern "C" fn bridge_environment_cb(cmd: c_uint, data: *mut c_void) -> bo
         RETRO_ENVIRONMENT_GET_LOG_INTERFACE => {
             unsafe extern "C" fn dummy_log_printf(_level: c_uint, _fmt: *const c_char) {}
             if !data.is_null() {
-                *(data as *mut usize) = dummy_log_printf as usize;
+                *(data as *mut usize) = dummy_log_printf as *const () as usize;
                 true
             } else {
                 false

@@ -86,7 +86,7 @@ fn draw_contents(ui: &mut egui::Ui, tw: &mut TwitchState, rect: egui::Rect, now:
     painter.vline(
         rect.left() + 0.5,
         rect.y_range(),
-        egui::Stroke::new(1.0, egui::Color32::from_white_alpha(28)),
+        egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(28)),
     );
 
     let header = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), HEADER_H));
@@ -108,7 +108,7 @@ fn draw_header(ui: &mut egui::Ui, tw: &mut TwitchState, header: egui::Rect) {
     painter.hline(
         header.x_range(),
         header.bottom() - 0.5,
-        egui::Stroke::new(1.0, egui::Color32::from_white_alpha(20)),
+        egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(20)),
     );
 
     // Right side: whether the stream is actually on air (Helix API), never guessed.
@@ -404,7 +404,7 @@ fn draw_footer(ui: &mut egui::Ui, tw: &mut TwitchState, footer: egui::Rect) {
     ui.painter_at(footer).hline(
         footer.x_range(),
         footer.top() + 0.5,
-        egui::Stroke::new(1.0, egui::Color32::from_white_alpha(20)),
+        egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(20)),
     );
     let can_send = tw.can_send();
     let hint = if can_send {

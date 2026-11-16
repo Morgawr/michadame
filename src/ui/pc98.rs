@@ -14,7 +14,10 @@ pub fn draw_pc98_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     // Top-level Retro PC System Selector (PC-98 vs PC-88)
     egui::Frame::none()
         .fill(egui::Color32::from_rgb(22, 22, 22))
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(53, 53, 53)))
+        .stroke(egui::Stroke::new(
+            1.0_f32,
+            egui::Color32::from_rgb(53, 53, 53),
+        ))
         .inner_margin(egui::Margin::symmetric(10.0, 6.0))
         .rounding(egui::Rounding::ZERO)
         .show(ui, |ui| {
@@ -59,7 +62,7 @@ pub fn draw_pc98_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         egui::Color32::from_rgb(34, 34, 34)
                     })
                     .stroke(egui::Stroke::new(
-                        1.0,
+                        1.0_f32,
                         if is_selected {
                             egui::Color32::from_rgb(42, 118, 68)
                         } else {
@@ -120,7 +123,7 @@ fn draw_pc98_system_section(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         .color(egui::Color32::from_rgb(255, 204, 204)),
                 )
                 .fill(egui::Color32::from_rgb(90, 24, 24))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(122, 40, 40)))
+                .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(122, 40, 40)))
                 .rounding(egui::Rounding::ZERO);
                 if ui.add(stop_btn).clicked() {
                     state.stop_stream(ui.ctx());
@@ -134,7 +137,7 @@ fn draw_pc98_system_section(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         .color(egui::Color32::from_rgb(255, 235, 180)),
                 )
                 .fill(egui::Color32::from_rgb(70, 50, 18))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 88, 30)))
+                .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(120, 88, 30)))
                 .rounding(egui::Rounding::ZERO);
                 if ui
                     .add(reset_btn)
@@ -150,7 +153,7 @@ fn draw_pc98_system_section(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         .color(egui::Color32::from_rgb(200, 230, 255)),
                 )
                 .fill(egui::Color32::from_rgb(24, 52, 82))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(44, 88, 136)))
+                .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(44, 88, 136)))
                 .rounding(egui::Rounding::ZERO);
                 if ui
                     .add(menu_btn)
@@ -179,7 +182,7 @@ fn draw_pc98_system_section(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         .color(egui::Color32::from_rgb(210, 255, 220)),
                 )
                 .fill(egui::Color32::from_rgb(24, 72, 42))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 118, 68)))
+                .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(42, 118, 68)))
                 .rounding(egui::Rounding::ZERO);
                 if ui
                     .add(boot_btn)
@@ -833,7 +836,7 @@ fn draw_game_library_section(ui: &mut egui::Ui, state: &mut AppState, changed: &
                     .color(egui::Color32::from_rgb(210, 255, 220)),
             )
             .fill(egui::Color32::from_rgb(24, 72, 42))
-            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 118, 68)))
+            .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(42, 118, 68)))
             .rounding(egui::Rounding::ZERO);
 
             if ui
@@ -895,7 +898,7 @@ fn draw_game_library_section(ui: &mut egui::Ui, state: &mut AppState, changed: &
                         egui::Color32::from_rgb(30, 38, 52)
                     })
                     .stroke(egui::Stroke::new(
-                        1.0,
+                        1.0_f32,
                         if is_sel {
                             egui::Color32::from_rgb(56, 138, 84)
                         } else {
@@ -1213,7 +1216,7 @@ fn draw_pc88_system_section(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         .color(egui::Color32::from_rgb(255, 204, 204)),
                 )
                 .fill(egui::Color32::from_rgb(90, 24, 24))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(122, 40, 40)))
+                .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(122, 40, 40)))
                 .rounding(egui::Rounding::ZERO);
                 if ui.add(stop_btn).clicked() {
                     state.stop_stream(ui.ctx());
@@ -1227,7 +1230,7 @@ fn draw_pc88_system_section(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         .color(egui::Color32::from_rgb(255, 235, 180)),
                 )
                 .fill(egui::Color32::from_rgb(70, 50, 18))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 88, 30)))
+                .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(120, 88, 30)))
                 .rounding(egui::Rounding::ZERO);
                 if ui
                     .add(reset_btn)
@@ -1264,7 +1267,7 @@ fn draw_pc88_system_section(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         .color(egui::Color32::from_rgb(210, 255, 220)),
                 )
                 .fill(egui::Color32::from_rgb(24, 72, 42))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 118, 68)))
+                .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(42, 118, 68)))
                 .rounding(egui::Rounding::ZERO);
                 if ui
                     .add(boot_btn)
@@ -1827,7 +1830,7 @@ fn draw_pc88_game_library_section(ui: &mut egui::Ui, state: &mut AppState, chang
                     .color(egui::Color32::from_rgb(210, 255, 220)),
             )
             .fill(egui::Color32::from_rgb(24, 72, 42))
-            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 118, 68)))
+            .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(42, 118, 68)))
             .rounding(egui::Rounding::ZERO);
 
             if ui
@@ -1889,7 +1892,7 @@ fn draw_pc88_game_library_section(ui: &mut egui::Ui, state: &mut AppState, chang
                         egui::Color32::from_rgb(30, 38, 52)
                     })
                     .stroke(egui::Stroke::new(
-                        1.0,
+                        1.0_f32,
                         if is_sel {
                             egui::Color32::from_rgb(56, 138, 84)
                         } else {
@@ -2326,11 +2329,11 @@ fn draw_save_states_section(
                         egui::Color32::from_rgb(18, 18, 18)
                     };
                     let frame_stroke = if is_sel {
-                        egui::Stroke::new(1.0, egui::Color32::from_rgb(56, 152, 88))
+                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(56, 152, 88))
                     } else if meta_opt.is_some() {
-                        egui::Stroke::new(1.0, egui::Color32::from_rgb(52, 66, 56))
+                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(52, 66, 56))
                     } else {
-                        egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 42, 42))
+                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(42, 42, 42))
                     };
 
                     egui::Frame::none()
@@ -2421,7 +2424,7 @@ fn draw_save_states_section(
                                                 egui::pos2(rect.right(), y),
                                             ],
                                             egui::Stroke::new(
-                                                1.0,
+                                                1.0_f32,
                                                 egui::Color32::from_rgba_unmultiplied(0, 0, 0, 42),
                                             ),
                                         );
@@ -2446,7 +2449,7 @@ fn draw_save_states_section(
                                     rect,
                                     egui::Rounding::same(2.0),
                                     egui::Stroke::new(
-                                        1.0,
+                                        1.0_f32,
                                         if is_sel {
                                             egui::Color32::from_rgb(68, 168, 100)
                                         } else {

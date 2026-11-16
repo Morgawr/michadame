@@ -111,7 +111,7 @@ pub fn draw_fft_mask_editor(state: &mut AppState, ctx: &egui::Context) -> bool {
                     painter.circle_stroke(
                         hover_pos,
                         brush_screen_radius,
-                        egui::Stroke::new(2.0, egui::Color32::RED),
+                        egui::Stroke::new(2.0_f32, egui::Color32::RED),
                     );
                 }
 

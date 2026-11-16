@@ -849,7 +849,7 @@ pub fn draw_whiteboard(state: &mut AppState, ctx: &egui::Context, screen_rect: R
             } else {
                 let toolbar_response = egui::Frame::none()
                     .fill(Color32::from_rgb(24, 24, 24))
-                    .stroke(Stroke::new(1.0, Color32::from_rgb(56, 56, 56)))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(56, 56, 56)))
                     .inner_margin(egui::Margin::symmetric(8.0, 5.0))
                     .rounding(Rounding::ZERO)
                     .show(ui, |ui| {
@@ -884,7 +884,7 @@ pub fn draw_whiteboard(state: &mut AppState, ctx: &egui::Context, screen_rect: R
                                     Color32::from_rgb(44, 44, 44)
                                 })
                                 .stroke(Stroke::new(
-                                    1.0,
+                                    1.0_f32,
                                     if active {
                                         Color32::from_rgb(66, 133, 244)
                                     } else {
@@ -920,13 +920,13 @@ pub fn draw_whiteboard(state: &mut AppState, ctx: &egui::Context, screen_rect: R
                                     palette_color.to_color32(),
                                 );
                                 let border_stroke = if is_selected {
-                                    Stroke::new(2.0, Color32::from_rgb(80, 180, 255))
+                                    Stroke::new(2.0_f32, Color32::from_rgb(80, 180, 255))
                                 } else if swatch_rect
                                     .contains(pointer_pos.unwrap_or(Pos2::new(-999.0, -999.0)))
                                 {
-                                    Stroke::new(1.5, Color32::WHITE)
+                                    Stroke::new(1.5_f32, Color32::WHITE)
                                 } else {
-                                    Stroke::new(1.0, Color32::from_rgb(90, 90, 90))
+                                    Stroke::new(1.0_f32, Color32::from_rgb(90, 90, 90))
                                 };
                                 painter.rect_stroke(swatch_rect, Rounding::ZERO, border_stroke);
                             }
@@ -1002,7 +1002,7 @@ pub fn draw_whiteboard(state: &mut AppState, ctx: &egui::Context, screen_rect: R
                                     .color(Color32::from_rgb(230, 200, 200)),
                             )
                             .fill(Color32::from_rgb(56, 28, 28))
-                            .stroke(Stroke::new(1.0, Color32::from_rgb(96, 48, 48)))
+                            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(96, 48, 48)))
                             .rounding(Rounding::ZERO);
                             if ui
                                 .add(clear_btn)
@@ -1067,7 +1067,7 @@ pub fn draw_whiteboard(state: &mut AppState, ctx: &egui::Context, screen_rect: R
                                 Color32::from_rgb(36, 36, 36)
                             })
                             .stroke(Stroke::new(
-                                1.0,
+                                1.0_f32,
                                 if can_mine {
                                     Color32::from_rgb(56, 189, 248)
                                 } else if is_already_mined {
@@ -1111,7 +1111,7 @@ pub fn draw_whiteboard(state: &mut AppState, ctx: &egui::Context, screen_rect: R
                                 Color32::from_rgb(36, 36, 36)
                             })
                             .stroke(Stroke::new(
-                                1.0,
+                                1.0_f32,
                                 if can_mine {
                                     Color32::from_rgb(168, 85, 247)
                                 } else if is_already_mined {
@@ -1296,7 +1296,7 @@ pub fn draw_whiteboard(state: &mut AppState, ctx: &egui::Context, screen_rect: R
                         painter.with_clip_rect(canvas_rect).circle_stroke(
                             pos,
                             radius,
-                            Stroke::new(1.0, Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
+                            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(200, 200, 200, 180)),
                         );
                     }
                 }

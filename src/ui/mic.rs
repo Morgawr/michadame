@@ -1237,12 +1237,12 @@ fn draw_db_meter(ui: &mut egui::Ui, current_db: f32, peak_db: f32, clipping: boo
             painter.rect_stroke(
                 rect,
                 egui::Rounding::ZERO,
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(53, 53, 53)),
+                egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(53, 53, 53)),
             );
 
             // Normalized level 0.0 .. 1.0 (corresponds to -60 dB .. 0 dB)
-            let norm_level = ((current_db + 60.0) / 60.0).clamp(0.0, 1.0);
-            let norm_peak = ((peak_db + 60.0) / 60.0).clamp(0.0, 1.0);
+            let norm_level = crate::devices::audio::dbfs_to_vu_level(current_db);
+            let norm_peak = crate::devices::audio::dbfs_to_vu_level(peak_db);
 
             // Segments:
             // Green: -60 dB to -20 dB => 0.0 to 40.0/60.0 = 0.667
@@ -1320,7 +1320,7 @@ fn draw_db_meter(ui: &mut egui::Ui, current_db: f32, peak_db: f32, clipping: boo
                     egui::pos2(line_20_x, rect.min.y),
                     egui::pos2(line_20_x, rect.max.y),
                 ],
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(30, 30, 30)),
+                egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(30, 30, 30)),
             );
             let line_9_x = rect.min.x + p_orange_end * rect.width();
             painter.line_segment(
@@ -1328,7 +1328,7 @@ fn draw_db_meter(ui: &mut egui::Ui, current_db: f32, peak_db: f32, clipping: boo
                     egui::pos2(line_9_x, rect.min.y),
                     egui::pos2(line_9_x, rect.max.y),
                 ],
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(30, 30, 30)),
+                egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(30, 30, 30)),
             );
         }
 

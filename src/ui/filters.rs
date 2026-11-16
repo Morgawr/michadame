@@ -2310,7 +2310,7 @@ fn draw_mini_level_bar(ui: &mut egui::Ui, label: &str, value: f32, fill_color: e
         ui.painter().rect_stroke(
             rect,
             egui::Rounding::ZERO,
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(58, 58, 58)),
+            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(58, 58, 58)),
         );
     });
 }

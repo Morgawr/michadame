@@ -88,7 +88,7 @@ pub(crate) fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
         .frame(
             egui::Frame::side_top_panel(&ctx.style())
                 .fill(theme::BACKDROP)
-                .stroke(egui::Stroke::new(2.0, theme::RULE)),
+                .stroke(egui::Stroke::new(2.0_f32, theme::RULE)),
         )
         .show(ctx, |ui| {
             ui.add_space(6.0);
@@ -111,7 +111,7 @@ pub(crate) fn draw_contents(state: &mut AppState, ctx: &egui::Context) {
                             .color(COLOR_TERM),
                     )
                     .fill(theme::BUTTON_CLIP)
-                    .stroke(egui::Stroke::new(2.0, theme::RULE))
+                    .stroke(egui::Stroke::new(2.0_f32, theme::RULE))
                     .rounding(0.0);
                     if ui
                         .add(add_btn)
@@ -579,7 +579,7 @@ fn draw_row_at(
                                         RichText::new("Cancel").color(COLOR_TERM),
                                     )
                                     .fill(COLOR_TAG_BG)
-                                    .stroke(egui::Stroke::new(1.5, COLOR_TAG_STROKE));
+                                    .stroke(egui::Stroke::new(1.5_f32, COLOR_TAG_STROKE));
                                     if ui.add(cancel_btn).clicked() {
                                         state.bank.pending_delete = None;
                                     }
@@ -587,7 +587,7 @@ fn draw_row_at(
                                         RichText::new("Delete").color(theme::DANGER_TEXT),
                                     )
                                     .fill(theme::BUTTON_DANGER_HOVER)
-                                    .stroke(egui::Stroke::new(1.5, theme::BRICK));
+                                    .stroke(egui::Stroke::new(1.5_f32, theme::BRICK));
                                     if ui.add(delete_btn).clicked() {
                                         action = RowAction::Delete;
                                     }
@@ -781,7 +781,7 @@ fn draw_tag_row_at(
 
                 // Draw base chip
                 ui.painter()
-                    .rect(chip_rect, 0.0, bg, egui::Stroke::new(2.0, border));
+                    .rect(chip_rect, 0.0, bg, egui::Stroke::new(2.0_f32, border));
 
                 // Draw tag text
                 let text_pos = egui::pos2(
@@ -815,7 +815,7 @@ fn draw_tag_row_at(
                 }
 
                 let arm = 3.5;
-                let stroke = egui::Stroke::new(1.4, x_stroke_color);
+                let stroke = egui::Stroke::new(1.4_f32, x_stroke_color);
                 ui.painter().line_segment(
                     [
                         remove_center + egui::vec2(-arm, -arm),
@@ -859,7 +859,7 @@ fn draw_tag_row_at(
                         .color(COLOR_MUTED),
                 )
                 .fill(COLOR_TAG_BG)
-                .stroke(egui::Stroke::new(2.0, COLOR_TAG_STROKE))
+                .stroke(egui::Stroke::new(2.0_f32, COLOR_TAG_STROKE))
                 .rounding(0.0);
 
                 if ui
@@ -936,7 +936,7 @@ fn paint_thumbnail(
     painter.rect_stroke(
         rect.expand(1.0),
         0.0,
-        egui::Stroke::new(2.0, theme::TAG_BORDER),
+        egui::Stroke::new(2.0_f32, theme::TAG_BORDER),
     );
     match texture {
         Some(tex) => {
@@ -975,7 +975,7 @@ fn paint_copy_overlay(painter: &egui::Painter, rect: egui::Rect, hovered: bool, 
     };
 
     painter.rect_filled(rect, 0.0, bg);
-    painter.rect_stroke(rect, 0.0, egui::Stroke::new(2.0, stroke_color));
+    painter.rect_stroke(rect, 0.0, egui::Stroke::new(2.0_f32, stroke_color));
 
     let center = rect.center();
     if copying {
@@ -987,7 +987,7 @@ fn paint_copy_overlay(painter: &egui::Painter, rect: egui::Rect, hovered: bool, 
             icon_color,
         );
     } else {
-        let stroke = egui::Stroke::new(1.5, icon_color);
+        let stroke = egui::Stroke::new(1.5_f32, icon_color);
         // Back sheet (top-right)
         let back =
             egui::Rect::from_min_size(center + egui::vec2(-2.0, -7.0), egui::vec2(10.0, 12.0));
@@ -1000,7 +1000,7 @@ fn paint_copy_overlay(painter: &egui::Painter, rect: egui::Rect, hovered: bool, 
         painter.rect_stroke(front, 1.5, stroke);
 
         // Lines on front sheet to clearly represent a document
-        let line_stroke = egui::Stroke::new(1.0, icon_color);
+        let line_stroke = egui::Stroke::new(1.0_f32, icon_color);
         painter.line_segment(
             [
                 center + egui::vec2(-4.5, 0.5),
@@ -1250,7 +1250,7 @@ fn render_subtle_tag_chip(ui: &mut egui::Ui, tag: &str) -> egui::Response {
         (COLOR_TAG_BG, COLOR_TAG_STROKE)
     };
     ui.painter()
-        .rect(chip_rect, 0.0, bg, egui::Stroke::new(1.5, border));
+        .rect(chip_rect, 0.0, bg, egui::Stroke::new(1.5_f32, border));
     ui.painter().galley(
         chip_rect.min + padding,
         galley,
@@ -1273,10 +1273,10 @@ fn render_close_button(ui: &mut egui::Ui, hover_text: &str) -> egui::Response {
     };
     ui.painter().rect_filled(rect, 0.0, bg);
     ui.painter()
-        .rect_stroke(rect, 0.0, egui::Stroke::new(1.5, border_color));
+        .rect_stroke(rect, 0.0, egui::Stroke::new(1.5_f32, border_color));
     let center = rect.center();
     let arm = 3.5;
-    let stroke = egui::Stroke::new(1.4, stroke_color);
+    let stroke = egui::Stroke::new(1.4_f32, stroke_color);
     ui.painter().line_segment(
         [
             center + egui::vec2(-arm, -arm),
@@ -1309,7 +1309,7 @@ fn paint_delete_button(painter: &egui::Painter, rect: egui::Rect, hovered: bool)
     theme::paint_bevel(painter, rect, bg, false, 1.0);
 
     let center = rect.center();
-    let stroke = egui::Stroke::new(1.4, icon_color);
+    let stroke = egui::Stroke::new(1.4_f32, icon_color);
 
     // Lid top handle
     let handle = egui::Rect::from_min_max(
@@ -1338,7 +1338,7 @@ fn paint_delete_button(painter: &egui::Painter, rect: egui::Rect, hovered: bool)
     painter.line_segment([body_bottom_right, body_top_right], stroke);
 
     // Inner vertical slots
-    let inner_stroke = egui::Stroke::new(1.0, icon_color);
+    let inner_stroke = egui::Stroke::new(1.0_f32, icon_color);
     painter.line_segment(
         [
             center + egui::vec2(-1.5, -1.5),

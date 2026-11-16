@@ -1042,7 +1042,10 @@ fn draw_stream_info_group(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
             egui::Frame::none()
                 .fill(egui::Color32::from_rgb(34, 34, 37))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(55, 55, 60)))
+                .stroke(egui::Stroke::new(
+                    1.0_f32,
+                    egui::Color32::from_rgb(55, 55, 60),
+                ))
                 .inner_margin(egui::Margin::symmetric(10.0, 8.0))
                 .rounding(egui::Rounding::same(6.0))
                 .show(ui, |ui| {
@@ -1127,7 +1130,7 @@ fn draw_stream_info_group(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             };
                             let center = rect.center();
                             let arm = 4.5;
-                            let stroke = egui::Stroke::new(2.0, stroke_color);
+                            let stroke = egui::Stroke::new(2.0_f32, stroke_color);
                             ui.painter().line_segment(
                                 [
                                     center + egui::vec2(-arm, -arm),
@@ -1180,7 +1183,10 @@ fn draw_stream_info_group(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 ui.add_space(2.0);
                 egui::Frame::none()
                     .fill(egui::Color32::from_rgb(26, 26, 28))
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 50, 54)))
+                    .stroke(egui::Stroke::new(
+                        1.0_f32,
+                        egui::Color32::from_rgb(50, 50, 54),
+                    ))
                     .inner_margin(egui::Margin::symmetric(6.0, 4.0))
                     .rounding(egui::Rounding::same(4.0))
                     .show(ui, |ui| {

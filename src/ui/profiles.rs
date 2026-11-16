@@ -185,7 +185,10 @@ pub fn draw_profile_management(ui: &mut egui::Ui, state: &mut AppState) -> bool 
                     egui::RichText::new("Delete").color(egui::Color32::from_rgb(255, 204, 204)),
                 )
                 .fill(egui::Color32::from_rgb(90, 24, 24))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(122, 40, 40))),
+                .stroke(egui::Stroke::new(
+                    1.0_f32,
+                    egui::Color32::from_rgb(122, 40, 40),
+                )),
             )
             .clicked()
         {

@@ -914,7 +914,7 @@ fn draw_scrub_viewport_contents(scrub: &mut ReplayScrubState, ctx: &egui::Contex
         .frame(
             egui::Frame::none()
                 .fill(Color32::from_rgb(20, 20, 22))
-                .stroke(egui::Stroke::new(1.0, Color32::from_rgb(52, 52, 56)))
+                .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(52, 52, 56)))
                 .inner_margin(egui::Margin::symmetric(14.0, 10.0)),
         )
         .show(ctx, |ui| {
@@ -948,7 +948,7 @@ fn draw_scrub_viewport_contents(scrub: &mut ReplayScrubState, ctx: &egui::Contex
         .frame(
             egui::Frame::none()
                 .fill(Color32::from_rgb(22, 22, 24))
-                .stroke(egui::Stroke::new(1.0, Color32::from_rgb(52, 52, 56)))
+                .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(52, 52, 56)))
                 .inner_margin(egui::Margin::symmetric(14.0, 12.0)),
         )
         .show(ctx, |ui| {
@@ -1050,7 +1050,7 @@ fn draw_scrub_viewport_contents(scrub: &mut ReplayScrubState, ctx: &egui::Contex
                         .color(Color32::WHITE),
                 )
                 .fill(Color32::from_rgb(38, 78, 122))
-                .stroke(egui::Stroke::new(1.0, Color32::from_rgb(80, 140, 205)))
+                .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(80, 140, 205)))
                 .rounding(egui::Rounding::ZERO);
                 if ui
                     .add_sized([86.0, 28.0], play_btn)
@@ -1071,7 +1071,7 @@ fn draw_scrub_viewport_contents(scrub: &mut ReplayScrubState, ctx: &egui::Contex
                         .color(Color32::from_rgb(175, 250, 200)),
                 )
                 .fill(Color32::from_rgb(24, 66, 40))
-                .stroke(egui::Stroke::new(1.0, Color32::from_rgb(65, 165, 100)))
+                .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(65, 165, 100)))
                 .rounding(egui::Rounding::ZERO);
                 if ui
                     .add_sized([116.0, 28.0], start_btn)
@@ -1090,7 +1090,7 @@ fn draw_scrub_viewport_contents(scrub: &mut ReplayScrubState, ctx: &egui::Contex
                         .color(Color32::from_rgb(255, 220, 160)),
                 )
                 .fill(Color32::from_rgb(78, 52, 20))
-                .stroke(egui::Stroke::new(1.0, Color32::from_rgb(185, 125, 45)))
+                .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(185, 125, 45)))
                 .rounding(egui::Rounding::ZERO);
                 if ui
                     .add_sized([116.0, 28.0], end_btn)
@@ -1108,7 +1108,7 @@ fn draw_scrub_viewport_contents(scrub: &mut ReplayScrubState, ctx: &egui::Contex
                             .color(Color32::from_rgb(200, 200, 205)),
                     )
                     .fill(Color32::from_rgb(44, 44, 48))
-                    .stroke(egui::Stroke::new(1.0, Color32::from_rgb(76, 76, 84)))
+                    .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(76, 76, 84)))
                     .rounding(egui::Rounding::ZERO);
                     if ui
                         .add_sized([58.0, 28.0], reset_btn)
@@ -1129,7 +1129,7 @@ fn draw_scrub_viewport_contents(scrub: &mut ReplayScrubState, ctx: &egui::Contex
                             .color(Color32::from_rgb(220, 255, 225)),
                     )
                     .fill(Color32::from_rgb(28, 92, 46))
-                    .stroke(egui::Stroke::new(1.0, Color32::from_rgb(65, 180, 95)))
+                    .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(65, 180, 95)))
                     .rounding(egui::Rounding::ZERO);
                     if ui
                         .add_sized([100.0, 28.0], save_btn)
@@ -1151,7 +1151,7 @@ fn draw_scrub_viewport_contents(scrub: &mut ReplayScrubState, ctx: &egui::Contex
                             .color(Color32::from_rgb(255, 205, 205)),
                     )
                     .fill(Color32::from_rgb(82, 26, 26))
-                    .stroke(egui::Stroke::new(1.0, Color32::from_rgb(145, 55, 55)))
+                    .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(145, 55, 55)))
                     .rounding(egui::Rounding::ZERO);
                     if ui
                         .add_sized([88.0, 28.0], cancel_btn)
@@ -1223,7 +1223,7 @@ fn draw_scrub_viewport_contents(scrub: &mut ReplayScrubState, ctx: &egui::Contex
             painter.rect_stroke(
                 video_rect,
                 0.0,
-                egui::Stroke::new(1.0, Color32::from_rgb(55, 55, 62)),
+                egui::Stroke::new(1.0_f32, Color32::from_rgb(55, 55, 62)),
             );
         });
 
@@ -1281,7 +1281,7 @@ fn draw_timeline_marker_bar(
     painter.rect_stroke(
         track_rect,
         2.0,
-        egui::Stroke::new(1.0, Color32::from_rgb(60, 60, 68)),
+        egui::Stroke::new(1.0_f32, Color32::from_rgb(60, 60, 68)),
     );
 
     let x_for_sec = |sec: f64| -> f32 {
@@ -1313,7 +1313,7 @@ fn draw_timeline_marker_bar(
     painter.vline(
         start_x,
         rect.top()..=rect.bottom(),
-        egui::Stroke::new(2.0, start_color),
+        egui::Stroke::new(2.0_f32, start_color),
     );
     painter.add(egui::Shape::convex_polygon(
         vec![
@@ -1334,7 +1334,7 @@ fn draw_timeline_marker_bar(
     painter.vline(
         end_x,
         rect.top()..=rect.bottom(),
-        egui::Stroke::new(2.0, end_color),
+        egui::Stroke::new(2.0_f32, end_color),
     );
     painter.add(egui::Shape::convex_polygon(
         vec![
@@ -1351,7 +1351,7 @@ fn draw_timeline_marker_bar(
     painter.vline(
         cur_x,
         rect.top()..=rect.bottom(),
-        egui::Stroke::new(2.0, Color32::WHITE),
+        egui::Stroke::new(2.0_f32, Color32::WHITE),
     );
 }
 

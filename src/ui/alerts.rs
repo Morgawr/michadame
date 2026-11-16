@@ -168,7 +168,7 @@ fn build_alert_shapes(
     shapes.push(Shape::rect_stroke(
         card_rect,
         Rounding::same(2.0),
-        Stroke::new(2.5, frame_color),
+        Stroke::new(2.5_f32, frame_color),
     ));
 
     // 3. Inner Hairline Stroke (1.0px) inset by 3.5px
@@ -176,7 +176,7 @@ fn build_alert_shapes(
     shapes.push(Shape::rect_stroke(
         inner_rect,
         Rounding::same(1.0),
-        Stroke::new(1.0, hairline_color),
+        Stroke::new(1.0_f32, hairline_color),
     ));
 
     // 4. Header Bar (Dark Sepia Banner + Muted Separator Rule)
@@ -203,12 +203,12 @@ fn build_alert_shapes(
             Pos2::new(card_rect.min.x, rule_y),
             Pos2::new(card_rect.max.x, rule_y),
         ],
-        Stroke::new(1.5, rule_color),
+        Stroke::new(1.5_f32, rule_color),
     ));
 
     // 5. Technical Reticle Corner Brackets
     let bracket_len = 10.0;
-    let bracket_stroke = Stroke::new(2.0, frame_color);
+    let bracket_stroke = Stroke::new(2.0_f32, frame_color);
     let b_offset = 6.0;
 
     // Top-Left

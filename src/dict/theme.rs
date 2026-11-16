@@ -335,7 +335,7 @@ pub fn apply_widget_visuals(ui: &mut egui::Ui) {
     ] {
         state.bg_fill = fill;
         state.weak_bg_fill = TAG_BG;
-        state.bg_stroke = Stroke::new(1.5, fill);
+        state.bg_stroke = Stroke::new(1.5_f32, fill);
         state.fg_stroke.color = fg;
         state.rounding = egui::Rounding::ZERO;
     }

@@ -64,9 +64,9 @@ pub fn setup_style(ctx: &eframe::egui::Context) {
     style.visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(22, 22, 22);
     style.visuals.widgets.noninteractive.weak_bg_fill = egui::Color32::from_rgb(22, 22, 22);
     style.visuals.widgets.noninteractive.bg_stroke =
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(53, 53, 53));
+        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(53, 53, 53));
     style.visuals.widgets.noninteractive.fg_stroke =
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(208, 208, 208));
+        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(208, 208, 208));
 
     // Inactive button & slider track style:
     // Mandatory bg_fill (slider rail, checkbox): #111111
@@ -74,30 +74,30 @@ pub fn setup_style(ctx: &eframe::egui::Context) {
     // Weak bg_fill (buttons): #2c2c2c
     style.visuals.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(44, 44, 44);
     style.visuals.widgets.inactive.bg_stroke =
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(72, 72, 72));
+        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(72, 72, 72));
     style.visuals.widgets.inactive.fg_stroke =
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(208, 208, 208)); // #d0d0d0 crisp white text
+        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(208, 208, 208)); // #d0d0d0 crisp white text
 
     // Hovered button style: #383838 background, #5c5c5c border, white text
     style.visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(24, 24, 24);
     style.visuals.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(56, 56, 56);
     style.visuals.widgets.hovered.bg_stroke =
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(92, 92, 92));
-    style.visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(92, 92, 92));
+    style.visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::WHITE);
 
     // Active button style: #153c66 background, #21619f border, white text
     style.visuals.widgets.active.bg_fill = egui::Color32::from_rgb(18, 75, 128);
     style.visuals.widgets.active.weak_bg_fill = egui::Color32::from_rgb(21, 60, 102);
     style.visuals.widgets.active.bg_stroke =
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(33, 97, 159));
-    style.visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(33, 97, 159));
+    style.visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::WHITE);
 
     // Open/Combobox style
     style.visuals.widgets.open.bg_fill = egui::Color32::from_rgb(24, 24, 24);
     style.visuals.widgets.open.weak_bg_fill = egui::Color32::from_rgb(30, 30, 30);
     style.visuals.widgets.open.bg_stroke =
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 60));
-    style.visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(60, 60, 60));
+    style.visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::WHITE);
 
     // Spacing
     style.spacing.item_spacing = egui::vec2(6.0, 4.0);

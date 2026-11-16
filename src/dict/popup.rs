@@ -947,7 +947,7 @@ fn draw_popup_footer(ui: &mut egui::Ui, current: usize, total: usize, more_below
     let galley = painter.layout_no_wrap(label, super::render::dict_font(22.0), theme::MUTED);
     let half = galley.size().x * 0.5 + 14.0;
     let rule_len = 150.0f32.min(rect.width() * 0.3);
-    let stroke = Stroke::new(3.0, theme::RULE);
+    let stroke = Stroke::new(3.0_f32, theme::RULE);
     painter.hline(
         center.x - half - rule_len..=center.x - half,
         center.y,

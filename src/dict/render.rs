@@ -399,7 +399,7 @@ fn render_delete_name_button(ui: &mut egui::Ui, size: f32) -> bool {
 
     let center = rect.center();
     let arm = size * 0.22;
-    let stroke = egui::Stroke::new(1.5, icon_color);
+    let stroke = egui::Stroke::new(1.5_f32, icon_color);
 
     // Lid top handle
     ui.painter().line_segment(
@@ -426,7 +426,7 @@ fn render_delete_name_button(ui: &mut egui::Ui, size: f32) -> bool {
     ui.painter().line_segment([bl, br], stroke);
     ui.painter().line_segment([br, tr], stroke);
     // Vertical inner ribs
-    let inner_stroke = egui::Stroke::new(1.2, icon_color);
+    let inner_stroke = egui::Stroke::new(1.2_f32, icon_color);
     ui.painter().line_segment(
         [
             center + egui::vec2(-arm * 0.3, -arm * 0.1),
@@ -1860,7 +1860,7 @@ fn render_parsed_sense(ui: &mut egui::Ui, sense: &ParsedSenseNode) {
         ui.painter().vline(
             r.min.x + 2.0,
             r.y_range(),
-            egui::Stroke::new(4.0, accent_color),
+            egui::Stroke::new(4.0_f32, accent_color),
         );
     }
 
@@ -2185,7 +2185,7 @@ fn render_sense(ui: &mut egui::Ui, sense_val: &serde_json::Value, index: usize) 
         ui.painter().vline(
             r.min.x + 2.0,
             r.y_range(),
-            egui::Stroke::new(4.0, accent_color),
+            egui::Stroke::new(4.0_f32, accent_color),
         );
     }
 

@@ -1650,7 +1650,10 @@ pub fn draw_video_file_controls(
             ui.set_max_width(bar_rect.width());
             egui::Frame::none()
                 .fill(egui::Color32::from_rgba_unmultiplied(16, 16, 16, 235))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 50, 50)))
+                .stroke(egui::Stroke::new(
+                    1.0_f32,
+                    egui::Color32::from_rgb(50, 50, 50),
+                ))
                 .inner_margin(egui::Margin::symmetric(14.0, 8.0))
                 .show(ui, |ui| {
                     ui.set_min_width((bar_rect.width() - 28.0).max(0.0));
@@ -1669,7 +1672,10 @@ pub fn draw_video_file_controls(
                                 .color(egui::Color32::WHITE),
                         )
                         .fill(egui::Color32::from_rgb(34, 34, 34))
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(68, 68, 68)))
+                        .stroke(egui::Stroke::new(
+                            1.0_f32,
+                            egui::Color32::from_rgb(68, 68, 68),
+                        ))
                         .rounding(egui::Rounding::same(2.0));
 
                         if ui.add(play_btn).on_hover_text(play_pause_tip).clicked() {
@@ -1690,7 +1696,10 @@ pub fn draw_video_file_controls(
                                 .color(egui::Color32::WHITE),
                         )
                         .fill(egui::Color32::from_rgb(34, 34, 34))
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(68, 68, 68)))
+                        .stroke(egui::Stroke::new(
+                            1.0_f32,
+                            egui::Color32::from_rgb(68, 68, 68),
+                        ))
                         .rounding(egui::Rounding::same(2.0));
 
                         if ui
@@ -1862,7 +1871,10 @@ pub fn draw_video_file_controls(
                                 .color(egui::Color32::from_rgb(255, 180, 180)),
                         )
                         .fill(egui::Color32::from_rgb(60, 20, 20))
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 30, 30)))
+                        .stroke(egui::Stroke::new(
+                            1.0_f32,
+                            egui::Color32::from_rgb(100, 30, 30),
+                        ))
                         .rounding(egui::Rounding::same(2.0));
 
                         if ui
@@ -1919,7 +1931,7 @@ fn draw_roll_counter_preview(
     painter.rect_stroke(
         badge_rect,
         egui::Rounding::same(6.0),
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(240, 160, 32)),
+        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(240, 160, 32)),
     );
 
     // Indicator dot

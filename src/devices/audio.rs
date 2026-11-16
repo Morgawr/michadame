@@ -640,6 +640,26 @@ fn i16_to_f32(s: i16) -> f32 {
     s as f32 / 32768.0
 }
 
+/// Converts a linear peak amplitude (`>= 0.0`) to dBFS, flooring silence at `-100.0`.
+#[inline]
+pub fn linear_peak_to_dbfs(peak: f32) -> f32 {
+    if peak.is_finite() && peak > 1e-5 {
+        20.0 * peak.log10()
+    } else {
+        -100.0
+    }
+}
+
+/// Normalizes a dBFS reading onto `[0.0, 1.0]` over the `-60..0 dBFS` VU meter span.
+#[inline]
+pub fn dbfs_to_vu_level(db: f32) -> f32 {
+    if db.is_finite() && db > -80.0 {
+        ((db + 60.0) / 60.0).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
 pub fn is_usable_input_device(name: &str, desc: &str, direction: Option<alsa::Direction>) -> bool {
     // If ALSA explicitly flagged it as Playback (output), skip it
     if direction == Some(alsa::Direction::Playback) {
@@ -2192,5 +2212,22 @@ mod tests {
         let (_guard, handle) = coord.acquire().unwrap();
         assert_eq!(handle, 2);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn dbfs_and_vu_helpers_align_across_scale() {
+        assert_eq!(linear_peak_to_dbfs(0.0), -100.0);
+        assert_eq!(linear_peak_to_dbfs(f32::NAN), -100.0);
+        assert!((linear_peak_to_dbfs(1.0) - 0.0).abs() < 1e-5);
+        assert!((linear_peak_to_dbfs(0.5) - (-6.0206)).abs() < 1e-3);
+        assert!((linear_peak_to_dbfs(0.1) - (-20.0)).abs() < 1e-4);
+
+        assert_eq!(dbfs_to_vu_level(-100.0), 0.0);
+        assert_eq!(dbfs_to_vu_level(-60.0), 0.0);
+        assert!((dbfs_to_vu_level(-20.0) - (40.0 / 60.0)).abs() < 1e-6);
+        assert!((dbfs_to_vu_level(-9.0) - (51.0 / 60.0)).abs() < 1e-6);
+        assert_eq!(dbfs_to_vu_level(0.0), 1.0);
+        assert_eq!(dbfs_to_vu_level(6.0), 1.0);
+        assert_eq!(dbfs_to_vu_level(f32::NAN), 0.0);
     }
 }

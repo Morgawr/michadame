@@ -219,7 +219,7 @@ fn paint_retro_window_frame(
     painter.rect_stroke(
         inner_rect.expand(0.5),
         egui::Rounding::ZERO,
-        Stroke::new(1.0, theme::EDGE),
+        Stroke::new(1.0_f32, theme::EDGE),
     );
 
     paint_corner_gems(painter, frame_rect, time, hovered_corner, resizing_corner);
@@ -253,7 +253,7 @@ fn paint_corner_gems(
                 center + Vec2::new(-radius, 0.0),
             ],
             fill,
-            Stroke::new(1.0, outline),
+            Stroke::new(1.0_f32, outline),
         ));
     }
 }
@@ -265,7 +265,7 @@ fn paint_standby_screen(painter: &egui::Painter, rect: Rect, label: &str, time: 
     while y < rect.bottom() {
         painter.line_segment(
             [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
-            Stroke::new(1.0, theme::WINDOW),
+            Stroke::new(1.0_f32, theme::WINDOW),
         );
         y += step;
     }
@@ -755,7 +755,7 @@ pub fn draw_webcam_overlay(
                 debug_painter.rect_stroke(
                     outer_rect.shrink(0.5),
                     egui::Rounding::ZERO,
-                    Stroke::new(1.0, theme::RULE),
+                    Stroke::new(1.0_f32, theme::RULE),
                 );
                 paint_corner_gems(
                     &debug_painter,
@@ -782,7 +782,7 @@ pub fn draw_webcam_overlay(
             debug_painter.rect_stroke(
                 outer_rect.shrink(0.5),
                 egui::Rounding::ZERO,
-                Stroke::new(1.0, theme::RULE),
+                Stroke::new(1.0_f32, theme::RULE),
             );
             let font = egui::FontId::monospace(12.0);
             theme::paint_shadow_text(

@@ -49,7 +49,7 @@ impl Clipboard {
             limit <= MAX_CLIP_BYTES,
             "Clipboard clip exceeds 256 MiB; lower the replay bitrate"
         );
-        self.bytes.fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+        self.bytes.try_update(Ordering::AcqRel, Ordering::Acquire, |old| {
             old.checked_add(limit).filter(|total| *total <= budget)
         }).map_err(|_| anyhow::anyhow!("Not enough replay RAM for the clipboard clip; increase the RAM budget or lower the bitrate"))?;
         Ok(Reservation {

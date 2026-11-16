@@ -265,19 +265,19 @@ pub fn draw_ocr_overlay(ui: &mut egui::Ui, state: &mut AppState, video_rect: egu
         // Style the box according to its state
         let (stroke, fill) = if is_recently_copied {
             (
-                egui::Stroke::new(2.5, egui::Color32::from_rgb(46, 204, 113)),
+                egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(46, 204, 113)),
                 egui::Color32::from_rgba_unmultiplied(46, 204, 113, 80),
             )
         } else if is_active_box {
             // Darken the OCR box to hide the underlying game image
             (
-                egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 215, 0)),
+                egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(255, 215, 0)),
                 egui::Color32::from_rgba_unmultiplied(14, 16, 22, 250),
             )
         } else {
             (
                 egui::Stroke::new(
-                    1.5,
+                    1.5_f32,
                     egui::Color32::from_rgba_unmultiplied(66, 133, 244, 210),
                 ),
                 egui::Color32::from_rgba_unmultiplied(66, 133, 244, 35),

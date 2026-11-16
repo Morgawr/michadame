@@ -11,7 +11,10 @@ pub fn technical_group<R>(
 ) -> R {
     egui::Frame::none()
         .fill(egui::Color32::from_rgb(22, 22, 22)) // #161616
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(53, 53, 53))) // #353535
+        .stroke(egui::Stroke::new(
+            1.0_f32,
+            egui::Color32::from_rgb(53, 53, 53),
+        )) // #353535
         .inner_margin(egui::Margin::symmetric(10.0, 8.0))
         .rounding(egui::Rounding::ZERO)
         .show(ui, |ui| {
@@ -136,7 +139,7 @@ pub fn technical_separator(ui: &mut egui::Ui) {
     ui.painter().hline(
         rect.x_range(),
         rect.top(),
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 40, 40)),
+        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(40, 40, 40)),
     );
     ui.add_space(4.0);
 }
@@ -147,7 +150,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     // --- Pinned Top Section: Real Logo on left + Header Controls on right ---
     egui::Frame::none()
         .fill(egui::Color32::from_rgb(30, 30, 30)) // #1e1e1e
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(51, 51, 51))) // #333333
+        .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(51, 51, 51))) // #333333
         .inner_margin(egui::Margin::symmetric(10.0, 8.0))
         .rounding(egui::Rounding::ZERO)
         .show(ui, |ui| {
@@ -157,7 +160,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 if let Some(logo) = &state.logo_texture {
                     egui::Frame::none()
                         .fill(egui::Color32::from_rgb(10, 10, 10)) // #0a0a0a
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(51, 51, 51)))
+                        .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(51, 51, 51)))
                         .inner_margin(1.0)
                         .rounding(egui::Rounding::ZERO)
                         .show(ui, |ui| {
@@ -201,7 +204,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                     .color(egui::Color32::from_rgb(255, 204, 204)),
                             )
                             .fill(egui::Color32::from_rgb(90, 24, 24)) // #5a1818
-                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(122, 40, 40)))
+                            .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(122, 40, 40)))
                             .rounding(egui::Rounding::ZERO);
                             if ui.add(stop_btn).clicked() {
                                 state.stop_stream(ui.ctx());
@@ -278,7 +281,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                     .color(egui::Color32::from_rgb(204, 255, 204)),
                             )
                             .fill(egui::Color32::from_rgb(26, 74, 26)) // #1a4a1a
-                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 106, 40)))
+                            .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(40, 106, 40)))
                             .rounding(egui::Rounding::ZERO);
                             if ui.add_enabled(can_stream, start_btn).clicked() {
                                 state.start_stream(ui.ctx());
@@ -291,7 +294,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                     .color(egui::Color32::from_rgb(204, 230, 255)),
                             )
                             .fill(egui::Color32::from_rgb(24, 50, 80)) // #183250
-                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 80, 130)))
+                            .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(40, 80, 130)))
                             .rounding(egui::Rounding::ZERO);
                             if ui
                                 .add_enabled(!state.ui.is_file_dialog_open(), open_btn)
@@ -306,7 +309,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                     .color(egui::Color32::from_rgb(255, 230, 150)),
                             )
                             .fill(egui::Color32::from_rgb(80, 60, 20))
-                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(130, 100, 30)))
+                            .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(130, 100, 30)))
                             .rounding(egui::Rounding::ZERO);
                             if ui.add(gamescope_btn).clicked() {
                                 state.start_gamescope_hook(ui.ctx());
@@ -318,7 +321,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                     .color(egui::Color32::from_rgb(210, 255, 220)),
                             )
                             .fill(egui::Color32::from_rgb(24, 72, 42))
-                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 118, 68)))
+                            .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(42, 118, 68)))
                             .rounding(egui::Rounding::ZERO);
                             if ui
                                 .add(pc98_btn)
@@ -335,7 +338,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                     .color(egui::Color32::from_rgb(210, 255, 220)),
                             )
                             .fill(egui::Color32::from_rgb(24, 72, 42))
-                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 118, 68)))
+                            .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(42, 118, 68)))
                             .rounding(egui::Rounding::ZERO);
                             if ui
                                 .add(pc88_btn)
@@ -403,7 +406,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             egui::Color32::from_rgb(44, 44, 44)
                         })
                         .stroke(egui::Stroke::new(
-                            1.0,
+                            1.0_f32,
                             if state.ui.studio_window_open {
                                 egui::Color32::from_rgb(145, 70, 255)
                             } else {
@@ -514,7 +517,10 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     // --- Tab Notebook Headers: Classic Technical Linux Single-Row Balanced Tab Bar ---
     egui::Frame::none()
         .fill(egui::Color32::from_rgb(20, 20, 20)) // #141414
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(58, 58, 58))) // #3a3a3a
+        .stroke(egui::Stroke::new(
+            1.0_f32,
+            egui::Color32::from_rgb(58, 58, 58),
+        )) // #3a3a3a
         .inner_margin(egui::Margin {
             left: 4.0,
             right: 4.0,
@@ -574,7 +580,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         )
                         .fill(egui::Color32::from_rgb(26, 26, 26)) // #1a1a1a
                         .stroke(egui::Stroke::new(
-                            1.0,
+                            1.0_f32,
                             egui::Color32::from_rgb(84, 136, 184),
                         ))
                         .rounding(egui::Rounding::ZERO)
@@ -586,7 +592,10 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                 .color(egui::Color32::from_rgb(148, 148, 148)),
                         )
                         .fill(egui::Color32::from_rgb(34, 34, 34)) // #222222
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(56, 56, 56))) // #383838
+                        .stroke(egui::Stroke::new(
+                            1.0_f32,
+                            egui::Color32::from_rgb(56, 56, 56),
+                        )) // #383838
                         .rounding(egui::Rounding::ZERO)
                     };
                     if ui.add_sized([btn_w, 24.0], tab_btn).clicked() {

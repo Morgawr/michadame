@@ -658,6 +658,19 @@ pub struct MicStreamHandle {
     monitor_guard: Arc<std::sync::Mutex<Option<MonitorPlayback>>>,
 }
 
+#[cfg(test)]
+impl MicStreamHandle {
+    pub(crate) fn mock_for_test() -> Self {
+        Self {
+            device_name: "test-mic".to_string(),
+            stop: Arc::new(AtomicBool::new(true)),
+            thread: None,
+            config: Arc::new(RwLock::new(MicConfig::default())),
+            monitor_guard: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+}
+
 fn reap_mic_capture_thread(handle: thread::JoinHandle<()>) {
     if handle.is_finished() {
         if let Err(error) = handle.join() {
@@ -1015,11 +1028,7 @@ fn run_mic_capture_worker(
                         max_abs = max_abs.max(s.abs());
                     }
 
-                    let cur_db = if max_abs > 1e-5 {
-                        20.0 * max_abs.log10()
-                    } else {
-                        -100.0
-                    };
+                    let cur_db = crate::devices::audio::linear_peak_to_dbfs(max_abs);
                     current_level_db.store(cur_db.to_bits(), Ordering::Relaxed);
 
                     // Peak hold decay: hold for 1.2s, then decay smoothly

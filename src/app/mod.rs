@@ -159,6 +159,7 @@ impl Default for AppState {
                 audio_sample_format: "S16LE".to_string(),
                 master_volume: 1.0,
                 live_audio_peak: 0.0,
+                live_audio_db_peak: 0.0,
                 live_mic_peak: 0.0,
                 video_devices: Vec::new(),
                 usb_devices: Vec::new(),
@@ -370,6 +371,31 @@ impl AppState {
             && self.has_active_av_source()
             && (self.hardware.live_audio_peak > 1e-4
                 || self.audio_reactive_runtime.has_active_energy(1e-4))
+    }
+
+    /// Refreshes both linear (`live_audio_peak`) and aligned post-fader `-60..0 dBFS` Studio VU
+    /// meters (`live_audio_db_peak` and `live_mic_peak`) for the current UI frame.
+    pub fn update_live_audio_meters(&mut self) {
+        let raw_audio_peak = self
+            .hardware
+            .audio_peak_amplitude
+            .swap(0, Ordering::Relaxed) as f32
+            / 1000.0;
+        self.hardware.live_audio_peak = raw_audio_peak.max(self.hardware.live_audio_peak * 0.88);
+
+        let post_fader_peak = raw_audio_peak * self.hardware.master_volume.clamp(0.0, 1.0);
+        let raw_audio_vu =
+            devices::audio::dbfs_to_vu_level(devices::audio::linear_peak_to_dbfs(post_fader_peak));
+        self.hardware.live_audio_db_peak =
+            raw_audio_vu.max(self.hardware.live_audio_db_peak * 0.88);
+
+        let mic_db = f32::from_bits(self.mic.current_level_db.load(Ordering::Relaxed));
+        let raw_mic = if self.mic.config.enabled && self.mic.active_stream.is_some() {
+            devices::audio::dbfs_to_vu_level(mic_db)
+        } else {
+            0.0
+        };
+        self.hardware.live_mic_peak = raw_mic.max(self.hardware.live_mic_peak * 0.88);
     }
 
     #[cfg(test)]
@@ -1450,12 +1476,7 @@ impl eframe::App for AppState {
         let beam_subframe_only =
             self.is_beam_lockstep_active() && self.beam_lockstep.subframe_index > 0;
 
-        let raw_audio_peak = self
-            .hardware
-            .audio_peak_amplitude
-            .swap(0, Ordering::Relaxed) as f32
-            / 1000.0;
-        self.hardware.live_audio_peak = raw_audio_peak.max(self.hardware.live_audio_peak * 0.88);
+        self.update_live_audio_meters();
 
         let reactive_listen = self.audio_reactive.enabled
             || (self.ui.control_window_open
@@ -1468,15 +1489,6 @@ impl eframe::App for AppState {
             &self.audio_reactive.current,
             reactive_listen,
         );
-
-        let mic_db = f32::from_bits(self.mic.current_level_db.load(Ordering::Relaxed));
-        let raw_mic =
-            if self.mic.config.enabled && self.mic.active_stream.is_some() && mic_db > -80.0 {
-                ((mic_db + 60.0) / 60.0).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-        self.hardware.live_mic_peak = raw_mic.max(self.hardware.live_mic_peak * 0.88);
 
         self.replay.update();
         if let Some(message) = self.replay.notification() {
@@ -3078,5 +3090,70 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn test_studio_vu_meters_align_on_post_fader_dbfs_scale() {
+        let mut state = AppState::default();
+        state.mic.config.enabled = true;
+        state.mic.active_stream = Some(crate::devices::mic::MicStreamHandle::mock_for_test());
+
+        // Raw game peak 0.50 (-6.02 dBFS) with master_volume = 0.20 => post-fader 0.10 (-20.0 dBFS).
+        // Mic post-fader level also at -20.0 dBFS (0.10 linear).
+        state.set_master_volume(0.20);
+        state
+            .hardware
+            .audio_peak_amplitude
+            .store(500, Ordering::Relaxed);
+        state
+            .mic
+            .current_level_db
+            .store((-20.0f32).to_bits(), Ordering::Relaxed);
+
+        state.update_live_audio_meters();
+
+        // Linear pre-fader meter stays at 0.50 for audio-reactive fallback & compact meter.
+        assert!((state.hardware.live_audio_peak - 0.50).abs() < 1e-4);
+
+        // Both Studio VU meters map -20 dBFS identically to 40/60 = 0.6667.
+        let expected_vu = 40.0 / 60.0;
+        assert!(
+            (state.hardware.live_audio_db_peak - expected_vu).abs() < 1e-3,
+            "expected game Studio VU ~{expected_vu}, got {}",
+            state.hardware.live_audio_db_peak
+        );
+        assert!(
+            (state.hardware.live_mic_peak - expected_vu).abs() < 1e-3,
+            "expected mic Studio VU ~{expected_vu}, got {}",
+            state.hardware.live_mic_peak
+        );
+        assert!((state.hardware.live_audio_db_peak - state.hardware.live_mic_peak).abs() < 1e-3);
+
+        // With master_volume = 0.60 and raw game 0.50 (-6 dBFS), post-fader is 0.30 (-10.46 dBFS),
+        // which should read clearly higher than a quiet -24 dBFS (0.063 linear) mic.
+        state.hardware.live_audio_db_peak = 0.0;
+        state.hardware.live_mic_peak = 0.0;
+        state.set_master_volume(0.60);
+        state
+            .hardware
+            .audio_peak_amplitude
+            .store(500, Ordering::Relaxed);
+        state
+            .mic
+            .current_level_db
+            .store((-24.0f32).to_bits(), Ordering::Relaxed);
+
+        state.update_live_audio_meters();
+        assert!(state.hardware.live_audio_db_peak > state.hardware.live_mic_peak + 0.2);
+
+        // Muting master_volume drives new Studio game VU samples to 0.0 (allowing only decay).
+        state.hardware.live_audio_db_peak = 0.0;
+        state.set_master_volume(0.0);
+        state
+            .hardware
+            .audio_peak_amplitude
+            .store(900, Ordering::Relaxed);
+        state.update_live_audio_meters();
+        assert_eq!(state.hardware.live_audio_db_peak, 0.0);
     }
 }
