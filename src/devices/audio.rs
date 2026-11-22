@@ -210,7 +210,14 @@ pub(crate) struct LiveSource {
     buffering: bool,
     has_started_playback: bool,
     prebuffer_frames: usize,
+    rebuffer_frames: usize,
     target_frames: usize,
+    base_target_ms: u32,
+    adaptive_target_step_frames: usize,
+    adaptive_target_bonus_frames: usize,
+    max_adaptive_bonus_frames: usize,
+    live_target_ms: Option<Arc<AtomicU32>>,
+    effective_target_ms: Option<Arc<AtomicU32>>,
     max_drift_frames: usize,
     adaptive_resampling: bool,
     ema_queued_frames: f64,
@@ -329,7 +336,14 @@ impl LiveSource {
             buffering: true,
             has_started_playback: false,
             prebuffer_frames,
+            rebuffer_frames: prebuffer_frames,
             target_frames,
+            base_target_ms: 0,
+            adaptive_target_step_frames: 0,
+            adaptive_target_bonus_frames: 0,
+            max_adaptive_bonus_frames: 0,
+            live_target_ms: None,
+            effective_target_ms: None,
             max_drift_frames,
             adaptive_resampling,
             ema_queued_frames: target_frames as f64,
@@ -340,6 +354,154 @@ impl LiveSource {
             resample_primed: false,
             last_output_frame: vec![0.0; ch],
             declick_next_audio: true,
+        }
+    }
+
+    /// Creates a `LiveSource` tuned for jittery UDP network streams (such as PS5 Remote Play):
+    /// - Steady-state cushion (`target_ms`, optionally live-updatable via `live_target_ms`) to
+    ///   absorb PipeWire/CPAL bursts plus Wi-Fi/mesh jitter without starving.
+    /// - Auto-adaptive jitter expansion: each mid-stream underrun expands `target_frames` by
+    ///   `adaptive_step_ms` (up to `+max_adaptive_bonus_ms`) so repeated mesh/Wi-Fi spikes are
+    ///   absorbed silently after the first hit.
+    /// - Shorter mid-stream underrun recovery (`rebuffer_frames`) that resumes smoothly and lets
+    ///   the PI resampler rebuild the full cushion inaudibly instead of holding long silence.
+    /// - Wide drift ceiling (`max_drift_ms`) so temporary catch-up bursts drain via adaptive
+    ///   resampling instead of hard-dropping audio frames.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_network_stream(
+        statistics: Arc<PlaybackStatistics>,
+        consumer: Consumer<f32>,
+        channels: u16,
+        sample_rate: u32,
+        target_ms: u32,
+        adaptive_step_ms: u32,
+        max_adaptive_bonus_ms: u32,
+        min_max_drift_ms: u32,
+        live_target_ms: Option<Arc<AtomicU32>>,
+        effective_target_ms: Option<Arc<AtomicU32>>,
+        audio_latency_ms: Arc<AtomicU64>,
+        capture_delay_ms: Arc<AtomicU64>,
+        stop_playback: Arc<AtomicBool>,
+        volume_bits: Arc<AtomicU32>,
+    ) -> Self {
+        let channels = channels.max(1);
+        let ch = channels as usize;
+        let sr = sample_rate.max(1) as usize;
+        let ring_capacity_frames = (consumer.buffer().capacity() / ch).max(1);
+
+        let ms_to_frames = |ms: u32| -> usize { ((sr as u64 * ms as u64) / 1000).max(1) as usize };
+        let base_target_ms = target_ms.clamp(40, 250);
+        let max_safe_prebuffer = (ring_capacity_frames / 2).max(1);
+
+        let prebuffer_frames = ms_to_frames(base_target_ms).min(max_safe_prebuffer);
+        let target_frames = prebuffer_frames;
+        let rebuffer_ms = (base_target_ms / 2).clamp(40, 65).min(base_target_ms);
+        let rebuffer_frames = ms_to_frames(rebuffer_ms).min(prebuffer_frames).max(1);
+        let adaptive_target_step_frames = if adaptive_step_ms == 0 {
+            0
+        } else {
+            ms_to_frames(adaptive_step_ms)
+        };
+        let max_adaptive_bonus_frames = if max_adaptive_bonus_ms == 0 {
+            0
+        } else {
+            ms_to_frames(max_adaptive_bonus_ms)
+        };
+        let desired_drift_ms = min_max_drift_ms.max(base_target_ms + max_adaptive_bonus_ms + 140);
+        let max_drift_frames = ms_to_frames(desired_drift_ms)
+            .min(ring_capacity_frames.saturating_sub(ms_to_frames(20)))
+            .max(prebuffer_frames + max_adaptive_bonus_frames + 1);
+
+        if let Some(ref eff) = effective_target_ms {
+            eff.store(base_target_ms, Ordering::Relaxed);
+        }
+
+        let declick_frames =
+            ((sr as f64 * AUDIO_DECLICK_DURATION.as_secs_f64()).round() as usize).max(1);
+        let out_chunk_frames = (sr / 200).max(declick_frames).max(256);
+        let adaptive_resampling = prebuffer_frames >= 8 && ring_capacity_frames >= 16;
+        let initial_vol = f32::from_bits(volume_bits.load(Ordering::Relaxed));
+        let volume_slew_alpha = (1.0 / (0.004 * sr as f32)).clamp(0.0005, 1.0);
+
+        Self {
+            statistics,
+            consumer,
+            channels,
+            sample_rate: sample_rate.max(1),
+            audio_latency_ms,
+            capture_delay_ms,
+            stop_playback,
+            volume_bits,
+            current_volume: initial_vol,
+            volume_slew_alpha,
+            staging_buf: vec![0.0; (out_chunk_frames + 16) * ch],
+            local_buf: vec![0.0; out_chunk_frames * ch],
+            local_idx: 0,
+            valid_len: 0,
+            buffering: true,
+            has_started_playback: false,
+            prebuffer_frames,
+            rebuffer_frames,
+            target_frames,
+            base_target_ms,
+            adaptive_target_step_frames,
+            adaptive_target_bonus_frames: 0,
+            max_adaptive_bonus_frames,
+            live_target_ms,
+            effective_target_ms,
+            max_drift_frames,
+            adaptive_resampling,
+            ema_queued_frames: target_frames as f64,
+            integral_trim: 0.0,
+            resample_step: 1.0,
+            resample_pos_fp: 0,
+            resample_hist: vec![0.0; 4 * ch],
+            resample_primed: false,
+            last_output_frame: vec![0.0; ch],
+            declick_next_audio: true,
+        }
+    }
+
+    fn sync_network_target_from_atomic(&mut self) {
+        let Some(ref live) = self.live_target_ms else {
+            return;
+        };
+        let requested = live.load(Ordering::Relaxed);
+        if requested == 0 {
+            return;
+        }
+        let clamped_ms = requested.clamp(40, 250);
+        if clamped_ms == self.base_target_ms {
+            return;
+        }
+        self.base_target_ms = clamped_ms;
+        self.adaptive_target_bonus_frames = 0;
+        self.recompute_network_thresholds();
+    }
+
+    fn recompute_network_thresholds(&mut self) {
+        let ch = self.channels as usize;
+        let sr = self.sample_rate.max(1) as usize;
+        let ring_capacity_frames = (self.consumer.buffer().capacity() / ch).max(1);
+        let ms_to_frames = |ms: u32| -> usize { ((sr as u64 * ms as u64) / 1000).max(1) as usize };
+
+        let max_safe_target = ring_capacity_frames.saturating_mul(2) / 5;
+        let base_frames = ms_to_frames(self.base_target_ms).min(max_safe_target.max(1));
+        let effective_frames =
+            (base_frames + self.adaptive_target_bonus_frames).min(max_safe_target.max(base_frames));
+        self.prebuffer_frames = effective_frames;
+        self.target_frames = effective_frames;
+        let effective_ms = ((effective_frames as u64 * 1000) / sr as u64).max(1) as u32;
+        let rebuffer_ms = (effective_ms / 2).clamp(40, 65).min(effective_ms);
+        self.rebuffer_frames = ms_to_frames(rebuffer_ms).min(effective_frames).max(1);
+        let desired_drift_frames =
+            effective_frames + ms_to_frames(160).max(self.max_adaptive_bonus_frames);
+        self.max_drift_frames = desired_drift_frames
+            .max(ms_to_frames(300))
+            .min(ring_capacity_frames.saturating_sub(ms_to_frames(20)))
+            .max(effective_frames + 1);
+        if let Some(ref eff) = self.effective_target_ms {
+            eff.store(effective_ms, Ordering::Relaxed);
         }
     }
 
@@ -371,6 +533,7 @@ impl LiveSource {
 
     fn refill_local_buf(&mut self) {
         // This runs directly in CPAL's real-time output callback. It must never block or allocate.
+        self.sync_network_target_from_atomic();
         let channels = self.channels as usize;
         let out_chunk_frames = (self.local_buf.len() / channels).max(1);
 
@@ -412,12 +575,21 @@ impl LiveSource {
         // Hold in non-blocking silence until the jitter/period cushion is established so playback
         // does not scrape empty on every capture/playback beat cycle.
         if self.buffering {
-            if queued_frames < self.prebuffer_frames {
+            let required_frames = if self.has_started_playback {
+                self.rebuffer_frames
+            } else {
+                self.prebuffer_frames
+            };
+            if queued_frames < required_frames {
                 self.emit_silence_or_fade_out(self.has_started_playback);
                 return;
             }
             self.buffering = false;
-            self.ema_queued_frames = self.target_frames as f64;
+            self.ema_queued_frames = if self.rebuffer_frames < self.target_frames {
+                queued_frames as f64
+            } else {
+                self.target_frames as f64
+            };
         }
 
         let step_fp = self.current_step_fp();
@@ -544,6 +716,15 @@ impl LiveSource {
         self.resample_primed = false;
         self.resample_pos_fp = 0;
         self.declick_next_audio = true;
+        if self.has_started_playback
+            && self.adaptive_target_step_frames > 0
+            && self.adaptive_target_bonus_frames < self.max_adaptive_bonus_frames
+        {
+            self.adaptive_target_bonus_frames = (self.adaptive_target_bonus_frames
+                + self.adaptive_target_step_frames)
+                .min(self.max_adaptive_bonus_frames);
+            self.recompute_network_thresholds();
+        }
         self.emit_silence_or_fade_out(true);
     }
 
@@ -1817,6 +1998,84 @@ mod tests {
         let resume_first_right = source.next().unwrap();
         assert!(resume_first_left > 0.0 && resume_first_left < 0.01);
         assert!(resume_first_right < 0.0 && resume_first_right > -0.01);
+    }
+
+    #[test]
+    fn network_stream_recovers_at_shorter_rebuffer_and_ramps_back_to_target() {
+        let (mut producer, consumer) = RingBuffer::<f32>::new(48_000 * 2);
+        let live_target = Arc::new(AtomicU32::new(100));
+        let eff_target = Arc::new(AtomicU32::new(0));
+        let mut source = LiveSource::new_network_stream(
+            Arc::new(PlaybackStatistics::default()),
+            consumer,
+            2,
+            48_000,
+            100,
+            15,
+            60,
+            300,
+            Some(Arc::clone(&live_target)),
+            Some(Arc::clone(&eff_target)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(10)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU32::new(1.0f32.to_bits())),
+        );
+
+        assert_eq!(source.prebuffer_frames, 4_800);
+        assert_eq!(source.rebuffer_frames, 2_400);
+        assert_eq!(source.target_frames, 4_800);
+        assert_eq!(eff_target.load(Ordering::Relaxed), 100);
+
+        // Initial startup waits for the full 100 ms prebuffer.
+        push_frames(&mut producer, 2_400, 0.5, -0.5);
+        assert_eq!(source.next(), Some(0.0));
+        for _ in 1..source.valid_len {
+            assert_eq!(source.next(), Some(0.0));
+        }
+
+        // Reaching 100 ms starts playback.
+        push_frames(&mut producer, 2_400, 0.5, -0.5);
+        let mut started = false;
+        while source.consumer.slots() > 0 || source.local_idx < source.valid_len {
+            let l = source.next().unwrap();
+            let _r = source.next().unwrap();
+            if l.abs() > 0.1 {
+                started = true;
+            }
+        }
+        assert!(started);
+
+        // Force underrun fade-out to silence: mid-stream underrun auto-expands target by +15 ms!
+        let fade_frames = source.declick_frame_count();
+        for _ in 0..fade_frames {
+            source.next();
+            source.next();
+        }
+        assert!(source.buffering);
+        assert_eq!(eff_target.load(Ordering::Relaxed), 115);
+        assert_eq!(source.target_frames, 5_520);
+
+        // Mid-stream recovery resumes at rebuffer_frames (~57 ms, well below 115 ms target)
+        // and slows the adaptive resampler to rebuild the 115 ms cushion.
+        let rebuffer = source.rebuffer_frames;
+        assert!(rebuffer < source.target_frames);
+        push_frames(&mut producer, rebuffer, 0.6, -0.6);
+        let resumed_l = source.next().unwrap();
+        let _resumed_r = source.next().unwrap();
+        assert!(!source.buffering);
+        assert!(resumed_l > 0.0);
+        assert!(
+            source.resample_step < 1.0,
+            "PI resampler should gently slow playback to rebuild cushion after resume, got {}",
+            source.resample_step
+        );
+
+        // Adjusting the live slider resets the auto-bonus and updates target immediately.
+        live_target.store(80, Ordering::Relaxed);
+        source.sync_network_target_from_atomic();
+        assert_eq!(eff_target.load(Ordering::Relaxed), 80);
+        assert_eq!(source.target_frames, 3_840);
     }
 
     #[test]

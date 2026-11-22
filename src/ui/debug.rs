@@ -123,6 +123,41 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                     stats.silence_frames.load(Ordering::Relaxed) as f64 * ms,
                     stats.drift_dropped_frames.load(Ordering::Relaxed)
                 ));
+            } else if state.ps5.is_active {
+                let rate = state.ps5.audio_telemetry.sample_rate.load(Ordering::Relaxed);
+                let channels = state.ps5.audio_telemetry.channels.load(Ordering::Relaxed);
+                let stats = &state.ps5.audio_telemetry.statistics;
+                if rate > 0 {
+                    let ms = 1000.0 / rate as f64;
+                    let target_ms = state
+                        .ps5
+                        .audio_telemetry
+                        .effective_target_ms
+                        .load(Ordering::Relaxed);
+                    let target_suffix = if target_ms > 0 {
+                        format!(" (target: {target_ms} ms)")
+                    } else {
+                        String::new()
+                    };
+                    ui.label(format!(
+                        "PS5 Audio: {} Hz · {} channels · queued: {:.1} ms{}",
+                        rate,
+                        channels,
+                        stats.queued_frames.load(Ordering::Relaxed) as f64 * ms,
+                        target_suffix
+                    ));
+                    ui.label(format!(
+                        "Estimated audio latency: {} ms",
+                        state.hardware.audio_latency_ms.load(Ordering::Relaxed)
+                    ));
+                    ui.label(format!(
+                        "Playback underrun silence: {:.1} ms · drift drops: {} audio frames",
+                        stats.silence_frames.load(Ordering::Relaxed) as f64 * ms,
+                        stats.drift_dropped_frames.load(Ordering::Relaxed)
+                    ));
+                } else {
+                    ui.label("PS5 Audio: waiting for stream…");
+                }
             } else {
                 ui.label("Audio inactive");
             }

@@ -12,9 +12,9 @@
 //! - Haptics & DualSense feedback: forwarded to `DualSenseBridgeHandle` (single SDL2 thread).
 
 #[cfg(feature = "ps5-remote-play")]
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, AtomicU8},
+    atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8},
     Arc,
 };
 #[cfg(feature = "ps5-remote-play")]
@@ -77,6 +77,33 @@ pub enum Ps5SessionEvent {
     Stopped(String),
 }
 
+/// Shared real-time audio telemetry for an active PS5 Remote Play session, surfaced in the
+/// Debug overlay (`D`) alongside capture-card audio metrics.
+#[derive(Default)]
+pub struct Ps5AudioTelemetry {
+    pub statistics: Arc<crate::devices::audio::PlaybackStatistics>,
+    pub sample_rate: AtomicU32,
+    pub channels: AtomicU16,
+    /// User-configured base jitter buffer target in milliseconds (live-editable while streaming).
+    pub target_buffer_ms: Arc<AtomicU32>,
+    /// Current effective target in milliseconds (may auto-expand above base after underruns).
+    pub effective_target_ms: Arc<AtomicU32>,
+}
+
+impl Ps5AudioTelemetry {
+    pub fn reset(&self) {
+        use std::sync::atomic::Ordering;
+        self.statistics.queued_frames.store(0, Ordering::Relaxed);
+        self.statistics.silence_frames.store(0, Ordering::Relaxed);
+        self.statistics
+            .drift_dropped_frames
+            .store(0, Ordering::Relaxed);
+        self.sample_rate.store(0, Ordering::Relaxed);
+        self.channels.store(0, Ordering::Relaxed);
+        self.effective_target_ms.store(0, Ordering::Relaxed);
+    }
+}
+
 pub struct Ps5SessionParams {
     pub console_name: String,
     pub host: String,
@@ -101,6 +128,7 @@ pub struct Ps5SessionParams {
     pub master_volume: f32,
     pub peak_amplitude: Arc<AtomicU64>,
     pub audio_latency_ms: Arc<AtomicU64>,
+    pub audio_telemetry: Arc<Ps5AudioTelemetry>,
     pub queue_drops: Arc<AtomicU64>,
     pub replay_audio: Arc<crate::replay::AudioTap>,
     pub frame_tx: Sender<Arc<RawFrame>>,
@@ -111,13 +139,15 @@ pub struct Ps5SessionParams {
     pub controller_handle: Option<DualSenseBridgeHandle>,
 }
 
-/// Effective input jitter period (30 ms @ 48 kHz) passed to `LiveSource`.
-/// PS5 sends 10 ms (480-frame) Opus packets over UDP while Linux CPAL pulls ~25 ms bursts;
-/// sizing `LiveSource` with a 30 ms jitter period yields a ~70 ms prebuffer and ~42.5 ms
-/// steady-state target, keeping the ring buffer strictly non-empty across CPAL bursts and
-/// UDP jitter while Catmull-Rom PI adaptive resampling tracks PS5-vs-PC clock skew seamlessly.
+/// Auto-adaptive network-jitter `LiveSource` defaults for PS5 Remote Play:
+/// starts at the user's configured target (default 100 ms, matching chiaki-ng) and auto-expands
+/// by +15 ms per mid-stream underrun (up to +60 ms) to absorb Wi-Fi/mesh spikes silently.
 #[cfg_attr(not(feature = "ps5-remote-play"), allow(dead_code))]
-const PS5_AUDIO_JITTER_PERIOD_FRAMES: u32 = 1_440;
+const PS5_AUDIO_ADAPTIVE_STEP_MS: u32 = 15;
+#[cfg_attr(not(feature = "ps5-remote-play"), allow(dead_code))]
+const PS5_AUDIO_MAX_ADAPTIVE_BONUS_MS: u32 = 60;
+#[cfg_attr(not(feature = "ps5-remote-play"), allow(dead_code))]
+const PS5_AUDIO_MIN_MAX_DRIFT_MS: u32 = 300;
 
 #[cfg(feature = "ps5-remote-play")]
 const PS5_VIDEO_DECODE_QUEUE_CAPACITY: usize = 8;
@@ -381,6 +411,7 @@ struct AudioOutputContext {
     volume_bits: Arc<AtomicU32>,
     peak_amplitude: Arc<AtomicU64>,
     audio_latency_ms: Arc<AtomicU64>,
+    audio_telemetry: Arc<Ps5AudioTelemetry>,
     replay_audio: Arc<crate::replay::AudioTap>,
     playback: Option<Ps5AudioPlayback>,
     playback_init_attempted: bool,
@@ -394,6 +425,7 @@ impl AudioOutputContext {
         volume_bits: Arc<AtomicU32>,
         peak_amplitude: Arc<AtomicU64>,
         audio_latency_ms: Arc<AtomicU64>,
+        audio_telemetry: Arc<Ps5AudioTelemetry>,
         replay_audio: Arc<crate::replay::AudioTap>,
     ) -> Self {
         Self {
@@ -403,6 +435,7 @@ impl AudioOutputContext {
             volume_bits,
             peak_amplitude,
             audio_latency_ms,
+            audio_telemetry,
             replay_audio,
             playback: None,
             playback_init_attempted: false,
@@ -430,20 +463,48 @@ impl AudioOutputContext {
         self.producer = None;
 
         let stop = Arc::new(AtomicBool::new(false));
-        let ring_frames =
-            (rate.max(48_000) as usize * 2).max(PS5_AUDIO_JITTER_PERIOD_FRAMES as usize * 12);
+        let ring_frames = (rate.max(48_000) as usize * 2).max(24_000);
         let (producer, consumer) = RingBuffer::<f32>::new(ring_frames * out_ch as usize);
 
         match crate::devices::audio::initialize_rodio_playback() {
             Ok((stream_guard, stream_handle)) => {
-                let statistics = Arc::new(crate::devices::audio::PlaybackStatistics::default());
+                self.audio_telemetry.reset();
+                self.audio_telemetry
+                    .sample_rate
+                    .store(rate, Ordering::Relaxed);
+                self.audio_telemetry
+                    .channels
+                    .store(out_ch, Ordering::Relaxed);
+                let statistics = Arc::clone(&self.audio_telemetry.statistics);
                 let capture_delay_ms = Arc::new(AtomicU64::new(10));
-                let source = crate::devices::audio::LiveSource::new(
+                let configured_target_ms = {
+                    let stored = self
+                        .audio_telemetry
+                        .target_buffer_ms
+                        .load(Ordering::Relaxed);
+                    if stored == 0 {
+                        super::PS5_DEFAULT_AUDIO_BUFFER_MS
+                    } else {
+                        stored.clamp(
+                            super::PS5_MIN_AUDIO_BUFFER_MS,
+                            super::PS5_MAX_AUDIO_BUFFER_MS,
+                        )
+                    }
+                };
+                self.audio_telemetry
+                    .target_buffer_ms
+                    .store(configured_target_ms, Ordering::Relaxed);
+                let source = crate::devices::audio::LiveSource::new_network_stream(
                     Arc::clone(&statistics),
                     consumer,
                     out_ch,
                     rate,
-                    PS5_AUDIO_JITTER_PERIOD_FRAMES,
+                    configured_target_ms,
+                    PS5_AUDIO_ADAPTIVE_STEP_MS,
+                    PS5_AUDIO_MAX_ADAPTIVE_BONUS_MS,
+                    PS5_AUDIO_MIN_MAX_DRIFT_MS,
+                    Some(Arc::clone(&self.audio_telemetry.target_buffer_ms)),
+                    Some(Arc::clone(&self.audio_telemetry.effective_target_ms)),
                     Arc::clone(&self.audio_latency_ms),
                     capture_delay_ms,
                     Arc::clone(&stop),
@@ -462,7 +523,10 @@ impl AudioOutputContext {
                             input_channels = in_ch,
                             output_channels = out_ch,
                             sample_rate = rate,
-                            "PS5 Remote Play audio output started (adaptive LiveSource)"
+                            target_ms = configured_target_ms,
+                            adaptive_step_ms = PS5_AUDIO_ADAPTIVE_STEP_MS,
+                            max_adaptive_bonus_ms = PS5_AUDIO_MAX_ADAPTIVE_BONUS_MS,
+                            "PS5 Remote Play audio output started (auto-adaptive network LiveSource)"
                         );
                     }
                     Err(err) => {
@@ -854,6 +918,7 @@ fn run_single_attempt(
             Arc::clone(volume_bits),
             Arc::clone(&params.peak_amplitude),
             Arc::clone(&params.audio_latency_ms),
+            Arc::clone(&params.audio_telemetry),
             Arc::clone(&params.replay_audio),
         )),
         event_tx: params.event_tx.clone(),
@@ -1327,8 +1392,7 @@ mod tests {
 
         let sample_rate = 48_000u32;
         let channels = 2u16;
-        let ring_frames =
-            (sample_rate as usize * 2).max(PS5_AUDIO_JITTER_PERIOD_FRAMES as usize * 12);
+        let ring_frames = (sample_rate as usize * 2).max(24_000);
         let (mut prod, cons) = RingBuffer::<f32>::new(ring_frames * channels as usize);
         let stats = Arc::new(crate::devices::audio::PlaybackStatistics::default());
         let latency_ms = Arc::new(AtomicU64::new(0));
@@ -1336,12 +1400,17 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
 
-        let mut source = crate::devices::audio::LiveSource::new(
+        let mut source = crate::devices::audio::LiveSource::new_network_stream(
             Arc::clone(&stats),
             cons,
             channels,
             sample_rate,
-            PS5_AUDIO_JITTER_PERIOD_FRAMES,
+            crate::ps5::PS5_DEFAULT_AUDIO_BUFFER_MS,
+            PS5_AUDIO_ADAPTIVE_STEP_MS,
+            PS5_AUDIO_MAX_ADAPTIVE_BONUS_MS,
+            PS5_AUDIO_MIN_MAX_DRIFT_MS,
+            None,
+            None,
             Arc::clone(&latency_ms),
             capture_delay,
             stop,
@@ -1349,28 +1418,33 @@ mod tests {
         );
 
         // Simulate 2 seconds of 440 Hz sine wave arriving in 10 ms (480-frame) PS5 Opus packets
-        // with +/- 5 ms UDP jitter while Linux CPAL pulls 25 ms (1200-frame) bursts.
+        // with a 75 ms mid-stream Wi-Fi/mesh stall followed by burst catch-up while Linux CPAL
+        // pulls 25 ms (1200-frame) bursts.
         let mut prod_frame: u64 = 0;
         let mut started = false;
         let mut prev_l: Option<f32> = None;
         let mut max_step = 0.0f32;
         let freq = 440.0f64;
 
-        // Prime initial 80 ms (8 packets of 10 ms)
-        for _ in 0..8 {
-            for _ in 0..480 {
-                let s = ((2.0 * std::f64::consts::PI * freq * prod_frame as f64)
-                    / sample_rate as f64)
-                    .sin() as f32
-                    * 0.5;
-                prod.push(s).unwrap();
-                prod.push(s).unwrap();
-                prod_frame += 1;
+        let push_packets = |prod: &mut rtrb::Producer<f32>, prod_frame: &mut u64, count: usize| {
+            for _ in 0..count {
+                for _ in 0..480 {
+                    let s = ((2.0 * std::f64::consts::PI * freq * *prod_frame as f64)
+                        / sample_rate as f64)
+                        .sin() as f32
+                        * 0.5;
+                    prod.push(s).unwrap();
+                    prod.push(s).unwrap();
+                    *prod_frame += 1;
+                }
             }
-        }
+        };
 
-        // Run 80 CPAL 25 ms bursts (2.0 seconds total), interleaving 2 or 3 10 ms packets
-        // (average 2.5 packets = 25 ms per burst, simulating real UDP arrival jitter).
+        // Prime initial 110 ms (11 packets of 10 ms)
+        push_packets(&mut prod, &mut prod_frame, 11);
+
+        // Run 80 CPAL 25 ms bursts (2.0 seconds total), including a simulated 75 ms Wi-Fi stall
+        // (bursts 30-32 deliver 0 packets) followed by a 100 ms catch-up burst on burst 33.
         for burst in 0..80 {
             let mut burst_samples = Vec::with_capacity(1200 * 2);
             for _ in 0..(1200 * 2) {
@@ -1389,30 +1463,25 @@ mod tests {
                 }
             }
 
-            let packets_this_burst = if burst % 2 == 0 { 3 } else { 2 };
-            for _ in 0..packets_this_burst {
-                for _ in 0..480 {
-                    let s = ((2.0 * std::f64::consts::PI * freq * prod_frame as f64)
-                        / sample_rate as f64)
-                        .sin() as f32
-                        * 0.5;
-                    prod.push(s).unwrap();
-                    prod.push(s).unwrap();
-                    prod_frame += 1;
-                }
-            }
+            let packets_this_burst = match burst {
+                30 | 31 | 32 => 0, // 75 ms Wi-Fi/mesh stall
+                33 => 10,          // catch-up burst (75 ms stalled + 25 ms current)
+                b if b % 2 == 0 => 3,
+                _ => 2,
+            };
+            push_packets(&mut prod, &mut prod_frame, packets_this_burst);
         }
 
         assert!(started, "Expected continuous audio output after prebuffer");
         assert_eq!(
             stats.silence_frames.load(Ordering::Relaxed),
             0,
-            "Expected zero audio underruns across 2 seconds of 10ms->25ms streaming"
+            "Expected zero audio underruns across 2 seconds + 50 ms UDP jitter stall"
         );
         assert_eq!(
             stats.drift_dropped_frames.load(Ordering::Relaxed),
             0,
-            "Expected zero hard sample drops"
+            "Expected zero hard sample drops across catch-up burst"
         );
         // For 440 Hz @ 48 kHz with amplitude 0.5, max true derivative per sample is ~0.029.
         // Any click/discontinuity would jump >> 0.1.

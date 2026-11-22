@@ -92,7 +92,7 @@ fn build_ps5_chiaki_bridge() {
         })
         .unwrap_or(false);
 
-    let desired_stamp = format!("{CHIAKI_COMMIT}:sys_curl={system_curl_has_wss}");
+    let desired_stamp = format!("{CHIAKI_COMMIT}:sys_curl={system_curl_has_wss}:audio_fix=2");
     let up_to_date = libchiaki_a.is_file()
         && std::fs::read_to_string(&stamp_path)
             .map(|s| s.trim() == desired_stamp)
@@ -106,6 +106,8 @@ fn build_ps5_chiaki_bridge() {
             CHIAKI_COMMIT,
             !system_curl_has_wss,
         );
+        let is_managed_cache = src_dir == cache_root.join("src");
+        apply_chiaki_audio_fixes(&src_dir, is_managed_cache);
         configure_and_build_chiaki(&src_dir, &build_dir, system_curl_has_wss);
         std::fs::write(&stamp_path, &desired_stamp).expect("Failed to write libchiaki cache stamp");
     }
@@ -221,6 +223,143 @@ fn build_ps5_chiaki_bridge() {
             sub_cmd.arg(sm);
         }
         run_checked(&mut sub_cmd, "git submodule update for libchiaki");
+    }
+
+    /// Patches two audio-stutter bugs in pinned `chiaki-ng` v1.10.1 (`libchiaki`):
+    /// 1. `audioreceiver.c`:
+    ///    - Process FEC units before current source units so a lost packet whose FEC copy is
+    ///      carried in the very next packet is recovered losslessly instead of triggering false
+    ///      Opus PLC and getting discarded as stale.
+    ///    - Fix the inverted `jitter_buffer_count < CHIAKI_AUDIO_JITTER_PREFILL` branch that
+    ///      concealed missing packets immediately on the first out-of-order arrival instead of
+    ///      waiting up to `CHIAKI_AUDIO_JITTER_PREFILL` frames (or full buffer) for reordering/FEC.
+    /// 2. `takion.c`:
+    ///    - Request a 2 MiB UDP `SO_RCVBUF` (falling back to `takion->a_rwnd` if rejected) instead
+    ///      of shrinking the OS receive buffer to 100 KB (`0x19000`), preventing kernel UDP packet
+    ///      drops during 15–30 Mbps video IDR bursts.
+    fn apply_chiaki_audio_fixes(src_dir: &Path, strict: bool) {
+        let patch_file = |rel_path: &str, replacements: &[(&str, &str, &str)]| {
+            let full_path = src_dir.join(rel_path);
+            let mut content = std::fs::read_to_string(&full_path)
+                .unwrap_or_else(|e| panic!("Failed to read {}: {e}", full_path.display()));
+            let mut changed = false;
+            for &(marker, old, new) in replacements {
+                if content.contains(marker) {
+                    continue;
+                }
+                if content.contains(old) {
+                    content = content.replace(old, new);
+                    changed = true;
+                } else if strict {
+                    panic!(
+                        "Expected upstream snippet not found while patching {} (marker: {})",
+                        full_path.display(),
+                        marker
+                    );
+                }
+            }
+            if changed {
+                std::fs::write(&full_path, content)
+                    .unwrap_or_else(|e| panic!("Failed to write {}: {e}", full_path.display()));
+            }
+        };
+
+        patch_file(
+            "lib/src/audioreceiver.c",
+            &[
+                (
+                    "MICHADAME_PATCH_AUDIO_PREFILL",
+                    "#define CHIAKI_AUDIO_JITTER_PREFILL 3\n",
+                    concat!(
+                        "/* MICHADAME_PATCH_AUDIO_PREFILL: 20 ms lookahead cuts burst stall while preserving 2-frame FEC/reorder */\n",
+                        "#define CHIAKI_AUDIO_JITTER_PREFILL 2\n",
+                    ),
+                ),
+                (
+                    "MICHADAME_PATCH_AUDIO_FEC_FIRST",
+                    concat!(
+                        "\tfor(size_t i = 0; i < source_units_count + fec_units_count; i++)\n",
+                        "\t{\n",
+                        "\t\tChiakiSeqNum16 frame_index;\n",
+                        "\t\tif(i < source_units_count)\n",
+                        "\t\t\tframe_index = packet->frame_index + i;\n",
+                        "\t\telse\n",
+                        "\t\t{\n",
+                        "\t\t\tsize_t fec_index = i - source_units_count;\n",
+                        "\t\t\tif(audio_receiver->frame_index_startup && packet->frame_index + fec_index < fec_units_count + 1)\n",
+                        "\t\t\t\tcontinue;\n",
+                        "\t\t\tframe_index = packet->frame_index - fec_units_count + fec_index;\n",
+                        "\t\t}\n",
+                        "\n",
+                        "\t\tchiaki_audio_receiver_frame(audio_receiver, frame_index, packet->is_haptics, packet->data + unit_size * i, unit_size);\n",
+                        "\t}\n",
+                    ),
+                    concat!(
+                        "\t/* MICHADAME_PATCH_AUDIO_FEC_FIRST: feed older FEC units before current source units */\n",
+                        "\tfor(size_t fec_index = 0; fec_index < fec_units_count; fec_index++)\n",
+                        "\t{\n",
+                        "\t\tif(audio_receiver->frame_index_startup && packet->frame_index + fec_index < fec_units_count + 1)\n",
+                        "\t\t\tcontinue;\n",
+                        "\t\tChiakiSeqNum16 frame_index = packet->frame_index - fec_units_count + fec_index;\n",
+                        "\t\tsize_t unit_offset = source_units_count + fec_index;\n",
+                        "\t\tchiaki_audio_receiver_frame(audio_receiver, frame_index, packet->is_haptics, packet->data + unit_size * unit_offset, unit_size);\n",
+                        "\t}\n",
+                        "\tfor(size_t i = 0; i < source_units_count; i++)\n",
+                        "\t{\n",
+                        "\t\tChiakiSeqNum16 frame_index = packet->frame_index + i;\n",
+                        "\t\tchiaki_audio_receiver_frame(audio_receiver, frame_index, packet->is_haptics, packet->data + unit_size * i, unit_size);\n",
+                        "\t}\n",
+                    ),
+                ),
+                (
+                    "MICHADAME_PATCH_AUDIO_PLC_LOOKAHEAD",
+                    concat!(
+                        "\t\t\t\tif(newer_audio_buffered && newest >= 0)\n",
+                        "\t\t\t\t{\n",
+                        "\t\t\t\t\tif(audio_receiver->jitter_buffer_count >= CHIAKI_AUDIO_JITTER_PREFILL)\n",
+                        "\t\t\t\t\t{\n",
+                        "\t\t\t\t\t\tChiakiSeqNum16 required_lookahead = audio_receiver->next_frame_index + CHIAKI_AUDIO_JITTER_PREFILL;\n",
+                        "\t\t\t\t\t\tcan_conceal_loss = chiaki_seq_num_16_gt(audio_receiver->jitter_buffer[newest].frame_index, required_lookahead - 1);\n",
+                        "\t\t\t\t\t}\n",
+                        "\t\t\t\t\telse\n",
+                        "\t\t\t\t\t{\n",
+                        "\t\t\t\t\t\tcan_conceal_loss = true;\n",
+                        "\t\t\t\t\t}\n",
+                        "\t\t\t\t}\n",
+                    ),
+                    concat!(
+                        "\t\t\t\t/* MICHADAME_PATCH_AUDIO_PLC_LOOKAHEAD: wait for lookahead before Opus PLC */\n",
+                        "\t\t\t\tif(newer_audio_buffered && newest >= 0)\n",
+                        "\t\t\t\t{\n",
+                        "\t\t\t\t\tChiakiSeqNum16 required_lookahead = audio_receiver->next_frame_index + CHIAKI_AUDIO_JITTER_PREFILL;\n",
+                        "\t\t\t\t\tcan_conceal_loss = audio_receiver->jitter_buffer_count >= CHIAKI_AUDIO_JITTER_BUFFER_SIZE\n",
+                        "\t\t\t\t\t\t|| chiaki_seq_num_16_gt(audio_receiver->jitter_buffer[newest].frame_index, required_lookahead - 1);\n",
+                        "\t\t\t\t}\n",
+                    ),
+                ),
+            ],
+        );
+
+        patch_file(
+            "lib/src/takion.c",
+            &[(
+                "MICHADAME_PATCH_TAKION_RCVBUF",
+                concat!(
+                    "\t\tconst int rcvbuf_val = takion->a_rwnd;\n",
+                    "\t\tint r = setsockopt(takion->sock, SOL_SOCKET, SO_RCVBUF, (const CHIAKI_SOCKET_BUF_TYPE)&rcvbuf_val, sizeof(rcvbuf_val));\n",
+                ),
+                concat!(
+                    "\t\t/* MICHADAME_PATCH_TAKION_RCVBUF: avoid shrinking OS UDP receive queue to 100 KiB */\n",
+                    "\t\tconst int rcvbuf_large = 2 * 1024 * 1024;\n",
+                    "\t\tint r = setsockopt(takion->sock, SOL_SOCKET, SO_RCVBUF, (const CHIAKI_SOCKET_BUF_TYPE)&rcvbuf_large, sizeof(rcvbuf_large));\n",
+                    "\t\tif(r < 0)\n",
+                    "\t\t{\n",
+                    "\t\t\tconst int rcvbuf_val = takion->a_rwnd;\n",
+                    "\t\t\tr = setsockopt(takion->sock, SOL_SOCKET, SO_RCVBUF, (const CHIAKI_SOCKET_BUF_TYPE)&rcvbuf_val, sizeof(rcvbuf_val));\n",
+                    "\t\t}\n",
+                ),
+            )],
+        );
     }
 
     fn configure_and_build_chiaki(src_dir: &Path, build_dir: &Path, system_curl_has_wss: bool) {

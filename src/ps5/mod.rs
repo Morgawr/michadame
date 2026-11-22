@@ -23,11 +23,14 @@ pub use controller::{
 };
 pub use ffi::{DiscoveredHostInfo, PsnRemoteDeviceInfo, RegisteredConsoleData};
 pub use psn::StoredPsnToken;
-pub use session::{Ps5Command, Ps5SessionEvent, Ps5SessionParams};
+pub use session::{Ps5AudioTelemetry, Ps5Command, Ps5SessionEvent, Ps5SessionParams};
 
 pub const PS5_MIN_BITRATE_KBPS: u32 = 2_000;
 pub const PS5_MAX_BITRATE_KBPS: u32 = 100_000;
 pub const PS5_DEFAULT_BITRATE_KBPS: u32 = 15_000;
+pub const PS5_MIN_AUDIO_BUFFER_MS: u32 = 50;
+pub const PS5_MAX_AUDIO_BUFFER_MS: u32 = 200;
+pub const PS5_DEFAULT_AUDIO_BUFFER_MS: u32 = 100;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ps5Resolution {
@@ -223,6 +226,7 @@ pub struct Ps5Config {
     pub resolution: Ps5Resolution,
     pub fps: Ps5Fps,
     pub bitrate_kbps: u32,
+    pub audio_buffer_ms: u32,
     pub codec: Ps5Codec,
     pub connection_mode: Ps5ConnectionMode,
     pub enable_keyboard: bool,
@@ -240,6 +244,7 @@ impl Default for Ps5Config {
             resolution: Ps5Resolution::P1080,
             fps: Ps5Fps::Fps60,
             bitrate_kbps: PS5_DEFAULT_BITRATE_KBPS,
+            audio_buffer_ms: PS5_DEFAULT_AUDIO_BUFFER_MS,
             codec: Ps5Codec::H265,
             connection_mode: Ps5ConnectionMode::Auto,
             enable_keyboard: true,
@@ -256,6 +261,11 @@ impl Ps5Config {
     pub fn clamped_bitrate_kbps(&self) -> u32 {
         self.bitrate_kbps
             .clamp(PS5_MIN_BITRATE_KBPS, PS5_MAX_BITRATE_KBPS)
+    }
+
+    pub fn clamped_audio_buffer_ms(&self) -> u32 {
+        self.audio_buffer_ms
+            .clamp(PS5_MIN_AUDIO_BUFFER_MS, PS5_MAX_AUDIO_BUFFER_MS)
     }
 }
 
@@ -281,6 +291,7 @@ pub struct Ps5State {
     pub event_rx: Option<Receiver<Ps5SessionEvent>>,
     pub stop_requested: Option<Arc<AtomicBool>>,
     pub worker_thread: Option<JoinHandle<()>>,
+    pub audio_telemetry: Arc<Ps5AudioTelemetry>,
 
     // DualSense / DualSense Edge 1:1 controller monitor
     pub controller_monitor: Option<DualSenseMonitor>,
@@ -348,6 +359,7 @@ impl Default for Ps5State {
             event_rx: None,
             stop_requested: None,
             worker_thread: None,
+            audio_telemetry: Arc::new(Ps5AudioTelemetry::default()),
             controller_monitor: None,
             controller_status: Ps5DualSenseStatus::default(),
             controller_disconnect_warned: false,
@@ -737,6 +749,7 @@ impl Ps5State {
                     master_volume: 0.0,
                     peak_amplitude: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                     audio_latency_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    audio_telemetry: Arc::new(Ps5AudioTelemetry::default()),
                     queue_drops: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                     replay_audio: Arc::new(crate::replay::AudioTap::default()),
                     frame_tx,

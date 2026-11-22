@@ -378,6 +378,33 @@ pub fn draw_ps5_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                 }
                             });
                         ui.end_row();
+
+                        ui.label("Audio Buffer:");
+                        if ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut state.ps5.config.audio_buffer_ms,
+                                    crate::ps5::PS5_MIN_AUDIO_BUFFER_MS
+                                        ..=crate::ps5::PS5_MAX_AUDIO_BUFFER_MS,
+                                )
+                                .step_by(5.0)
+                                .suffix(" ms"),
+                            )
+                            .on_hover_text(
+                                "Target audio jitter buffer (100 ms default). Increase for Wi-Fi/mesh links; updates live while streaming and auto-expands up to +60 ms if underruns occur.",
+                            )
+                            .changed()
+                        {
+                            let clamped = state.ps5.config.clamped_audio_buffer_ms();
+                            state
+                                .ps5
+                                .audio_telemetry
+                                .target_buffer_ms
+                                .store(clamped, std::sync::atomic::Ordering::Relaxed);
+                            config::save_config(state);
+                            changed = true;
+                        }
+                        ui.end_row();
                     });
             }
             let ui = right;

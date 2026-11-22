@@ -2591,6 +2591,11 @@ impl AppState {
         self.ps5.login_pin_prompt_open = false;
         self.ps5.login_pin_input.clear();
         self.ps5.login_pin_incorrect = false;
+        self.ps5.audio_telemetry.reset();
+        self.ps5
+            .audio_telemetry
+            .target_buffer_ms
+            .store(self.ps5.config.clamped_audio_buffer_ms(), Ordering::Relaxed);
 
         self.replay.set_game_volume(self.hardware.master_volume);
         self.replay.sync_audio_filter();
@@ -2623,6 +2628,7 @@ impl AppState {
             master_volume: self.effective_local_volume(),
             peak_amplitude: Arc::clone(&self.hardware.audio_peak_amplitude),
             audio_latency_ms: Arc::clone(&self.hardware.audio_latency_ms),
+            audio_telemetry: Arc::clone(&self.ps5.audio_telemetry),
             queue_drops: Arc::clone(&self.hardware.video_queue_drops),
             replay_audio: self.replay.audio.clone(),
             frame_tx,
@@ -2668,6 +2674,7 @@ impl AppState {
 
         if self.ps5.is_active {
             self.ps5.is_active = false;
+            self.ps5.audio_telemetry.reset();
             self.ps5.is_connecting = false;
             self.ps5.cant_display_warning = false;
             self.ps5.keyboard_prompt_open = false;
