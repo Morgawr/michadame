@@ -1,6 +1,7 @@
 use super::anime4k::{Anime4kUpscaler, Anime4kVariant};
 use super::beam::BeamRenderer;
 use super::fft_filter::FftFilter;
+use super::fsr1::{Fsr1RunInfo, Fsr1Upscaler};
 use super::geometry::{OcrProjection, RenderedArea};
 use super::halo::HaloRenderer;
 use super::params::{
@@ -124,6 +125,7 @@ pub struct CrtFilterRenderer {
     anime4k_small: Anime4kUpscaler,
     anime4k_medium: Anime4kUpscaler,
     anime4k_large: Anime4kUpscaler,
+    fsr1: Fsr1Upscaler,
     pub halo: HaloRenderer,
     pub beam: BeamRenderer,
 
@@ -311,6 +313,7 @@ pub struct CrtFilterRenderer {
     last_fallback_tex: Option<glow::Texture>,
     last_preprocess_sig: Option<PreprocessCacheSig>,
     last_preprocess_out: Option<(glow::Texture, (u32, u32), bool)>,
+    last_fsr1_active: bool,
     history_ring: DeinterlaceHistoryRing,
     pub fallback_captured_at_next_paint: Option<i64>,
     pub render_fft_spectrum_next_paint: bool,
@@ -359,6 +362,7 @@ struct PreprocessCacheSig {
     resolution: (u32, u32),
     effective_res: (u32, u32),
     scaler_filter: u8,
+    fsr1_sharpness: u32,
     allow_srgb_passthrough_fastpath: bool,
     scan_and_color: [u32; 6],
     deinterlace_enabled: bool,
@@ -476,6 +480,7 @@ fn build_preprocess_cache_sig(
     resolution: (u32, u32),
     effective_res: (u32, u32),
     scaler_filter: u8,
+    fsr1_sharpness: u32,
     allow_srgb_passthrough_fastpath: bool,
     scan_and_color: [u32; 6],
     deinterlace_enabled: bool,
@@ -510,6 +515,7 @@ fn build_preprocess_cache_sig(
         resolution,
         effective_res,
         scaler_filter,
+        fsr1_sharpness,
         allow_srgb_passthrough_fastpath,
         scan_and_color,
         deinterlace_enabled,
@@ -1490,6 +1496,7 @@ impl CrtFilterRenderer {
                 anime4k_small: Anime4kUpscaler::new(gl, Anime4kVariant::Small),
                 anime4k_medium: Anime4kUpscaler::new(gl, Anime4kVariant::Medium),
                 anime4k_large: Anime4kUpscaler::new(gl, Anime4kVariant::Large),
+                fsr1: Fsr1Upscaler::new(gl),
                 halo: HaloRenderer::new(gl),
                 beam: BeamRenderer::new(gl),
                 last_size: (0, 0),
@@ -1511,6 +1518,7 @@ impl CrtFilterRenderer {
                 last_fallback_tex: None,
                 last_preprocess_sig: None,
                 last_preprocess_out: None,
+                last_fsr1_active: false,
                 history_ring: DeinterlaceHistoryRing::new(HISTORY_SLOTS),
                 fallback_captured_at_next_paint: None,
                 render_fft_spectrum_next_paint: false,
@@ -1525,6 +1533,15 @@ impl CrtFilterRenderer {
                 ocr_pbo_size: 0,
                 ocr_pending_readback: None,
             }
+        }
+    }
+
+    /// Returns telemetry from the most recent FSR 1.0 GPU pass if FSR 1.0 produced the active frame.
+    pub fn last_fsr1_run(&self) -> Option<Fsr1RunInfo> {
+        if self.last_fsr1_active {
+            self.fsr1.last_run()
+        } else {
+            None
         }
     }
 
@@ -2264,6 +2281,7 @@ impl CrtFilterRenderer {
         resolution: (u32, u32),
         output_size: (f32, f32),
         scaler_filter: u8,
+        fsr1_sharpness: f32,
         overscan_x: f32,
         overscan_y: f32,
         underscan_x: f32,
@@ -2291,6 +2309,8 @@ impl CrtFilterRenderer {
             scaler,
             ScalerFilter::Anime4kSmall | ScalerFilter::Anime4kMedium | ScalerFilter::Anime4kLarge
         );
+        let is_fsr1 = scaler == ScalerFilter::Fsr1;
+        let is_gpu_upscaler = is_anime4k || is_fsr1;
 
         let effective_res = if is_anime4k {
             match scaler {
@@ -2314,6 +2334,13 @@ impl CrtFilterRenderer {
                 ),
                 _ => unreachable!(),
             }
+        } else if is_fsr1 {
+            self.fsr1.get_upscaled_size(
+                resolution.0,
+                resolution.1,
+                output_size.0 as u32,
+                output_size.1 as u32,
+            )
         } else {
             resolution
         };
@@ -2353,6 +2380,7 @@ impl CrtFilterRenderer {
             resolution,
             effective_res,
             scaler_filter,
+            if is_fsr1 { fsr1_sharpness.to_bits() } else { 0 },
             allow_srgb_passthrough_fastpath,
             [
                 overscan_x.to_bits(),
@@ -2417,7 +2445,7 @@ impl CrtFilterRenderer {
             if allow_srgb_passthrough_fastpath
                 && !deinterlace_filter_enabled
                 && !median_filter_enabled
-                && !is_anime4k
+                && !is_gpu_upscaler
                 && (brightness - 1.0).abs() <= 0.0001
                 && (gamma - 1.0).abs() <= 0.0001
             {
@@ -2573,9 +2601,22 @@ impl CrtFilterRenderer {
             };
             current_video_texture = upscaled.0;
             current_res = (upscaled.1, upscaled.2);
+        } else if is_fsr1 {
+            let upscaled = self.fsr1.upscale(
+                gl,
+                current_video_texture,
+                current_res.0,
+                current_res.1,
+                output_size.0 as u32,
+                output_size.1 as u32,
+                fsr1_sharpness,
+            );
+            current_video_texture = upscaled.0;
+            current_res = (upscaled.1, upscaled.2);
         }
 
         let out = (current_video_texture, current_res, input_is_srgb);
+        self.last_fsr1_active = is_fsr1;
         self.last_preprocess_sig = current_sig;
         self.last_preprocess_out = Some(out);
         out
@@ -2932,6 +2973,7 @@ impl CrtFilterRenderer {
                 resolution,
                 output_size,
                 params.scaler_filter,
+                params.fsr1_sharpness,
                 params.overscan_x,
                 params.overscan_y,
                 params.underscan_x,
@@ -3329,6 +3371,7 @@ impl CrtFilterRenderer {
         brightness: f32,
         gamma: f32,
         scaler_filter: u8,
+        fsr1_sharpness: f32,
         overscan_x: f32,
         overscan_y: f32,
         underscan_x: f32,
@@ -3365,6 +3408,7 @@ impl CrtFilterRenderer {
                 resolution,
                 output_size,
                 scaler_filter,
+                fsr1_sharpness,
                 overscan_x,
                 overscan_y,
                 underscan_x,
@@ -4443,6 +4487,7 @@ impl CrtFilterRenderer {
             self.anime4k_small.destroy(gl);
             self.anime4k_medium.destroy(gl);
             self.anime4k_large.destroy(gl);
+            self.fsr1.destroy(gl);
             self.halo.destroy(gl);
             self.beam.destroy(gl);
             gl.delete_vertex_array(self.vertex_array);
@@ -4501,6 +4546,9 @@ impl CrtFilterRenderer {
                 }
                 _ => unreachable!(),
             }
+        } else if scaler == ScalerFilter::Fsr1 {
+            self.fsr1
+                .get_upscaled_size(width, height, target_width, target_height)
         } else {
             (width, height)
         };
@@ -5166,6 +5214,7 @@ mod tests {
                 1.0,
                 1.0,
                 0,
+                crate::video::gpu::DEFAULT_FSR1_SHARPNESS,
                 0.0,
                 0.0,
                 0.0,
@@ -5425,6 +5474,7 @@ mod tests {
                 (1280, 800),
                 (1280, 800),
                 0,
+                0,
                 fastpath,
                 scan_and_color,
                 false,
@@ -5472,6 +5522,7 @@ mod tests {
             (1280, 800),
             (1280, 800),
             0,
+            0,
             false,
             scan_and_color,
             false,
@@ -5485,6 +5536,49 @@ mod tests {
         )
         .unwrap();
         assert_ne!(sig_a1, sig_raw);
+
+        // Changing FSR 1.0 sharpness invalidates the preprocess cache signature
+        let sig_fsr_lo = build_preprocess_cache_sig(
+            Some(&raw_frame),
+            None,
+            None,
+            (1280, 800),
+            (2560, 1600),
+            ScalerFilter::Fsr1 as u8,
+            0.25f32.to_bits(),
+            false,
+            scan_and_color,
+            false,
+            0,
+            deint_params,
+            false,
+            0.0f32.to_bits(),
+            false,
+            fft_thresh,
+            0,
+        )
+        .unwrap();
+        let sig_fsr_hi = build_preprocess_cache_sig(
+            Some(&raw_frame),
+            None,
+            None,
+            (1280, 800),
+            (2560, 1600),
+            ScalerFilter::Fsr1 as u8,
+            0.85f32.to_bits(),
+            false,
+            scan_and_color,
+            false,
+            0,
+            deint_params,
+            false,
+            0.0f32.to_bits(),
+            false,
+            fft_thresh,
+            0,
+        )
+        .unwrap();
+        assert_ne!(sig_fsr_lo, sig_fsr_hi);
     }
 
     #[test]
@@ -5785,5 +5879,167 @@ mod tests {
         // Brightness scales signal and clamps to [0, 1]
         assert!((apply_brightness_gamma(0.4, 1.5, 1.0) - 0.6).abs() < 1e-5);
         assert_eq!(apply_brightness_gamma(0.8, 2.0, 1.0), 1.0);
+    }
+
+    #[test]
+    #[ignore = "opt-in Mesa software EGL readback; set LIBGL_ALWAYS_SOFTWARE=1 EGL_PLATFORM=surfaceless"]
+    fn fsr1_upscales_and_records_telemetry_and_sharpness() {
+        let egl = software_gl::SoftwareGl::new(320, 240);
+        #[allow(clippy::arc_with_non_send_sync)]
+        let gl = Arc::new(egl.context());
+        let mut painter = egui_glow::Painter::new(gl.clone(), "", None).unwrap();
+        let mut renderer = CrtFilterRenderer::new(&gl);
+
+        // 160x120 source with a blurred S-curve vertical step edge at x=79..80 (40 -> 65 -> 175 -> 200)
+        let mut small_pixels = vec![0u8; 160 * 120 * 4];
+        for y in 0..120 {
+            for x in 0..160 {
+                let v = if x < 79 {
+                    40u8
+                } else if x == 79 {
+                    65u8
+                } else if x == 80 {
+                    175u8
+                } else {
+                    200u8
+                };
+                let idx = (y * 160 + x) * 4;
+                small_pixels[idx] = v;
+                small_pixels[idx + 1] = v;
+                small_pixels[idx + 2] = v;
+                small_pixels[idx + 3] = 255;
+            }
+        }
+        let small_frame = RawFrame {
+            captured_at: 1,
+            rate: crate::replay::config::Rate { num: 60, den: 1 },
+            width: 160,
+            height: 120,
+            data: small_pixels,
+            format: Pixel::RGBA,
+            color_range: crate::video::types::ColorRange::Full,
+        };
+
+        let output = (320.0, 240.0);
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(output.0, output.1));
+
+        let render = |renderer: &mut CrtFilterRenderer,
+                      frame: &RawFrame,
+                      scaler: ScalerFilter,
+                      sharpness: f32| {
+            let area = renderer.draw_passthrough(
+                &gl,
+                &painter,
+                rect,
+                Some(frame),
+                None,
+                (frame.width, frame.height),
+                output,
+                [0.0, 0.0, 0.0],
+                1.0,
+                false,
+                0.0,
+                false,
+                0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                1.0,
+                1.0,
+                1.0,
+                scaler as u8,
+                sharpness,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                [0.0, 0.0, 0.0, 0.0],
+                None,
+                0.0,
+                0.0,
+                None,
+                None,
+                None,
+                0.0,
+                None,
+                None,
+                false,
+            );
+            read_framebuffer_pixels_raw(&gl, area).unwrap().0
+        };
+
+        // 1. 2x upscale with sharpness = 0.0 (EASU active, RCAS neutral)
+        let px_soft = render(&mut renderer, &small_frame, ScalerFilter::Fsr1, 0.0);
+        assert_eq!(
+            renderer.last_fsr1_run(),
+            Some(Fsr1RunInfo {
+                input_size: (160, 120),
+                output_size: (320, 240),
+                easu_ran: true,
+                rcas_sharpness: 0.0,
+                run_count: 1,
+            })
+        );
+        let mid_y = 120usize;
+        let sample_r = |buf: &[u8], x: usize| buf[(mid_y * 320 + x) * 4] as i32;
+        assert!(
+            (sample_r(&px_soft, 40) - 40).abs() <= 2,
+            "Left interior should preserve dark gray (~40), got {}",
+            sample_r(&px_soft, 40)
+        );
+        assert!(
+            (sample_r(&px_soft, 280) - 200).abs() <= 2,
+            "Right interior should preserve bright gray (~200), got {}",
+            sample_r(&px_soft, 280)
+        );
+
+        // 2. Same frame with sharpness = 1.0 invalidates cache and steepens edge contrast
+        let px_sharp = render(&mut renderer, &small_frame, ScalerFilter::Fsr1, 1.0);
+        assert_eq!(
+            renderer.last_fsr1_run(),
+            Some(Fsr1RunInfo {
+                input_size: (160, 120),
+                output_size: (320, 240),
+                easu_ran: true,
+                rcas_sharpness: 1.0,
+                run_count: 2,
+            })
+        );
+        let soft_edge_step = sample_r(&px_soft, 161) - sample_r(&px_soft, 158);
+        let sharp_edge_step = sample_r(&px_sharp, 161) - sample_r(&px_sharp, 158);
+        assert!(
+            sharp_edge_step > soft_edge_step,
+            "RCAS sharpness=1.0 must steepen edge contrast over sharpness=0.0 (sharp={sharp_edge_step}, soft={soft_edge_step})"
+        );
+
+        // 3. 1x native frame skips EASU and runs RCAS only
+        let native_frame = RawFrame {
+            captured_at: 2,
+            rate: crate::replay::config::Rate { num: 60, den: 1 },
+            width: 320,
+            height: 240,
+            data: vec![128u8; 320 * 240 * 4],
+            format: Pixel::RGBA,
+            color_range: crate::video::types::ColorRange::Full,
+        };
+        let _ = render(&mut renderer, &native_frame, ScalerFilter::Fsr1, 0.85);
+        assert_eq!(
+            renderer.last_fsr1_run(),
+            Some(Fsr1RunInfo {
+                input_size: (320, 240),
+                output_size: (320, 240),
+                easu_ran: false,
+                rcas_sharpness: 0.85,
+                run_count: 3,
+            })
+        );
+
+        // 4. Switching away from FSR 1.0 clears active telemetry
+        let _ = render(&mut renderer, &native_frame, ScalerFilter::Bilinear, 0.85);
+        assert_eq!(renderer.last_fsr1_run(), None);
+
+        renderer.destroy(&gl);
+        painter.destroy();
     }
 }

@@ -286,6 +286,7 @@ pub fn build_profile_from_state(state: &AppState) -> Profile {
         crt_glass_flash_enabled: Some(state.video.crt_glass_flash_enabled),
         crt_glass_flash_intensity: Some(state.video.crt_glass_flash_intensity),
         horizontal_stretch: Some(state.video.horizontal_stretch),
+        fsr1_sharpness: Some(state.video.fsr1_sharpness),
         median_filter_enabled: Some(state.video.median_filter_enabled),
         median_mix: Some(state.video.median_mix),
         deinterlace_filter_enabled: Some(state.video.deinterlace_filter_enabled),
@@ -698,6 +699,12 @@ pub fn apply_profile_to_state(state: &mut AppState, profile: &Profile) -> bool {
         sanitize_finite_f32(profile.crt_glass_flash_intensity, 0.70, 0.0, 1.0);
 
     state.video.horizontal_stretch = sanitize_finite_f32(profile.horizontal_stretch, 1.0, 0.5, 1.5);
+    state.video.fsr1_sharpness = sanitize_finite_f32(
+        profile.fsr1_sharpness,
+        crate::video::gpu::DEFAULT_FSR1_SHARPNESS,
+        0.0,
+        1.0,
+    );
     state.video.median_filter_enabled = profile.median_filter_enabled.unwrap_or(false);
     state.video.median_mix = sanitize_finite_f32(profile.median_mix, 1.0, 0.0, 1.0);
     state.video.deinterlace_filter_enabled = profile.deinterlace_filter_enabled.unwrap_or(false);

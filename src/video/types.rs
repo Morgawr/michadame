@@ -207,15 +207,17 @@ pub enum ScalerFilter {
     Anime4kSmall = 5,
     Anime4kMedium = 6,
     Anime4kLarge = 7,
+    Fsr1 = 8,
 }
 
 impl ScalerFilter {
-    pub const ALL: [ScalerFilter; 8] = [
+    pub const ALL: [ScalerFilter; 9] = [
         ScalerFilter::FastBilinear,
         ScalerFilter::Bilinear,
         ScalerFilter::Bicubic,
         ScalerFilter::Point,
         ScalerFilter::Lanczos,
+        ScalerFilter::Fsr1,
         ScalerFilter::Anime4kSmall,
         ScalerFilter::Anime4kMedium,
         ScalerFilter::Anime4kLarge,
@@ -230,6 +232,7 @@ impl ScalerFilter {
             5 | 10 => ScalerFilter::Anime4kSmall,
             6 | 11 => ScalerFilter::Anime4kMedium,
             7 | 12 => ScalerFilter::Anime4kLarge,
+            8 => ScalerFilter::Fsr1,
             _ => ScalerFilter::FastBilinear,
         }
     }
@@ -245,9 +248,8 @@ impl ScalerFilter {
             ScalerFilter::Lanczos => ffmpeg_next::software::scaling::flag::Flags::LANCZOS,
             ScalerFilter::Anime4kSmall
             | ScalerFilter::Anime4kMedium
-            | ScalerFilter::Anime4kLarge => {
-                ffmpeg_next::software::scaling::flag::Flags::FAST_BILINEAR
-            }
+            | ScalerFilter::Anime4kLarge
+            | ScalerFilter::Fsr1 => ffmpeg_next::software::scaling::flag::Flags::FAST_BILINEAR,
         }
     }
 }
@@ -263,6 +265,7 @@ impl std::fmt::Display for ScalerFilter {
             ScalerFilter::Anime4kSmall => "Anime4K S (Very Fast)",
             ScalerFilter::Anime4kMedium => "Anime4K M (Fast)",
             ScalerFilter::Anime4kLarge => "Anime4K L (Medium)",
+            ScalerFilter::Fsr1 => "FSR 1.0 (EASU + RCAS)",
         };
         write!(f, "{}", text)
     }
@@ -315,10 +318,13 @@ mod tests {
         assert_eq!(ScalerFilter::from_u8(5), ScalerFilter::Anime4kSmall);
         assert_eq!(ScalerFilter::from_u8(6), ScalerFilter::Anime4kMedium);
         assert_eq!(ScalerFilter::from_u8(7), ScalerFilter::Anime4kLarge);
+        assert_eq!(ScalerFilter::from_u8(8), ScalerFilter::Fsr1);
+        assert_eq!(ScalerFilter::from_u8(9), ScalerFilter::FastBilinear); // Unmapped
         assert_eq!(ScalerFilter::from_u8(10), ScalerFilter::Anime4kSmall);
         assert_eq!(ScalerFilter::from_u8(11), ScalerFilter::Anime4kMedium);
         assert_eq!(ScalerFilter::from_u8(12), ScalerFilter::Anime4kLarge);
         assert_eq!(ScalerFilter::from_u8(13), ScalerFilter::FastBilinear); // Default
+        assert_eq!(ScalerFilter::Fsr1.to_string(), "FSR 1.0 (EASU + RCAS)");
     }
 
     #[test]
@@ -353,6 +359,10 @@ mod tests {
         );
         assert_eq!(
             ScalerFilter::Anime4kLarge.into_ffmpeg_flag(),
+            ffmpeg_next::software::scaling::flag::Flags::FAST_BILINEAR
+        );
+        assert_eq!(
+            ScalerFilter::Fsr1.into_ffmpeg_flag(),
             ffmpeg_next::software::scaling::flag::Flags::FAST_BILINEAR
         );
     }

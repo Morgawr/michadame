@@ -22,6 +22,28 @@ pub fn anime4k_size(source: (u32, u32), target: (u32, u32)) -> (u32, u32) {
     (w, h)
 }
 
+const MAX_FSR1_WIDTH: u32 = 7680;
+const MAX_FSR1_HEIGHT: u32 = 4320;
+
+/// Shared with the FSR 1.0 renderer and UI geometry; upscales to the aspect-fitted
+/// target size up to 8K and leaves the size unchanged when the target is <= source.
+pub fn fsr1_size(source: (u32, u32), target: (u32, u32)) -> (u32, u32) {
+    let (sw, sh) = source;
+    let (tw, th) = target;
+    if sw == 0 || sh == 0 || tw == 0 || th == 0 {
+        return source;
+    }
+    let capped_tw = tw.min(MAX_FSR1_WIDTH);
+    let capped_th = th.min(MAX_FSR1_HEIGHT);
+    let scale = (capped_tw as f64 / sw as f64).min(capped_th as f64 / sh as f64);
+    if scale <= 1.0 {
+        return source;
+    }
+    let out_w = ((sw as f64 * scale).round() as u32).clamp(sw, capped_tw);
+    let out_h = ((sh as f64 * scale).round() as u32).clamp(sh, capped_th);
+    (out_w, out_h)
+}
+
 pub fn pixelate_size(source: (u32, u32)) -> (u32, u32) {
     if source.0 == 0 || source.1 == 0 {
         return (1, 1);
@@ -292,6 +314,30 @@ mod tests {
         assert_eq!(
             RenderedArea::full((1920., f32::NAN)),
             RenderedArea::default()
+        );
+    }
+
+    #[test]
+    fn fsr1_size_upscales_aspect_fitted_and_never_downscales() {
+        assert_eq!(fsr1_size((1920, 1080), (3840, 2160)), (3840, 2160));
+        assert_eq!(fsr1_size((1920, 1080), (2560, 1440)), (2560, 1440));
+        assert_eq!(fsr1_size((1920, 1080), (2560, 1600)), (2560, 1440));
+        assert_eq!(fsr1_size((1920, 1080), (1920, 1080)), (1920, 1080));
+        assert_eq!(fsr1_size((1920, 1080), (1280, 720)), (1920, 1080));
+        assert_eq!(fsr1_size((1920, 1080), (2560, 1080)), (1920, 1080));
+        assert_eq!(fsr1_size((640, 480), (1920, 1080)), (1440, 1080));
+        assert_eq!(fsr1_size((1920, 1080), (16000, 9000)), (7680, 4320));
+        assert_eq!(fsr1_size((0, 1080), (3840, 2160)), (0, 1080));
+        assert_eq!(fsr1_size((1920, 1080), (0, 0)), (1920, 1080));
+
+        // Aspect-fitted bounds must match the original source after FSR 1.0 upscaling.
+        assert_eq!(
+            RenderedArea::fit(fsr1_size((640, 480), (1920, 1080)), (1920.0, 1080.0), 1.0),
+            RenderedArea::fit((640, 480), (1920.0, 1080.0), 1.0)
+        );
+        assert_eq!(
+            RenderedArea::fit(fsr1_size((1920, 1080), (2560, 1600)), (2560.0, 1600.0), 1.0),
+            RenderedArea::fit((1920, 1080), (2560.0, 1600.0), 1.0)
         );
     }
 }

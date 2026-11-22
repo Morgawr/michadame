@@ -139,6 +139,28 @@ pub fn draw_shaders_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 });
         });
 
+        if crate::video::types::ScalerFilter::from_u8(
+            state
+                .scaler_filter
+                .load(std::sync::atomic::Ordering::Relaxed),
+        ) == crate::video::types::ScalerFilter::Fsr1
+        {
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new("FSR 1.0 Sharpness:")
+                        .monospace()
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(170, 170, 170)),
+                );
+                let slider = percent_slider(&mut state.video.fsr1_sharpness, 0.0..=1.0);
+                if ui.add(slider).changed() {
+                    crate::config::save_config(state);
+                    changed = true;
+                }
+            });
+        }
+
         technical_separator(ui);
 
         ui.horizontal_wrapped(|ui| {

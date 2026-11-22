@@ -370,14 +370,22 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         };
         let scaler =
             crate::video::types::ScalerFilter::from_u8(state.scaler_filter.load(Ordering::Relaxed));
-        let mut fitted_res = if !is_showing_roll
-            && matches!(
-                scaler,
+        let mut fitted_res = if !is_showing_roll {
+            match scaler {
                 crate::video::types::ScalerFilter::Anime4kSmall
-                    | crate::video::types::ScalerFilter::Anime4kMedium
-                    | crate::video::types::ScalerFilter::Anime4kLarge
-            ) {
-            video::gpu::geometry::anime4k_size(res, (output_size.0 as u32, output_size.1 as u32))
+                | crate::video::types::ScalerFilter::Anime4kMedium
+                | crate::video::types::ScalerFilter::Anime4kLarge => {
+                    video::gpu::geometry::anime4k_size(
+                        res,
+                        (output_size.0 as u32, output_size.1 as u32),
+                    )
+                }
+                crate::video::types::ScalerFilter::Fsr1 => video::gpu::geometry::fsr1_size(
+                    res,
+                    (output_size.0 as u32, output_size.1 as u32),
+                ),
+                _ => res,
+            }
         } else {
             res
         };
@@ -992,6 +1000,11 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             } else {
                 state.scaler_filter.load(Ordering::Relaxed)
             };
+            let fsr1_sharpness = if is_showing_roll {
+                video::gpu::DEFAULT_FSR1_SHARPNESS
+            } else {
+                state.video.fsr1_sharpness
+            };
             let latest_frame = active_frame.clone();
             let video_texture_id = state.video_texture.as_ref().map(|t| t.id());
             let fft_clone = if is_showing_roll {
@@ -1133,6 +1146,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                             brightness,
                             gamma,
                             scaler_filter,
+                            fsr1_sharpness,
                             overscan_x,
                             overscan_y,
                             underscan_x,

@@ -251,6 +251,7 @@ impl Default for AppState {
                 crt_glass_flash_enabled: false,
                 crt_glass_flash_intensity: 0.70,
                 horizontal_stretch: 1.0,
+                fsr1_sharpness: crate::video::gpu::DEFAULT_FSR1_SHARPNESS,
                 median_filter_enabled: false,
                 median_mix: 1.0,
                 deinterlace_filter_enabled: false,

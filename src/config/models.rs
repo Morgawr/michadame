@@ -1147,6 +1147,7 @@ pub struct Profile {
     pub crt_glass_flash_enabled: Option<bool>,
     pub crt_glass_flash_intensity: Option<f32>,
     pub horizontal_stretch: Option<f32>,
+    pub fsr1_sharpness: Option<f32>,
     pub median_filter_enabled: Option<bool>,
     pub median_mix: Option<f32>,
     pub deinterlace_filter_enabled: Option<bool>,

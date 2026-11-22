@@ -1660,6 +1660,16 @@ mod tests {
             "Shaders tab content_size.x {shaders_w:.1}px exceeded ScrollArea inner_rect {inner_w:.1}px (triggers horizontal scrollbar)"
         );
 
+        state.scaler_filter.store(
+            crate::video::types::ScalerFilter::Fsr1 as u8,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let (fsr_w, fsr_inner_w) = measure_controls_content_width(&mut state, SettingsTab::Shaders);
+        assert!(
+            fsr_w <= fsr_inner_w + 0.5,
+            "Shaders tab (FSR 1.0) content_size.x {fsr_w:.1}px exceeded ScrollArea inner_rect {fsr_inner_w:.1}px (triggers horizontal scrollbar)"
+        );
+
         // Also check PS5 tab with active PSN login form + saved console
         state.ps5.psn_login_url =
             "https://auth.api.sonyentertainmentnetwork.com/2.0/oauth/authorize?duid=test"

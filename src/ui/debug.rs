@@ -97,6 +97,14 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
             }
             let size = ctx.screen_rect().size() * ctx.pixels_per_point();
             ui.label(format!("Video window: {:.0} × {:.0} px", size.x, size.y));
+            let active_scaler = ScalerFilter::from_u8(state.scaler_filter.load(Ordering::Relaxed));
+            if active_scaler == ScalerFilter::Fsr1 {
+                let fsr1_info = state
+                    .crt_renderer
+                    .as_ref()
+                    .and_then(|r| r.try_lock().ok().and_then(|g| g.last_fsr1_run()));
+                ui.label(format_fsr1_debug_status(fsr1_info));
+            }
             if let Some(audio) = &state.hardware.active_audio_stream {
                 let stats = &audio.statistics;
                 let ms = 1000.0 / audio.sample_rate.max(1) as f64;
@@ -156,11 +164,20 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                 hw.audio_sample_format,
                 hw.audio_buffer_size
             ));
+            let scaler_label = if active_scaler == ScalerFilter::Fsr1 {
+                format!(
+                    "{} (sharpness {:.0}%)",
+                    active_scaler,
+                    state.video.fsr1_sharpness * 100.0
+                )
+            } else {
+                active_scaler.to_string()
+            };
             ui.label(format!(
                 "Profile: {} · CRT: {} · scaler: {}",
                 state.active_profile,
                 CrtFilter::from_u8(state.crt_filter.load(Ordering::Relaxed)),
-                ScalerFilter::from_u8(state.scaler_filter.load(Ordering::Relaxed))
+                scaler_label
             ));
             ui.label(format!(
                 "Color range: {} · stretch: {:.3} · overscan X/Y: {:.3} / {:.3} · underscan X/Y: {:.3} / {:.3}",
@@ -201,6 +218,28 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
             crate::replay::ui::draw_debug(&state.replay, ui);
         });
     state.ui.debug_open = open;
+}
+
+fn format_fsr1_debug_status(info: Option<crate::video::gpu::Fsr1RunInfo>) -> String {
+    match info {
+        Some(run) if run.easu_ran => format!(
+            "FSR 1.0: {} × {} → {} × {} (EASU + RCAS · sharpness {:.0}% · {} frames)",
+            run.input_size.0,
+            run.input_size.1,
+            run.output_size.0,
+            run.output_size.1,
+            run.rcas_sharpness * 100.0,
+            run.run_count
+        ),
+        Some(run) => format!(
+            "FSR 1.0: {} × {} (RCAS only · viewport ≤ source · sharpness {:.0}% · {} frames)",
+            run.input_size.0,
+            run.input_size.1,
+            run.rcas_sharpness * 100.0,
+            run.run_count
+        ),
+        None => "FSR 1.0: waiting for frame…".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -271,5 +310,37 @@ mod tests {
         };
         let _ = ctx.run(input, |ctx| draw(&mut state, ctx));
         assert!(state.ui.debug_open);
+    }
+
+    #[test]
+    fn fsr1_debug_status_distinguishes_easu_plus_rcas_and_rcas_only() {
+        assert_eq!(
+            format_fsr1_debug_status(None),
+            "FSR 1.0: waiting for frame…"
+        );
+
+        let upscaled = format_fsr1_debug_status(Some(crate::video::gpu::Fsr1RunInfo {
+            input_size: (1920, 1080),
+            output_size: (3840, 2160),
+            easu_ran: true,
+            rcas_sharpness: 0.85,
+            run_count: 42,
+        }));
+        assert_eq!(
+            upscaled,
+            "FSR 1.0: 1920 × 1080 → 3840 × 2160 (EASU + RCAS · sharpness 85% · 42 frames)"
+        );
+
+        let rcas_only = format_fsr1_debug_status(Some(crate::video::gpu::Fsr1RunInfo {
+            input_size: (1920, 1080),
+            output_size: (1920, 1080),
+            easu_ran: false,
+            rcas_sharpness: 0.5,
+            run_count: 7,
+        }));
+        assert_eq!(
+            rcas_only,
+            "FSR 1.0: 1920 × 1080 (RCAS only · viewport ≤ source · sharpness 50% · 7 frames)"
+        );
     }
 }

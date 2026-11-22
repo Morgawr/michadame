@@ -2,6 +2,10 @@ use crate::app::AppState;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
 
+fn default_fsr1_sharpness() -> f32 {
+    super::fsr1::DEFAULT_FSR1_SHARPNESS
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ShaderParams {
     pub hard_scan: f32,
@@ -28,6 +32,8 @@ pub struct ShaderParams {
     pub brightness: f32,
     pub gamma: f32,
     pub scaler_filter: u8,
+    #[serde(default = "default_fsr1_sharpness")]
+    pub fsr1_sharpness: f32,
     pub overscan_x: f32,
     pub overscan_y: f32,
     pub underscan_x: f32,
@@ -591,6 +597,7 @@ impl ShaderParams {
             brightness: state.video.brightness,
             gamma: state.video.gamma,
             scaler_filter: state.scaler_filter.load(Ordering::Relaxed),
+            fsr1_sharpness: state.video.fsr1_sharpness,
             overscan_x: state.video.overscan_x,
             overscan_y: state.video.overscan_y,
             underscan_x: state.video.underscan_x,
@@ -637,6 +644,7 @@ impl Default for ShaderParams {
             brightness: 1.0,
             gamma: 1.0,
             scaler_filter: crate::video::types::ScalerFilter::FastBilinear as u8,
+            fsr1_sharpness: super::fsr1::DEFAULT_FSR1_SHARPNESS,
             overscan_x: 0.0,
             overscan_y: 0.0,
             underscan_x: 0.0,

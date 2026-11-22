@@ -44,6 +44,7 @@ impl From<LegacyConfig> for MichadameConfig {
                 crt_glass_flash_enabled: legacy.crt_glass_flash_enabled,
                 crt_glass_flash_intensity: legacy.crt_glass_flash_intensity,
                 horizontal_stretch: legacy.horizontal_stretch,
+                fsr1_sharpness: None,
                 median_filter_enabled: legacy.median_filter_enabled,
                 median_mix: legacy.median_mix,
                 deinterlace_filter_enabled: legacy.deinterlace_filter_enabled,

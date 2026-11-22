@@ -1998,6 +1998,7 @@ pub struct VideoSettings {
     pub crt_glass_flash_enabled: bool,
     pub crt_glass_flash_intensity: f32,
     pub horizontal_stretch: f32,
+    pub fsr1_sharpness: f32,
     pub median_filter_enabled: bool,
     pub median_mix: f32,
     pub deinterlace_filter_enabled: bool,
