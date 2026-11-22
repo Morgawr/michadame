@@ -15,6 +15,7 @@ pub mod networking;
 pub mod niconico;
 pub mod pc98;
 pub mod profiles;
+pub mod ps5;
 pub mod replay_scrub;
 pub mod scaling;
 pub mod steam_deck;

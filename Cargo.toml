@@ -5,6 +5,10 @@ name = "michadame"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["ps5-remote-play"]
+ps5-remote-play = []
+
 [dependencies]
 confy = "0.5.1"
 crossbeam-channel = "0.5.12"

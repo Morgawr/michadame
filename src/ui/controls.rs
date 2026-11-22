@@ -170,22 +170,92 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
 
                 ui.add_space(12.0);
 
-                // Right column: Title, Stream/Audio row, Profile row, Tag row
+                // Right column: Title + Audio/Replay/Studio bar, Source launch row, Profile row, Tag row
                 ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new("Michadame Viewer")
-                            .size(16.0)
-                            .strong()
-                            .color(egui::Color32::from_rgb(238, 238, 238)),
-                    );
+                    // Title row + Audio meter + Replay toggle + Studio button (keeps Row 1 compact without horizontal overflow)
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Michadame Viewer")
+                                .size(16.0)
+                                .strong()
+                                .color(egui::Color32::from_rgb(238, 238, 238)),
+                        );
+                        ui.add_space(10.0);
+
+                        // Compact mechanical audio meter bar
+                        let peak = state.hardware.live_audio_peak;
+                        let color = if peak > 0.9 {
+                            egui::Color32::RED
+                        } else if peak > 0.7 {
+                            egui::Color32::YELLOW
+                        } else {
+                            egui::Color32::from_rgb(42, 122, 42) // #2a7a2a
+                        };
+                        let meter = egui::ProgressBar::new(peak.min(1.0))
+                            .text(
+                                egui::RichText::new(format!("Audio: {:.0}%", peak * 100.0))
+                                    .monospace()
+                                    .strong()
+                                    .size(10.0)
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(color)
+                            .desired_width(120.0)
+                            .rounding(egui::Rounding::ZERO);
+                        ui.add(meter);
+
+                        ui.add_space(8.0);
+                        // Same toggle as the Audio / Replay tab; both reflect `replay.runtime`.
+                        crate::replay::ui::draw_toggle(
+                            &mut state.replay,
+                            ui,
+                            state.ui.video_window_open,
+                        );
+
+                        ui.add_space(8.0);
+                        let studio_btn = egui::Button::new(
+                            egui::RichText::new("Studio (L)")
+                                .monospace()
+                                .strong()
+                                .size(10.5)
+                                .color(if state.ui.studio_window_open {
+                                    egui::Color32::from_rgb(190, 150, 255)
+                                } else {
+                                    egui::Color32::from_rgb(208, 208, 208)
+                                }),
+                        )
+                        .fill(if state.ui.studio_window_open {
+                            egui::Color32::from_rgb(60, 20, 100)
+                        } else {
+                            egui::Color32::from_rgb(44, 44, 44)
+                        })
+                        .stroke(egui::Stroke::new(
+                            1.0_f32,
+                            if state.ui.studio_window_open {
+                                egui::Color32::from_rgb(145, 70, 255)
+                            } else {
+                                egui::Color32::from_rgb(72, 72, 72)
+                            },
+                        ))
+                        .rounding(egui::Rounding::ZERO);
+                        if ui
+                            .add(studio_btn)
+                            .on_hover_text("Open Twitch Studio dashboard window (hotkey: L)")
+                            .clicked()
+                        {
+                            state.ui.studio_window_open = !state.ui.studio_window_open;
+                            changed = true;
+                        }
+                    });
                     ui.add_space(6.0);
 
-                    // Row 1: Stream Start/Stop / Video File + Compact Audio Meter (120x16)
+                    // Row 1: Stream Start/Stop / Input Sources
                     ui.horizontal(|ui| {
                         if state.ui.video_window_open {
                             let is_gamescope = state.gamescope_hook.as_ref().map_or(false, |h| h.is_active);
                             let is_pc98 = state.pc98.is_active;
                             let is_pc88 = state.pc88.is_active;
+                            let is_ps5 = state.ps5.is_active;
                             let is_file_mode = state.video_player.is_some();
                             let label = if is_gamescope {
                                 "Stop Gamescope"
@@ -193,6 +263,8 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                 "Stop PC-98"
                             } else if is_pc88 {
                                 "Stop PC-88"
+                            } else if is_ps5 {
+                                "Stop PS5"
                             } else if is_file_mode {
                                 "Stop Video"
                             } else {
@@ -214,6 +286,8 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                     "PC-98 emulator stopped."
                                 } else if is_pc88 {
                                     "PC-88 emulator stopped."
+                                } else if is_ps5 {
+                                    "PS5 Remote Play stopped."
                                 } else if is_file_mode {
                                     "Video playback stopped."
                                 } else {
@@ -271,6 +345,30 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                 if ui.small_button("Quasi88 Menu").on_hover_text("Toggle Quasi88 OSD menu (F12)").clicked() {
                                     state.pc88.send_command(crate::pc88::Pc88Command::TriggerMenu);
                                 }
+                            } else if is_ps5 {
+                                let (label, color) = if state.ps5.is_controller_connected() {
+                                    (
+                                        state.ps5.controller_status.short_label(),
+                                        egui::Color32::from_rgb(130, 215, 255),
+                                    )
+                                } else {
+                                    (
+                                        crate::ps5::PS5_CONTROLLER_REQUIRED_ERROR.to_string(),
+                                        egui::Color32::from_rgb(255, 120, 120),
+                                    )
+                                };
+                                ui.label(
+                                    egui::RichText::new(label)
+                                        .monospace()
+                                        .size(10.5)
+                                        .color(color),
+                                );
+                                if ui.small_button("PS Home").on_hover_text("Open PlayStation Home screen").clicked() {
+                                    state.ps5.send_command(crate::ps5::Ps5Command::GoHome);
+                                }
+                                if ui.small_button("Sleep PS5").on_hover_text("Put PS5 into Rest Mode").clicked() {
+                                    state.ps5.send_command(crate::ps5::Ps5Command::GotoBed);
+                                }
                             }
                         } else {
                             let can_stream = !state.hardware.selected_video_device.is_empty()
@@ -283,7 +381,13 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             .fill(egui::Color32::from_rgb(26, 74, 26)) // #1a4a1a
                             .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(40, 106, 40)))
                             .rounding(egui::Rounding::ZERO);
-                            if ui.add_enabled(can_stream, start_btn).clicked() {
+                            if ui
+                                .add_enabled(can_stream, start_btn)
+                                .on_disabled_hover_text(
+                                    "Select a capture card & video format in Capture & Replay to stream HDMI.",
+                                )
+                                .clicked()
+                            {
                                 state.start_stream(ui.ctx());
                                 state.info("Stream starting...");
                             }
@@ -349,78 +453,48 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                                 state.start_pc88_mode(ui.ctx());
                             }
 
-                            if !can_stream {
-                                ui.label(
-                                    egui::RichText::new("Select format for capture card, open local video, hook Gamescope, or boot PC-98/PC-88.")
-                                        .weak()
-                                        .small(),
-                                );
-                            }
-                        }
-
-                        // Compact mechanical audio meter bar
-                        let peak = state.hardware.live_audio_peak;
-                        let color = if peak > 0.9 {
-                            egui::Color32::RED
-                        } else if peak > 0.7 {
-                            egui::Color32::YELLOW
-                        } else {
-                            egui::Color32::from_rgb(42, 122, 42) // #2a7a2a
-                        };
-                        let meter = egui::ProgressBar::new(peak.min(1.0))
-                            .text(
-                                egui::RichText::new(format!("Audio: {:.0}%", peak * 100.0))
-                                    .monospace()
-                                    .strong()
-                                    .size(10.0)
-                                    .color(egui::Color32::WHITE),
+                            let ps5_controller_ok = state.ps5.is_controller_connected()
+                                && crate::ps5::ffi::is_backend_compiled();
+                            let ps5_btn = egui::Button::new(
+                                egui::RichText::new("PS5 Remote Play")
+                                    .size(11.0)
+                                    .color(if ps5_controller_ok {
+                                        egui::Color32::from_rgb(208, 232, 255)
+                                    } else {
+                                        egui::Color32::from_rgb(130, 130, 130)
+                                    }),
                             )
-                            .fill(color)
-                            .desired_width(120.0)
-                            .rounding(egui::Rounding::ZERO);
-                        ui.add(meter);
-
-                        ui.add_space(8.0);
-                        // Same toggle as the Audio / Replay tab; both reflect `replay.runtime`.
-                        crate::replay::ui::draw_toggle(
-                            &mut state.replay,
-                            ui,
-                            state.ui.video_window_open,
-                        );
-
-                        ui.add_space(8.0);
-                        let studio_btn = egui::Button::new(
-                            egui::RichText::new("Studio (L)")
-                                .monospace()
-                                .strong()
-                                .size(10.5)
-                                .color(if state.ui.studio_window_open {
-                                    egui::Color32::from_rgb(190, 150, 255)
-                                } else {
-                                    egui::Color32::from_rgb(208, 208, 208)
-                                }),
-                        )
-                        .fill(if state.ui.studio_window_open {
-                            egui::Color32::from_rgb(60, 20, 100)
-                        } else {
-                            egui::Color32::from_rgb(44, 44, 44)
-                        })
-                        .stroke(egui::Stroke::new(
-                            1.0_f32,
-                            if state.ui.studio_window_open {
-                                egui::Color32::from_rgb(145, 70, 255)
+                            .fill(if ps5_controller_ok {
+                                egui::Color32::from_rgb(20, 56, 108)
                             } else {
-                                egui::Color32::from_rgb(72, 72, 72)
-                            },
-                        ))
-                        .rounding(egui::Rounding::ZERO);
-                        if ui
-                            .add(studio_btn)
-                            .on_hover_text("Open Twitch Studio dashboard window (hotkey: L)")
-                            .clicked()
-                        {
-                            state.ui.studio_window_open = !state.ui.studio_window_open;
-                            changed = true;
+                                egui::Color32::from_rgb(38, 38, 38)
+                            })
+                            .stroke(egui::Stroke::new(
+                                1.0_f32,
+                                if ps5_controller_ok {
+                                    egui::Color32::from_rgb(56, 118, 205)
+                                } else {
+                                    egui::Color32::from_rgb(65, 65, 65)
+                                },
+                            ))
+                            .rounding(egui::Rounding::ZERO);
+                            let ps5_resp = ui.add_enabled(ps5_controller_ok, ps5_btn);
+                            let ps5_resp = if !state.ps5.is_controller_connected() {
+                                ps5_resp.on_disabled_hover_text(
+                                    crate::ps5::PS5_CONTROLLER_REQUIRED_ERROR,
+                                )
+                            } else if !crate::ps5::ffi::is_backend_compiled() {
+                                ps5_resp.on_disabled_hover_text(
+                                    "PS5 Remote Play disabled at compile time",
+                                )
+                            } else {
+                                ps5_resp.on_hover_text(
+                                    "Connect to the selected PS5 console via Remote Play",
+                                )
+                            };
+                            if ps5_resp.clicked() {
+                                let _ = state.start_ps5_mode(ui.ctx());
+                            }
                         }
                     });
 
@@ -508,6 +582,63 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             changed = true;
                         }
                     });
+
+                    ui.add_space(5.0);
+
+                    // Row 6: PS5 Console selector dropdown + DualSense status
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("PS5 Console:")
+                                .monospace()
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(150, 150, 150)),
+                        );
+                        changed |= super::ps5::draw_ps5_console_dropdown(
+                            ui,
+                            state,
+                            "header_ps5_console_selector",
+                            240.0,
+                        );
+                        let disc_label = if state.ps5.discovery_in_progress {
+                            "Scanning..."
+                        } else {
+                            "Discover"
+                        };
+                        if ui
+                            .add_enabled(
+                                !state.ps5.discovery_in_progress
+                                    && crate::ps5::ffi::is_backend_compiled(),
+                                egui::Button::new(disc_label),
+                            )
+                            .on_hover_text("Discover PlayStation 5 consoles on the local network")
+                            .clicked()
+                        {
+                            let rctx = ui.ctx().clone();
+                            state
+                                .ps5
+                                .start_discovery(Some(std::sync::Arc::new(move || {
+                                    rctx.request_repaint();
+                                })));
+                        }
+                        if state.ps5.is_controller_connected() {
+                            ui.label(
+                                egui::RichText::new(state.ps5.controller_status.short_label())
+                                    .monospace()
+                                    .size(10.5)
+                                    .color(egui::Color32::from_rgb(145, 235, 165)),
+                            );
+                        } else {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "⚠ {}",
+                                    crate::ps5::PS5_CONTROLLER_REQUIRED_ERROR
+                                ))
+                                .monospace()
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(255, 145, 145)),
+                            );
+                        }
+                    });
                 });
             });
         });
@@ -541,6 +672,7 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                     (SettingsTab::CaptureReplay, "Capture & Replay"),
                     (SettingsTab::AudioMic, "Audio & Mic"),
                     (SettingsTab::Pc98, "PC-98 / PC-88"),
+                    (SettingsTab::Ps5, "PS5"),
                     (SettingsTab::OcrDict, "OCR & Dict"),
                     (SettingsTab::Twitch, "Twitch"),
                     (SettingsTab::Hotkeys, "Hotkeys"),
@@ -564,8 +696,9 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 });
                 let total_text_w: f32 = text_widths.iter().sum();
                 let total_spacing = spacing * (tabs.len().saturating_sub(1) as f32);
+                let usable_w = (avail_w - 2.0).max(0.0);
                 let extra_per_tab =
-                    ((avail_w - total_text_w - total_spacing) / (tabs.len() as f32)).max(6.0);
+                    ((usable_w - total_text_w - total_spacing) / (tabs.len() as f32)).max(4.0);
 
                 for ((tab, label), text_w) in tabs.into_iter().zip(text_widths.into_iter()) {
                     let is_active = state.ui.active_settings_tab == tab;
@@ -651,6 +784,9 @@ pub fn layout_top_ui(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                 }
                 SettingsTab::Pc98 => {
                     changed |= super::pc98::draw_pc98_tab(ui, state);
+                }
+                SettingsTab::Ps5 => {
+                    changed |= super::ps5::draw_ps5_tab(ui, state);
                 }
                 SettingsTab::OcrDict => {
                     draw_ocr_dict_tab(ui, state, &mut changed);
@@ -1427,4 +1563,124 @@ fn draw_hotkeys_tab(ui: &mut egui::Ui) {
             draw_hotkey_grid(col2, "hotkeys_grid_right", right_shortcuts);
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn measure_controls_content_width(state: &mut AppState, tab: SettingsTab) -> (f32, f32) {
+        let ctx = egui::Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "roboto_slab".to_owned(),
+            egui::FontData::from_static(include_bytes!("../../assets/RobotoSlab-Regular.ttf"))
+                .tweak(egui::FontTweak {
+                    scale: 1.05,
+                    ..Default::default()
+                }),
+        );
+        fonts
+            .families
+            .get_mut(&egui::FontFamily::Proportional)
+            .unwrap()
+            .push("roboto_slab".to_owned());
+        fonts
+            .families
+            .get_mut(&egui::FontFamily::Monospace)
+            .unwrap()
+            .push("roboto_slab".to_owned());
+        ctx.set_fonts(fonts);
+        crate::ui::setup_style(&ctx);
+
+        // Install a 160x160 logo texture matching the real desktop window header
+        let logo_img = egui::ColorImage::new([160, 160], egui::Color32::WHITE);
+        state.logo_texture = Some(ctx.load_texture("logo", logo_img, Default::default()));
+        state.ui.active_settings_tab = tab;
+
+        let mut measured_content_w = 0.0f32;
+        let mut measured_inner_w = 0.0f32;
+
+        // Run 3 passes so ScrollArea & Frame/Grid/ComboBox sizing fully settle
+        for _ in 0..3 {
+            let raw_input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    crate::ui::CONTROLS_WINDOW_SIZE,
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(raw_input, |ctx| {
+                egui::CentralPanel::default()
+                    .frame(
+                        egui::Frame::none()
+                            .fill(egui::Color32::from_rgb(26, 26, 26))
+                            .inner_margin(egui::Margin::same(8.0)),
+                    )
+                    .show(ctx, |ui| {
+                        let max_panel_w = ui
+                            .available_width()
+                            .max(crate::ui::CONTROLS_MIN_CONTENT_WIDTH);
+                        let scroll_out = egui::ScrollArea::both()
+                            .id_source("desktop_settings_scroll_test")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.set_max_width(max_panel_w);
+                                ui.set_width(max_panel_w);
+                                layout_top_ui(ui, state);
+                            });
+                        measured_content_w = scroll_out.content_size.x;
+                        measured_inner_w = scroll_out.inner_rect.width();
+                    });
+            });
+        }
+        (measured_content_w, measured_inner_w)
+    }
+
+    #[test]
+    fn controls_window_fits_default_width_without_horizontal_scrollbar() {
+        let mut state = AppState::default();
+        // Prevent auto-discovery thread during layout test
+        state.ps5.config.auto_discover_on_tab_open = false;
+        state.ps5.controller_status = crate::ps5::Ps5DualSenseStatus {
+            connected: true,
+            is_edge: false,
+            is_wireless: false,
+            haptics_audio_connected: true,
+            vendor_id: 0x054c,
+            product_id: 0x0ce6,
+            name: "DualSense Wireless Controller".to_string(),
+        };
+        state.ps5.test_controller_override = Some(true);
+
+        let (shaders_w, inner_w) = measure_controls_content_width(&mut state, SettingsTab::Shaders);
+        println!("Shaders tab: content_size.x={shaders_w:.1}, inner_rect.w={inner_w:.1}");
+        assert!(
+            shaders_w <= inner_w + 0.5,
+            "Shaders tab content_size.x {shaders_w:.1}px exceeded ScrollArea inner_rect {inner_w:.1}px (triggers horizontal scrollbar)"
+        );
+
+        // Also check PS5 tab with active PSN login form + saved console
+        state.ps5.psn_login_url =
+            "https://auth.api.sonyentertainmentnetwork.com/2.0/oauth/authorize?duid=test"
+                .to_string();
+        state.ps5.config.consoles.push(crate::ps5::Ps5ConsoleEntry {
+            id: "ps5:1".to_string(),
+            nickname: "Living Room PS5 Pro".to_string(),
+            host: "192.168.1.50".to_string(),
+            mac: "aa:bb:cc:dd:ee:ff".to_string(),
+            regist_key_hex: "31323334353637380000000000000000".to_string(),
+            rp_key_hex: "00112233445566778899aabbccddeeff".to_string(),
+            psn_duid_hex: "deadbeef".to_string(),
+            ..Default::default()
+        });
+        state.ps5.config.selected_console_id = "ps5:1".to_string();
+
+        let (ps5_w, inner_w_ps5) = measure_controls_content_width(&mut state, SettingsTab::Ps5);
+        println!("PS5 tab: content_size.x={ps5_w:.1}, inner_rect.w={inner_w_ps5:.1}");
+        assert!(
+            ps5_w <= inner_w_ps5 + 0.5,
+            "PS5 tab content_size.x {ps5_w:.1}px exceeded ScrollArea inner_rect {inner_w_ps5:.1}px (triggers horizontal scrollbar)"
+        );
+    }
 }

@@ -1461,8 +1461,14 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             }
         }
 
+        if state.ps5.is_active && !deck_mode {
+            crate::ui::ps5::draw_ps5_overlays(state, ctx);
+        }
+
         if !deck_mode
             && !passthrough_active
+            && !state.ps5.is_modal_prompt_open()
+            && !state.ps5.cant_display_warning
             && response.double_clicked()
             && !state
                 .whiteboard
@@ -1502,6 +1508,8 @@ pub fn is_software_mouse_active(state: &AppState, is_on_crt_surface: bool) -> bo
     let has_system_dialog = state.ui.show_quit_dialog
         || state.ui.show_stop_stream_dialog
         || state.ui.show_first_run_dialog
+        || state.ps5.is_modal_prompt_open()
+        || state.ps5.cant_display_warning
         || (state.config_load_error.is_some() && !state.ui.dismissed_config_error)
         || state.video.fft_mask_window_open
         || state.ui.debug_open;
@@ -1570,6 +1578,8 @@ pub fn is_passthrough_host_cursor_hidden(
     let has_system_dialog = state.ui.show_quit_dialog
         || state.ui.show_stop_stream_dialog
         || state.ui.show_first_run_dialog
+        || state.ps5.is_modal_prompt_open()
+        || state.ps5.cant_display_warning
         || (state.config_load_error.is_some() && !state.ui.dismissed_config_error)
         || state.video.fft_mask_window_open
         || state.ui.debug_open;

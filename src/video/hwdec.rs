@@ -93,6 +93,7 @@ pub struct VideoDecoderSession {
     sw_transfer_frame: ffmpeg_next::frame::Video,
     hw_backend_name: Option<&'static str>,
     saved_params: ffmpeg_next::codec::Parameters,
+    low_delay: bool,
     confirmed_working: bool,
     saw_eof: bool,
     startup_packets: Vec<ffmpeg_next::Packet>,
@@ -112,14 +113,38 @@ impl VideoDecoderSession {
         params: ffmpeg_next::codec::Parameters,
         allow_hwdec: bool,
     ) -> Result<Self, ffmpeg_next::Error> {
+        Self::open_internal(params, allow_hwdec, false)
+    }
+
+    /// Opens a raw Annex-B video decoder (e.g. H.264 / HEVC for PS5 Remote Play) configured
+    /// for low-latency decoding with optional VAAPI / NVDEC / DRM hardware acceleration.
+    #[allow(dead_code)]
+    pub fn open_raw_codec_low_latency(
+        codec_id: ffmpeg_next::codec::Id,
+        allow_hwdec: bool,
+    ) -> Result<Self, ffmpeg_next::Error> {
+        let mut params = ffmpeg_next::codec::Parameters::new();
+        unsafe {
+            let p = params.as_mut_ptr();
+            (*p).codec_type = ffmpeg_next::sys::AVMediaType::AVMEDIA_TYPE_VIDEO;
+            (*p).codec_id = codec_id.into();
+        }
+        Self::open_internal(params, allow_hwdec, true)
+    }
+
+    fn open_internal(
+        params: ffmpeg_next::codec::Parameters,
+        allow_hwdec: bool,
+        low_delay: bool,
+    ) -> Result<Self, ffmpeg_next::Error> {
         let codec_id = params.id();
         if allow_hwdec && is_hwdec_eligible_codec(codec_id) {
-            if let Some(hw_session) = Self::try_open_hardware(params.clone(), codec_id) {
+            if let Some(hw_session) = Self::try_open_hardware(params.clone(), codec_id, low_delay) {
                 return Ok(hw_session);
             }
         }
 
-        let decoder = Self::open_software_decoder(params.clone())?;
+        let decoder = Self::open_software_decoder(params.clone(), low_delay)?;
         Ok(Self {
             decoder: Some(decoder),
             hw_device_ctx: ptr::null_mut(),
@@ -129,6 +154,7 @@ impl VideoDecoderSession {
             sw_transfer_frame: ffmpeg_next::frame::Video::empty(),
             hw_backend_name: None,
             saved_params: params,
+            low_delay,
             confirmed_working: true,
             saw_eof: false,
             startup_packets: Vec::new(),
@@ -141,14 +167,23 @@ impl VideoDecoderSession {
 
     fn open_software_decoder(
         params: ffmpeg_next::codec::Parameters,
+        low_delay: bool,
     ) -> Result<ffmpeg_next::decoder::Video, ffmpeg_next::Error> {
-        ffmpeg_next::codec::context::Context::from_parameters(params)
-            .and_then(|c| c.decoder().video())
+        let mut ctx = ffmpeg_next::codec::context::Context::from_parameters(params)?;
+        if low_delay {
+            unsafe {
+                let ctx_ptr = ctx.as_mut_ptr();
+                (*ctx_ptr).flags |= ffmpeg_next::sys::AV_CODEC_FLAG_LOW_DELAY as libc::c_int;
+                (*ctx_ptr).thread_type = ffmpeg_next::sys::FF_THREAD_SLICE as libc::c_int;
+            }
+        }
+        ctx.decoder().video()
     }
 
     fn try_open_hardware(
         params: ffmpeg_next::codec::Parameters,
         codec_id: ffmpeg_next::codec::Id,
+        low_delay: bool,
     ) -> Option<Self> {
         let codec = ffmpeg_next::decoder::find(codec_id)?;
         let codec_ptr = unsafe { codec.as_ptr() };
@@ -218,6 +253,9 @@ impl VideoDecoderSession {
                 (*ctx_ptr).get_format = Some(get_hw_format);
                 (*ctx_ptr).hw_device_ctx = ctx_hw_ref;
                 (*ctx_ptr).thread_count = 1;
+                if low_delay {
+                    (*ctx_ptr).flags |= ffmpeg_next::sys::AV_CODEC_FLAG_LOW_DELAY as libc::c_int;
+                }
             }
 
             match ctx.decoder().open_as(codec).and_then(|o| o.video()) {
@@ -237,6 +275,7 @@ impl VideoDecoderSession {
                         sw_transfer_frame: ffmpeg_next::frame::Video::empty(),
                         hw_backend_name: Some(backend_name),
                         saved_params: params,
+                        low_delay,
                         confirmed_working: false,
                         saw_eof: false,
                         startup_packets: Vec::new(),
@@ -332,7 +371,8 @@ impl VideoDecoderSession {
 
     fn fallback_to_software_and_replay(&mut self) -> Result<(), ffmpeg_next::Error> {
         self.release_hw_resources();
-        let mut sw_decoder = Self::open_software_decoder(self.saved_params.clone())?;
+        let mut sw_decoder =
+            Self::open_software_decoder(self.saved_params.clone(), self.low_delay)?;
         let queued = std::mem::take(&mut self.startup_packets);
         for pkt in &queued {
             let _ = sw_decoder.send_packet(pkt);

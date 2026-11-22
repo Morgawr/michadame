@@ -1264,6 +1264,16 @@ pub fn default_pc88_profile() -> Profile {
     }
 }
 
+pub fn default_ps5_profile() -> Profile {
+    Profile {
+        crt_filter: Some(0),
+        selected_crt_filter: Some(2),
+        scaler_filter: Some(crate::video::types::ScalerFilter::Bilinear as u8),
+        horizontal_stretch: Some(1.0),
+        ..Default::default()
+    }
+}
+
 #[derive(Deserialize, Clone)]
 #[serde(default)]
 pub struct LegacyConfig {
@@ -1403,9 +1413,13 @@ pub struct LegacyConfig {
     #[serde(default)]
     pub pc88_profile: Option<Profile>,
     #[serde(default)]
+    pub ps5_profile: Option<Profile>,
+    #[serde(default)]
     pub pc98: crate::pc98::Pc98Config,
     #[serde(default)]
     pub pc88: crate::pc88::Pc88Config,
+    #[serde(default)]
+    pub ps5: crate::ps5::Ps5Config,
     #[serde(default)]
     pub twitch: TwitchConfig,
     #[serde(default)]
@@ -1537,8 +1551,10 @@ impl Default for LegacyConfig {
             gamescope_profile: None,
             pc98_profile: None,
             pc88_profile: None,
+            ps5_profile: None,
             pc98: crate::pc98::Pc98Config::default(),
             pc88: crate::pc88::Pc88Config::default(),
+            ps5: crate::ps5::Ps5Config::default(),
             twitch: TwitchConfig::default(),
             mic: MicConfig::default(),
             webcam: WebcamConfig::default(),
@@ -1617,6 +1633,8 @@ pub struct MichadameConfig {
     pub pc98: crate::pc98::Pc98Config,
     #[serde(default)]
     pub pc88: crate::pc88::Pc88Config,
+    #[serde(default)]
+    pub ps5: crate::ps5::Ps5Config,
     // confy's TOML serializer requires scalar fields before nested tables.
     pub replay: crate::replay::config::ReplayConfig,
     #[serde(default)]
@@ -1627,6 +1645,8 @@ pub struct MichadameConfig {
     pub pc98_profile: Option<Profile>,
     #[serde(default)]
     pub pc88_profile: Option<Profile>,
+    #[serde(default)]
+    pub ps5_profile: Option<Profile>,
     #[serde(default)]
     pub audio_reactive: crate::app::models::AudioReactiveConfig,
     #[serde(default = "default_halo_presets")]
@@ -1673,6 +1693,7 @@ impl Default for MichadameConfig {
             webcam: WebcamConfig::default(),
             pc98: crate::pc98::Pc98Config::default(),
             pc88: crate::pc88::Pc88Config::default(),
+            ps5: crate::ps5::Ps5Config::default(),
             bank_current_tag: None,
             bank_compact_mode: None,
             ui_scale: None,
@@ -1684,6 +1705,7 @@ impl Default for MichadameConfig {
             gamescope_profile: None,
             pc98_profile: None,
             pc88_profile: None,
+            ps5_profile: None,
             audio_reactive: crate::app::models::AudioReactiveConfig::default(),
             halo_presets: default_halo_presets(),
             beam_presets: default_beam_presets(),

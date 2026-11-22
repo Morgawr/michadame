@@ -204,3 +204,27 @@ with the most recent at the top, each showing the dictionary entry, the
 sentence and a screenshot thumbnail. Click a thumbnail to enlarge it, or use 🗑
 to delete an entry. The bank
 is stored in `~/.config/michadame/bank/bank.db`.
+
+## PS5 Remote Play
+
+Desktop mode includes a PlayStation 5 (including PS5 Pro) Remote Play streaming
+client under the **PS5** settings tab and top-header console selector.
+
+- **Controller requirement:** Only Sony DualSense (`054c:0ce6`) and DualSense Edge
+  (`054c:0df2`) controllers are supported (USB or Bluetooth) with automatic 1:1
+  button/stick/trigger/touchpad/motion mapping, adaptive triggers, LED/player lights,
+  and USB haptic audio feedback. Microphone input is intentionally omitted.
+- **Discovery, Registration & PSN:** Discover local PS5 consoles on the LAN,
+  register via 8-digit Link PIN, or sign in with PlayStation Network OAuth2 to
+  list linked consoles, auto-register without a PIN, and connect remotely over PSN.
+- **Pipeline & Profile:** Decoded H.264/HEVC video and Opus audio feed the bottom
+  of Michadame's rendering pipeline so all CRT/Anime4K/FX shaders, OCR, dictionary,
+  replay buffer, screenshots, and Twitch streaming apply to it, backed by its own
+  dedicated PS5 rendering profile. Virtual keyboard prompts open a live text overlay.
+- **Build-time dependency (`ps5-remote-play` feature):** By default, `build.rs`
+  fetches a pinned `streetpea/chiaki-ng` commit (`libchiaki`, AGPL-3.0) into
+  `target/chiaki-ng-cache/` and compiles it locally (requiring `cmake`, `git`,
+  `protoc`, `python3` with `protobuf`, `sdl2`, `opus`, `openssl`, `libcurl` with
+  WebSocket support, `libevent`, `json-c`, and `miniupnpc`). No `chiaki-ng` source
+  code is stored in this repository. To build without PS5 Remote Play / `libchiaki`,
+  compile with `cargo build --release --no-default-features`.

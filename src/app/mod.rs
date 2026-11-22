@@ -98,6 +98,12 @@ pub fn init_app_state_with_logo(
     let egui_ctx = cc.egui_ctx.clone();
     state.ocr.start_worker(Some(egui_ctx.clone()));
     if !steam_deck {
+        state.ps5.load_saved_psn_token();
+        let ps5_repaint_ctx = cc.egui_ctx.clone();
+        state.ps5.ensure_controller_monitor(Some(Arc::new(move || {
+            ps5_repaint_ctx.request_repaint();
+        })));
+
         let (tx, rx) = crossbeam_channel::unbounded();
         state.device_scan_receiver = Some(rx);
         std::thread::spawn(move || {
@@ -314,10 +320,12 @@ impl Default for AppState {
             gamescope_profile: config::Profile::default(),
             pc98_profile: config::models::default_pc98_profile(),
             pc88_profile: config::models::default_pc88_profile(),
+            ps5_profile: config::models::default_ps5_profile(),
             previous_normal_profile: None,
             previous_gamescope_normal_profile: None,
             previous_pc98_normal_profile: None,
             previous_pc88_normal_profile: None,
+            previous_ps5_normal_profile: None,
             previous_capture_resolution: (0, 0),
             previous_capture_framerate: 0,
             gamescope_hook: None,
@@ -327,6 +335,7 @@ impl Default for AppState {
             retro_pc_system: crate::pc88::RetroPcSystem::default(),
             pc98: crate::pc98::Pc98State::default(),
             pc88: crate::pc88::Pc88State::default(),
+            ps5: crate::ps5::Ps5State::default(),
             fft_filter: None,
             fft_mask_data: Vec::new(),
             fft_mask_dirty: false,
@@ -364,6 +373,7 @@ impl AppState {
             || self.gamescope_hook.as_ref().is_some_and(|h| h.is_active)
             || self.pc98.is_active
             || self.pc88.is_active
+            || self.ps5.is_active
     }
 
     pub fn should_repaint_audio_reactive(&self) -> bool {
@@ -846,6 +856,16 @@ impl AppState {
             format!(
                 "Michadame Viewer | NEC PC-88 ({}x{}) | UI: {:.1} FPS | Video: {:.1} FPS | Audio Latency: {} ms",
                 self.pc88.resolution.0, self.pc88.resolution.1, self.gui_fps, self.video_fps, audio_latency
+            )
+        } else if self.ps5.is_active {
+            let name = if self.ps5.connected_console_name.is_empty() {
+                "PS5 Remote Play"
+            } else {
+                &self.ps5.connected_console_name
+            };
+            format!(
+                "Michadame Viewer | {} ({}x{}) | UI: {:.1} FPS | Video: {:.1} FPS | Audio Latency: {} ms",
+                name, self.ps5.resolution.0, self.ps5.resolution.1, self.gui_fps, self.video_fps, audio_latency
             )
         } else {
             format!(
@@ -1622,9 +1642,14 @@ impl eframe::App for AppState {
             }
         }
 
-        // Video-window hotkeys must not fire while typing or while Gamescope/PC-98 passthrough is active.
-        let typing = ctx.wants_keyboard_input();
-        if self.steam_deck.is_none() && !gamescope_passthrough && !pc98_passthrough {
+        // Video-window hotkeys must not fire while typing, while Gamescope/PC-98 passthrough is active,
+        // or while a PS5 virtual keyboard / Login PIN prompt is open.
+        let typing = ctx.wants_keyboard_input() || self.ps5.is_modal_prompt_open();
+        if self.steam_deck.is_none()
+            && !gamescope_passthrough
+            && !pc98_passthrough
+            && !self.ps5.is_modal_prompt_open()
+        {
             if !typing && ctx.input(|i| i.key_pressed(egui::Key::F)) {
                 let is_fullscreen = !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(is_fullscreen));
@@ -1842,6 +1867,7 @@ impl eframe::App for AppState {
         repaint_requested |= self.handle_video_file_player_events(ctx);
         repaint_requested |= self.handle_pc98_events(ctx);
         repaint_requested |= self.handle_pc88_events(ctx);
+        repaint_requested |= self.handle_ps5_events(ctx);
 
         if let Some(ref mut p) = self.video_player {
             if !p.is_seeking {
@@ -2138,6 +2164,7 @@ impl eframe::App for AppState {
             }
             if self.pc98.is_scanning_library
                 || self.pc88.is_scanning_library
+                || self.ps5.has_background_tasks()
                 || self.capture_format_probing
                 || self.webcam_format_probing
                 || self.webcam.vtuber_format_probing

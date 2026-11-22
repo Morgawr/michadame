@@ -267,6 +267,7 @@ impl AppState {
         self.stop_gamescope_hook();
         self.stop_pc98_mode();
         self.stop_pc88_mode();
+        self.stop_ps5_mode();
 
         if audio_was_active {
             self.info("Stream stopped and audio stream dropped.");
@@ -1782,6 +1783,9 @@ impl AppState {
         if let Some(ref tx) = self.pc88.command_tx {
             let _ = tx.send(crate::pc88::Pc88Command::SetVolume(local_vol));
         }
+        if let Some(ref tx) = self.ps5.command_tx {
+            let _ = tx.send(crate::ps5::Ps5Command::SetVolume(local_vol));
+        }
         self.twitch.alert_player.set_volume(local_vol);
     }
 
@@ -2452,6 +2456,555 @@ impl AppState {
                 crate::pc88::Pc88Event::Stopped => {}
             }
         }
+        if handled {
+            ctx.request_repaint();
+        }
+        handled
+    }
+
+    pub fn validate_ps5_start(&self) -> Result<crate::ps5::Ps5ConsoleEntry, String> {
+        if !self.ps5.is_controller_connected() {
+            return Err(crate::ps5::PS5_CONTROLLER_REQUIRED_ERROR.to_string());
+        }
+        if !crate::ps5::ffi::is_backend_compiled() {
+            return Err(
+                "PS5 Remote Play was disabled at compile time (built with --no-default-features)."
+                    .to_string(),
+            );
+        }
+        let console = self.ps5.selected_console().cloned().ok_or_else(|| {
+            "No PS5 console selected. Discover/register a PS5 or sign in to PSN in the PS5 tab."
+                .to_string()
+        })?;
+
+        let has_local = console.has_local_registration();
+        let has_psn = console.has_psn_target()
+            && self.ps5.is_psn_signed_in()
+            && self.ps5.effective_psn_account_id().is_some();
+
+        match self.ps5.config.connection_mode {
+            crate::ps5::Ps5ConnectionMode::LocalLan => {
+                if !has_local {
+                    return Err(
+                        "Selected PS5 is not registered for Local LAN streaming. Register it via 8-digit PIN in the PS5 tab."
+                            .to_string(),
+                    );
+                }
+            }
+            crate::ps5::Ps5ConnectionMode::PsnRemote => {
+                if !has_psn {
+                    return Err(
+                        "Selected PS5 is not ready for PSN Remote Play. Sign in to PSN and refresh PSN consoles in the PS5 tab."
+                            .to_string(),
+                    );
+                }
+            }
+            crate::ps5::Ps5ConnectionMode::Auto => {
+                if !has_local && !has_psn {
+                    return Err(
+                        "Selected PS5 has neither local PIN registration nor PSN Remote Play credentials. Register it via PIN or sign in to PSN in the PS5 tab."
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Ok(console)
+    }
+
+    pub fn start_ps5_mode(&mut self, ctx: &egui::Context) -> Result<(), String> {
+        let console = match self.validate_ps5_start() {
+            Ok(c) => c,
+            Err(err) => {
+                self.error(err.clone());
+                return Err(err);
+            }
+        };
+
+        self.stop_stream_resources();
+
+        // Stash current normal profile and capture card parameters
+        let current_normal = crate::config::build_profile_from_state(self);
+        self.profiles
+            .insert(self.active_profile.clone(), current_normal);
+        self.previous_ps5_normal_profile = Some(self.active_profile.clone());
+        self.previous_capture_resolution = self.hardware.selected_resolution;
+        self.previous_capture_framerate = self.hardware.selected_framerate;
+
+        // Apply dedicated PS5 Remote Play rendering profile
+        crate::config::apply_profile_to_state(self, &self.ps5_profile.clone());
+
+        let (req_w, req_h) = self.ps5.config.resolution.dimensions();
+        let req_fps = self.ps5.config.fps.as_u32();
+        self.hardware.selected_resolution = (req_w, req_h);
+        self.hardware.selected_framerate = req_fps;
+
+        if self.steam_deck.is_none() {
+            let win_w = (req_w as f32).min(1280.0);
+            let win_h = (req_h as f32).min(720.0);
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)),
+            );
+        }
+
+        let (frame_tx, frame_rx) = crossbeam_channel::bounded(4);
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+        let stop_requested = Arc::new(AtomicBool::new(false));
+
+        self.latest_frame = None;
+        self.gui_fps = 0.0;
+        self.video_fps = 0.0;
+        self.frames_since_last_check = 0;
+        self.video_frames_since_last_check = 0;
+        self.last_fps_check = std::time::Instant::now();
+        self.last_video_fps_check = self.last_fps_check;
+
+        let repaint_ctx = ctx.clone();
+        let request_repaint: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            repaint_ctx.request_repaint();
+        });
+
+        self.ps5
+            .ensure_controller_monitor(Some(request_repaint.clone()));
+        let controller_handle = self.ps5.controller_handle();
+
+        self.frame_receiver = Some(frame_rx);
+        self.ps5.event_rx = Some(event_rx);
+        self.ps5.command_tx = Some(cmd_tx);
+        self.ps5.stop_requested = Some(Arc::clone(&stop_requested));
+        self.ps5.is_active = true;
+        self.ps5.is_connecting = true;
+        self.ps5.connected_console_id = console.id.clone();
+        self.ps5.connected_console_name = if console.nickname.trim().is_empty() {
+            "PlayStation 5".to_string()
+        } else {
+            console.nickname.trim().to_string()
+        };
+        self.ps5.status_message = format!("Connecting to {}...", self.ps5.connected_console_name);
+        self.ps5.resolution = (req_w, req_h);
+        self.ps5.cant_display_warning = false;
+        self.ps5.controller_disconnect_warned = false;
+        self.ps5.auto_login_pin_attempted = false;
+        self.ps5.keyboard_prompt_open = false;
+        self.ps5.keyboard_text.clear();
+        self.ps5.login_pin_prompt_open = false;
+        self.ps5.login_pin_input.clear();
+        self.ps5.login_pin_incorrect = false;
+
+        self.replay.set_game_volume(self.hardware.master_volume);
+        self.replay.sync_audio_filter();
+
+        let params = crate::ps5::Ps5SessionParams {
+            console_name: self.ps5.connected_console_name.clone(),
+            host: console.host.clone(),
+            regist_key: console.regist_key_bytes(),
+            morning: console.rp_key_bytes(),
+            psn_duid_hex: console.psn_duid_hex.clone(),
+            psn_token: self.ps5.psn_token.clone(),
+            psn_account_id: self.ps5.effective_psn_account_id(),
+            console_login_pin: if console.console_pin.trim().is_empty() {
+                None
+            } else {
+                Some(console.console_pin.trim().to_string())
+            },
+            mode: self.ps5.config.connection_mode,
+            auto_regist_only: false,
+            width: req_w,
+            height: req_h,
+            max_fps: req_fps,
+            bitrate_kbps: self.ps5.config.clamped_bitrate_kbps(),
+            codec: self.ps5.config.codec,
+            enable_keyboard: self.ps5.config.enable_keyboard,
+            enable_dualsense_haptics: self.ps5.config.enable_dualsense_haptics,
+            allow_hwdec: self.hardware.video_hwdec,
+            scaler_filter: Arc::clone(&self.scaler_filter),
+            color_range: Arc::clone(&self.color_range),
+            master_volume: self.effective_local_volume(),
+            peak_amplitude: Arc::clone(&self.hardware.audio_peak_amplitude),
+            audio_latency_ms: Arc::clone(&self.hardware.audio_latency_ms),
+            queue_drops: Arc::clone(&self.hardware.video_queue_drops),
+            replay_audio: self.replay.audio.clone(),
+            frame_tx,
+            command_rx: cmd_rx,
+            event_tx,
+            stop_requested,
+            request_repaint,
+            controller_handle,
+        };
+
+        let handle = thread::Builder::new()
+            .name("ps5-remote-play-worker".to_string())
+            .spawn(move || {
+                crate::ps5::session::run_ps5_session_worker(params);
+            })
+            .ok();
+
+        self.ps5.worker_thread = handle;
+        self.ui.video_window_open = true;
+        self.ui.control_window_open = false;
+        self.fullscreen_toggle_frame_count = Some(0);
+        ctx.request_repaint();
+        Ok(())
+    }
+
+    pub fn stop_ps5_mode(&mut self) {
+        if self.ps5.is_active {
+            // Save PS5 profile changes while PS5 mode is still active
+            self.ps5_profile = crate::config::build_profile_from_state(self);
+            crate::config::save_config(self);
+            crate::config::flush_pending_config(self);
+        }
+
+        if let Some(stop) = self.ps5.stop_requested.take() {
+            stop.store(true, Ordering::Release);
+        }
+        if let Some(tx) = self.ps5.command_tx.take() {
+            let _ = tx.send(crate::ps5::Ps5Command::Stop);
+        }
+        if let Some(handle) = self.ps5.worker_thread.take() {
+            reap_video_thread(handle);
+        }
+
+        if self.ps5.is_active {
+            self.ps5.is_active = false;
+            self.ps5.is_connecting = false;
+            self.ps5.cant_display_warning = false;
+            self.ps5.keyboard_prompt_open = false;
+            self.ps5.login_pin_prompt_open = false;
+            self.ps5.controller_disconnect_warned = false;
+            self.ps5.auto_login_pin_attempted = false;
+
+            if self.previous_capture_resolution.0 > 0 {
+                self.hardware.selected_resolution = self.previous_capture_resolution;
+                self.hardware.selected_framerate = self.previous_capture_framerate;
+            }
+            if let Some(prev_name) = self.previous_ps5_normal_profile.take() {
+                self.active_profile = prev_name;
+            }
+            let profile_to_apply = self
+                .steam_deck
+                .is_none()
+                .then(|| self.profiles.get(&self.active_profile).cloned())
+                .flatten();
+            if let Some(profile) = profile_to_apply {
+                crate::config::apply_profile_to_state(self, &profile);
+            }
+        }
+
+        self.ps5.event_rx = None;
+        self.frame_receiver = None;
+        self.latest_frame = None;
+    }
+
+    pub fn handle_ps5_events(&mut self, ctx: &egui::Context) -> bool {
+        let mut handled = false;
+
+        // Refresh live DualSense status
+        let prev_status = self.ps5.controller_status.clone();
+        self.ps5.refresh_controller_status();
+        if self.ps5.controller_status != prev_status {
+            handled = true;
+        }
+        if self.ps5.is_active {
+            if !self.ps5.is_controller_connected() {
+                if !self.ps5.controller_disconnect_warned {
+                    self.ps5.controller_disconnect_warned = true;
+                    self.error(crate::ps5::PS5_CONTROLLER_REQUIRED_ERROR);
+                    handled = true;
+                }
+            } else {
+                self.ps5.controller_disconnect_warned = false;
+            }
+        }
+
+        // Poll local LAN discovery result
+        if let Some(res) = self
+            .ps5
+            .discovery_rx
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        {
+            self.ps5.discovery_in_progress = false;
+            self.ps5.discovery_rx = None;
+            match res {
+                Ok(hosts) => {
+                    let count = hosts.len();
+                    self.ps5.merge_discovered_hosts_into_consoles(&hosts);
+                    self.ps5.discovered_consoles = hosts;
+                    if count == 0 {
+                        self.ps5.status_message =
+                            "No PS5 consoles found on the local network.".to_string();
+                        self.info("No local PS5 consoles discovered.");
+                    } else {
+                        self.ps5.status_message =
+                            format!("Discovered {count} local PS5 console(s).");
+                        self.info(format!("Discovered {count} local PS5 console(s)."));
+                        crate::config::save_config(self);
+                    }
+                }
+                Err(err) => {
+                    self.ps5.status_message = format!("Discovery failed: {err}");
+                    self.error(format!("PS5 discovery failed: {err}"));
+                }
+            }
+            handled = true;
+        }
+
+        // Poll PSN OAuth sign-in result
+        if let Some(res) = self
+            .ps5
+            .psn_auth_rx
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        {
+            self.ps5.psn_auth_in_progress = false;
+            self.ps5.psn_auth_rx = None;
+            match res {
+                Ok(tok) => {
+                    self.ps5.config.psn_account_id_b64 = tok.account_id_b64.clone();
+                    self.ps5.psn_token = Some(tok);
+                    self.ps5.psn_login_url.clear();
+                    self.ps5.psn_redirect_input.clear();
+                    self.ps5.status_message = "Signed in to PlayStation Network!".to_string();
+                    self.info("Signed in to PlayStation Network!");
+                    crate::config::save_config(self);
+
+                    // Automatically fetch linked PS5 consoles from PSN
+                    let rctx = ctx.clone();
+                    let _ = self
+                        .ps5
+                        .start_psn_device_refresh(Some(Arc::new(move || rctx.request_repaint())));
+                }
+                Err(err) => {
+                    self.ps5.status_message = format!("PSN sign-in failed: {err}");
+                    self.error(format!("PSN sign-in failed: {err}"));
+                }
+            }
+            handled = true;
+        }
+
+        // Poll PSN device list result
+        if let Some(res) = self
+            .ps5
+            .psn_devices_rx
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        {
+            self.ps5.psn_devices_in_progress = false;
+            self.ps5.psn_devices_rx = None;
+            match res {
+                Ok((devices, updated_token)) => {
+                    if let Some(tok) = updated_token {
+                        self.ps5.psn_token = Some(tok);
+                    }
+                    let count = devices.len();
+                    self.ps5.upsert_psn_devices_into_consoles(&devices);
+                    self.ps5.psn_devices = devices;
+                    self.ps5.status_message = format!("Loaded {count} PS5 console(s) from PSN.");
+                    self.info(format!("Loaded {count} PS5 console(s) from PSN."));
+                    crate::config::save_config(self);
+                }
+                Err(err) => {
+                    self.ps5.status_message = format!("PSN device list failed: {err}");
+                    self.error(format!("Failed to list PSN consoles: {err}"));
+                }
+            }
+            handled = true;
+        }
+
+        // Poll PIN / PSN auto-registration result
+        if let Some(res) = self
+            .ps5
+            .regist_rx
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        {
+            self.ps5.regist_in_progress = false;
+            self.ps5.regist_rx = None;
+            match res {
+                Ok((host, psn_duid_hex, console_pin, data)) => {
+                    let nick = if data.server_nickname.trim().is_empty() {
+                        "PlayStation 5".to_string()
+                    } else {
+                        data.server_nickname.trim().to_string()
+                    };
+                    self.ps5
+                        .upsert_registered_console(&host, &psn_duid_hex, &console_pin, &data);
+                    self.ps5.regist_pin_input.clear();
+                    self.ps5.status_message = format!("Registered {nick} successfully!");
+                    self.info(format!("PS5 '{nick}' registered successfully!"));
+                    crate::config::save_config(self);
+                }
+                Err(err) => {
+                    self.ps5.status_message = format!("Registration failed: {err}");
+                    self.error(format!("PS5 registration failed: {err}"));
+                }
+            }
+            handled = true;
+        }
+
+        // Poll Wake-Up result
+        if let Some(res) = self
+            .ps5
+            .wakeup_rx
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        {
+            self.ps5.wakeup_in_progress = false;
+            self.ps5.wakeup_rx = None;
+            match res {
+                Ok(msg) => {
+                    self.ps5.status_message = msg.clone();
+                    self.info(msg);
+                }
+                Err(err) => {
+                    self.ps5.status_message = format!("Wake-Up failed: {err}");
+                    self.error(format!("PS5 Wake-Up failed: {err}"));
+                }
+            }
+            handled = true;
+        }
+
+        // Drain active streaming session events
+        let events: Vec<crate::ps5::Ps5SessionEvent> = if let Some(ref rx) = self.ps5.event_rx {
+            let mut out = Vec::new();
+            while let Ok(ev) = rx.try_recv() {
+                out.push(ev);
+            }
+            out
+        } else {
+            Vec::new()
+        };
+
+        for ev in events {
+            handled = true;
+            match ev {
+                crate::ps5::Ps5SessionEvent::Status(msg) => {
+                    self.ps5.status_message = msg;
+                }
+                crate::ps5::Ps5SessionEvent::Connected => {
+                    self.ps5.is_connecting = false;
+                    self.ps5.status_message =
+                        format!("Connected to {}", self.ps5.connected_console_name);
+                    self.info(format!(
+                        "PS5 Remote Play connected to {}!",
+                        self.ps5.connected_console_name
+                    ));
+                }
+                crate::ps5::Ps5SessionEvent::NicknameReceived(nick) => {
+                    self.ps5.connected_console_name = nick.clone();
+                    if let Some(entry) = self
+                        .ps5
+                        .config
+                        .consoles
+                        .iter_mut()
+                        .find(|c| c.id == self.ps5.connected_console_id)
+                    {
+                        if entry.nickname.trim().is_empty() {
+                            entry.nickname = nick;
+                            crate::config::save_config(self);
+                        }
+                    }
+                }
+                crate::ps5::Ps5SessionEvent::ResolutionChanged(w, h) => {
+                    self.ps5.resolution = (w, h);
+                    self.hardware.selected_resolution = (w, h);
+                }
+                crate::ps5::Ps5SessionEvent::PsnTokenRefreshed(tok) => {
+                    self.ps5.psn_token = Some(tok);
+                }
+                crate::ps5::Ps5SessionEvent::AutoRegistSucceeded(data) => {
+                    let (host, duid, pin) = self
+                        .ps5
+                        .config
+                        .consoles
+                        .iter()
+                        .find(|c| c.id == self.ps5.connected_console_id)
+                        .map(|c| {
+                            (
+                                c.host.clone(),
+                                c.psn_duid_hex.clone(),
+                                c.console_pin.clone(),
+                            )
+                        })
+                        .unwrap_or_default();
+                    let new_id = self
+                        .ps5
+                        .upsert_registered_console(&host, &duid, &pin, &data);
+                    self.ps5.connected_console_id = new_id;
+                    crate::config::save_config(self);
+                }
+                crate::ps5::Ps5SessionEvent::LoginPinRequested { incorrect } => {
+                    let saved_pin = self
+                        .ps5
+                        .config
+                        .consoles
+                        .iter()
+                        .find(|c| c.id == self.ps5.connected_console_id)
+                        .map(|c| c.console_pin.trim().to_string())
+                        .unwrap_or_default();
+                    if !incorrect && !self.ps5.auto_login_pin_attempted && saved_pin.len() == 4 {
+                        self.ps5.auto_login_pin_attempted = true;
+                        self.ps5
+                            .send_command(crate::ps5::Ps5Command::SetLoginPin(saved_pin));
+                    } else {
+                        self.ps5.login_pin_prompt_open = true;
+                        self.ps5.login_pin_incorrect = incorrect;
+                        self.ps5.login_pin_input.clear();
+                        self.ps5.login_pin_needs_focus = true;
+                    }
+                }
+                crate::ps5::Ps5SessionEvent::KeyboardOpen(initial) => {
+                    self.ps5.keyboard_prompt_open = true;
+                    self.ps5.keyboard_text = initial;
+                    self.ps5.keyboard_needs_focus = true;
+                }
+                crate::ps5::Ps5SessionEvent::KeyboardTextChange(updated) => {
+                    if self.ps5.keyboard_text != updated {
+                        self.ps5.keyboard_text = updated;
+                    }
+                }
+                crate::ps5::Ps5SessionEvent::KeyboardRemoteClose => {
+                    self.ps5.keyboard_prompt_open = false;
+                }
+                crate::ps5::Ps5SessionEvent::CantDisplay(flag) => {
+                    let was_blocked = self.ps5.cant_display_warning;
+                    self.ps5.cant_display_warning = flag;
+                    if flag && !was_blocked && self.ps5.config.auto_go_home_on_cant_display {
+                        self.ps5.send_command(crate::ps5::Ps5Command::GoHome);
+                        self.info("Protected content detected — returning PS5 to Home Screen.");
+                    }
+                }
+                crate::ps5::Ps5SessionEvent::Failed(err) => {
+                    self.fullscreen_toggle_frame_count = None;
+                    if self.steam_deck.is_none() {
+                        self.ui.is_fullscreen = false;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                    }
+                    self.ps5.status_message = format!("Error: {err}");
+                    self.error(format!("PS5 Remote Play error: {err}"));
+                    self.stop_ps5_mode();
+                    self.ui.video_window_open = false;
+                    self.ui.control_window_open = true;
+                }
+                crate::ps5::Ps5SessionEvent::Stopped(msg) => {
+                    if self.ps5.is_active {
+                        self.fullscreen_toggle_frame_count = None;
+                        if self.steam_deck.is_none() {
+                            self.ui.is_fullscreen = false;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                        }
+                        self.ps5.status_message = msg.clone();
+                        self.info(msg);
+                        self.stop_ps5_mode();
+                        self.ui.video_window_open = false;
+                        self.ui.control_window_open = true;
+                    }
+                }
+            }
+        }
+
         if handled {
             ctx.request_repaint();
         }

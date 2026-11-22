@@ -13,7 +13,7 @@ docker run --rm --user "$(id -u):$(id -g)" \
     -e CARGO_INCREMENTAL=0 \
     "$builder_image" bash -c '
         set -euo pipefail
-        cargo build --locked --release
+        cargo build --locked --release --no-default-features
         python3 packaging/steam-deck/assemble.py /work/target/steam-deck/michadame-steam-deck
     '
 tar -C target/steam-deck -czf target/steam-deck/michadame-steam-deck-x86_64.tar.gz michadame-steam-deck

@@ -398,6 +398,8 @@ pub fn sync_active_profile_in_state(state: &mut AppState) {
         state.pc98_profile = current_profile_data;
     } else if state.pc88.is_active {
         state.pc88_profile = current_profile_data;
+    } else if state.ps5.is_active {
+        state.ps5_profile = current_profile_data;
     } else if let Some(deck) = &state.steam_deck {
         match deck.source {
             crate::steam_deck::Source::Steam => state.gamescope_profile = current_profile_data,
@@ -487,6 +489,7 @@ fn populate_config_from_state(cfg: &mut MichadameConfig, state: &AppState) {
         && state.gamescope_hook.is_none()
         && !state.pc98.is_active
         && !state.pc88.is_active
+        && !state.ps5.is_active
     {
         cfg.video_resolution = if state.hardware.selected_resolution.0 > 0 {
             Some(state.hardware.selected_resolution)
@@ -539,6 +542,7 @@ fn populate_config_from_state(cfg: &mut MichadameConfig, state: &AppState) {
     cfg.webcam = state.webcam.config.synced_for_save();
     cfg.pc98 = state.pc98.config.clone();
     cfg.pc88 = state.pc88.config.clone();
+    cfg.ps5 = state.ps5.config.clone();
     cfg.audio_reactive = state.audio_reactive.clone();
 
     let current_profile_data = build_profile_from_state(state);
@@ -547,21 +551,31 @@ fn populate_config_from_state(cfg: &mut MichadameConfig, state: &AppState) {
         cfg.gamescope_profile = Some(state.gamescope_profile.clone());
         cfg.pc98_profile = Some(state.pc98_profile.clone());
         cfg.pc88_profile = Some(state.pc88_profile.clone());
+        cfg.ps5_profile = Some(state.ps5_profile.clone());
     } else if state.gamescope_hook.as_ref().map_or(false, |g| g.is_active) {
         cfg.gamescope_profile = Some(current_profile_data);
         cfg.video_profile = Some(state.video_profile.clone());
         cfg.pc98_profile = Some(state.pc98_profile.clone());
         cfg.pc88_profile = Some(state.pc88_profile.clone());
+        cfg.ps5_profile = Some(state.ps5_profile.clone());
     } else if state.pc98.is_active {
         cfg.pc98_profile = Some(current_profile_data);
         cfg.video_profile = Some(state.video_profile.clone());
         cfg.gamescope_profile = Some(state.gamescope_profile.clone());
         cfg.pc88_profile = Some(state.pc88_profile.clone());
+        cfg.ps5_profile = Some(state.ps5_profile.clone());
     } else if state.pc88.is_active {
         cfg.pc88_profile = Some(current_profile_data);
         cfg.video_profile = Some(state.video_profile.clone());
         cfg.gamescope_profile = Some(state.gamescope_profile.clone());
         cfg.pc98_profile = Some(state.pc98_profile.clone());
+        cfg.ps5_profile = Some(state.ps5_profile.clone());
+    } else if state.ps5.is_active {
+        cfg.ps5_profile = Some(current_profile_data);
+        cfg.video_profile = Some(state.video_profile.clone());
+        cfg.gamescope_profile = Some(state.gamescope_profile.clone());
+        cfg.pc98_profile = Some(state.pc98_profile.clone());
+        cfg.pc88_profile = Some(state.pc88_profile.clone());
     } else {
         let mut profiles = state.profiles.clone();
         profiles.insert(state.active_profile.clone(), current_profile_data);
@@ -571,6 +585,7 @@ fn populate_config_from_state(cfg: &mut MichadameConfig, state: &AppState) {
         cfg.gamescope_profile = Some(state.gamescope_profile.clone());
         cfg.pc98_profile = Some(state.pc98_profile.clone());
         cfg.pc88_profile = Some(state.pc88_profile.clone());
+        cfg.ps5_profile = Some(state.ps5_profile.clone());
     }
 
     if let Some(deck) = &state.steam_deck {
@@ -1007,6 +1022,10 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
         .clone()
         .or_else(|| cfg.pc98_profile.clone())
         .unwrap_or_else(super::models::default_pc88_profile);
+    state.ps5_profile = cfg
+        .ps5_profile
+        .clone()
+        .unwrap_or_else(super::models::default_ps5_profile);
     state.retro_pc_system = cfg.retro_pc_system;
     state.gamescope_launcher_script = cfg
         .gamescope_launcher_script
@@ -1027,6 +1046,12 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
             let _ = state.pc88.refresh_games_list();
         } else {
             let _ = state.pc88.start_background_library_scan(None);
+        }
+    }
+    state.ps5.config = cfg.ps5.clone();
+    if state.ps5.config.psn_account_id_b64.trim().is_empty() {
+        if let Some(ref tok) = state.ps5.psn_token {
+            state.ps5.config.psn_account_id_b64 = tok.account_id_b64.clone();
         }
     }
 

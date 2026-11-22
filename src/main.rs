@@ -8,6 +8,7 @@ mod ocr;
 pub mod pc88;
 pub mod pc98;
 mod portable;
+pub mod ps5;
 mod replay;
 pub mod screenshot;
 mod steam_deck;

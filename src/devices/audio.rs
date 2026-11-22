@@ -192,7 +192,7 @@ impl DcBlocker {
     }
 }
 
-struct LiveSource {
+pub(crate) struct LiveSource {
     statistics: Arc<PlaybackStatistics>,
     consumer: Consumer<f32>,
     channels: u16,
@@ -265,7 +265,7 @@ impl Iterator for LiveSource {
 
 impl LiveSource {
     #[allow(clippy::too_many_arguments)]
-    fn new(
+    pub(crate) fn new(
         statistics: Arc<PlaybackStatistics>,
         consumer: Consumer<f32>,
         channels: u16,
