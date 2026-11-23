@@ -587,8 +587,8 @@ impl AudioTap {
             while offset < samples.len() {
                 let end = (offset + chunk_size).min(samples.len());
                 let chunk = &samples[offset..end];
-                submit_to_route(&self.route, &self.discontinuity, chunk, 48000, 2, at, None);
                 if !self.broadcast_preroll_active.load(Ordering::Relaxed) {
+                    submit_to_route(&self.route, &self.discontinuity, chunk, 48000, 2, at, None);
                     submit_to_route(
                         &self.broadcast_route,
                         &self.broadcast_discontinuity,
@@ -606,7 +606,9 @@ impl AudioTap {
     }
     pub fn submit(&self, samples: &[f32], rate: u32, channels: u16, at: i64) {
         self.last_game_submit.store(now_us(), Ordering::Relaxed);
-        if !self.enabled.load(Ordering::Relaxed) {
+        if !self.enabled.load(Ordering::Relaxed)
+            || self.broadcast_preroll_active.load(Ordering::Relaxed)
+        {
             return;
         }
 
@@ -651,20 +653,20 @@ impl AudioTap {
             at,
             alert_slice,
         );
-        if !self.broadcast_preroll_active.load(Ordering::Relaxed) {
-            submit_to_route(
-                &self.broadcast_route,
-                &self.broadcast_discontinuity,
-                samples,
-                rate,
-                channels,
-                at,
-                alert_slice,
-            );
-        }
+        submit_to_route(
+            &self.broadcast_route,
+            &self.broadcast_discontinuity,
+            samples,
+            rate,
+            channels,
+            at,
+            alert_slice,
+        );
     }
     pub fn submit_mic(&self, samples: &[f32], rate: u32, channels: u16, at: i64) {
-        if !self.enabled.load(Ordering::Relaxed) {
+        if !self.enabled.load(Ordering::Relaxed)
+            || self.broadcast_preroll_active.load(Ordering::Relaxed)
+        {
             return;
         }
         submit_to_route(
@@ -676,17 +678,15 @@ impl AudioTap {
             at,
             None,
         );
-        if !self.broadcast_preroll_active.load(Ordering::Relaxed) {
-            submit_to_route(
-                &self.broadcast_mic_route,
-                &self.broadcast_mic_discontinuity,
-                samples,
-                rate,
-                channels,
-                at,
-                None,
-            );
-        }
+        submit_to_route(
+            &self.broadcast_mic_route,
+            &self.broadcast_mic_discontinuity,
+            samples,
+            rate,
+            channels,
+            at,
+            None,
+        );
     }
     /// Submits decoded pre-roll audio directly into the live broadcast route.
     pub fn submit_preroll_audio(&self, samples: &[f32], rate: u32, channels: u16, at: i64) {
@@ -706,6 +706,8 @@ impl AudioTap {
     pub fn set_broadcast_preroll_active(&self, active: bool) {
         self.broadcast_preroll_active
             .store(active, Ordering::SeqCst);
+        self.discontinuity.store(true, Ordering::Relaxed);
+        self.mic_discontinuity.store(true, Ordering::Relaxed);
         self.broadcast_discontinuity.store(true, Ordering::Relaxed);
         self.broadcast_mic_discontinuity
             .store(true, Ordering::Relaxed);
@@ -1578,5 +1580,69 @@ mod tests {
         let third = rx.try_recv().unwrap();
         assert!((third.samples[0] - 0.15).abs() < 1e-4);
         free.send(third).unwrap();
+    }
+
+    #[test]
+    fn broadcast_preroll_active_pauses_replay_audio_and_marks_discontinuity_on_resume() {
+        let (tap, rx, free, _) = test_tap(4);
+        let (mic_tx, mic_rx) = bounded(4);
+        let (mic_free_tx, mic_free_rx) = bounded(4);
+        for _ in 0..4 {
+            mic_free_tx
+                .send(AudioBlock {
+                    samples: Box::new([0.; AUDIO_SAMPLES]),
+                    len: 0,
+                    rate: 48000,
+                    channels: 2,
+                    at: 0,
+                    continuous: false,
+                })
+                .unwrap();
+        }
+        *tap.mic_route.lock().unwrap() = Some(AudioRoute {
+            ready: mic_tx,
+            free: mic_free_rx,
+            stop: Arc::new(AtomicBool::new(false)),
+            dropped: Arc::new(AtomicU64::new(0)),
+            partial: None,
+            next_continuous: false,
+            format: None,
+        });
+
+        // Baseline active submission establishes continuous streams.
+        tap.submit(&[0.2f32; 3840], 48000, 2, 100_000);
+        tap.submit_mic(&[0.3f32; 3840], 48000, 2, 100_000);
+        free.send(rx.try_recv().unwrap()).unwrap();
+        mic_free_tx.send(mic_rx.try_recv().unwrap()).unwrap();
+
+        // While pre-roll/outro is active, replay game and mic audio must be paused.
+        tap.set_broadcast_preroll_active(true);
+        tap.submit(&[0.5f32; 3840], 48000, 2, 140_000);
+        tap.submit_mic(&[0.6f32; 3840], 48000, 2, 140_000);
+        assert!(
+            rx.try_recv().is_err(),
+            "Replay game audio must pause during pre-roll/outro"
+        );
+        assert!(
+            mic_rx.try_recv().is_err(),
+            "Replay mic audio must pause during pre-roll/outro"
+        );
+
+        // Resuming after pre-roll/outro delivers audio marked discontinuous so AudioClock re-anchors.
+        tap.set_broadcast_preroll_active(false);
+        tap.submit(&[0.7f32; 3840], 48000, 2, 60_000_000);
+        tap.submit_mic(&[0.8f32; 3840], 48000, 2, 60_000_000);
+        let game = rx
+            .try_recv()
+            .expect("Replay game audio must resume after roll");
+        let mic = mic_rx
+            .try_recv()
+            .expect("Replay mic audio must resume after roll");
+        assert!(!game.continuous);
+        assert!(!mic.continuous);
+        assert!((game.samples[0] - 0.7).abs() < 1e-4);
+        assert!((mic.samples[0] - 0.8).abs() < 1e-4);
+        free.send(game).unwrap();
+        mic_free_tx.send(mic).unwrap();
     }
 }

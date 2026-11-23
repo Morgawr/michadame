@@ -95,6 +95,7 @@ pub struct VideoEncoder {
     height: u32,
     pub rate: Rate,
     timings: EncodeTimings,
+    needs_drain: bool,
 }
 #[derive(Default)]
 pub struct EncodeTimings {
@@ -173,6 +174,7 @@ impl VideoEncoder {
             height,
             rate,
             timings: EncodeTimings::default(),
+            needs_drain: false,
         })
     }
     pub fn parameters(&self) -> Result<codec::Parameters> {
@@ -184,16 +186,21 @@ impl VideoEncoder {
         let mut hardware = frame::Video::empty();
         let hardware_started = std::time::Instant::now();
         unsafe {
-            check(ffi::av_hwframe_get_buffer(
+            if let Err(err) = check(ffi::av_hwframe_get_buffer(
                 self.frames.0,
                 hardware.as_mut_ptr(),
                 0,
-            ))?;
-            check(ffi::av_hwframe_transfer_data(
-                hardware.as_mut_ptr(),
-                self.sw.as_ptr(),
-                0,
-            ))?;
+            ))
+            .and_then(|()| {
+                check(ffi::av_hwframe_transfer_data(
+                    hardware.as_mut_ptr(),
+                    self.sw.as_ptr(),
+                    0,
+                ))
+            }) {
+                self.needs_drain = false;
+                return Err(err);
+            }
         }
         hardware.set_pts(Some(pts));
         hardware.set_kind(if key {
@@ -201,7 +208,11 @@ impl VideoEncoder {
         } else {
             ff::picture::Type::None
         });
-        self.encoder.send_frame(&hardware)?;
+        if let Err(err) = self.encoder.send_frame(&hardware) {
+            self.needs_drain = false;
+            return Err(err.into());
+        }
+        self.needs_drain = true;
         let mut packets = Vec::new();
         loop {
             let mut packet = Packet::empty();
@@ -212,7 +223,10 @@ impl VideoEncoder {
                 }
                 Err(ff::Error::Other { errno }) if errno == libc::EAGAIN => break,
                 Err(ff::Error::Eof) => break,
-                Err(e) => return Err(e.into()),
+                Err(e) => {
+                    self.needs_drain = false;
+                    return Err(e.into());
+                }
             }
         }
         self.timings.hardware_ms += hardware_started.elapsed().as_secs_f64() * 1000.;
@@ -240,6 +254,35 @@ impl VideoEncoder {
         }
         self.timings.conversion_ms += conversion_started.elapsed().as_secs_f64() * 1000.;
         self.send_hardware_frame(pts, key)
+    }
+}
+
+fn drain_video_encoder(encoder: &mut encoder::Video) -> usize {
+    const MAX_DRAIN_PACKETS: usize = 64;
+    if !matches!(encoder.send_eof(), Ok(()) | Err(ff::Error::Eof)) {
+        return 0;
+    }
+    let mut drained = 0usize;
+    let mut packet = Packet::empty();
+    for _ in 0..MAX_DRAIN_PACKETS {
+        if encoder.receive_packet(&mut packet).is_err() {
+            break;
+        }
+        drained += 1;
+    }
+    drained
+}
+
+impl Drop for VideoEncoder {
+    fn drop(&mut self) {
+        if !self.needs_drain {
+            return;
+        }
+        // With `async_depth = 2`, frames submitted to `h264_vaapi` may still be
+        // in flight on the hardware video engine when the session resets or
+        // stops. Drain them cleanly before freeing the VAAPI context, surfaces,
+        // and device.
+        let _ = drain_video_encoder(&mut self.encoder);
     }
 }
 
@@ -1461,5 +1504,57 @@ mod tests {
 
         assert_eq!(decoded_video_frames, expected_video_packets);
         assert!(decoded_audio_samples > 0);
+    }
+
+    #[test]
+    fn drain_video_encoder_flushes_delayed_frames_and_is_idempotent() {
+        ff::init().unwrap();
+        let codec = encoder::find_by_name("libx264")
+            .expect("Software libx264 encoder required for drain unit test");
+        let mut video = codec::context::Context::new_with_codec(codec)
+            .encoder()
+            .video()
+            .unwrap();
+        video.set_width(64);
+        video.set_height(48);
+        video.set_format(format::Pixel::YUV420P);
+        video.set_time_base((1, 1_000_000));
+        video.set_frame_rate(Some(Rational(30, 1)));
+        video.set_gop(30);
+        video.set_max_b_frames(0);
+        let mut opts = ff::Dictionary::new();
+        opts.set("preset", "ultrafast");
+        opts.set("rc-lookahead", "4");
+        let mut encoder = video.open_with(opts).unwrap();
+
+        let mut received_before_drain = 0usize;
+        for i in 0..4i64 {
+            let mut f = frame::Video::new(format::Pixel::YUV420P, 64, 48);
+            f.data_mut(0).fill(40 + i as u8 * 20);
+            f.data_mut(1).fill(128);
+            f.data_mut(2).fill(128);
+            f.set_pts(Some(i * 33_333));
+            encoder.send_frame(&f).unwrap();
+            let mut pkt = Packet::empty();
+            while encoder.receive_packet(&mut pkt).is_ok() {
+                received_before_drain += 1;
+            }
+        }
+        assert!(
+            received_before_drain < 4,
+            "Expected buffered delayed frames before drain"
+        );
+
+        let drained = drain_video_encoder(&mut encoder);
+        assert_eq!(
+            received_before_drain + drained,
+            4,
+            "Draining must flush every in-flight frame"
+        );
+        assert_eq!(
+            drain_video_encoder(&mut encoder),
+            0,
+            "Draining an already-flushed encoder must be a safe no-op"
+        );
     }
 }

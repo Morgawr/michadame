@@ -878,7 +878,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                     bank_capture_cb.save(request, shot);
                                 }
 
-                                if !capture_overlays && !webcam_enabled {
+                                if !capture_overlays && !webcam_enabled && !is_roll_active {
                                     replay_gpu.lock().unwrap().capture(
                                         painter.gl(),
                                         replay.as_ref(),
@@ -1205,7 +1205,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                             bank_capture_cb.save(request, shot);
                         }
 
-                        if !capture_overlays && !webcam_enabled {
+                        if !capture_overlays && !webcam_enabled && !is_roll_active {
                             replay_gpu.lock().unwrap().capture(
                                 painter.gl(),
                                 replay.as_ref(),
@@ -1406,9 +1406,13 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
         let is_broadcasting = state.twitch.is_broadcasting() || state.twitch.broadcast.is_some();
         let whiteboard_visible =
             !deck_background && !is_roll_active && state.whiteboard.is_visible();
-        let capture_replay_here = (!deck_background && state.replay.config.capture_overlays)
-            || state.webcam.config.enabled
-            || whiteboard_visible;
+        // Pause Replay Buffer capture during Twitch pre-roll/outro videos so an intro/outro
+        // with different dimensions does not wipe gameplay replay history or tear down and
+        // recreate the VAAPI hardware encoder while live decoding is active.
+        let capture_replay_here = !is_roll_active
+            && ((!deck_background && state.replay.config.capture_overlays)
+                || state.webcam.config.enabled
+                || whiteboard_visible);
         if capture_replay_here || is_broadcasting {
             let replay_gpu = state.replay.gpu.clone();
             let replay = if capture_replay_here {

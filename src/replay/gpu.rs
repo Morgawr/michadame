@@ -30,7 +30,7 @@ struct Slot {
     buffer: glow::Buffer,
     fence: SlotFence,
     at: i64,
-    generation: u64,
+    generation: Option<u64>,
     broadcast_sent: bool,
 }
 // SAFETY: fence handles are opaque. Slots are only accessed by egui paint/on_exit
@@ -291,6 +291,7 @@ pub struct Readback {
     pending: VecDeque<Slot>,
     free: Vec<glow::Buffer>,
     surface: SurfaceState,
+    replay_surface: Option<(u32, u32)>,
     last_at: i64,
     last_seen_at: Cell<i64>,
     last_accepted_at: Cell<i64>,
@@ -340,6 +341,7 @@ impl Readback {
     pub(crate) fn destroy_with<G: GlBackend>(&mut self, gl: &G) {
         self.release_buffers_with(gl);
         self.surface = SurfaceState::default();
+        self.replay_surface = None;
         self.active = None;
     }
 
@@ -414,8 +416,19 @@ impl Readback {
                 self.destroy_with(gl);
                 self.active = Some(std::sync::Arc::downgrade(&runtime.shared));
             }
+        } else if let Some(active) = self.active.as_ref().and_then(|w| w.upgrade()) {
+            // Replay is paused (e.g. during Twitch pre-roll/outro) or has stopped while
+            // Broadcast continues capturing. Clear `gpu_pending` so the replay worker does
+            // not treat paused capture as a GPU backlog, while preserving `active` and
+            // `replay_surface` so Replay resumes cleanly without resetting its encoder.
+            active.gpu_pending.store(0, Ordering::Relaxed);
+            if active.stop.load(Ordering::Acquire) {
+                self.active = None;
+                self.replay_surface = None;
+            }
         } else if self.active.is_some() {
             self.active = None;
+            self.replay_surface = None;
         }
 
         let (capture_w, capture_h) = target_capture_dimensions(width, height);
@@ -429,8 +442,16 @@ impl Readback {
         };
         if resized {
             self.release_buffers_with(gl);
-            if let Some(runtime) = running_replay {
-                runtime.shared.generation.fetch_add(1, Ordering::AcqRel);
+        }
+        if let Some(runtime) = running_replay {
+            if self.replay_surface != Some((capture_w, capture_h)) {
+                if !resized {
+                    self.release_buffers_with(gl);
+                }
+                if self.replay_surface.is_some() || resized {
+                    runtime.shared.generation.fetch_add(1, Ordering::AcqRel);
+                }
+                self.replay_surface = Some((capture_w, capture_h));
             }
         }
 
@@ -501,7 +522,7 @@ impl Readback {
                 let Some(front_slot) = self.pending.front() else {
                     break;
                 };
-                if running_replay.is_some() && front_slot.generation != generation {
+                if running_replay.is_some() && front_slot.generation != Some(generation) {
                     let stale = self.pending.pop_front().unwrap();
                     gl.delete_sync(stale.fence);
                     self.free.push(stale.buffer);
@@ -612,28 +633,30 @@ impl Readback {
                     }
                 } else {
                     let slot = self.pending.pop_front().unwrap();
-                    if let Some(bc) = broadcast {
-                        if let Ok(mut b_buf) = bc.free_rx.try_recv() {
-                            if b_buf.len() != bytes {
-                                b_buf.resize(bytes, 0);
-                            }
-                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(slot.buffer));
-                            gl.get_buffer_sub_data(glow::PIXEL_PACK_BUFFER, 0, &mut b_buf);
-                            if bc
-                                .tx
-                                .try_send(VideoFrame {
-                                    rgba: bc.share_buffer(b_buf),
-                                    width: capture_w,
-                                    height: capture_h,
-                                    at: slot.at,
-                                    generation: 0,
-                                })
-                                .is_err()
-                            {
+                    if !slot.broadcast_sent {
+                        if let Some(bc) = broadcast {
+                            if let Ok(mut b_buf) = bc.free_rx.try_recv() {
+                                if b_buf.len() != bytes {
+                                    b_buf.resize(bytes, 0);
+                                }
+                                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(slot.buffer));
+                                gl.get_buffer_sub_data(glow::PIXEL_PACK_BUFFER, 0, &mut b_buf);
+                                if bc
+                                    .tx
+                                    .try_send(VideoFrame {
+                                        rgba: bc.share_buffer(b_buf),
+                                        width: capture_w,
+                                        height: capture_h,
+                                        at: slot.at,
+                                        generation: 0,
+                                    })
+                                    .is_err()
+                                {
+                                    bc.dropped.fetch_add(1, Ordering::Relaxed);
+                                }
+                            } else {
                                 bc.dropped.fetch_add(1, Ordering::Relaxed);
                             }
-                        } else {
-                            bc.dropped.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                     gl.delete_sync(slot.fence);
@@ -816,7 +839,7 @@ impl Readback {
                                     buffer,
                                     fence,
                                     at,
-                                    generation,
+                                    generation: running_replay.map(|_| generation),
                                     broadcast_sent: false,
                                 });
                                 self.last_at = at;
@@ -1855,5 +1878,188 @@ mod tests {
             0,
             "Idle non-scheduled frame must early-out before issuing any GL calls"
         );
+    }
+
+    #[test]
+    fn pausing_replay_during_roll_preserves_generation_and_isolates_broadcast_frames() {
+        use crate::replay::{
+            clipboard::Clipboard,
+            config::{QueuePlan, ReplayConfig},
+            queue::{PoolRequest, WorkQueue},
+            Shared, Status,
+        };
+        use std::sync::{
+            atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize},
+            Arc, Mutex,
+        };
+        use std::time::Duration;
+
+        let gl = MockGl::default();
+        let queue = Arc::new(WorkQueue::new());
+        let config = Arc::new(ReplayConfig::default());
+        let shared = Arc::new(Shared {
+            clipboard: Arc::new(Clipboard::default()),
+            generation: AtomicU64::new(1),
+            stop: Arc::new(AtomicBool::new(false)),
+            audio_dropped: Arc::new(AtomicU64::new(0)),
+            video_dropped: AtomicU64::new(0),
+            gpu_pending: AtomicUsize::new(0),
+            queue_slots: AtomicUsize::new(0),
+            queue_bytes: AtomicUsize::new(0),
+            staging_bytes: AtomicUsize::new(0),
+            captured_at: Default::default(),
+            processed_at: Default::default(),
+            status: Mutex::new(Status::default()),
+            saving_bytes: AtomicUsize::new(0),
+            game_volume: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            scrub_snapshot: Mutex::new(None),
+        });
+        let runtime = RuntimeView {
+            queue: queue.clone(),
+            shared: shared.clone(),
+            config,
+        };
+
+        let live_area = RenderedArea {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 4,
+        };
+        let outro_area = RenderedArea {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 2,
+        };
+        let live_bytes = 4 * 4 * 4;
+        let plan = QueuePlan {
+            slots: 4,
+            frame_bytes: live_bytes,
+            queue_bytes: live_bytes * 8,
+            overhead: live_bytes * 8,
+        };
+        assert!(queue
+            .prepare(
+                PoolRequest {
+                    generation: 1,
+                    plan,
+                },
+                &shared.generation,
+                &shared.stop
+            )
+            .unwrap());
+
+        let (bc_tx, bc_rx) = crossbeam_channel::bounded(8);
+        let (bc_free_tx, bc_free_rx) = crossbeam_channel::bounded(8);
+        for _ in 0..4 {
+            bc_free_tx.send(vec![0u8; live_bytes]).unwrap();
+        }
+        let bc = BroadcastSink {
+            tx: bc_tx,
+            free_rx: bc_free_rx,
+            free_tx: bc_free_tx,
+            dropped: Arc::new(AtomicU64::new(0)),
+        };
+
+        let mut readback = Readback::default();
+        readback.active = Some(Arc::downgrade(&shared));
+        readback.surface.size = (4, 4);
+        readback.replay_surface = Some((4, 4));
+        readback.requested = Some(1);
+
+        // 1. Capture a live gameplay frame (4x4) with Replay + Broadcast active.
+        gl.next_pixel_byte.set(0x11);
+        readback.capture_with(&gl, Some(&runtime), Some(&bc), live_area, 10_000_000);
+        assert_eq!(shared.gpu_pending.load(Ordering::Relaxed), 1);
+
+        // 2. Outro starts with different dimensions (4x2, analogous to 1920x1080 -> 1920x1072).
+        //    Replay is paused (`runtime = None`) while Broadcast stays active.
+        readback.capture_with(&gl, None, Some(&bc), outro_area, 10_020_000);
+        assert_eq!(
+            shared.gpu_pending.load(Ordering::Relaxed),
+            0,
+            "Pausing replay must clear gpu_pending so the replay worker does not stall audio"
+        );
+        // Age the 300ms surface-change debounce deterministically without sleeping.
+        if let Some((_, since)) = readback.surface.candidate.as_mut() {
+            *since -= 400_000;
+        }
+        gl.next_pixel_byte.set(0x22);
+        readback.capture_with(&gl, None, Some(&bc), outro_area, 10_400_000);
+        readback.capture_with(&gl, None, Some(&bc), outro_area, 10_405_000);
+
+        let outro_bc = bc_rx
+            .try_recv()
+            .expect("Broadcast must continue receiving outro frames while replay is paused");
+        assert_eq!((outro_bc.width, outro_bc.height), (4, 2));
+        assert_eq!(outro_bc.rgba[0], 0x22);
+        drop(outro_bc);
+        assert_eq!(
+            shared.generation.load(Ordering::Acquire),
+            1,
+            "Outro dimension change must NOT bump replay generation or reset replay encoder"
+        );
+        assert!(
+            queue.receive(Duration::ZERO).is_none(),
+            "Outro frames must not be submitted to replay"
+        );
+
+        // 3. Outro finishes and live gameplay returns at the original 4x4 dimensions.
+        readback.capture_with(&gl, Some(&runtime), Some(&bc), live_area, 20_000_000);
+        if let Some((_, since)) = readback.surface.candidate.as_mut() {
+            *since -= 400_000;
+        }
+        gl.next_pixel_byte.set(0x33);
+        readback.capture_with(&gl, Some(&runtime), Some(&bc), live_area, 20_400_000);
+        readback.capture_with(&gl, Some(&runtime), Some(&bc), live_area, 20_405_000);
+
+        assert_eq!(
+            shared.generation.load(Ordering::Acquire),
+            1,
+            "Returning to original live dimensions after roll must NOT reset replay"
+        );
+        let resumed_replay = queue
+            .receive(Duration::ZERO)
+            .expect("Replay must seamlessly resume receiving 4x4 gameplay frames");
+        assert_eq!((resumed_replay.width, resumed_replay.height), (4, 4));
+        assert_eq!(resumed_replay.rgba[0], 0x33);
+        queue.recycle(resumed_replay.generation, resumed_replay.rgba);
+        while bc_rx.try_recv().is_ok() {}
+
+        // 4. Same-dimension roll pause: an in-flight broadcast-only slot (`generation: None`)
+        //    must be discarded and never leaked into Replay when Replay resumes.
+        gl.next_pixel_byte.set(0x44);
+        readback.capture_with(&gl, None, Some(&bc), live_area, 30_000_000);
+        assert_eq!(readback.pending.len(), 1);
+        assert!(readback.pending.front().unwrap().generation.is_none());
+        gl.next_pixel_byte.set(0x55);
+        readback.capture_with(&gl, Some(&runtime), Some(&bc), live_area, 30_020_000);
+        readback.capture_with(&gl, Some(&runtime), Some(&bc), live_area, 30_025_000);
+        let after_same_size = queue
+            .receive(Duration::ZERO)
+            .expect("Replay should receive post-roll gameplay frame");
+        assert_eq!(
+            after_same_size.rgba[0], 0x55,
+            "Broadcast-only roll slot (0x44) must never leak into replay"
+        );
+        queue.recycle(after_same_size.generation, after_same_size.rgba);
+
+        // 5. If gameplay itself changed to match the outro's 4x2 size while Replay was paused,
+        //    resuming Replay must detect `replay_surface != (4, 2)` and bump generation safely.
+        readback.capture_with(&gl, None, Some(&bc), outro_area, 40_000_000);
+        if let Some((_, since)) = readback.surface.candidate.as_mut() {
+            *since -= 400_000;
+        }
+        readback.capture_with(&gl, None, Some(&bc), outro_area, 40_400_000);
+        assert_eq!(shared.generation.load(Ordering::Acquire), 1);
+
+        readback.capture_with(&gl, Some(&runtime), Some(&bc), outro_area, 40_500_000);
+        assert_eq!(
+            shared.generation.load(Ordering::Acquire),
+            2,
+            "Resuming replay at a different surface size than before the roll must bump generation"
+        );
+        assert_eq!(readback.replay_surface, Some((4, 2)));
     }
 }
