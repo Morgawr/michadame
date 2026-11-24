@@ -3,7 +3,7 @@ use crate::devices::{self};
 use crate::video::{types::RawFrame, VideoFormat};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8},
     Arc, Mutex,
@@ -2377,6 +2377,467 @@ pub struct V4l2FormatProbeResult {
     pub formats: Result<Vec<VideoFormat>, String>,
 }
 
+/// Presentation phase for AMD FidelityFX 30 -> 60 FPS frame generation on PS5 Remote Play.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ps5FrameGenPhase {
+    /// Presenting the real decoded PS5 frame `F(t)`.
+    Real,
+    /// Presenting the synthesized optical-flow midpoint frame `F(t - 0.5)`.
+    Interpolated,
+}
+
+/// Paces 30 FPS PS5 Remote Play source frames into a locked 60 FPS alternating
+/// `(Interpolated F(t - 0.5), Real F(t))` presentation cadence with centered +/-16.7 ms jitter
+/// absorption, presentation-aligned phase locking (compensating `Interpolated` vs `Real` GPU
+/// compute asymmetry on non-VSync desktop), hardware 60 Hz VSync detection, non-skipping frame
+/// staging, and strictly monotonic Replay/Twitch timestamps.
+#[derive(Clone)]
+pub struct Ps5FrameGenPacer {
+    pub phase: Ps5FrameGenPhase,
+    pub prev_captured_at: Option<i64>,
+    pub curr_captured_at: Option<i64>,
+    /// Capture timestamp (`RawFrame.captured_at`) of the most recently enqueued PS5 source frame,
+    /// used to measure true source period independent of GUI VSync/sleep jitter.
+    pub last_enqueued_captured_at: Option<i64>,
+    pub last_source_arrival: Option<Instant>,
+    pub last_resolution: Option<(u32, u32)>,
+    pub smoothed_interval: std::time::Duration,
+    /// Bounded staging FIFO (`<= 3` frames) so an early PS5 arrival or LAN burst never clobbers
+    /// an unshown `Real` frame or drops a source frame while `primed` holds 1 cushion frame.
+    pub pending_frames: VecDeque<(Instant, Arc<RawFrame>)>,
+    /// True once the 1-beat (16.67 ms) startup jitter cushion has been primed, centering
+    /// `Interpolated` promotions in the middle of the 33.33 ms PS5 arrival window.
+    pub primed: bool,
+    /// Base 60 Hz phase grid target `Instant` (un-offset) for the next presentation beat.
+    pub next_beat_at: Option<Instant>,
+    /// Wall-clock `Instant` right after `sleep_until_precise` on the prior beat (includes
+    /// `recv_timeout` + render + `SwapBuffers`) used to detect hardware 60 Hz VSync.
+    pub last_beat_wake: Option<Instant>,
+    /// Wall-clock `Instant` right after `recv_timeout` and immediately before render + `SwapBuffers`
+    /// on the prior beat, used to measure pure per-phase GPU/render duration.
+    pub last_render_start: Option<Instant>,
+    /// Which phase (`Interpolated` vs `Real`) was rendered on the most recent beat.
+    pub last_phase_rendered: Option<Ps5FrameGenPhase>,
+    /// Count of consecutive beats whose wake-to-entry cycle was `>= 14.5 ms`. Requiring `>= 2`
+    /// consecutive beats distinguishes true hardware 60 Hz VSync (where even the lightweight `Real`
+    /// beat blocks `>= 14.5 ms`) from a single heavy `Interpolated` compute beat on desktop.
+    pub consecutive_60hz_swaps: u8,
+    /// True when hardware 60 Hz VSync is actively pacing `SwapBuffers()` on both phases.
+    pub is_60hz_vsync_locked: bool,
+    /// Live EMA of pure `Interpolated` beat render+swap duration (used to align `Real` presentation).
+    pub ema_interp_work: Option<std::time::Duration>,
+    /// Live EMA of pure `Real` beat render+swap duration.
+    pub ema_real_work: Option<std::time::Duration>,
+    /// Monotonic smoothed Replay/Twitch presentation timestamp for the active beat (us).
+    pub current_beat_ts: Option<i64>,
+    /// Last emitted Replay/Twitch presentation timestamp (us).
+    pub last_emitted_ts: i64,
+}
+
+impl Default for Ps5FrameGenPacer {
+    fn default() -> Self {
+        Self {
+            phase: Ps5FrameGenPhase::Real,
+            prev_captured_at: None,
+            curr_captured_at: None,
+            last_enqueued_captured_at: None,
+            last_source_arrival: None,
+            last_resolution: None,
+            smoothed_interval: Self::DEFAULT_INTERVAL,
+            pending_frames: VecDeque::with_capacity(4),
+            primed: false,
+            next_beat_at: None,
+            last_beat_wake: None,
+            last_render_start: None,
+            last_phase_rendered: None,
+            consecutive_60hz_swaps: 0,
+            is_60hz_vsync_locked: false,
+            ema_interp_work: None,
+            ema_real_work: None,
+            current_beat_ts: None,
+            last_emitted_ts: 0,
+        }
+    }
+}
+
+impl Ps5FrameGenPacer {
+    pub const DEFAULT_INTERVAL: std::time::Duration = std::time::Duration::from_micros(33_333);
+    /// Symmetric single-frame source delta window (`33_333 +/- 15_333 us`) for EMA sampling so
+    /// even heavy +/-15 ms LAN jitter is never asymmetrically clipped.
+    const MIN_SAMPLE_INTERVAL_US: i64 = 18_000;
+    const MAX_SAMPLE_INTERVAL_US: i64 = 48_666;
+    /// Crystal-locked bounds around PS5 29.97 Hz (`33_367 us`) / 30.00 Hz (`33_333 us`) encoding
+    /// (+/-13 us margin, preventing LAN jitter from causing duplicate or skipped 60 Hz CFR ticks).
+    const MIN_SMOOTHED_INTERVAL: std::time::Duration = std::time::Duration::from_micros(33_320);
+    const MAX_SMOOTHED_INTERVAL: std::time::Duration = std::time::Duration::from_micros(33_380);
+    /// Skip interpolation for one beat only on a genuine multi-frame stall/dropout (`> 80 ms`),
+    /// avoiding false resets on normal single-frame LAN jitter swings (e.g. -10 ms / +16 ms).
+    const DISCONTINUITY_GAP: std::time::Duration = std::time::Duration::from_millis(80);
+    /// Maximum staged source frames: holds 1 primed cushion frame + 1 early arrival + 1 burst
+    /// frame without silently dropping source frames while capping worst-case stall latency.
+    pub const MAX_PENDING_FRAMES: usize = 3;
+    /// Continue driving 60 Hz beats for this window after the most recent PS5 frame arrival.
+    pub const ACTIVE_STREAM_WINDOW: std::time::Duration = std::time::Duration::from_millis(160);
+    /// Swap-cycle threshold above which `SwapBuffers()` may be hardware-paced at ~60 Hz VSync
+    /// (requires 2 consecutive beats so a single heavy `Interpolated` beat never false-triggers).
+    const VSYNC_60HZ_MIN_CYCLE: std::time::Duration = std::time::Duration::from_micros(14_500);
+    /// Maximum `recv_timeout` wait on 60 Hz VSync vs non-60Hz-VSync displays.
+    pub const WAIT_BUDGET_60HZ: std::time::Duration = std::time::Duration::from_millis(6);
+    pub const WAIT_BUDGET_HIGH_HZ: std::time::Duration = std::time::Duration::from_millis(5);
+    /// Minimum age (us) of the first staged continuation frame to consider it already centered
+    /// in the 33.33 ms PS5 arrival window (half a 60 Hz beat = 8.33 ms).
+    const PRIME_ALREADY_CENTERED_MIN_AGE_US: i64 = 8_333;
+    const PRIME_ALREADY_CENTERED_MAX_AGE_US: i64 = 40_000;
+    const MIN_WORK_EMA: std::time::Duration = std::time::Duration::from_micros(200);
+    const MAX_WORK_EMA: std::time::Duration = std::time::Duration::from_millis(22);
+
+    pub fn reset(&mut self) {
+        self.phase = Ps5FrameGenPhase::Real;
+        self.prev_captured_at = None;
+        self.curr_captured_at = None;
+        self.last_enqueued_captured_at = None;
+        self.last_source_arrival = None;
+        self.last_resolution = None;
+        self.smoothed_interval = Self::DEFAULT_INTERVAL;
+        self.pending_frames.clear();
+        self.primed = false;
+        self.next_beat_at = None;
+        self.last_beat_wake = None;
+        self.last_render_start = None;
+        self.last_phase_rendered = None;
+        self.consecutive_60hz_swaps = 0;
+        self.is_60hz_vsync_locked = false;
+        self.ema_interp_work = None;
+        self.ema_real_work = None;
+        self.current_beat_ts = None;
+        // Preserve `last_emitted_ts` monotonically so Replay/Twitch timestamps never go backwards
+        // across a quick toggle or reset.
+    }
+
+    pub fn take_all_pending(&mut self) -> Vec<Arc<RawFrame>> {
+        self.pending_frames.drain(..).map(|(_, f)| f).collect()
+    }
+
+    /// Enqueues a newly decoded PS5 source frame without clobbering the currently displayed pair.
+    /// Measures `smoothed_interval` strictly from `frame.captured_at` deltas inside a symmetric
+    /// acceptance window so GUI sleep/VSync timing and LAN jitter can never bias the interval.
+    pub fn enqueue_frame(&mut self, arrived_at: Instant, frame: Arc<RawFrame>) {
+        let last_seen_ts = self
+            .pending_frames
+            .back()
+            .map(|(_, f)| f.captured_at)
+            .or(self.curr_captured_at);
+        if last_seen_ts == Some(frame.captured_at) {
+            return;
+        }
+        if let Some(prev_src_ts) = self.last_enqueued_captured_at {
+            let dt_us = frame.captured_at.saturating_sub(prev_src_ts);
+            if (Self::MIN_SAMPLE_INTERVAL_US..=Self::MAX_SAMPLE_INTERVAL_US).contains(&dt_us) {
+                let ema_us =
+                    self.smoothed_interval.as_micros() as f64 * 0.98 + (dt_us as f64) * 0.02;
+                self.smoothed_interval = std::time::Duration::from_micros(ema_us.round() as u64)
+                    .clamp(Self::MIN_SMOOTHED_INTERVAL, Self::MAX_SMOOTHED_INTERVAL);
+            }
+        }
+        self.last_enqueued_captured_at = Some(frame.captured_at);
+        self.last_source_arrival = Some(arrived_at);
+        self.pending_frames.push_back((arrived_at, frame));
+        while self.pending_frames.len() > Self::MAX_PENDING_FRAMES {
+            self.pending_frames.pop_front();
+        }
+    }
+
+    /// Target 60 Hz beat period (~16.67 ms), with proportional queue-pressure PLL drain when
+    /// 2+ source frames are queued so LAN bursts drain smoothly without overflowing `pending_frames`.
+    pub fn beat_duration(&self) -> std::time::Duration {
+        let base = (self.smoothed_interval / 2).clamp(
+            std::time::Duration::from_micros(16_660),
+            std::time::Duration::from_micros(16_690),
+        );
+        match self.pending_frames.len() {
+            0 | 1 => base,
+            2 => base.saturating_sub(std::time::Duration::from_micros(800)),
+            _ => base.saturating_sub(std::time::Duration::from_micros(1_800)),
+        }
+    }
+
+    fn update_work_ema(slot: &mut Option<std::time::Duration>, sample: std::time::Duration) {
+        let clamped = sample.clamp(Self::MIN_WORK_EMA, Self::MAX_WORK_EMA);
+        *slot = Some(match *slot {
+            None => clamped,
+            Some(prev) => {
+                let ema_us = prev.as_micros() as f64 * 0.85 + clamped.as_micros() as f64 * 0.15;
+                std::time::Duration::from_micros(ema_us.round() as u64)
+                    .clamp(Self::MIN_WORK_EMA, Self::MAX_WORK_EMA)
+            }
+        });
+    }
+
+    /// Computes whether `pace_gui_frame()` should sleep before rendering this 60 Hz beat:
+    /// - Detects true hardware 60 Hz VSync only when `>= 2` consecutive beats block `>= 14.5 ms`
+    ///   (so even the lightweight `Real` beat is VSync-bound); never sleeps against 60 Hz VSync.
+    /// - On desktop `vsync: false` / 120/144/240 Hz / VRR displays:
+    ///   1. Preserves a locked 60 Hz phase grid (`grid + beat_dur`) across minor `<= 1`-beat
+    ///      overruns so a fast `Real` beat immediately recovers a heavy `Interpolated` compute beat
+    ///      (preventing permanent 58.5 FPS drift and staging-queue overflows).
+    ///   2. Delays ONLY the lightweight `Real` beat by `clamp(ema_interp - ema_real, 0, margin)` so
+    ///      actual `SwapBuffers` presentation cadence stays evenly spaced at `16.67 ms / 16.67 ms`
+    ///      without waking `Interpolated` early or starving the `primed` jitter cushion.
+    pub fn compute_beat_sleep_target(&mut self, entry_now: Instant) -> Option<Instant> {
+        if let Some(prev_wake) = self.last_beat_wake {
+            let wake_cycle = entry_now.saturating_duration_since(prev_wake);
+            if wake_cycle >= Self::VSYNC_60HZ_MIN_CYCLE {
+                self.consecutive_60hz_swaps = self.consecutive_60hz_swaps.saturating_add(1).min(4);
+            } else {
+                self.consecutive_60hz_swaps = 0;
+            }
+            self.is_60hz_vsync_locked = self.consecutive_60hz_swaps >= 2;
+        } else {
+            self.consecutive_60hz_swaps = 0;
+            self.is_60hz_vsync_locked = false;
+        }
+
+        if !self.is_60hz_vsync_locked {
+            if let (Some(render_start), Some(prev_phase)) =
+                (self.last_render_start, self.last_phase_rendered)
+            {
+                let work = entry_now.saturating_duration_since(render_start);
+                match prev_phase {
+                    Ps5FrameGenPhase::Interpolated => {
+                        Self::update_work_ema(&mut self.ema_interp_work, work);
+                    }
+                    Ps5FrameGenPhase::Real => {
+                        Self::update_work_ema(&mut self.ema_real_work, work);
+                    }
+                }
+            }
+        }
+
+        let beat_dur = self.beat_duration();
+        if self.is_60hz_vsync_locked {
+            self.next_beat_at = Some(entry_now + beat_dur);
+            return None;
+        }
+
+        // Predict whether THIS beat will run `Interpolated` or `Real`:
+        // - If the previous beat was `Interpolated`, this beat is unconditionally `Real`.
+        // - If the previous beat was `Real` on a primed stream, this beat will run `Interpolated`.
+        let will_be_interp =
+            self.phase == Ps5FrameGenPhase::Real && self.primed && self.curr_captured_at.is_some();
+        let real_phase_offset = if will_be_interp {
+            std::time::Duration::ZERO
+        } else if let (Some(ti), Some(tr)) = (self.ema_interp_work, self.ema_real_work) {
+            let raw_lead = ti.saturating_sub(tr);
+            let max_lead = beat_dur
+                .saturating_sub(tr)
+                .saturating_sub(std::time::Duration::from_micros(500));
+            raw_lead.min(max_lead)
+        } else {
+            std::time::Duration::ZERO
+        };
+
+        match self.next_beat_at {
+            None => {
+                self.next_beat_at = Some(entry_now + beat_dur);
+                None
+            }
+            Some(grid) => {
+                let target_wake = grid + real_phase_offset;
+                if entry_now >= target_wake {
+                    // Minor overrun (<= 1 beat, e.g. heavy Interpolated compute pass): keep the
+                    // locked phase grid `grid + beat_dur` so the immediately following fast Real
+                    // beat recovers the overrun instead of permanently drifting slower.
+                    if entry_now <= grid + beat_dur {
+                        self.next_beat_at = Some(grid + beat_dur);
+                    } else {
+                        self.next_beat_at = Some(entry_now + beat_dur);
+                    }
+                    None
+                } else {
+                    let max_target = entry_now + beat_dur * 2;
+                    let clamped = target_wake.min(max_target);
+                    self.next_beat_at = if clamped < target_wake {
+                        Some(clamped + beat_dur)
+                    } else {
+                        Some(grid + beat_dur)
+                    };
+                    Some(clamped)
+                }
+            }
+        }
+    }
+
+    /// Records the post-sleep wake instant immediately before `recv_timeout`, rendering, and
+    /// `SwapBuffers()` so the next beat measures the full wake-to-swap cycle for 60 Hz VSync detection.
+    pub fn record_beat_wake(&mut self, wake_now: Instant) {
+        self.last_beat_wake = Some(wake_now);
+    }
+
+    /// Records the post-`recv_timeout` render start instant and active phase immediately before
+    /// `draw_video_player()` + `SwapBuffers()` so `ema_interp_work` / `ema_real_work` measure
+    /// pure per-phase GPU/render duration without `recv_timeout` contamination.
+    pub fn record_render_start(&mut self, render_start: Instant) {
+        self.last_render_start = Some(render_start);
+        self.last_phase_rendered = Some(self.phase);
+    }
+
+    /// Bounded `recv_timeout` budget when waiting for a slightly late PS5 packet right after `Real`.
+    pub fn next_frame_wait_budget(&self) -> std::time::Duration {
+        if self.is_60hz_vsync_locked {
+            Self::WAIT_BUDGET_60HZ
+        } else {
+            Self::WAIT_BUDGET_HIGH_HZ
+        }
+    }
+
+    /// Returns true when we just finished presenting `Real` and the staging queue is empty on an
+    /// active stream — allowing `pace_gui_frame()` a short bounded wait to catch a slightly late
+    /// PS5 LAN frame before painting.
+    pub fn should_wait_for_next_frame(&self, now: Instant) -> bool {
+        self.phase == Ps5FrameGenPhase::Real
+            && self.primed
+            && self.pending_frames.is_empty()
+            && self.curr_captured_at.is_some()
+            && self
+                .last_source_arrival
+                .is_some_and(|t| now.saturating_duration_since(t) <= Self::ACTIVE_STREAM_WINDOW)
+    }
+
+    /// Returns true while the PS5 stream is active or an interpolated/staged frame is pending,
+    /// driving steady 60 Hz continuous repaint without `request_repaint_after` timer overshoot.
+    pub fn should_request_continuous_repaint(&self, now: Instant) -> bool {
+        self.show_interpolated()
+            || !self.pending_frames.is_empty()
+            || self
+                .last_source_arrival
+                .is_some_and(|t| now.saturating_duration_since(t) <= Self::ACTIVE_STREAM_WINDOW)
+    }
+
+    fn advance_beat_timestamp(&mut self, wall_now_us: i64, fallback_ts: i64) {
+        let est_work_us = if self.is_60hz_vsync_locked {
+            0i64
+        } else {
+            match self.phase {
+                Ps5FrameGenPhase::Interpolated => {
+                    self.ema_interp_work.map_or(0, |d| d.as_micros() as i64)
+                }
+                Ps5FrameGenPhase::Real => self.ema_real_work.map_or(0, |d| d.as_micros() as i64),
+            }
+        };
+        let anchor = if wall_now_us > 0 {
+            wall_now_us.saturating_add(est_work_us)
+        } else {
+            fallback_ts
+        };
+        let half_us = (self.smoothed_interval.as_micros() as i64 / 2).clamp(16_660, 16_690);
+        let next_ts = if self.last_emitted_ts <= 0 {
+            anchor
+        } else {
+            let ideal = self.last_emitted_ts + half_us;
+            let err = anchor - ideal;
+            // Snap directly on startup priming holds or genuine stalls (> 40 ms) so a one-time
+            // offset never bleeds into artificial +350 us/beat Replay tick skips later.
+            if err.abs() > 40_000 {
+                anchor.max(self.last_emitted_ts + 1)
+            } else {
+                // Gentle PLL pull (+/-0.35 ms max/beat) keeps A/V sync tight while ensuring
+                // consecutive beats advance 60 FPS Replay CFR ticks by exact +1.
+                let pull = (err / 16).clamp(-350, 350);
+                (ideal + pull).max(self.last_emitted_ts + 1)
+            }
+        };
+        self.last_emitted_ts = next_ts;
+        self.current_beat_ts = Some(next_ts);
+    }
+
+    /// Advances the presentation state machine by one 60 Hz beat BEFORE `draw_video_player()`.
+    ///
+    /// Guarantees strict alternation & centered jitter immunity:
+    /// - From `Interpolated`: ALWAYS transitions to `Real` for the current frame (never skipped!).
+    /// - From `Real`: holds the very first continuous follow-up frame for 1 beat (`16.67 ms`) when
+    ///   only 1 frame is staged to prime a centered `+/-16.7 ms` LAN jitter cushion; thereafter
+    ///   promotes the next staged PS5 frame `F(t)` into `Interpolated` (or `Real` on first frame /
+    ///   resolution change / dropped source frame `> 58 ms` gap).
+    pub fn step_beat(&mut self, wall_now_us: i64) -> Option<Arc<RawFrame>> {
+        match self.phase {
+            Ps5FrameGenPhase::Interpolated => {
+                self.phase = Ps5FrameGenPhase::Real;
+                let fallback = self.curr_captured_at.unwrap_or(wall_now_us);
+                self.advance_beat_timestamp(wall_now_us, fallback);
+                None
+            }
+            Ps5FrameGenPhase::Real => {
+                let Some((_, peek_frame)) = self.pending_frames.front() else {
+                    return None;
+                };
+                let ts_gap_ok = self.curr_captured_at.is_some_and(|prev_ts| {
+                    if prev_ts > 0 && peek_frame.captured_at > prev_ts {
+                        (peek_frame.captured_at - prev_ts)
+                            <= Self::DISCONTINUITY_GAP.as_micros() as i64
+                    } else {
+                        true
+                    }
+                });
+                let res = (peek_frame.width, peek_frame.height);
+                let has_valid_prev = self.curr_captured_at.is_some()
+                    && self.last_resolution == Some(res)
+                    && ts_gap_ok;
+
+                if has_valid_prev && !self.primed {
+                    if self.pending_frames.len() >= 2 {
+                        self.primed = true;
+                    } else {
+                        let age_us = if wall_now_us > 0 && peek_frame.captured_at > 0 {
+                            wall_now_us.saturating_sub(peek_frame.captured_at)
+                        } else {
+                            0
+                        };
+                        if (Self::PRIME_ALREADY_CENTERED_MIN_AGE_US
+                            ..=Self::PRIME_ALREADY_CENTERED_MAX_AGE_US)
+                            .contains(&age_us)
+                        {
+                            // Already sat >= 8.33 ms in the channel -> centered inside the
+                            // 33.33 ms PS5 arrival window; promote immediately with no extra beat.
+                            self.primed = true;
+                        } else {
+                            // Fresh arrival (< 8.33 ms old): hold 1 single 60 Hz beat (16.67 ms)
+                            // on startup/resync so subsequent 30 FPS arrivals sit centered in a
+                            // +/-16.7 ms jitter window.
+                            self.primed = true;
+                            return None;
+                        }
+                    }
+                }
+
+                let (_, next_frame) = self.pending_frames.pop_front()?;
+
+                if has_valid_prev {
+                    self.prev_captured_at = self.curr_captured_at;
+                    self.curr_captured_at = Some(next_frame.captured_at);
+                    self.last_resolution = Some(res);
+                    self.phase = Ps5FrameGenPhase::Interpolated;
+                } else {
+                    self.prev_captured_at = None;
+                    self.curr_captured_at = Some(next_frame.captured_at);
+                    self.last_resolution = Some(res);
+                    self.phase = Ps5FrameGenPhase::Real;
+                    self.primed = false;
+                }
+                self.advance_beat_timestamp(wall_now_us, next_frame.captured_at);
+                Some(next_frame)
+            }
+        }
+    }
+
+    pub fn show_interpolated(&self) -> bool {
+        matches!(self.phase, Ps5FrameGenPhase::Interpolated)
+    }
+
+    pub fn effective_captured_at(&self, real_captured_at: i64) -> i64 {
+        self.current_beat_ts.unwrap_or(real_captured_at)
+    }
+}
+
 pub struct AppState {
     pub steam_deck: Option<crate::steam_deck::SteamDeckState>,
     pub replay: crate::replay::Replay,
@@ -2394,6 +2855,7 @@ pub struct AppState {
     pub active_beam_preset: String,
     pub new_beam_preset_name: String,
     pub beam_lockstep: BeamLockstepState,
+    pub ps5_framegen_pacer: Ps5FrameGenPacer,
     pub cathode_interference: CathodeInterferenceSettings,
     pub cathode_interference_defaults: CathodeInterferenceSettings,
     pub audio_reactive: AudioReactiveConfig,
@@ -2671,5 +3133,457 @@ mod tests {
         assert_eq!(beam.gain_vs_blur, 0.60);
         assert_eq!(beam.fps_divisor, 0.5);
         assert_eq!(beam.scan_direction, 2);
+    }
+
+    fn make_dummy_ps5_frame(captured_at: i64, width: u32, height: u32) -> Arc<RawFrame> {
+        Arc::new(RawFrame {
+            captured_at,
+            rate: crate::replay::config::Rate { num: 30, den: 1 },
+            width,
+            height,
+            data: Vec::new(),
+            format: ffmpeg_next::format::Pixel::RGBA,
+            color_range: crate::video::types::ColorRange::Full,
+        })
+    }
+
+    #[test]
+    fn ps5_framegen_pacer_alternates_strictly_without_skipping_real_under_jitter() {
+        let mut pacer = Ps5FrameGenPacer::default();
+        let t0 = Instant::now();
+
+        // First frame displays Real immediately (no prior frame to interpolate from).
+        pacer.enqueue_frame(t0, make_dummy_ps5_frame(100_000, 1920, 1080));
+        let promoted0 = pacer.step_beat(100_000);
+        assert_eq!(promoted0.as_ref().map(|f| f.captured_at), Some(100_000));
+        assert!(!pacer.show_interpolated());
+        let ts0 = pacer.effective_captured_at(100_000);
+        assert_eq!(ts0, 100_000);
+
+        // Fresh F1 arrival (< 8.33 ms old) holds 1 single 60 Hz beat on startup to prime the
+        // centered +/-16.7 ms jitter cushion, then promotes F1 on the immediately following beat.
+        let jitter_us: [i64; 8] = [-5_500, 4_200, -6_000, 5_800, -3_200, 2_900, -4_800, 6_000];
+        let f1_ts = 100_000 + 33_333 + jitter_us[1];
+        pacer.enqueue_frame(
+            t0 + std::time::Duration::from_micros((f1_ts - 100_000) as u64),
+            make_dummy_ps5_frame(f1_ts, 1920, 1080),
+        );
+        assert!(
+            pacer.step_beat(f1_ts + 500).is_none(),
+            "Fresh F1 (< 8.33 ms old) must hold 1 beat to center the jitter cushion"
+        );
+        assert!(pacer.primed);
+
+        // Simulate 60 source 30 FPS PS5 frames arriving with realistic +/-6 ms LAN jitter
+        // (including early arrivals while `Interpolated` is currently on screen!).
+        // Verify:
+        // 1. ZERO `Real` frames are ever skipped!
+        // 2. Every source frame emits `(Interpolated, Real)` strictly in order.
+        // 3. `ReplayGpu::should_capture` accepts 100% of all 120 paced 60 FPS beats!
+        // 4. 60 Hz Replay CFR ticks advance by exact +1 every beat (ZERO sawtooth drops/doubles).
+        let replay_gpu = crate::replay::gpu::Readback::default();
+        assert!(replay_gpu.should_capture(ts0));
+
+        let mut last_ts = ts0;
+        let mut last_tick: Option<i64> = None;
+        let mut sim_wall_us = 100_000i64;
+        let mut accepted_beats = 0usize;
+
+        for k in 1..=60i64 {
+            let nominal_us = 100_000 + k * 33_333;
+            let src_ts = nominal_us + jitter_us[(k as usize) % jitter_us.len()];
+            if k > 1 {
+                let arr_t = t0 + std::time::Duration::from_micros((src_ts - 100_000).max(0) as u64);
+                pacer.enqueue_frame(arr_t, make_dummy_ps5_frame(src_ts, 1920, 1080));
+            }
+
+            // Beat 2k-1: promote F_k -> Interpolated.
+            sim_wall_us += 16_667;
+            let p_interp = pacer.step_beat(sim_wall_us);
+            assert_eq!(
+                p_interp.as_ref().map(|f| f.captured_at),
+                Some(src_ts),
+                "Beat should promote F_{k}"
+            );
+            assert!(
+                pacer.show_interpolated(),
+                "Continuous source frame F_{k} must enter Interpolated phase"
+            );
+            let ts_interp = pacer.effective_captured_at(src_ts);
+            assert!(ts_interp > last_ts, "Timestamps must be strictly monotonic");
+            assert!(
+                replay_gpu.should_capture(ts_interp),
+                "Replay should_capture must not drop paced Interp beat {k} (ts={ts_interp}, prev={last_ts})"
+            );
+            let tick_interp = ((ts_interp - ts0) as f64 * 60.0 / 1_000_000.0).round() as i64;
+            if let Some(prev_tick) = last_tick {
+                assert_eq!(
+                    tick_interp,
+                    prev_tick + 1,
+                    "Replay CFR tick must advance by exact +1 on Interp beat {k}"
+                );
+            }
+            last_tick = Some(tick_interp);
+            last_ts = ts_interp;
+            accepted_beats += 1;
+
+            // Even if F_{k+1} arrives EARLY before Real F_k is painted, Real F_k MUST NOT be skipped!
+            if k < 60 && (k % 3 == 0) {
+                let next_nom = 100_000 + (k + 1) * 33_333;
+                let next_ts = next_nom + jitter_us[((k + 1) as usize) % jitter_us.len()];
+                let early_t =
+                    t0 + std::time::Duration::from_micros((next_ts - 100_000).max(0) as u64);
+                pacer.enqueue_frame(early_t, make_dummy_ps5_frame(next_ts, 1920, 1080));
+            }
+
+            // Beat 2k: unconditionally reveal Real F_k!
+            sim_wall_us += 16_667;
+            let p_real = pacer.step_beat(sim_wall_us);
+            assert!(
+                p_real.is_none(),
+                "Real beat for F_{k} must keep current frame without clobbering it"
+            );
+            assert!(
+                !pacer.show_interpolated(),
+                "Beat after Interpolated must always present Real F_{k}"
+            );
+            let ts_real = pacer.effective_captured_at(src_ts);
+            assert!(ts_real > last_ts, "Real timestamp must strictly advance");
+            assert!(
+                replay_gpu.should_capture(ts_real),
+                "Replay should_capture must not drop paced Real beat {k} (ts={ts_real}, prev={last_ts})"
+            );
+            let tick_real = ((ts_real - ts0) as f64 * 60.0 / 1_000_000.0).round() as i64;
+            assert_eq!(
+                tick_real,
+                last_tick.unwrap() + 1,
+                "Replay CFR tick must advance by exact +1 on Real beat {k}"
+            );
+            last_tick = Some(tick_real);
+            last_ts = ts_real;
+            accepted_beats += 1;
+        }
+        assert_eq!(accepted_beats, 120);
+
+        // Genuine multi-frame stream stall (> 80 ms gap) cleanly falls back to Real immediately
+        // (without wasting a priming hold on a discontinuity frame) and resets `primed`.
+        let drop_ts = pacer.curr_captured_at.unwrap() + 95_000;
+        pacer.enqueue_frame(
+            t0 + std::time::Duration::from_secs(3),
+            make_dummy_ps5_frame(drop_ts, 1920, 1080),
+        );
+        let p_drop = pacer.step_beat(drop_ts + 500);
+        assert_eq!(p_drop.as_ref().map(|f| f.captured_at), Some(drop_ts));
+        assert!(!pacer.show_interpolated());
+        assert!(!pacer.primed);
+
+        // If the next continuous frame after a drop has already sat >= 8.33 ms in the channel,
+        // it is already centered and promotes immediately into Interpolated without an extra beat.
+        let centered_ts = drop_ts + 33_333;
+        pacer.enqueue_frame(
+            t0 + std::time::Duration::from_secs(3) + std::time::Duration::from_millis(33),
+            make_dummy_ps5_frame(centered_ts, 1920, 1080),
+        );
+        let p_centered = pacer.step_beat(centered_ts + 12_000);
+        assert_eq!(
+            p_centered.as_ref().map(|f| f.captured_at),
+            Some(centered_ts)
+        );
+        assert!(pacer.show_interpolated());
+        assert!(pacer.primed);
+        // Complete its Real beat before testing resolution change.
+        assert!(pacer.step_beat(centered_ts + 28_667).is_none());
+        assert!(!pacer.show_interpolated());
+
+        // Resolution change also falls back cleanly to Real for 1 beat.
+        let res_ts = centered_ts + 33_333;
+        pacer.enqueue_frame(
+            t0 + std::time::Duration::from_secs(3) + std::time::Duration::from_millis(66),
+            make_dummy_ps5_frame(res_ts, 1280, 720),
+        );
+        let p_res = pacer.step_beat(res_ts + 500);
+        assert_eq!(p_res.as_ref().map(|f| f.captured_at), Some(res_ts));
+        assert!(!pacer.show_interpolated());
+
+        // Queue depth cap: bursting 5 frames never retains more than MAX_PENDING_FRAMES (3).
+        for i in 1..=5i64 {
+            pacer.enqueue_frame(
+                t0 + std::time::Duration::from_secs(4),
+                make_dummy_ps5_frame(res_ts + i * 33_333, 1280, 720),
+            );
+        }
+        assert_eq!(
+            pacer.pending_frames.len(),
+            Ps5FrameGenPacer::MAX_PENDING_FRAMES
+        );
+        // Proportional queue-pressure PLL engages smoothly: len=3 < len=2 < len=1.
+        let burst3_beat = pacer.beat_duration();
+        pacer.pending_frames.pop_front();
+        let burst2_beat = pacer.beat_duration();
+        pacer.pending_frames.pop_front();
+        let normal_beat = pacer.beat_duration();
+        assert!(burst3_beat < burst2_beat && burst2_beat < normal_beat);
+    }
+
+    #[test]
+    fn ps5_framegen_pacer_prevents_smoothed_interval_sawtooth_runaway() {
+        let mut pacer = Ps5FrameGenPacer::default();
+        let t0 = Instant::now();
+
+        // Feed 120 crystal-locked 30.00 Hz PS5 frames (`captured_at` += 33_333 us) while
+        // artificially delaying the GUI drain instant (`arrived_at`) by +4 ms every frame
+        // (reproducing the Round 8 `recv_timeout` positive-feedback loop).
+        // `smoothed_interval` MUST measure strictly from `captured_at` and stay tightly locked!
+        for k in 0..120i64 {
+            let src_ts = 1_000_000 + k * 33_333;
+            let delayed_gui_instant = t0 + std::time::Duration::from_micros((k as u64) * 37_333);
+            pacer.enqueue_frame(
+                delayed_gui_instant,
+                make_dummy_ps5_frame(src_ts, 1920, 1080),
+            );
+        }
+        assert!(
+            pacer.smoothed_interval >= std::time::Duration::from_micros(33_320)
+                && pacer.smoothed_interval <= std::time::Duration::from_micros(33_380),
+            "smoothed_interval must never run away from GUI drain jitter: {:?}",
+            pacer.smoothed_interval
+        );
+        assert!(
+            (pacer.smoothed_interval.as_micros() as i64 - 33_333).abs() <= 50,
+            "smoothed_interval should stay locked to true 33.33 ms source period: {:?}",
+            pacer.smoothed_interval
+        );
+
+        // Even with a deliberately high worst-case clamped interval (33.38 ms -> beat_dur =
+        // 16.690 ms > 16.667 ms monitor VSync), true hardware 60 Hz VSync (>= 2 consecutive
+        // beats with swap_cycle >= 14.5 ms) must NEVER sleep or drift into sawtooth misses!
+        pacer.smoothed_interval = std::time::Duration::from_micros(33_380);
+        pacer.pending_frames.clear();
+        assert_eq!(pacer.compute_beat_sleep_target(t0), None);
+        pacer.record_beat_wake(t0);
+
+        for beat in 1..=60u64 {
+            let vsync_entry = t0 + std::time::Duration::from_micros(beat * 16_667);
+            let sleep_target = pacer.compute_beat_sleep_target(vsync_entry);
+            if beat >= 2 {
+                assert_eq!(
+                    sleep_target, None,
+                    "60 Hz VSync beat {beat} must never sleep into a sawtooth miss"
+                );
+                assert!(pacer.is_60hz_vsync_locked);
+                assert_eq!(
+                    pacer.next_frame_wait_budget(),
+                    Ps5FrameGenPacer::WAIT_BUDGET_60HZ
+                );
+            }
+            pacer.record_beat_wake(vsync_entry);
+        }
+    }
+
+    #[test]
+    fn ps5_framegen_pacer_phase_locks_and_aligns_presentation_under_heavy_interp_gpu_asymmetry() {
+        // Reproduces desktop `vsync: false` when `Interpolated` compute takes 17.5 ms (> 16.67 ms!)
+        // while `Real` takes 3.5 ms (21.0 ms total << 33.33 ms):
+        // 1. Must NOT false-trigger `is_60hz_vsync_locked` (which previously caused permanent
+        //    58.5 FPS drift and periodic staging-queue overflow drops!).
+        // 2. Must preserve the locked 60 Hz phase grid so `Real` recovers `Interpolated`'s overrun,
+        //    emitting ZERO dropped source frames and ZERO steady-state Replay CFR tick skips.
+        // 3. Must offset `Real` presentation so actual SwapBuffers intervals stay tightly centered
+        //    around 16.67 ms (instead of 3.5 ms / 29.8 ms judder!).
+        let mut pacer = Ps5FrameGenPacer::default();
+        let t0 = Instant::now();
+        let interp_work = std::time::Duration::from_micros(17_500);
+        let real_work = std::time::Duration::from_micros(3_500);
+
+        let jitter_us: [i64; 8] = [-5_000, 4_000, -5_500, 5_000, -3_000, 2_500, -4_500, 5_500];
+        let mut src_arrivals_us = Vec::new();
+        for k in 0..160i64 {
+            let nom = k * 33_333;
+            let t = if k == 0 {
+                0
+            } else {
+                (nom + jitter_us[(k as usize) % jitter_us.len()]).max(0)
+            };
+            src_arrivals_us.push(t);
+        }
+
+        let replay_gpu = crate::replay::gpu::Readback::default();
+        let mut src_idx = 0usize;
+        let mut now_us = 0u64;
+        let mut last_seen_at = 0i64;
+        let mut epoch: Option<i64> = None;
+        let mut last_tick: Option<i64> = None;
+        let mut steady_tick_skips = 0usize;
+        let mut prev_present_us: Option<u64> = None;
+        let mut steady_disp_dts_ms = Vec::new();
+        let mut prev_phase: Option<Ps5FrameGenPhase> = None;
+        let mut steady_parity_flips = 0usize;
+        let mut promoted_count = 0usize;
+
+        while now_us < 4_500_000 {
+            let entry = t0 + std::time::Duration::from_micros(now_us);
+            if let Some(target) = pacer.compute_beat_sleep_target(entry) {
+                let target_us = target.saturating_duration_since(t0).as_micros() as u64;
+                if target_us > now_us {
+                    now_us = target_us;
+                }
+            }
+            assert!(
+                !pacer.is_60hz_vsync_locked,
+                "Alternating 17.5 ms Interp / 3.5 ms Real on desktop must never trip 60 Hz VSync lock"
+            );
+
+            let wake = t0 + std::time::Duration::from_micros(now_us);
+            pacer.record_beat_wake(wake);
+
+            while src_idx < src_arrivals_us.len() && (src_arrivals_us[src_idx] as u64) <= now_us {
+                let ts = 1_000_000 + src_arrivals_us[src_idx];
+                pacer.enqueue_frame(wake, make_dummy_ps5_frame(ts, 1920, 1080));
+                src_idx += 1;
+            }
+            if pacer.should_wait_for_next_frame(wake) {
+                let budget_us = pacer.next_frame_wait_budget().as_micros() as u64;
+                if src_idx < src_arrivals_us.len()
+                    && (src_arrivals_us[src_idx] as u64) <= now_us + budget_us
+                {
+                    now_us = src_arrivals_us[src_idx] as u64;
+                    let arrived = t0 + std::time::Duration::from_micros(now_us);
+                    while src_idx < src_arrivals_us.len()
+                        && (src_arrivals_us[src_idx] as u64) <= now_us
+                    {
+                        let ts = 1_000_000 + src_arrivals_us[src_idx];
+                        pacer.enqueue_frame(arrived, make_dummy_ps5_frame(ts, 1920, 1080));
+                        src_idx += 1;
+                    }
+                } else {
+                    now_us += budget_us;
+                }
+            }
+
+            let render_start = t0 + std::time::Duration::from_micros(now_us);
+            if pacer.step_beat(1_000_000 + now_us as i64).is_some() {
+                promoted_count += 1;
+            }
+            pacer.record_render_start(render_start);
+
+            let work = if pacer.show_interpolated() {
+                interp_work
+            } else {
+                real_work
+            };
+            now_us += work.as_micros() as u64;
+
+            if now_us > 400_000 {
+                if let Some(pp) = prev_phase {
+                    if pp == pacer.phase {
+                        steady_parity_flips += 1;
+                    }
+                }
+                prev_phase = Some(pacer.phase);
+
+                if let Some(prev_p) = prev_present_us {
+                    steady_disp_dts_ms.push((now_us - prev_p) as f64 / 1000.0);
+                }
+            }
+            prev_present_us = Some(now_us);
+
+            let at = pacer.effective_captured_at(1_000_000 + now_us as i64);
+            if at > last_seen_at {
+                last_seen_at = at;
+                assert!(
+                    replay_gpu.should_capture(at),
+                    "Replay should_capture dropped beat at now={}ms",
+                    now_us / 1000
+                );
+                let ep = *epoch.get_or_insert(at);
+                let tick = ((at - ep) as f64 * 60.0 / 1_000_000.0).round() as i64;
+                if let Some(prev_t) = last_tick {
+                    if now_us > 400_000 && tick != prev_t + 1 {
+                        steady_tick_skips += 1;
+                    }
+                }
+                last_tick = Some(tick);
+            }
+        }
+
+        // Every source frame that arrived (minus <= 2 still staged) must have been promoted (0 drops!).
+        let dropped = src_idx.saturating_sub(promoted_count + pacer.pending_frames.len());
+        assert_eq!(
+            dropped, 0,
+            "Heavy Interp pacer must drop ZERO source frames"
+        );
+        assert_eq!(
+            steady_parity_flips, 0,
+            "Heavy Interp pacer must have ZERO steady-state parity flips"
+        );
+        assert_eq!(
+            steady_tick_skips, 0,
+            "Heavy Interp pacer must have ZERO steady-state 60 Hz Replay CFR tick skips"
+        );
+        let min_dt = steady_disp_dts_ms
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        let max_dt = steady_disp_dts_ms.iter().copied().fold(0.0_f64, f64::max);
+        assert!(
+            min_dt >= 14.0 && max_dt <= 20.0,
+            "Presentation intervals must be balanced (min={min_dt:.2}ms, max={max_dt:.2}ms)"
+        );
+    }
+
+    #[test]
+    fn ps5_framegen_pacer_sleep_targets_handle_60hz_vsync_and_120hz_displays() {
+        let mut pacer = Ps5FrameGenPacer::default();
+        let t0 = Instant::now();
+
+        // First beat never sleeps.
+        assert_eq!(pacer.compute_beat_sleep_target(t0), None);
+        pacer.record_beat_wake(t0);
+
+        // 60 Hz VSync: SwapBuffers returns at +16.67 ms (>= 14.5 ms) -> ZERO sleep every beat
+        // and `is_60hz_vsync_locked` engages on the 2nd consecutive 60 Hz swap!
+        for i in 1..=10u64 {
+            let vsync_t = t0 + std::time::Duration::from_micros(i * 16_667);
+            assert_eq!(
+                pacer.compute_beat_sleep_target(vsync_t),
+                None,
+                "60 Hz VSync beat {i} must not incur extra sleep"
+            );
+            if i >= 2 {
+                assert!(pacer.is_60hz_vsync_locked);
+            }
+            pacer.record_beat_wake(vsync_t);
+        }
+
+        // 120 Hz VSync: SwapBuffers returns early at +8.33 ms (< 14.5 ms) -> sleeps to ~16.67 ms!
+        let mut pacer120 = Ps5FrameGenPacer::default();
+        assert_eq!(pacer120.compute_beat_sleep_target(t0), None);
+        pacer120.record_beat_wake(t0);
+        let early_return = t0 + std::time::Duration::from_micros(8_333);
+        let sleep_to = pacer120
+            .compute_beat_sleep_target(early_return)
+            .expect("120 Hz early SwapBuffers must pace to next 60 Hz beat");
+        assert!(!pacer120.is_60hz_vsync_locked);
+        assert_eq!(
+            pacer120.next_frame_wait_budget(),
+            Ps5FrameGenPacer::WAIT_BUDGET_HIGH_HZ
+        );
+        let sleep_dur = sleep_to.saturating_duration_since(early_return);
+        assert!(
+            sleep_dur >= std::time::Duration::from_millis(7)
+                && sleep_dur <= std::time::Duration::from_millis(10),
+            "Unexpected 120 Hz pacing sleep duration: {:?}",
+            sleep_dur
+        );
+
+        // Idle detection stops continuous repaint after ACTIVE_STREAM_WINDOW.
+        pacer120.enqueue_frame(t0, make_dummy_ps5_frame(50_000, 1920, 1080));
+        let _ = pacer120.step_beat(50_000);
+        assert!(
+            pacer120.should_request_continuous_repaint(t0 + std::time::Duration::from_millis(50))
+        );
+        assert!(
+            !pacer120.should_request_continuous_repaint(t0 + std::time::Duration::from_millis(250))
+        );
     }
 }

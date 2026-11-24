@@ -219,12 +219,18 @@ impl Ps5ConsoleEntry {
 ///
 /// NOTE: All scalar fields MUST precede `consoles` (`Vec<Ps5ConsoleEntry>`) so `toml`
 /// serialization never emits a value after an array-of-tables (`ValueAfterTable`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Ps5Config {
     pub selected_console_id: String,
     pub resolution: Ps5Resolution,
     pub fps: Ps5Fps,
+    /// Desktop-only AMD FidelityFX Optical Flow 30 -> 60 FPS frame generation.
+    /// Automatically disabled whenever `fps` is set to 60 FPS, and unavailable in Steam Deck mode.
+    pub framegen_enabled: bool,
+    pub framegen_artifact_guard: f32,
+    pub framegen_scd_sensitivity: f32,
+    pub framegen_hud_protection: f32,
     pub bitrate_kbps: u32,
     pub audio_buffer_ms: u32,
     pub codec: Ps5Codec,
@@ -243,6 +249,10 @@ impl Default for Ps5Config {
             selected_console_id: String::new(),
             resolution: Ps5Resolution::P1080,
             fps: Ps5Fps::Fps60,
+            framegen_enabled: false,
+            framegen_artifact_guard: crate::video::gpu::DEFAULT_FRAMEGEN_ARTIFACT_GUARD,
+            framegen_scd_sensitivity: crate::video::gpu::DEFAULT_FRAMEGEN_SCD_SENSITIVITY,
+            framegen_hud_protection: crate::video::gpu::DEFAULT_FRAMEGEN_HUD_PROTECTION,
             bitrate_kbps: PS5_DEFAULT_BITRATE_KBPS,
             audio_buffer_ms: PS5_DEFAULT_AUDIO_BUFFER_MS,
             codec: Ps5Codec::H265,
@@ -267,6 +277,39 @@ impl Ps5Config {
         self.audio_buffer_ms
             .clamp(PS5_MIN_AUDIO_BUFFER_MS, PS5_MAX_AUDIO_BUFFER_MS)
     }
+
+    /// Enforces that FidelityFX frame generation is only enabled for explicit 30 FPS streams
+    /// and clamps tuning sliders into valid bounds.
+    pub fn normalize_framegen(&mut self) {
+        if self.fps != Ps5Fps::Fps30 {
+            self.framegen_enabled = false;
+        }
+        let p = self.framegen_params();
+        self.framegen_artifact_guard = p.artifact_guard;
+        self.framegen_scd_sensitivity = p.scd_sensitivity;
+        self.framegen_hud_protection = p.hud_protection;
+    }
+
+    pub fn framegen_params(&self) -> crate::video::gpu::FfxFrameGenParams {
+        crate::video::gpu::FfxFrameGenParams {
+            artifact_guard: self.framegen_artifact_guard,
+            scd_sensitivity: self.framegen_scd_sensitivity,
+            hud_protection: self.framegen_hud_protection,
+        }
+        .sanitized()
+    }
+
+    pub fn reset_framegen_params(&mut self) {
+        self.framegen_artifact_guard = crate::video::gpu::DEFAULT_FRAMEGEN_ARTIFACT_GUARD;
+        self.framegen_scd_sensitivity = crate::video::gpu::DEFAULT_FRAMEGEN_SCD_SENSITIVITY;
+        self.framegen_hud_protection = crate::video::gpu::DEFAULT_FRAMEGEN_HUD_PROTECTION;
+    }
+
+    /// Updates stream framerate and automatically disables frame generation when 60 FPS is chosen.
+    pub fn set_fps(&mut self, fps: Ps5Fps) {
+        self.fps = fps;
+        self.normalize_framegen();
+    }
 }
 
 pub type DiscoveryTaskResult = Result<Vec<DiscoveredHostInfo>, String>;
@@ -281,6 +324,7 @@ pub struct Ps5State {
     // Active streaming session state
     pub is_active: bool,
     pub is_connecting: bool,
+    pub active_session_fps: Option<Ps5Fps>,
     pub connected_console_id: String,
     pub connected_console_name: String,
     pub status_message: String,
@@ -349,6 +393,7 @@ impl Default for Ps5State {
             config: Ps5Config::default(),
             is_active: false,
             is_connecting: false,
+            active_session_fps: None,
             connected_console_id: String::new(),
             connected_console_name: String::new(),
             status_message: String::new(),
@@ -1380,10 +1425,25 @@ mod tests {
         assert_eq!(Ps5Fps::Fps60.as_u32(), 60);
 
         let mut cfg = Ps5Config::default();
+        assert!(!cfg.framegen_enabled);
         cfg.bitrate_kbps = 100;
         assert_eq!(cfg.clamped_bitrate_kbps(), PS5_MIN_BITRATE_KBPS);
         cfg.bitrate_kbps = 999_999;
         assert_eq!(cfg.clamped_bitrate_kbps(), PS5_MAX_BITRATE_KBPS);
+
+        // Frame generation is only allowed for explicit 30 FPS streams and auto-disables at 60 FPS.
+        cfg.set_fps(Ps5Fps::Fps30);
+        cfg.framegen_enabled = true;
+        cfg.normalize_framegen();
+        assert!(cfg.framegen_enabled);
+
+        cfg.set_fps(Ps5Fps::Fps60);
+        assert!(!cfg.framegen_enabled);
+
+        // Even if deserialized with fps=60 and framegen_enabled=true, normalize_framegen clears it.
+        cfg.framegen_enabled = true;
+        cfg.normalize_framegen();
+        assert!(!cfg.framegen_enabled);
     }
 
     #[test]

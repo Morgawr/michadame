@@ -543,7 +543,9 @@ fn populate_config_from_state(cfg: &mut MichadameConfig, state: &AppState) {
     cfg.webcam = state.webcam.config.synced_for_save();
     cfg.pc98 = state.pc98.config.clone();
     cfg.pc88 = state.pc88.config.clone();
-    cfg.ps5 = state.ps5.config.clone();
+    let mut ps5_cfg = state.ps5.config.clone();
+    ps5_cfg.normalize_framegen();
+    cfg.ps5 = ps5_cfg;
     cfg.audio_reactive = state.audio_reactive.clone();
 
     let current_profile_data = build_profile_from_state(state);
@@ -1056,6 +1058,7 @@ pub fn apply_config(state: &mut AppState, cfg: &MichadameConfig) {
         }
     }
     state.ps5.config = cfg.ps5.clone();
+    state.ps5.config.normalize_framegen();
     if state.ps5.config.psn_account_id_b64.trim().is_empty() {
         if let Some(ref tok) = state.ps5.psn_token {
             state.ps5.config.psn_account_id_b64 = tok.account_id_b64.clone();

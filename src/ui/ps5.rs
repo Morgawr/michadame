@@ -343,20 +343,134 @@ pub fn draw_ps5_tab(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                             .width(175.0)
                             .show_ui(ui, |ui| {
                                 for fps in Ps5Fps::ALL {
-                                    if ui
-                                        .selectable_value(
-                                            &mut state.ps5.config.fps,
-                                            fps,
-                                            fps.label(),
-                                        )
-                                        .changed()
+                                    let selected = state.ps5.config.fps == fps;
+                                    if ui.selectable_label(selected, fps.label()).clicked()
+                                        && !selected
                                     {
+                                        state.ps5.config.set_fps(fps);
+                                        if fps != Ps5Fps::Fps30 {
+                                            state.ps5_framegen_pacer.reset();
+                                        }
                                         config::save_config(state);
                                         changed = true;
                                     }
                                 }
                             });
                         ui.end_row();
+
+                        if state.steam_deck.is_none() {
+                            state.ps5.config.normalize_framegen();
+                            let is_30fps = state.ps5.config.fps == Ps5Fps::Fps30;
+                            let beam_crt_enabled = state.effective_ps5_crt_filter()
+                                == crate::devices::filter_type::CrtFilter::Beam;
+                            let can_toggle = is_30fps && !beam_crt_enabled;
+
+                            ui.label("Frame Gen:");
+                            let mut enabled_val = if can_toggle {
+                                state.ps5.config.framegen_enabled
+                            } else {
+                                false
+                            };
+                            let checkbox = ui.add_enabled(
+                                can_toggle,
+                                egui::Checkbox::new(
+                                    &mut enabled_val,
+                                    "AMD FidelityFX (30 → 60 FPS)",
+                                ),
+                            );
+                            let checkbox = if !is_30fps {
+                                checkbox.on_disabled_hover_text(
+                                    "Only available when PS5 stream framerate is set to 30 FPS (automatically disabled at 60 FPS).",
+                                )
+                            } else if beam_crt_enabled {
+                                checkbox.on_disabled_hover_text(
+                                    "Disabled while the CRT Beam filter is enabled. Switch CRT filter to Off, Lottes, or Halo to use AMD FidelityFX Frame Gen.",
+                                )
+                            } else {
+                                checkbox.on_hover_text(
+                                    "Uses AMD FidelityFX Optical Flow v5 on the GPU to interpolate explicit 30 FPS PS5 streams to 60 FPS (works with CRT Off, Lottes, or Halo; adds ~17 ms latency; disabled when CRT Beam filter is enabled).",
+                                )
+                            };
+                            if can_toggle && checkbox.changed() {
+                                state.ps5.config.framegen_enabled = enabled_val;
+                                if !enabled_val {
+                                    state.ps5_framegen_pacer.reset();
+                                }
+                                config::save_config(state);
+                                changed = true;
+                            }
+                            ui.end_row();
+
+                            if can_toggle && state.ps5.config.framegen_enabled {
+                                ui.label("Artifact Guard:");
+                                if ui
+                                    .add(
+                                        egui::Slider::new(
+                                            &mut state.ps5.config.framegen_artifact_guard,
+                                            0.0..=1.0,
+                                        )
+                                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+                                    )
+                                    .on_hover_text(
+                                        "Strictness of forward/backward optical flow consistency & fallback on unmatchable regions (particles, fast whips, transparency). Higher = cleaner with fewer warp glitches.",
+                                    )
+                                    .changed()
+                                {
+                                    config::save_config(state);
+                                    changed = true;
+                                }
+                                ui.end_row();
+
+                                ui.label("Scene Cut Sens.:");
+                                if ui
+                                    .add(
+                                        egui::Slider::new(
+                                            &mut state.ps5.config.framegen_scd_sensitivity,
+                                            0.0..=1.0,
+                                        )
+                                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+                                    )
+                                    .on_hover_text(
+                                        "Scene Change Detection sensitivity. Higher values bypass interpolation more readily on camera cuts, menu flashes, or rapid scene whips.",
+                                    )
+                                    .changed()
+                                {
+                                    config::save_config(state);
+                                    changed = true;
+                                }
+                                ui.end_row();
+
+                                ui.label("HUD Protection:");
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .add(
+                                            egui::Slider::new(
+                                                &mut state.ps5.config.framegen_hud_protection,
+                                                0.0..=1.0,
+                                            )
+                                            .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+                                        )
+                                        .on_hover_text(
+                                            "Locks stationary UI, subtitles, and Japanese dialogue boxes against warping during camera movement.",
+                                        )
+                                        .changed()
+                                    {
+                                        config::save_config(state);
+                                        changed = true;
+                                    }
+                                    if ui
+                                        .small_button("Reset")
+                                        .on_hover_text("Restore default FidelityFX Frame Gen tuning")
+                                        .clicked()
+                                    {
+                                        state.ps5.config.reset_framegen_params();
+                                        config::save_config(state);
+                                        changed = true;
+                                    }
+                                });
+                                ui.end_row();
+                            }
+                        }
 
                         ui.label("Codec:");
                         egui::ComboBox::from_id_source("ps5_codec")

@@ -225,6 +225,7 @@ impl Default for AppState {
             active_beam_preset: crate::app::models::BEAM_DEFAULT_PRESET.to_string(),
             new_beam_preset_name: String::new(),
             beam_lockstep: crate::app::models::BeamLockstepState::default(),
+            ps5_framegen_pacer: crate::app::models::Ps5FrameGenPacer::default(),
             cathode_interference: crate::app::models::CathodeInterferenceSettings::default(),
             cathode_interference_defaults: crate::app::models::CathodeInterferenceSettings::default(
             ),
@@ -519,6 +520,30 @@ impl AppState {
             && self.steam_deck.is_none()
             && self.ui.is_window_focused
             && CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed)) == CrtFilter::Beam
+    }
+
+    /// Returns true when AMD FidelityFX 30 -> 60 FPS frame generation is active for the
+    /// current PS5 Remote Play session:
+    /// - Desktop mode only (disabled/unavailable in Steam Deck mode)
+    /// - Explicit 30 FPS PS5 stream (disabled for 60 FPS streams)
+    /// - User checkbox enabled
+    /// - Disabled when the CRT Beam filter is enabled (works with CRT Off, Lottes, and Halo)
+    pub fn is_ps5_framegen_active(&self) -> bool {
+        self.steam_deck.is_none()
+            && self.ui.video_window_open
+            && self.ps5.is_active
+            && self.ps5.active_session_fps == Some(crate::ps5::Ps5Fps::Fps30)
+            && self.ps5.config.framegen_enabled
+            && CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed)) != CrtFilter::Beam
+    }
+
+    /// Effective CRT filter for PS5 mode (live filter while streaming PS5, otherwise the PS5 profile).
+    pub fn effective_ps5_crt_filter(&self) -> CrtFilter {
+        if self.ps5.is_active {
+            CrtFilter::from_u8(self.crt_filter.load(Ordering::Relaxed))
+        } else {
+            CrtFilter::from_u8(self.ps5_profile.crt_filter.unwrap_or(0))
+        }
     }
 
     pub fn request_screenshot(
@@ -1393,6 +1418,22 @@ impl AppState {
                 }
             }
             self.beam_lockstep.deactivate();
+
+            if self.is_ps5_framegen_active() {
+                self.pace_ps5_framegen_frame();
+                return;
+            }
+
+            if !self.ps5_framegen_pacer.pending_frames.is_empty()
+                || self.ps5_framegen_pacer.next_beat_at.is_some()
+                || self.ps5_framegen_pacer.show_interpolated()
+            {
+                for staged in self.ps5_framegen_pacer.take_all_pending() {
+                    self.apply_received_video_frame(staged);
+                }
+                self.ps5_framegen_pacer.reset();
+            }
+
             const TARGET_FRAME_DURATION: std::time::Duration =
                 std::time::Duration::from_nanos(1_000_000_000 / 60);
 
@@ -1419,8 +1460,74 @@ impl AppState {
                 }
             }
             self.beam_lockstep.deactivate();
+            if !self.ps5_framegen_pacer.pending_frames.is_empty()
+                || self.ps5_framegen_pacer.next_beat_at.is_some()
+                || self.ps5_framegen_pacer.show_interpolated()
+            {
+                for staged in self.ps5_framegen_pacer.take_all_pending() {
+                    self.apply_received_video_frame(staged);
+                }
+                self.ps5_framegen_pacer.reset();
+            }
             self.next_gui_frame_time = None;
         }
+    }
+
+    /// Drives locked 60 FPS `(Interpolated F(t - 0.5), Real F(t))` presentation for 30 FPS PS5
+    /// Remote Play BEFORE `draw_video_player()` runs:
+    /// 1. Paces the 60 Hz beat (zero sleep on 60 Hz VSync; precise sleep on 120/144/240 Hz & VRR).
+    /// 2. Stages newly arrived PS5 frames into `ps5_framegen_pacer.pending_frames` so an early
+    ///    arrival NEVER clobbers an unshown `Real` frame.
+    /// 3. Uses a short bounded `recv_timeout` (<= 6 ms) right after a `Real` beat when the staging
+    ///    queue is momentarily empty so slight LAN/decode jitter never drops a 60 Hz VSync.
+    /// 4. Advances the pacer by exactly one beat and applies any promoted source frame BEFORE paint.
+    fn pace_ps5_framegen_frame(&mut self) {
+        let entry_now = Instant::now();
+        if let Some(sleep_target) = self.ps5_framegen_pacer.compute_beat_sleep_target(entry_now) {
+            sleep_until_precise(sleep_target);
+        }
+
+        let after_sleep = Instant::now();
+        self.ps5_framegen_pacer.record_beat_wake(after_sleep);
+        if let Some(rx) = &self.frame_receiver {
+            let mut drained = Vec::new();
+            while let Ok(frame) = rx.try_recv() {
+                drained.push(frame);
+            }
+            for frame in drained {
+                self.ps5_framegen_pacer.enqueue_frame(after_sleep, frame);
+            }
+        }
+
+        if self
+            .ps5_framegen_pacer
+            .should_wait_for_next_frame(after_sleep)
+        {
+            let wait_budget = self.ps5_framegen_pacer.next_frame_wait_budget();
+            let maybe_frame = self
+                .frame_receiver
+                .as_ref()
+                .and_then(|rx| rx.recv_timeout(wait_budget).ok());
+            if let Some(first) = maybe_frame {
+                let arrived = Instant::now();
+                self.ps5_framegen_pacer.enqueue_frame(arrived, first);
+                if let Some(rx) = &self.frame_receiver {
+                    let mut extra = Vec::new();
+                    while let Ok(frame) = rx.try_recv() {
+                        extra.push(frame);
+                    }
+                    for frame in extra {
+                        self.ps5_framegen_pacer.enqueue_frame(arrived, frame);
+                    }
+                }
+            }
+        }
+
+        let render_start = Instant::now();
+        if let Some(promoted) = self.ps5_framegen_pacer.step_beat(crate::replay::now_us()) {
+            self.apply_received_video_frame(promoted);
+        }
+        self.ps5_framegen_pacer.record_render_start(render_start);
     }
 }
 
@@ -1880,7 +1987,8 @@ impl eframe::App for AppState {
         }
 
         let beam_lockstep_active = self.is_beam_lockstep_active();
-        if !beam_lockstep_active {
+        let ps5_framegen_active = self.is_ps5_framegen_active();
+        if !beam_lockstep_active && !ps5_framegen_active {
             if let Some(rx) = &self.frame_receiver {
                 let mut incoming = Vec::new();
                 while let Ok(frame) = rx.try_recv() {
@@ -3183,5 +3291,151 @@ mod tests {
             .store(900, Ordering::Relaxed);
         state.update_live_audio_meters();
         assert_eq!(state.hardware.live_audio_db_peak, 0.0);
+    }
+
+    #[test]
+    fn ps5_framegen_eligibility_respects_deck_fps_toggle_and_beam_crt() {
+        let mut state = AppState::default();
+        state.ui.video_window_open = true;
+        state.ps5.is_active = true;
+        state.ps5.config.fps = crate::ps5::Ps5Fps::Fps30;
+        state.ps5.config.framegen_enabled = true;
+        state.ps5.active_session_fps = Some(crate::ps5::Ps5Fps::Fps30);
+        state
+            .crt_filter
+            .store(CrtFilter::Off as u8, Ordering::Relaxed);
+
+        // 1. Desktop + active PS5 30 FPS + checkbox ON + CRT Off -> ACTIVE!
+        assert!(state.is_ps5_framegen_active());
+
+        // 2. Works with non-Beam CRT filters (Lottes / Halo) as well
+        state
+            .crt_filter
+            .store(CrtFilter::Lottes as u8, Ordering::Relaxed);
+        assert!(state.is_ps5_framegen_active());
+        state
+            .crt_filter
+            .store(CrtFilter::Halo as u8, Ordering::Relaxed);
+        assert!(state.is_ps5_framegen_active());
+
+        // 3. Disabled when CRT Beam filter is enabled
+        state
+            .crt_filter
+            .store(CrtFilter::Beam as u8, Ordering::Relaxed);
+        assert!(!state.is_ps5_framegen_active());
+        state
+            .crt_filter
+            .store(CrtFilter::Off as u8, Ordering::Relaxed);
+        assert!(state.is_ps5_framegen_active());
+
+        // 4. Disabled for 60 FPS streams (even if framegen_enabled were somehow true)
+        state.ps5.active_session_fps = Some(crate::ps5::Ps5Fps::Fps60);
+        assert!(!state.is_ps5_framegen_active());
+        state.ps5.active_session_fps = Some(crate::ps5::Ps5Fps::Fps30);
+        assert!(state.is_ps5_framegen_active());
+
+        // 5. Disabled when user unchecks the toggle
+        state.ps5.config.framegen_enabled = false;
+        assert!(!state.is_ps5_framegen_active());
+        state.ps5.config.framegen_enabled = true;
+        assert!(state.is_ps5_framegen_active());
+
+        // 6. Disabled/unavailable in Steam Deck mode
+        state.steam_deck = Some(crate::steam_deck::SteamDeckState::default());
+        assert!(!state.is_ps5_framegen_active());
+        state.steam_deck = None;
+        assert!(state.is_ps5_framegen_active());
+
+        // 7. Disabled when PS5 mode is not active
+        state.ps5.is_active = false;
+        assert!(!state.is_ps5_framegen_active());
+    }
+
+    #[test]
+    fn pace_gui_frame_stages_early_ps5_frames_and_never_skips_real_beats() {
+        let mut state = AppState::default();
+        state.ui.video_window_open = true;
+        state.ps5.is_active = true;
+        state.ps5.config.fps = crate::ps5::Ps5Fps::Fps30;
+        state.ps5.config.framegen_enabled = true;
+        state.ps5.active_session_fps = Some(crate::ps5::Ps5Fps::Fps30);
+        state
+            .crt_filter
+            .store(CrtFilter::Off as u8, Ordering::Relaxed);
+
+        let (tx, rx) = crossbeam_channel::bounded(4);
+        state.frame_receiver = Some(rx);
+
+        let mk = |ts: i64| {
+            Arc::new(crate::video::types::RawFrame {
+                captured_at: ts,
+                rate: crate::replay::config::Rate { num: 30, den: 1 },
+                width: 1920,
+                height: 1080,
+                data: Vec::new(),
+                format: ffmpeg_next::format::Pixel::RGBA,
+                color_range: crate::video::types::ColorRange::Full,
+            })
+        };
+
+        // Beat 0: F0 arrives -> promoted immediately as Real.
+        tx.send(mk(100_000)).unwrap();
+        state.pace_gui_frame();
+        assert_eq!(
+            state.latest_frame.as_ref().map(|f| f.captured_at),
+            Some(100_000)
+        );
+        assert!(!state.ps5_framegen_pacer.show_interpolated());
+
+        // Beat 1: F1 and F2 BOTH sit in the channel (early arrival / burst!).
+        // Pacer must promote ONLY F1 as Interpolated and stage F2 without clobbering F1!
+        tx.send(mk(133_333)).unwrap();
+        tx.send(mk(166_666)).unwrap();
+        // Fast-forward beat clock so test does not sleep.
+        state.ps5_framegen_pacer.next_beat_at =
+            Some(Instant::now() - std::time::Duration::from_millis(20));
+        state.pace_gui_frame();
+        assert_eq!(
+            state.latest_frame.as_ref().map(|f| f.captured_at),
+            Some(133_333)
+        );
+        assert!(state.ps5_framegen_pacer.show_interpolated());
+        assert_eq!(state.ps5_framegen_pacer.pending_frames.len(), 1);
+
+        // Beat 2: Even though F2 is waiting, Beat 2 MUST reveal Real F1 (NEVER skip Real!).
+        state.ps5_framegen_pacer.next_beat_at =
+            Some(Instant::now() - std::time::Duration::from_millis(20));
+        state.pace_gui_frame();
+        assert_eq!(
+            state.latest_frame.as_ref().map(|f| f.captured_at),
+            Some(133_333)
+        );
+        assert!(!state.ps5_framegen_pacer.show_interpolated());
+        assert_eq!(state.ps5_framegen_pacer.pending_frames.len(), 1);
+
+        // Beat 3: Now F2 is promoted as Interpolated!
+        state.ps5_framegen_pacer.next_beat_at =
+            Some(Instant::now() - std::time::Duration::from_millis(20));
+        state.pace_gui_frame();
+        assert_eq!(
+            state.latest_frame.as_ref().map(|f| f.captured_at),
+            Some(166_666)
+        );
+        assert!(state.ps5_framegen_pacer.show_interpolated());
+        assert_eq!(state.ps5_framegen_pacer.pending_frames.len(), 0);
+
+        // Disabling framegen (or switching to Beam) flushes any staged frame and resets pacer cleanly.
+        tx.send(mk(200_000)).unwrap();
+        state
+            .ps5_framegen_pacer
+            .enqueue_frame(Instant::now(), mk(200_000));
+        state.ps5.config.framegen_enabled = false;
+        state.pace_gui_frame();
+        assert_eq!(
+            state.latest_frame.as_ref().map(|f| f.captured_at),
+            Some(200_000)
+        );
+        assert!(!state.ps5_framegen_pacer.show_interpolated());
+        assert!(state.ps5_framegen_pacer.pending_frames.is_empty());
     }
 }

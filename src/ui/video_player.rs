@@ -617,7 +617,15 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
         }
 
-        if !is_showing_roll && filter == CrtFilter::Beam && is_window_focused {
+        let framegen_active = !is_showing_roll && state.is_ps5_framegen_active();
+        let framegen_continuous_repaint = framegen_active
+            && state
+                .ps5_framegen_pacer
+                .should_request_continuous_repaint(std::time::Instant::now());
+
+        if (!is_showing_roll && filter == CrtFilter::Beam && is_window_focused)
+            || framegen_continuous_repaint
+        {
             ui.ctx().request_repaint();
         } else if (!is_showing_roll && filter == CrtFilter::Beam)
             || state.cathode_interference.enabled
@@ -628,6 +636,19 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_nanos(1_000_000_000 / 60));
         }
+
+        let framegen_show_interpolated =
+            framegen_active && state.ps5_framegen_pacer.show_interpolated();
+        let framegen_params = state.ps5.config.framegen_params();
+        let framegen_effective_captured_at = active_frame.as_ref().map(|f| {
+            if framegen_active {
+                state
+                    .ps5_framegen_pacer
+                    .effective_captured_at(f.captured_at)
+            } else {
+                f.captured_at
+            }
+        });
 
         if !is_showing_roll
             && (state.video.pixelate_filter_enabled
@@ -679,9 +700,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                 params.fallback_captured_at =
                     latest_dmabuf_frame_cb.as_ref().map(|f| f.captured_at);
                 params.render_fft_spectrum = state.video.fft_mask_window_open;
-                halo_params.source_captured_at = latest_frame
-                    .as_ref()
-                    .map(|f| f.captured_at)
+                halo_params.source_captured_at = framegen_effective_captured_at
                     .or_else(|| latest_dmabuf_frame_cb.as_ref().map(|f| f.captured_at));
 
                 let capture_overlays = state.replay.config.capture_overlays && !deck_background;
@@ -793,6 +812,18 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 renderer.ocr_recycled_buffer =
                                     ocr_dispatch_cb.try_take_recycled_buffer();
                             }
+                            // OCR reads directly from the un-interpolated pre-framegen texture
+                            // inside `renderer.paint()`, so only explicit screenshot/mining captures
+                            // need to force the displayed framebuffer back to the Real frame.
+                            let force_real_for_capture = is_screenshot_capture;
+                            renderer.framegen_next_paint =
+                                Some(crate::video::gpu::FrameGenPaintRequest {
+                                    enabled: framegen_active && !run_beam,
+                                    show_interpolated: framegen_show_interpolated
+                                        && !run_beam
+                                        && !force_real_for_capture,
+                                    params: framegen_params,
+                                });
                             let effective_beam_params = if is_screenshot_capture && run_beam {
                                 beam_params.as_steady_state_capture()
                             } else {
@@ -824,9 +855,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                                 current_software_mouse_clip,
                                 is_mining_capture,
                             );
-                            let at = latest_frame
-                                .as_ref()
-                                .map(|f| f.captured_at)
+                            let at = framegen_effective_captured_at
                                 .or_else(|| latest_dmabuf_frame_cb.as_ref().map(|f| f.captured_at))
                                 .unwrap_or(0);
                             if let Some((pixels, w, h)) = renderer.last_ocr_capture.take() {
@@ -1124,6 +1153,18 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                             renderer.ocr_recycled_buffer =
                                 ocr_dispatch_cb.try_take_recycled_buffer();
                         }
+                        // OCR reads directly from the un-interpolated pre-framegen texture inside
+                        // `renderer.draw_passthrough()`, so Constant OCR never interrupts 60 FPS
+                        // display or Replay interpolation.
+                        let force_real_for_capture =
+                            is_mining_capture || screenshot_capture_cb.has_pending();
+                        renderer.framegen_next_paint =
+                            Some(crate::video::gpu::FrameGenPaintRequest {
+                                enabled: framegen_active,
+                                show_interpolated: framegen_show_interpolated
+                                    && !force_real_for_capture,
+                                params: framegen_params,
+                            });
                         let area = renderer.draw_passthrough(
                             painter.gl(),
                             painter,
@@ -1165,9 +1206,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         );
                         (area, renderer.last_ocr_capture.take())
                     };
-                    let at = latest_frame
-                        .as_ref()
-                        .map(|f| f.captured_at)
+                    let at = framegen_effective_captured_at
                         .or_else(|| latest_dmabuf_frame_cb.as_ref().map(|f| f.captured_at))
                         .unwrap_or(0);
                     if let Some((pixels, w, h)) = ocr_captured {
@@ -1435,10 +1474,7 @@ pub fn draw_video_player(state: &mut AppState, ui: &mut egui::Ui, ctx: &egui::Co
                         free_tx: b.video_free_tx.clone(),
                         dropped: b.metrics.video_dropped.clone(),
                     });
-            let at = active_frame
-                .as_ref()
-                .map(|f| f.captured_at)
-                .unwrap_or_else(crate::replay::now_us);
+            let at = framegen_effective_captured_at.unwrap_or_else(crate::replay::now_us);
             let full_window_effects = retro_pc_frame || night_mode_glow_intensity > 0.001;
             let rendered_area = if full_window_effects {
                 crate::video::gpu::geometry::RenderedArea::full(output_size)

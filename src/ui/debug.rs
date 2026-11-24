@@ -105,6 +105,28 @@ pub fn draw(state: &mut AppState, ctx: &egui::Context) {
                     .and_then(|r| r.try_lock().ok().and_then(|g| g.last_fsr1_run()));
                 ui.label(format_fsr1_debug_status(fsr1_info));
             }
+            if state.steam_deck.is_none()
+                && state.ps5.is_active
+                && state.ps5.active_session_fps == Some(crate::ps5::Ps5Fps::Fps30)
+                && state.ps5.config.framegen_enabled
+            {
+                let beam_blocked = CrtFilter::from_u8(state.crt_filter.load(Ordering::Relaxed))
+                    == CrtFilter::Beam;
+                let (fg_info, fg_err) = state
+                    .crt_renderer
+                    .as_ref()
+                    .and_then(|r| {
+                        r.try_lock()
+                            .ok()
+                            .map(|g| (g.last_framegen_run(), g.last_framegen_error()))
+                    })
+                    .unwrap_or((None, None));
+                ui.label(format_framegen_debug_status(
+                    fg_info,
+                    fg_err.as_deref(),
+                    beam_blocked,
+                ));
+            }
             if let Some(audio) = &state.hardware.active_audio_stream {
                 let stats = &audio.statistics;
                 let ms = 1000.0 / audio.sample_rate.max(1) as f64;
@@ -277,6 +299,30 @@ fn format_fsr1_debug_status(info: Option<crate::video::gpu::Fsr1RunInfo>) -> Str
     }
 }
 
+fn format_framegen_debug_status(
+    info: Option<crate::video::gpu::FfxFrameGenRunInfo>,
+    init_error: Option<&str>,
+    beam_blocked: bool,
+) -> String {
+    if beam_blocked {
+        return "AMD FidelityFX Frame Gen: disabled (CRT Beam filter active)".to_string();
+    }
+    match info {
+        Some(run) if !run.supported => match init_error {
+            Some(err) => format!("AMD FidelityFX Frame Gen: unavailable ({err})"),
+            None => "AMD FidelityFX Frame Gen: unavailable (requires OpenGL 4.3+ compute)".to_string(),
+        },
+        Some(run) => format!(
+            "AMD FidelityFX Frame Gen: {} × {} · 30 → 60 FPS ({} generated · {} scene-cut fallbacks)",
+            run.input_size.0,
+            run.input_size.1,
+            run.generated_count,
+            run.scd_fallback_count
+        ),
+        None => "AMD FidelityFX Frame Gen: waiting for frames…".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,6 +422,48 @@ mod tests {
         assert_eq!(
             rcas_only,
             "FSR 1.0: 1920 × 1080 (RCAS only · viewport ≤ source · sharpness 50% · 7 frames)"
+        );
+    }
+
+    #[test]
+    fn framegen_debug_status_formats_active_beam_blocked_and_unsupported() {
+        assert_eq!(
+            format_framegen_debug_status(None, None, true),
+            "AMD FidelityFX Frame Gen: disabled (CRT Beam filter active)"
+        );
+        assert_eq!(
+            format_framegen_debug_status(None, None, false),
+            "AMD FidelityFX Frame Gen: waiting for frames…"
+        );
+        assert_eq!(
+            format_framegen_debug_status(
+                Some(crate::video::gpu::FfxFrameGenRunInfo {
+                    supported: false,
+                    input_size: (1920, 1080),
+                    generated_count: 0,
+                    scd_fallback_count: 0,
+                    last_scene_cut: false,
+                    showing_interpolated: false,
+                }),
+                Some("OpenGL 3.3 does not support GL 4.3+ compute shaders"),
+                false,
+            ),
+            "AMD FidelityFX Frame Gen: unavailable (OpenGL 3.3 does not support GL 4.3+ compute shaders)"
+        );
+        assert_eq!(
+            format_framegen_debug_status(
+                Some(crate::video::gpu::FfxFrameGenRunInfo {
+                    supported: true,
+                    input_size: (1920, 1080),
+                    generated_count: 120,
+                    scd_fallback_count: 2,
+                    last_scene_cut: false,
+                    showing_interpolated: true,
+                }),
+                None,
+                false,
+            ),
+            "AMD FidelityFX Frame Gen: 1920 × 1080 · 30 → 60 FPS (120 generated · 2 scene-cut fallbacks)"
         );
     }
 }

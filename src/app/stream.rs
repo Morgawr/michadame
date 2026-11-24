@@ -2533,10 +2533,13 @@ impl AppState {
         // Apply dedicated PS5 Remote Play rendering profile
         crate::config::apply_profile_to_state(self, &self.ps5_profile.clone());
 
+        self.ps5.config.normalize_framegen();
         let (req_w, req_h) = self.ps5.config.resolution.dimensions();
         let req_fps = self.ps5.config.fps.as_u32();
         self.hardware.selected_resolution = (req_w, req_h);
         self.hardware.selected_framerate = req_fps;
+        self.ps5.active_session_fps = Some(self.ps5.config.fps);
+        self.ps5_framegen_pacer.reset();
 
         if self.steam_deck.is_none() {
             let win_w = (req_w as f32).min(1280.0);
@@ -2699,6 +2702,8 @@ impl AppState {
             }
         }
 
+        self.ps5.active_session_fps = None;
+        self.ps5_framegen_pacer.reset();
         self.ps5.event_rx = None;
         self.frame_receiver = None;
         self.latest_frame = None;
