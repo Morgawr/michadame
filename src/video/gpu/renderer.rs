@@ -7553,4 +7553,341 @@ mod tests {
         renderer.destroy(&gl);
         painter.destroy();
     }
+
+    #[test]
+    #[ignore = "requires software OpenGL/EGL (Mesa llvmpipe)"]
+    fn ffx_framegen_clean_menu_selector_snaps_and_cloud_spin_silhouette() {
+        let width = 640u32;
+        let height = 360u32;
+        let egl = software_gl::SoftwareGl::new(width as i32, height as i32);
+        #[allow(clippy::arc_with_non_send_sync)]
+        let gl = Arc::new(egl.context());
+        let mut painter = egui_glow::Painter::new(gl.clone(), "", None).unwrap();
+        let mut renderer = CrtFilterRenderer::new(&gl);
+        let output = (width as f32, height as f32);
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(output.0, output.1));
+
+        let render =
+            |renderer: &mut CrtFilterRenderer, frame: &RawFrame, show_interp: bool| -> Vec<u8> {
+                renderer.framegen_next_paint = Some(FrameGenPaintRequest {
+                    enabled: true,
+                    show_interpolated: show_interp,
+                    params: super::super::FfxFrameGenParams::default(),
+                });
+                let area = renderer.draw_passthrough(
+                    &gl,
+                    &painter,
+                    rect,
+                    Some(frame),
+                    None,
+                    (width, height),
+                    output,
+                    [0.0, 0.0, 0.0],
+                    1.0,
+                    false,
+                    0.0,
+                    false,
+                    0,
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.0,
+                    1.0,
+                    1.0,
+                    1.0,
+                    ScalerFilter::Bilinear as u8,
+                    super::super::DEFAULT_FSR1_SHARPNESS,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    [0.0; 4],
+                    None,
+                    0.0,
+                    0.0,
+                    None,
+                    None,
+                    None,
+                    0.0,
+                    None,
+                    None,
+                    false,
+                );
+                read_framebuffer_pixels_raw(&gl, area).unwrap().0
+            };
+
+        // Scenario 1 & 2: Pause menu with 5 stacked rows (row pitch = 48px), static text strokes
+        // inside each row, AND a softly animating/drifting blurred bokeh backdrop on the right 65%
+        // of the screen (matching real pause menus). Moving the bright white highlight bar +48px
+        // (adjacent step) OR wrapping -192px (bottom -> top) must snap cleanly to crisp `curr`
+        // without mid-way ghost trails or half-rendered white/gray bars, while an idle menu pair
+        // with only gentle bokeh drift stays in active framegen without false fallback.
+        let make_menu = |captured_at: i64, active_row: u32, bokeh_phase: f32| -> RawFrame {
+            let mut data = vec![0u8; (width * height * 4) as usize];
+            for y in 0..height {
+                for x in 0..width {
+                    let fx = x as f32;
+                    let fy = y as f32;
+                    let b1 = (0.5
+                        + 0.5 * ((fx - 360.0) * 0.014).sin() * ((fy - 160.0) * 0.016).cos())
+                    .powf(2.0);
+                    let b2 = (0.5
+                        + 0.5 * ((fx - 500.0) * 0.019).cos() * ((fy - 220.0) * 0.013).sin())
+                    .powf(2.0);
+                    // Gentle pause-menu bokeh intensity pulse (~3x real PS5 pause-menu backdrop drift)
+                    let pulse1 = 1.0 + 0.018 * bokeh_phase;
+                    let pulse2 = 1.0 - 0.015 * bokeh_phase;
+                    let mut rgb = [
+                        (34.0 + 70.0 * b1 * pulse1 + 22.0 * b2 * pulse2).clamp(0.0, 255.0) as u8,
+                        (28.0 + 38.0 * b1 * pulse1 + 52.0 * b2 * pulse2).clamp(0.0, 255.0) as u8,
+                        (46.0 + 62.0 * b1 * pulse1 + 68.0 * b2 * pulse2).clamp(0.0, 255.0) as u8,
+                    ];
+                    // Left menu sidebar panel (x = 24..240)
+                    if (24..240).contains(&x) {
+                        rgb = [40, 38, 52];
+                        let row_top = 48 + active_row * 48;
+                        let in_bar = (36..228).contains(&x) && (row_top..row_top + 36).contains(&y);
+                        if in_bar {
+                            let grad = 245i32 - ((x - 36) as i32 * 55 / 192);
+                            let v = grad.clamp(180, 250) as u8;
+                            rgb = [v, v, v];
+                        }
+                        // Crisp horizontal/vertical glyph strokes on every menu row
+                        for row in 0..5u32 {
+                            let ty = 48 + row * 48 + 12;
+                            if (ty..ty + 12).contains(&y) && (56..152).contains(&x) {
+                                let glyph =
+                                    ((x - 56) % 10 < 3) || (y == ty + 5 && (x - 56) % 10 < 7);
+                                if glyph {
+                                    rgb = if row == active_row {
+                                        [24, 24, 28]
+                                    } else {
+                                        [238, 238, 244]
+                                    };
+                                }
+                            }
+                        }
+                    }
+                    let idx = ((y * width + x) * 4) as usize;
+                    data[idx] = rgb[0];
+                    data[idx + 1] = rgb[1];
+                    data[idx + 2] = rgb[2];
+                    data[idx + 3] = 255;
+                }
+            }
+            RawFrame {
+                captured_at,
+                rate: crate::replay::config::Rate { num: 30, den: 1 },
+                width,
+                height,
+                data,
+                format: Pixel::RGBA,
+                color_range: crate::video::types::ColorRange::Full,
+            }
+        };
+
+        // Idle pause menu (same active row, subtle bokeh drift only) must not false-trigger fallback.
+        let mi1 = make_menu(60_000, 1, 0.0);
+        let mi2 = make_menu(93_333, 1, 1.0);
+        let _ = render(&mut renderer, &mi1, false);
+        let _ = render(&mut renderer, &mi2, true);
+        unsafe {
+            renderer.flush_framegen_scd_sync(&gl);
+        }
+        let idle_info = renderer.last_framegen_run().unwrap();
+        assert!(
+            !idle_info.last_scene_cut,
+            "Idle pause menu with subtle background drift must not false-trigger fallback ({idle_info:?})"
+        );
+
+        // Scenario 1: Adjacent row jump over animated bokeh backdrop (row 1 -> row 2, dy = +48 px)
+        renderer.framegen.reset_history();
+        let m1 = make_menu(100_000, 1, 1.0);
+        let m2 = make_menu(133_333, 2, 2.0);
+        let _ = render(&mut renderer, &m1, false);
+        let px_step = render(&mut renderer, &m2, true);
+        unsafe {
+            renderer.flush_framegen_scd_sync(&gl);
+        }
+        let step_info = renderer.last_framegen_run().unwrap();
+        let mut step_err = 0u64;
+        let mut step_cnt = 0u64;
+        for y in 40..280u32 {
+            let gl_y = height - 1 - y;
+            for x in 24..240u32 {
+                for ch in 0..3usize {
+                    let got = px_step[((gl_y * width + x) * 4) as usize + ch] as i32;
+                    let exp = m2.data[((y * width + x) * 4) as usize + ch] as i32;
+                    step_err += (got - exp).unsigned_abs() as u64;
+                    step_cnt += 1;
+                }
+            }
+        }
+        let step_mae = step_err as f64 / step_cnt as f64;
+        assert!(
+            step_info.last_scene_cut && step_mae < 1.0,
+            "Static menu selector step over animated backdrop must snap cleanly without ghost trails (info={step_info:?}, step_mae={step_mae:.2})"
+        );
+
+        // Scenario 2: Out-of-range wrap-around flip over animated bokeh backdrop (row 4 -> row 0)
+        renderer.framegen.reset_history();
+        let mw1 = make_menu(200_000, 4, 2.0);
+        let mw2 = make_menu(233_333, 0, 3.0);
+        let _ = render(&mut renderer, &mw1, false);
+        let px_wrap = render(&mut renderer, &mw2, true);
+        unsafe {
+            renderer.flush_framegen_scd_sync(&gl);
+        }
+        let wrap_info = renderer.last_framegen_run().unwrap();
+        let mut wrap_err = 0u64;
+        let mut wrap_cnt = 0u64;
+        for y in 40..280u32 {
+            let gl_y = height - 1 - y;
+            for x in 24..240u32 {
+                for ch in 0..3usize {
+                    let got = px_wrap[((gl_y * width + x) * 4) as usize + ch] as i32;
+                    let exp = mw2.data[((y * width + x) * 4) as usize + ch] as i32;
+                    wrap_err += (got - exp).unsigned_abs() as u64;
+                    wrap_cnt += 1;
+                }
+            }
+        }
+        let wrap_mae = wrap_err as f64 / wrap_cnt as f64;
+        assert!(
+            wrap_info.last_scene_cut && wrap_mae < 1.0,
+            "Wrap-around menu selector flip over animated backdrop must snap cleanly (info={wrap_info:?}, wrap_mae={wrap_mae:.2})"
+        );
+
+        // Scenario 3: Fast camera spin (-72 px/frame) across bright clipped-white clouds + vertical
+        // wooden pole behind a stationary dark-haired character head: verifies zero bogus `(0, 0)`
+        // cloud islands / pole squiggles and zero dilated hair-side tumors!
+        renderer.framegen.reset_history();
+        let make_cloud_pole_spin = |captured_at: i64, shift_x: f32| -> RawFrame {
+            let mut data = vec![0u8; (width * height * 4) as usize];
+            let head_cx = 220.0f32;
+            let head_cy = 232.0f32;
+            let head_rx = 42.0f32;
+            let head_ry = 52.0f32;
+            let pole_x = 396.0 + shift_x;
+            for y in 0..height {
+                for x in 0..width {
+                    let fx = x as f32;
+                    let fy = y as f32;
+                    let sx = fx - shift_x;
+                    // Textured sky with a large bright clipped-white cloud core (x_world in 390..540)
+                    let cloud_dx = (sx - 465.0) / 88.0;
+                    let cloud_dy = (fy - 165.0) / 72.0;
+                    let cloud_core = (1.0 - (cloud_dx * cloud_dx + cloud_dy * cloud_dy)).max(0.0);
+                    let ripple = 0.5
+                        + 0.25 * (sx * 0.045).sin() * (fy * 0.055).cos()
+                        + 0.15 * (sx * 0.11 + fy * 0.08).cos();
+                    let sky_l = (0.48 + 0.30 * ripple + 0.95 * cloud_core).clamp(0.0, 1.0);
+                    let mut rgb = [
+                        (sky_l * 255.0).round() as u8,
+                        ((sky_l * 0.985) * 255.0).round() as u8,
+                        ((sky_l * 0.94 + (1.0 - sky_l) * 0.18).clamp(0.0, 1.0) * 255.0).round()
+                            as u8,
+                    ];
+
+                    // Vertical wooden porch pole moving with the spinning background
+                    if (fx - pole_x).abs() <= 11.0 {
+                        let t = 1.0 - ((fx - pole_x).abs() / 11.0);
+                        rgb = [
+                            (78.0 + 48.0 * t) as u8,
+                            (48.0 + 28.0 * t) as u8,
+                            (28.0 + 16.0 * t) as u8,
+                        ];
+                    }
+
+                    // Stationary dark-haired character head + shoulders in front of the sky
+                    let hx = (fx - head_cx) / head_rx;
+                    let hy = (fy - head_cy) / head_ry;
+                    let in_head = (hx * hx + hy * hy) <= 1.0;
+                    let in_shoulders = (fx - head_cx).abs() <= 68.0 && fy >= head_cy + 40.0;
+                    if in_head || in_shoulders {
+                        let strand = 0.5 + 0.5 * (fx * 0.35 + fy * 0.15).sin();
+                        rgb = [
+                            (24.0 + 16.0 * strand) as u8,
+                            (20.0 + 12.0 * strand) as u8,
+                            (22.0 + 12.0 * strand) as u8,
+                        ];
+                    }
+
+                    let idx = ((y * width + x) * 4) as usize;
+                    data[idx] = rgb[0];
+                    data[idx + 1] = rgb[1];
+                    data[idx + 2] = rgb[2];
+                    data[idx + 3] = 255;
+                }
+            }
+            RawFrame {
+                captured_at,
+                rate: crate::replay::config::Rate { num: 30, den: 1 },
+                width,
+                height,
+                data,
+                format: Pixel::RGBA,
+                color_range: crate::video::types::ColorRange::Full,
+            }
+        };
+
+        let c1 = make_cloud_pole_spin(300_000, 0.0);
+        let c2 = make_cloud_pole_spin(333_333, -72.0);
+        let c_gt = make_cloud_pole_spin(316_666, -36.0);
+        let _ = render(&mut renderer, &c1, false);
+        let px_cloud = render(&mut renderer, &c2, true);
+        unsafe {
+            renderer.flush_framegen_scd_sync(&gl);
+        }
+        let cloud_info = renderer.last_framegen_run().unwrap();
+        assert!(
+            !cloud_info.last_scene_cut,
+            "72px/frame cloud+pole spin must stay in active framegen mode ({cloud_info:?})"
+        );
+
+        let region_mae = |x0: u32, x1: u32, y0: u32, y1: u32| -> f64 {
+            let mut sum = 0u64;
+            let mut cnt = 0u64;
+            for y in y0..y1 {
+                let gl_y = height - 1 - y;
+                for x in x0..x1 {
+                    for ch in 0..3usize {
+                        let got = px_cloud[((gl_y * width + x) * 4) as usize + ch] as i32;
+                        let exp = c_gt.data[((y * width + x) * 4) as usize + ch] as i32;
+                        sum += (got - exp).unsigned_abs() as u64;
+                        cnt += 1;
+                    }
+                }
+            }
+            sum as f64 / cnt.max(1) as f64
+        };
+
+        // 1. Bright clipped-white cloud region right of the interpolated pole (no `(0, 0)` squiggle!)
+        let cloud_mae = region_mae(385, 500, 100, 230);
+        // 2. Interpolated wooden pole position (x = 349..371) stays solid and sharp
+        let pole_mae = region_mae(349, 371, 60, 260);
+        // 3. Disoccluded sky immediately to the right of Lucia's hair (x = 266..320, y = 185..265)
+        let right_sky_mae = region_mae(266, 320, 185, 265);
+        // 4. Character head interior (x = 190..250, y = 195..265)
+        let head_mae = region_mae(190, 250, 195, 265);
+        assert!(
+            cloud_mae < 5.0,
+            "Bright clipped-white cloud right of pole must not suffer bogus (0, 0) snap squiggles (cloud_mae={cloud_mae:.2})"
+        );
+        assert!(
+            pole_mae < 12.0,
+            "Thin wooden pole must stay intact across clipped clouds (pole_mae={pole_mae:.2})"
+        );
+        assert!(
+            right_sky_mae < 8.0,
+            "Disoccluded sky beside dark hair must not suffer dilated (0, 0) tumors (right_sky_mae={right_sky_mae:.2})"
+        );
+        assert!(
+            head_mae < 5.0,
+            "Stationary dark-haired character head must stay solid during spin (head_mae={head_mae:.2})"
+        );
+
+        renderer.destroy(&gl);
+        painter.destroy();
+    }
 }

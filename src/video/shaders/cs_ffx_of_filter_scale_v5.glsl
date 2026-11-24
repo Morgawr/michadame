@@ -153,12 +153,13 @@ void main() {
             }
             bool h_pair = fg_hit[0] && fg_hit[1] && fg_step[0] <= 14 && fg_step[1] <= 14
                 && length(fg_mv[0] - fg_mv[1]) <= 128.0
-                && !(bg_open[2] && fg_step[2] <= 2)
-                && !(bg_open[3] && fg_step[3] <= 2);
-            bool v_pair = fg_hit[2] && fg_hit[3] && fg_step[2] <= 14 && fg_step[3] <= 14
+                && !(bg_open[2] && fg_step[2] <= 4)
+                && !(bg_open[3] && fg_step[3] <= 4);
+            bool v_pair = fg_hit[2] && fg_hit[3] && fg_step[2] <= 10 && fg_step[3] <= 10
+                && (fg_step[2] + fg_step[3] <= 14)
                 && length(fg_mv[2] - fg_mv[3]) <= 128.0
-                && !(bg_open[0] && fg_step[0] <= 2)
-                && !(bg_open[1] && fg_step[1] <= 2);
+                && !(bg_open[0] && fg_step[0] <= 6)
+                && !(bg_open[1] && fg_step[1] <= 6);
             if (h_pair) {
                 float w0 = 1.0 / float(fg_step[0]);
                 float w1 = 1.0 / float(fg_step[1]);

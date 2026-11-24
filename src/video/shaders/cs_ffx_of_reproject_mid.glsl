@@ -43,8 +43,8 @@ layout(std430, binding = 0) buffer ScdTelemetry {
     uint splat_count;
     int global_mv_x_q;
     int global_mv_y_q;
-    uint _pad0;
-    uint _pad1;
+    uint moved_blocks;
+    uint jump_blocks;
     uint _pad2;
 } u_stats;
 
@@ -132,6 +132,22 @@ void splat_cell(ivec2 cell, uint packed_mv) {
     }
 }
 
+void write_mid_block(ivec2 gid, vec2 mv_px, float conf_val, bool count_valid, vec2 v_global_px) {
+    ivec2 out_q = clamp(ivec2(round(mv_px * 4.0)), ivec2(-1280), ivec2(1280));
+    imageStore(u_out_mid_flow, gid, ivec4(out_q, 0, 0));
+    imageStore(u_out_mid_conf, gid, vec4(conf_val, 0.0, 0.0, 0.0));
+    if (count_valid) {
+        atomicAdd(u_stats.valid_blocks, 1u);
+    }
+    float rel_spd = length(mv_px - v_global_px);
+    if (rel_spd > 4.0) {
+        atomicAdd(u_stats.moved_blocks, 1u);
+    }
+    if (rel_spd > 28.0) {
+        atomicAdd(u_stats.jump_blocks, 1u);
+    }
+}
+
 void main() {
     ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
     ivec2 max_g = max(u_grid_size - ivec2(1), ivec2(0));
@@ -215,14 +231,53 @@ void main() {
     }
 
     if (u_mode == 3) {
-        // Global AFMF-style quality gate: runs as a single 1x1x1 dispatch after u_mode == 2.
+        // Global AFMF-style quality gate + static-screen discrete UI teleport gate:
+        // runs as a single 1x1x1 dispatch after u_mode == 2.
         if (gid == ivec2(0, 0)) {
             uint already_cut = imageLoad(u_scd_img, ivec2(0, 0)).r;
             if (already_cut == 0u) {
-                float valid_ratio = float(u_stats.valid_blocks) / float(max(u_stats.total_blocks, 1u));
+                uint total_b = max(u_stats.total_blocks, 1u);
+                float valid_ratio = float(u_stats.valid_blocks) / float(total_b);
                 float guard = clamp(u_artifact_guard, 0.0, 1.0);
                 float min_valid = mix(0.20, 0.65, guard);
-                if (valid_ratio < min_valid) {
+
+                vec2 g_mv = vec2(float(u_stats.global_mv_x_q), float(u_stats.global_mv_y_q)) * 0.25;
+                float g_spd = length(g_mv);
+
+                // Stationary-screen discrete UI transition detection (menu selector step, wrap-around,
+                // sub-menu highlight, or dialog popup — even over a softly animating/pulsing pause backdrop):
+                // On a stationary camera (`g_spd < 2.0`), real smooth foreground motion (walking characters,
+                // moving objects) produces mostly cycle-consistent `4..28 px` (`smooth_moved`) blocks with
+                // a small occlusion rim (`invalid_b < smooth_moved`) and minimal `>28 px` teleports.
+                // Discrete UI bar jumps & wrap-arounds instead produce a burst of `>28 px` teleports
+                // and/or non-cycle-consistent `invalid_b` blocks that dwarfs `smooth_moved`.
+                uint invalid_b = (total_b > u_stats.valid_blocks)
+                    ? (total_b - u_stats.valid_blocks)
+                    : 0u;
+                uint smooth_moved = (u_stats.moved_blocks > u_stats.jump_blocks)
+                    ? (u_stats.moved_blocks - u_stats.jump_blocks)
+                    : 0u;
+                uint ui_broken = invalid_b + u_stats.jump_blocks;
+                float moved_ratio = float(u_stats.moved_blocks) / float(total_b);
+                float jump_ratio = float(u_stats.jump_blocks) / float(total_b);
+                float broken_ratio = float(ui_broken) / float(total_b);
+                float jump_share = float(u_stats.jump_blocks) / float(max(u_stats.moved_blocks, 1u));
+                bool static_ui_jump = (g_spd < 5.0)
+                    && (u_stats.jump_blocks >= 8u)
+                    && ((jump_ratio > 0.010) || (moved_ratio < 0.25 && jump_share > 0.45));
+                bool static_ui_pop = (g_spd < 5.0)
+                    && (ui_broken >= 16u)
+                    && (broken_ratio > 0.032)
+                    && (moved_ratio < 0.20)
+                    && (float(ui_broken) > 2.2 * float(max(smooth_moved, 1u)));
+
+                // Extreme camera whip spin (> ~195 px/frame at default guard=0.65, > 10% of 1080p
+                // width in a single 30 FPS frame): thin poles & hair silhouettes span >5x their
+                // width, so crisp real-frame AFMF fallback avoids shattered floating pole chunks.
+                float max_whip_spd = mix(260.0, 170.0, guard);
+                bool extreme_whip = (g_spd > max_whip_spd);
+
+                if (valid_ratio < min_valid || static_ui_jump || static_ui_pop || extreme_whip) {
                     imageStore(u_scd_img, ivec2(0, 0), uvec4(1u, 0u, 0u, 0u));
                     u_stats.scene_cut = 1u;
                     u_stats.quality_fallback = 1u;
@@ -345,6 +400,8 @@ void main() {
             u_stats.splat_count = 0u;
             u_stats.global_mv_x_q = 0;
             u_stats.global_mv_y_q = 0;
+            u_stats.moved_blocks = 0u;
+            u_stats.jump_blocks = 0u;
         }
         return;
     }
@@ -448,68 +505,94 @@ void main() {
         float fg_conf = local_consistent
             ? (1.0 - clamp(local_fb / local_max_err, 0.0, 0.85))
             : ((fwd_fg_valid || bwd_fg_valid) ? 0.75 : 0.60);
-        ivec2 out_q = clamp(ivec2(round(fg_mv * 4.0)), ivec2(-1280), ivec2(1280));
-        imageStore(u_out_mid_flow, gid, ivec4(out_q, 0, 0));
-        imageStore(u_out_mid_conf, gid, vec4(fg_conf, 0.0, 0.0, 0.0));
-        atomicAdd(u_stats.valid_blocks, 1u);
+        write_mid_block(gid, fg_mv, fg_conf, true, v_global_px);
         return;
     }
     // 4-way enclosed leapfrog guard: if ONE of `vf_local`/`-vb_local` fell into a dark
     // background match (e.g. black sunglasses matching a black background window `-114px` away)
-    // while the other is solid foreground AND `gid` is enclosed on all 4 cardinal sides (L/R/U/D
-    // within +/-4 blocks) by foreground in that same endpoint flow map (so exterior halos on the
-    // outer edge of a head NEVER trigger it!), block the leapfrogging background splat from
-    // slicing through the character's face!
+    // while the other is solid foreground, block the leapfrogging background splat ONLY when:
+    //   1. The background-like direction (`other_mv`) is NOT cycle-consistent moving background
+    //      (otherwise `gid` is an exterior occluded cloud/sky strip right beside hair!), AND
+    //   2. `gid` is enclosed on all 4 cardinal sides in the foreground direction AND on >= 3
+    //      cardinal sides in the OTHER flow map (skipping the tiny sunglasses patch) so exterior
+    //      occluded sky strips next to a head can NEVER grow `conf = 0.65` tumors into the sky!
     if (one_far_from_bg && (!has_splat || length(v_splat - v_global_px) <= fg_sep)) {
         bool use_fwd = (length(vf_local - v_global_px) > length(-vb_local - v_global_px));
         vec2 cand_fg = use_fwd ? vf_local : -vb_local;
-        vec2 enc_sum = vec2(0.0);
-        float enc_wsum = 0.0;
-        int enc_l = 0;
-        int enc_r = 0;
-        int enc_u = 0;
-        int enc_d = 0;
-        vec2 bg_dir_e = v_global_px / max(bg_speed, 1.0);
-        ivec2 rdirs[4];
-        rdirs[0] = ivec2(-1,  0);
-        rdirs[1] = ivec2( 1,  0);
-        rdirs[2] = ivec2( 0, -1);
-        rdirs[3] = ivec2( 0,  1);
-        for (int r = 0; r < 4; ++r) {
-            for (int step = 1; step <= 4; ++step) {
-                ivec2 nc = clamp(gid + rdirs[r] * step, ivec2(0), max_g);
-                vec2 nmv = use_fwd
-                    ? (vec2(texelFetch(u_fwd_flow, nc, 0).xy) * 0.25)
-                    : (-vec2(texelFetch(u_bwd_flow, nc, 0).xy) * 0.25);
-                if (dot(nmv, bg_dir_e) < 0.30 * bg_speed && length(nmv - cand_fg) <= 32.0) {
-                    float w = 1.0 / float(step);
-                    enc_sum += nmv * w;
-                    enc_wsum += w;
-                    if (r == 0) enc_l += 1;
-                    else if (r == 1) enc_r += 1;
-                    else if (r == 2) enc_u += 1;
-                    else enc_d += 1;
+        vec2 other_mv = use_fwd ? -vb_local : vf_local;
+
+        // 1. Cycle-check `other_mv`: if the background-like endpoint vector actually validates
+        //    against the opposite flow map (e.g. clean -98 px cloud in BWD right beside hair!),
+        //    this block is genuinely moving background, NOT a leapfrog face/sunglasses hole!
+        bool other_is_valid_bg = false;
+        vec2 other_dst = use_fwd
+            ? (vec2(gid) + vb_local / 8.0)
+            : (vec2(gid) + vf_local / 8.0);
+        if (in_grid(other_dst, max_g)) {
+            vec2 opp = use_fwd
+                ? sample_flow_edge_safe(u_fwd_flow, other_dst, max_g)
+                : (-sample_flow_edge_safe(u_bwd_flow, other_dst, max_g));
+            float other_err = length(other_mv - opp);
+            float other_lim = base_thresh + 0.16 * length(other_mv);
+            other_is_valid_bg = (other_err <= other_lim);
+        }
+
+        if (!other_is_valid_bg) {
+            vec2 enc_sum = vec2(0.0);
+            float enc_wsum = 0.0;
+            int enc_l = 0;
+            int enc_r = 0;
+            int enc_u = 0;
+            int enc_d = 0;
+            int opp_fg_sides = 0;
+            vec2 bg_dir_e = v_global_px / max(bg_speed, 1.0);
+            ivec2 rdirs[4];
+            rdirs[0] = ivec2(-1,  0);
+            rdirs[1] = ivec2( 1,  0);
+            rdirs[2] = ivec2( 0, -1);
+            rdirs[3] = ivec2( 0,  1);
+            for (int r = 0; r < 4; ++r) {
+                bool opp_hit = false;
+                for (int step = 1; step <= 4; ++step) {
+                    ivec2 nc = clamp(gid + rdirs[r] * step, ivec2(0), max_g);
+                    vec2 nmv = use_fwd
+                        ? (vec2(texelFetch(u_fwd_flow, nc, 0).xy) * 0.25)
+                        : (-vec2(texelFetch(u_bwd_flow, nc, 0).xy) * 0.25);
+                    if (dot(nmv, bg_dir_e) < 0.30 * bg_speed && length(nmv - cand_fg) <= 32.0) {
+                        float w = 1.0 / float(step);
+                        enc_sum += nmv * w;
+                        enc_wsum += w;
+                        if (r == 0) enc_l += 1;
+                        else if (r == 1) enc_r += 1;
+                        else if (r == 2) enc_u += 1;
+                        else enc_d += 1;
+                    }
+                }
+                for (int step = 1; step <= 6; ++step) {
+                    ivec2 nc = clamp(gid + rdirs[r] * step, ivec2(0), max_g);
+                    vec2 omv = use_fwd
+                        ? (-vec2(texelFetch(u_bwd_flow, nc, 0).xy) * 0.25)
+                        : (vec2(texelFetch(u_fwd_flow, nc, 0).xy) * 0.25);
+                    if (dot(omv, bg_dir_e) < 0.30 * bg_speed && length(omv - cand_fg) <= 32.0) {
+                        opp_hit = true;
+                        break;
+                    }
+                }
+                if (opp_hit) {
+                    opp_fg_sides += 1;
                 }
             }
-        }
-        // Require >= 2 coherent foreground blocks on ALL 4 cardinal rays (deeply enclosed inside
-        // the character's head/body, never on an exterior halo or silhouette edge!).
-        if (enc_wsum > 0.0 && enc_l >= 2 && enc_r >= 2 && enc_u >= 2 && enc_d >= 2) {
-            vec2 enc_avg = enc_sum / enc_wsum;
-            vec2 out_fg = (length(cand_fg - enc_avg) <= 20.0) ? cand_fg : enc_avg;
-            ivec2 out_q = clamp(ivec2(round(out_fg * 4.0)), ivec2(-1280), ivec2(1280));
-            imageStore(u_out_mid_flow, gid, ivec4(out_q, 0, 0));
-            imageStore(u_out_mid_conf, gid, vec4(0.65, 0.0, 0.0, 0.0));
-            atomicAdd(u_stats.valid_blocks, 1u);
-            return;
+            if (enc_wsum > 0.0 && enc_l >= 2 && enc_r >= 2 && enc_u >= 2 && enc_d >= 2 && opp_fg_sides >= 3) {
+                vec2 enc_avg = enc_sum / enc_wsum;
+                vec2 out_fg = (length(cand_fg - enc_avg) <= 20.0) ? cand_fg : enc_avg;
+                write_mid_block(gid, out_fg, 0.65, true, v_global_px);
+                return;
+            }
         }
     }
     if (local_consistent && splat_is_background) {
         float fg_conf = 1.0 - clamp(local_fb / local_max_err, 0.0, 0.85);
-        ivec2 out_q = clamp(ivec2(round(v_local * 4.0)), ivec2(-1280), ivec2(1280));
-        imageStore(u_out_mid_flow, gid, ivec4(out_q, 0, 0));
-        imageStore(u_out_mid_conf, gid, vec4(fg_conf, 0.0, 0.0, 0.0));
-        atomicAdd(u_stats.valid_blocks, 1u);
+        write_mid_block(gid, v_local, fg_conf, true, v_global_px);
         return;
     }
 
@@ -581,19 +664,13 @@ void main() {
     }
 
     if (converged) {
-        ivec2 out_q = clamp(ivec2(round(v_cur * 4.0)), ivec2(-1280), ivec2(1280));
-        imageStore(u_out_mid_flow, gid, ivec4(out_q, 0, 0));
-        imageStore(u_out_mid_conf, gid, vec4(final_conf, 0.0, 0.0, 0.0));
-        atomicAdd(u_stats.valid_blocks, 1u);
+        write_mid_block(gid, v_cur, final_conf, true, v_global_px);
         return;
     }
 
     if (has_splat) {
         float sc = unpack_mid_conf(packed_mv);
-        ivec2 out_q = clamp(ivec2(round(v_splat * 4.0)), ivec2(-1280), ivec2(1280));
-        imageStore(u_out_mid_flow, gid, ivec4(out_q, 0, 0));
-        imageStore(u_out_mid_conf, gid, vec4(sc * 0.75, 0.0, 0.0, 0.0));
-        atomicAdd(u_stats.valid_blocks, 1u);
+        write_mid_block(gid, v_splat, sc * 0.75, true, v_global_px);
         return;
     }
 
@@ -644,10 +721,13 @@ void main() {
                 } else {
                     fg_sum += nmv * w;
                     fg_wsum += w;
-                    if (dx < 0) has_fg_l = true;
-                    if (dx > 0) has_fg_r = true;
-                    if (dy < 0) has_fg_u = true;
-                    if (dy > 0) has_fg_d = true;
+                    // Strict axial bracketing (`dy == 0` for L/R, `dx == 0` for U/D): a block
+                    // sitting outside a convex character head/hair edge can NEVER falsely satisfy
+                    // `has_fg_u && has_fg_d` via off-axis hair blocks to its left/right!
+                    if (dx < 0 && dy == 0) has_fg_l = true;
+                    if (dx > 0 && dy == 0) has_fg_r = true;
+                    if (dy < 0 && dx == 0) has_fg_u = true;
+                    if (dy > 0 && dx == 0) has_fg_d = true;
                     if (abs(dx) <= 1 && dy >= -2 && dy < 0) {
                         fg_u2_sum += nmv * w;
                         fg_u2_w += w;
@@ -661,12 +741,10 @@ void main() {
         }
     }
 
-    if (bg_wsum <= 0.0 && fg_wsum > 0.0 && ((has_fg_l && has_fg_r) || (has_fg_u && has_fg_d))) {
+    if (bg_wsum <= 0.0 && fg_wsum > 0.0 && (one_far_from_bg || bg_speed <= 20.0)
+        && ((has_fg_l && has_fg_r) || (has_fg_u && has_fg_d))) {
         vec2 fg_fill = fg_sum / fg_wsum;
-        ivec2 fg_q = clamp(ivec2(round(fg_fill * 4.0)), ivec2(-1280), ivec2(1280));
-        imageStore(u_out_mid_flow, gid, ivec4(fg_q, 0, 0));
-        imageStore(u_out_mid_conf, gid, vec4(0.55, 0.0, 0.0, 0.0));
-        atomicAdd(u_stats.valid_blocks, 1u);
+        write_mid_block(gid, fg_fill, 0.55, true, v_global_px);
         return;
     }
 
@@ -677,10 +755,7 @@ void main() {
             vec2 limb_avg = 0.5 * (u_avg + d_avg);
             float local_limb_err = min(length(vf_local - limb_avg), length(-vb_local - limb_avg));
             if (local_limb_err <= 22.0) {
-                ivec2 fg_q = clamp(ivec2(round(limb_avg * 4.0)), ivec2(-1280), ivec2(1280));
-                imageStore(u_out_mid_flow, gid, ivec4(fg_q, 0, 0));
-                imageStore(u_out_mid_conf, gid, vec4(0.50, 0.0, 0.0, 0.0));
-                atomicAdd(u_stats.valid_blocks, 1u);
+                write_mid_block(gid, limb_avg, 0.50, true, v_global_px);
                 return;
             }
         }
@@ -739,12 +814,12 @@ void main() {
         }
         bool horiz_enc = ray_is_fg[0] && ray_is_fg[1]
             && ray_dist[0] <= 10 && ray_dist[1] <= 10
-            && !(ray_is_bg[2] && ray_dist[2] <= 3)
-            && !(ray_is_bg[3] && ray_dist[3] <= 3);
+            && !(ray_is_bg[2] && ray_dist[2] <= 4)
+            && !(ray_is_bg[3] && ray_dist[3] <= 4);
         bool vert_enc = ray_is_fg[2] && ray_is_fg[3]
-            && ray_dist[2] <= 10 && ray_dist[3] <= 10
-            && !(ray_is_bg[0] && ray_dist[0] <= 3)
-            && !(ray_is_bg[1] && ray_dist[1] <= 3);
+            && ray_dist[2] <= 8 && ray_dist[3] <= 8
+            && !(ray_is_bg[0] && ray_dist[0] <= 6)
+            && !(ray_is_bg[1] && ray_dist[1] <= 6);
         if ((fg_ray_hits >= 3 || horiz_enc || vert_enc) && fg_ray_wsum > 1e-4) {
             vec2 fg_avg = fg_ray_sum / fg_ray_wsum;
             float max_fg_dev = 0.0;
@@ -754,10 +829,7 @@ void main() {
                 }
             }
             if (max_fg_dev <= 28.0) {
-                ivec2 fg_q = clamp(ivec2(round(fg_avg * 4.0)), ivec2(-1280), ivec2(1280));
-                imageStore(u_out_mid_flow, gid, ivec4(fg_q, 0, 0));
-                imageStore(u_out_mid_conf, gid, vec4(0.45, 0.0, 0.0, 0.0));
-                atomicAdd(u_stats.valid_blocks, 1u);
+                write_mid_block(gid, fg_avg, 0.45, true, v_global_px);
                 return;
             }
         }
@@ -833,7 +905,5 @@ void main() {
     }
 
     vec2 best_mv = (bg_wsum > 1e-4) ? (bg_sum / bg_wsum) : v_global_px;
-    ivec2 fill_q = clamp(ivec2(round(best_mv * 4.0)), ivec2(-1280), ivec2(1280));
-    imageStore(u_out_mid_flow, gid, ivec4(fill_q, 0, 0));
-    imageStore(u_out_mid_conf, gid, vec4(0.0, 0.0, 0.0, 0.0));
+    write_mid_block(gid, best_mv, 0.0, false, v_global_px);
 }

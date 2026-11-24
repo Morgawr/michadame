@@ -141,13 +141,14 @@ void main() {
     }
 
     // Only skip search on completely uniform flat blocks; still verify (0, 0) vs coarse_center
-    // ONLY when coarse_center lands on a genuinely mismatched brightness/color!
+    // ONLY when coarse_center lands on a genuinely mismatched brightness/color (> ~0.032/px,
+    // never a 1-LSB bright-cloud shade gradient!).
     if (contrast < 0.0015) {
         ivec2 flat_mv = coarse_center;
         if (coarse_center != ivec2(0)) {
             float c_sad = eval_sad4(base, vec2(coarse_center), src4, src_mean, inv_size);
             float z_sad = eval_sad4(base, vec2(0.0), src4, src_mean, inv_size);
-            if (z_sad + 0.08 < c_sad) {
+            if (z_sad + 0.55 < c_sad) {
                 flat_mv = ivec2(0);
             }
         }
@@ -168,9 +169,15 @@ void main() {
 
     if (coarse_center != ivec2(0)) {
         float z_sad = eval_sad4(base, vec2(0.0), src4, src_mean, inv_size);
-        // Require a genuine improvement to jump from fast coarse motion to (0, 0),
-        // while allowing easy tie-break if coarse_center is already slow (<= 16px).
-        float z_margin = (length(vec2(coarse_center)) > 16.0) ? 0.035 : -0.006;
+        // Require a stronger improvement (~0.028/px) on flat/low-contrast sky/cloud blocks
+        // (`contrast < 0.015`) so smooth bright clouds never snap to (0, 0) on a 1-LSB gradient,
+        // while textured/shaded characters & hairlines (`contrast >= 0.055`) still recover (0, 0)
+        // effortlessly even with subtle (+4,+2) head sway against mid-gray backgrounds!
+        // Scale the "already slow" threshold by pyramid level: on coarse levels (u_search_radius > 2,
+        // 1/2..1/32 res), even 3 px = 48..96 full-res px, so never easy-snap fast sky pans to 0!
+        float slow_lim = (u_search_radius == 2) ? 16.0 : 2.0;
+        float fast_z_margin = mix(0.45, 0.06, smoothstep(0.015, 0.055, contrast));
+        float z_margin = (length(vec2(coarse_center)) > slow_lim) ? fast_z_margin : -0.004;
         if (z_sad + z_margin < best_sad) {
             best_sad = z_sad;
             best_seed = ivec2(0);
@@ -290,18 +297,19 @@ void main() {
         }
     }
 
-    // Minimum-motion tie-breaker ONLY for slow/stationary foreground candidates (`<= 12 px`)
-    // so smooth/periodic stationary character heads don't drift into inconsistent fwd/bwd shifts,
-    // while fast-moving smooth asphalt/sky (`-116 px`) is NEVER falsely snapped to `(0, 0)`!
+    // Minimum-motion tie-breaker ONLY for slow/stationary foreground candidates at full-res Level 0
+    // (`u_search_radius == 2` and `<= 12 px`) so smooth/periodic stationary character heads don't
+    // drift into inconsistent fwd/bwd shifts, while coarse-level pans (where 3..12 px = 48..384
+    // full-res px!) NEVER snap smooth sky/clouds to `(0, 0)` and shatter poles or power lines!
     if (best_int_mv != ivec2(0)) {
         float zero_sad = eval_sad8(base_i, ivec2(0));
-        if (length(vec2(best_int_mv)) <= 12.0) {
+        if (u_search_radius == 2 && length(vec2(best_int_mv)) <= 12.0) {
             float tie_tol = min(0.08, 0.25 * contrast + 0.002);
             if (zero_sad <= sad3x3[best_idx] + tie_tol) {
                 best_int_mv = ivec2(0);
                 best_idx = -1;
             }
-        } else if (zero_sad + 0.25 < sad3x3[best_idx]) {
+        } else if (zero_sad + mix(1.80, 0.35, smoothstep(0.015, 0.055, contrast)) < sad3x3[best_idx]) {
             best_int_mv = ivec2(0);
             best_idx = -1;
         }

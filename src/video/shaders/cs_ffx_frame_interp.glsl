@@ -701,6 +701,15 @@ void main() {
         return;
     }
 
+    // In-place fallback color: normally a smooth 50/50 crossfade, EXCEPT on a stationary or
+    // gently drifting pause-menu screen (`global_speed < 5.0`) where abrupt color flips (highlight
+    // bars, inverted menu text, checkboxes) snap cleanly to `curr_unwarped` instead of gray ghosts!
+    vec3 static_fallback = 0.5 * (prev_unwarped + curr_unwarped);
+    if (global_speed < 5.0) {
+        float ui_snap_w = smoothstep(0.12, 0.24, color_err(prev_unwarped, curr_unwarped));
+        static_fallback = mix(static_fallback, curr_unwarped, ui_snap_w);
+    }
+
     vec3 out_rgb;
 
     if (std_v <= 2.5) {
@@ -801,7 +810,7 @@ void main() {
             float local_fb_w = clamp(photo_bad * bad_signal * not_one_sided * fb_gain, 0.0, 1.0);
 
             if (local_fb_w > 0.01) {
-                vec3 soft_fallback = 0.5 * (prev_unwarped + curr_unwarped);
+                vec3 soft_fallback = static_fallback;
                 if (aux_fg < 0.35 && length(v_smooth - v_global_px) > 12.0) {
                     float g_err, g_bocc, g_one, g_ohud, g_brk;
                     vec3 c_glob = warp_layer(
@@ -815,6 +824,16 @@ void main() {
                 }
                 out_rgb = mix(out_rgb, soft_fallback, local_fb_w);
             }
+        }
+
+        // On a stationary camera (e.g. pause menus), an abrupt in-place brightness/color snap on
+        // a stationary pixel (menu highlight bar turning on/off or text inverting white <-> black,
+        // e.g. wrap-around Settings -> Map) should snap cleanly to crisp `curr_unwarped` instead of
+        // producing a washed-out 50/50 gray double-bar ghost, while slow smooth fades still blend!
+        if (global_speed < 5.0 && length(v_smooth) < 2.0) {
+            float snap_err = color_err(prev_unwarped, curr_unwarped);
+            float ui_snap_w = smoothstep(0.12, 0.24, snap_err);
+            out_rgb = mix(out_rgb, curr_unwarped, ui_snap_w);
         }
     } else {
         // Regime B: C1-continuous B-Spline two-layer silhouette compositing (`std_v > 2.5 px`).
@@ -892,13 +911,17 @@ void main() {
         float self_fg = 0.5 * (color_err(prev_unwarped, c_fg) + color_err(curr_unwarped, c_fg));
         float self_bg = 0.5 * (color_err(prev_unwarped, c_bg) + color_err(curr_unwarped, c_bg));
         float fg_still_color_w = smoothstep(-0.06, 0.12, self_bg - self_fg);
-        // Gate by `fg_photo` so moving background bridge cables/textures (high `err_fg`) can
-        // never be falsely classified as stationary foreground!
-        float fg_still_matte = clamp(
-            fg_photo * mix(0.25, 1.0, fg_still_color_w),
-            0.0,
-            1.0
+        // Gate by `min(err_fg, color_err(prev, curr))` so moving background bridge cables/textures
+        // (high in BOTH `err_fg` and `color_err(prev, curr)`) are rejected, while curly stationary
+        // hair strands with a 1-2 px local `v_fg` offset across a high-contrast hair/sky cliff stay
+        // solid hair instead of punching bright sky holes into the rim. Zero floor prevents a 25%
+        // dark-hair halo from bleeding onto proven sky pixels (`fg_still_color_w -> 0`)!
+        float fg_still_photo = smoothstep(
+            0.24,
+            0.05,
+            min(err_fg, color_err(prev_unwarped, curr_unwarped))
         );
+        float fg_still_matte = clamp(fg_still_photo * fg_still_color_w, 0.0, 1.0);
 
         // On clean one-sided background disocclusions (`bg_one -> 1`), `err_bg` compares the valid
         // unoccluded endpoint against the occluded endpoint behind the character, inflating `err_bg`
@@ -941,7 +964,7 @@ void main() {
             float photo_bad_b = smoothstep(mix(0.28, 0.13, guard), mix(0.48, 0.26, guard), wide_b);
             float reg_b_fb = clamp(photo_bad_b * bad_sel * not_one_b * fb_gain_b, 0.0, 1.0);
             if (reg_b_fb > 0.01) {
-                two_layer_rgb = mix(two_layer_rgb, 0.5 * (prev_unwarped + curr_unwarped), reg_b_fb);
+                two_layer_rgb = mix(two_layer_rgb, static_fallback, reg_b_fb);
             }
         }
 
@@ -960,7 +983,7 @@ void main() {
                 float r_photo_bad = smoothstep(mix(0.28, 0.13, guard), mix(0.48, 0.26, guard), r_wide);
                 float r_fb = clamp(r_photo_bad * max(max(r_bocc, r_brk), r_severe) * r_not_one * fb_gain_b, 0.0, 1.0);
                 if (r_fb > 0.01) {
-                    reg_a_rgb = mix(reg_a_rgb, 0.5 * (prev_unwarped + curr_unwarped), r_fb);
+                    reg_a_rgb = mix(reg_a_rgb, static_fallback, r_fb);
                 }
             }
             float t_regime = smoothstep(2.5, 6.5, std_v);
